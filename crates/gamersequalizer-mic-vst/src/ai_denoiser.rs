@@ -759,8 +759,13 @@ mod tests {
   /// Clean speech at `speech_rms_db` dBFS and the same speech with mechanical keyboard and
   /// mouse clicks mixed in at `snr_db`. Both at 48 kHz.
   fn speech_over_keyboard(speech_rms_db: f32, snr_db: f32) -> (Vec<f32>, Vec<f32>) {
-    let clean = read_wav_48k("speech_clean.wav");
-    let mut noise: Vec<f32> = KEYBOARD_CLIPS.iter().flat_map(|f| read_wav_48k(f)).collect();
+    mix("speech_clean.wav", &KEYBOARD_CLIPS, speech_rms_db, snr_db)
+  }
+
+  /// `speech_over_keyboard` for any fixtures (paths relative to `FIXTURES`).
+  fn mix(speech: &str, noise_clips: &[&str], speech_rms_db: f32, snr_db: f32) -> (Vec<f32>, Vec<f32>) {
+    let clean = read_wav_48k(speech);
+    let mut noise: Vec<f32> = noise_clips.iter().flat_map(|f| read_wav_48k(f)).collect();
     while noise.len() < clean.len() {
       noise.extend_from_within(..);
     }
@@ -773,7 +778,11 @@ mod tests {
 
   /// Keyboard and mouse clicks only (no speech) at `rms_db` dBFS, 48 kHz.
   fn keyboard_only(rms_db: f32) -> Vec<f32> {
-    let noise: Vec<f32> = KEYBOARD_CLIPS.iter().flat_map(|f| read_wav_48k(f)).collect();
+    noise_only(&KEYBOARD_CLIPS, rms_db)
+  }
+
+  fn noise_only(noise_clips: &[&str], rms_db: f32) -> Vec<f32> {
+    let noise: Vec<f32> = noise_clips.iter().flat_map(|f| read_wav_48k(f)).collect();
     scale_to_db(&noise, rms_db)
   }
 
@@ -883,6 +892,37 @@ mod tests {
       })
       .fold((0, f32::MIN), |best, cur| if cur.1 > best.1 { cur } else { best })
       .0
+  }
+
+  /// Report on the developer's own recordings in the git-ignored `test_data/private/`
+  /// (`speech.wav`, `keys.wav`: mono WAV). Prints gate vs no gate per model, no thresholds:
+  /// a private voice can't back a shared regression test. Run:
+  /// `cargo test -p gamersequalizer-mic-vst --release private_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn private_report() {
+    const SPEECH: &str = "../private/speech.wav";
+    const KEYS: [&str; 1] = ["../private/keys.wav"];
+    if [SPEECH, KEYS[0]].iter().any(|f| !std::path::Path::new(FIXTURES).join(f).exists()) {
+      eprintln!("skipped: put speech.wav and keys.wav into test_data/private/");
+      return;
+    }
+    eprintln!("soft% / loud% lost [pause suppression dB], gate auto | no gate");
+    for (level, snr) in [(-20.0f32, 0.0f32), (-45.0, 0.0), (-30.0, -10.0)] {
+      let (clean, mixed) = mix(SPEECH, &KEYS, level, snr);
+      for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
+        let row = |q: Quality| format!("{:4.1} / {:3.1} [{:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db);
+        let gate = row(run_quality(model, GATE_AUTO, &clean, &mixed));
+        let no_gate = row(run_quality(model, GATE_OFF_DB - 1.0, &clean, &mixed));
+        eprintln!("voice {level:>4} dBFS, SNR {snr:>4} dB, {model:<13?} {gate} | {no_gate}");
+      }
+    }
+    for level in [-20.0f32, -40.0] {
+      let keys = noise_only(&KEYS, level);
+      for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
+        eprintln!("keys only {level} dBFS, {model:<13?} gate open {:.1} %", open_share(&run(model, GATE_AUTO, &keys)) * 100.0);
+      }
+    }
   }
 
   /// Tuning report for the detector's hysteresis (keep threshold x active window). Run:

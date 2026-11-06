@@ -11,3 +11,6 @@ target/
 
 # Local debug dumps
 probe.txt
+
+# Developer's own recordings (voice), never published
+test_data/private/
