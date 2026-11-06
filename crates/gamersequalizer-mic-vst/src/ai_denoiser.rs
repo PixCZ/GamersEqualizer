@@ -35,6 +35,20 @@ const VOICE_MIN_FRAMES: u32 = 2;
 /// 0.4-1.6 %, and typing right after speech keeps the gate open +0.2 % longer.
 const VOICE_KEEP_PROB: f32 = 0.05;
 const VOICE_ACTIVE_FRAMES: u32 = 20;
+/// The second detector, on the denoised output, opens on one frame above this and stays open
+/// longer: keys are mostly gone there, and a cut voice is worse than a few keys let through.
+/// Measured on a private voice under its own keyboard (`private_report`): phrase onsets after
+/// a pause scored 0.6-0.9 there for one frame but < 0.1 on the raw input; soft syllables cut
+/// by the gate over no gate 6-15 -> 1-4 %. Cost: typing alone (ESC-50 keys, -20 dBFS) keeps
+/// it open most of the time with RNNoise/DFN3, so only the floor below stops those keys.
+const OUT_VOICE_PROB: f32 = 0.3;
+const OUT_VOICE_MIN_FRAMES: u32 = 1;
+const OUT_VOICE_KEEP_PROB: f32 = 0.02;
+const OUT_VOICE_ACTIVE_FRAMES: u32 = 50;
+/// A closed gate attenuates by this much instead of muting, so a late open only makes a word
+/// onset quieter, never cuts it (lost soft syllables, own voice: up to 1.6 percentage points
+/// less than muting). Keys between words come through 12 dB under the denoiser's output.
+const GATE_FLOOR_DB: f32 = -12.0;
 /// Shared-memory gate value at or below this = gate off; anything above = automatic gate.
 /// (The setting used to be a level threshold; the gate no longer has one.)
 const GATE_OFF_DB: f32 = -79.5;
@@ -68,6 +82,10 @@ pub struct AiVoiceIsolator {
   strength: f32, // 0.0 to 1.0
   gate: NoiseGate,
   vad: VoiceDetector,
+  /// Same detector on the denoised output: keys are gone there, so it keeps hearing a voice the
+  /// raw-input one loses under typing (private voice, keys at -10 dB SNR: RNNoise's probability
+  /// on soft syllables fell from ~0.95 to <0.1 and the gate cut 18-31 % of them).
+  vad_out: VoiceDetector,
   bypassed: bool,
 }
 
@@ -90,9 +108,9 @@ struct DeepFilterEngine {
   error_logged: bool,
 }
 
-/// RNNoise's voice probability on the raw microphone; drives the gate for both models. Runs
-/// ahead of the denoised output (DeepFilterNet 40 ms, RNNoise 20 ms), so word onsets open it
-/// in time. Costs one extra RNNoise pass (~1 % of a core) even when RNNoise is the denoiser:
+/// RNNoise's voice probability; drives the gate for all models. One instance hears the raw
+/// microphone, ahead of the denoised output (DeepFilterNet 40 ms, RNNoise 20 ms), so word
+/// onsets open the gate in time; a second hears the denoised output (`OUT_VOICE_PROB`). Costs one extra RNNoise pass (~1 % of a core) even when RNNoise is the denoiser:
 /// simpler than sharing its VAD; share it if CPU ever matters.
 struct VoiceDetector {
   state: Box<DenoiseState<'static>>,
@@ -105,15 +123,19 @@ struct VoiceDetector {
   active_left: u32,
   keep_prob: f32,
   active_frames: u32,
+  open_prob: f32,
+  min_frames: u32,
 }
 
-/// Automatic speech gate: open while the detector hears speech, plus a hold; fades instead of
-/// chopping. No level threshold, so it works the same for a loud or a quiet voice (day vs.
-/// evening) and loud key clicks never open it. Classic attack/hold/release keyed by a VAD.
+/// Automatic speech gate: open while a detector hears speech, plus a hold; fades instead of
+/// chopping, and closed only attenuates (`GATE_FLOOR_DB`). No level threshold, so it works the
+/// same for a loud or a quiet voice (day vs. evening). Classic attack/hold/release keyed by a VAD.
+/// Tuned to never cut a voice; some loud keys get through (see `OUT_VOICE_PROB`).
 struct NoiseGate {
   enabled: bool,
   hold_left: usize,
   gain: f32,
+  floor: f32,
 }
 
 impl Default for AiVoiceIsolator {
@@ -136,6 +158,7 @@ impl AiVoiceIsolator {
       strength: 0.75,
       gate: NoiseGate::new(true),
       vad: VoiceDetector::new(),
+      vad_out: VoiceDetector::new_output(),
       bypassed: false,
     }
   }
@@ -236,13 +259,22 @@ impl AiVoiceIsolator {
       (DenoiseModel::DpdfNet, _, Some(dp)) => dp.process(samples, atten_lim(self.strength)),
       _ => self.rnnoise.process(samples, self.strength),
     }
-    self.gate.process(samples, voice, GATE_HOLD_SAMPLES + latency_samples(self.active));
+    // The input detector runs a model latency ahead of the output (opens on word onsets in
+    // time); the output one is in step with it, so its hold needs no latency on top.
+    let voice_out = self.gate.enabled && self.vad_out.process(samples);
+    let hold = match (voice, voice_out) {
+      (true, _) => GATE_HOLD_SAMPLES + latency_samples(self.active),
+      (false, true) => GATE_HOLD_SAMPLES,
+      (false, false) => 0,
+    };
+    self.gate.process(samples, hold);
   }
 
   pub fn reset(&mut self) {
     self.reset_engines();
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceDetector::new();
+    self.vad_out = VoiceDetector::new_output();
     self.bypassed = false;
   }
 
@@ -258,7 +290,12 @@ impl AiVoiceIsolator {
 }
 
 /// Loads a heavy engine once, logging the outcome; the error is kept so it is not retried.
-fn load_into<E>(slot: &mut Option<Box<E>>, error: &mut Option<String>, name: &str, load: impl FnOnce() -> Result<E, String>) {
+fn load_into<E>(
+  slot: &mut Option<Box<E>>,
+  error: &mut Option<String>,
+  name: &str,
+  load: impl FnOnce() -> Result<E, String>,
+) {
   let t0 = std::time::Instant::now();
   match load() {
     Ok(engine) => {
@@ -384,6 +421,19 @@ impl VoiceDetector {
       active_left: 0,
       keep_prob: VOICE_KEEP_PROB,
       active_frames: VOICE_ACTIVE_FRAMES,
+      open_prob: VOICE_PROB,
+      min_frames: VOICE_MIN_FRAMES,
+    }
+  }
+
+  /// Detector for the denoised output, see `OUT_VOICE_PROB`.
+  fn new_output() -> Self {
+    Self {
+      open_prob: OUT_VOICE_PROB,
+      min_frames: OUT_VOICE_MIN_FRAMES,
+      keep_prob: OUT_VOICE_KEEP_PROB,
+      active_frames: OUT_VOICE_ACTIVE_FRAMES,
+      ..Self::new()
     }
   }
 
@@ -396,9 +446,9 @@ impl VoiceDetector {
         *dst = src * I16_SCALE;
       }
       let prob = self.state.process_frame(&mut self.scratch, &self.frame);
-      self.run = if prob > VOICE_PROB { self.run.saturating_add(1) } else { 0 };
+      self.run = if prob > self.open_prob { self.run.saturating_add(1) } else { 0 };
       // Hysteresis: opening needs a clear syllable; once talking, a soft one keeps it open.
-      let frame_voice = self.run >= VOICE_MIN_FRAMES || (self.active_left > 0 && prob > self.keep_prob);
+      let frame_voice = self.run >= self.min_frames || (self.active_left > 0 && prob > self.keep_prob);
       self.active_left = if frame_voice { self.active_frames } else { self.active_left.saturating_sub(1) };
       voice |= frame_voice;
     }
@@ -408,20 +458,19 @@ impl VoiceDetector {
 
 impl NoiseGate {
   fn new(enabled: bool) -> Self {
-    Self { enabled, hold_left: 0, gain: 0.0 }
+    Self { enabled, hold_left: 0, gain: 0.0, floor: 10f32.powf(GATE_FLOOR_DB / 20.0) }
   }
 
-  /// `voice`: the detector heard speech in this block; `hold`: samples to stay open after it.
-  fn process(&mut self, samples: &mut [f32], voice: bool, hold: usize) {
+  /// `hold`: samples to stay open from now (speech heard in this block), 0 = none heard.
+  /// Never shortens a running hold.
+  fn process(&mut self, samples: &mut [f32], hold: usize) {
     if !self.enabled {
       return;
     }
-    if voice {
-      self.hold_left = hold;
-    }
+    self.hold_left = self.hold_left.max(hold);
     for s in samples.iter_mut() {
       self.hold_left = self.hold_left.saturating_sub(1);
-      let (target, coef) = if self.hold_left > 0 { (1.0, GATE_OPEN_COEF) } else { (0.0, GATE_CLOSE_COEF) };
+      let (target, coef) = if self.hold_left > 0 { (1.0, GATE_OPEN_COEF) } else { (self.floor, GATE_CLOSE_COEF) };
       self.gain += (target - self.gain) * coef;
       *s *= self.gain;
     }
@@ -459,6 +508,8 @@ pub(crate) fn drain_fifo(fifo: &mut Vec<f32>, samples: &mut [f32]) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use gamersequalizer_common::biquad::BiquadCascade;
+  use gamersequalizer_common::profile::{BiquadBand, FilterType};
 
   #[test]
   fn test_ai_denoiser_smoke() {
@@ -612,7 +663,9 @@ mod tests {
       num / den.max(1e-12)
     };
     let expected = (AiVoiceIsolator::latency_ms(DenoiseModel::DpdfNet) * 48.0) as usize;
-    let best_near = |center: usize| (center - 24..=center + 24).map(|l| (l, corr(l))).fold((0, f32::MIN), |b, c| if c.1 > b.1 { c } else { b });
+    let best_near = |center: usize| {
+      (center - 24..=center + 24).map(|l| (l, corr(l))).fold((0, f32::MIN), |b, c| if c.1 > b.1 { c } else { b })
+    };
     let (at, here) = best_near(expected);
     let (_, early) = best_near(expected - 480);
     let (_, late) = best_near(expected + 480);
@@ -696,22 +749,42 @@ mod tests {
 
   #[test]
   fn test_gate_shuts_on_typing_without_speech() {
-    // -20 dBFS keys are louder than most voices; there the detector takes two short
-    // mouse-click bursts for speech (~2 % open). Quieter typing never opens it.
-    for (level, max_open) in [(-20.0f32, 0.03f32), (-40.0, 0.0)] {
+    // Max open share per model (DFN3, DPDFNet, RNNoise). The gate favours the voice: the output
+    // detector also hears keys a model leaves in, so RNNoise (keys still audible in its output)
+    // opens on a third of loud typing (measured 31 %, 11 % at -40 dBFS); DFN3 5 %, DPDFNet 2 %.
+    // Closed or not, keys stay `GATE_FLOOR_DB` or more under the model's output.
+    for (level, max_open) in [(-20.0f32, [0.08f32, 0.03, 0.40]), (-40.0, [0.0, 0.0, 0.15])] {
       let keys = keyboard_only(level);
-      for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
-        let out = run(model, GATE_AUTO, &keys);
-        let open = open_share(&out);
+      for (model, max_open) in
+        [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise].into_iter().zip(max_open)
+      {
+        let open = open_share(&run(model, GATE_AUTO, &keys), &run(model, GATE_OFF_DB - 1.0, &keys));
         eprintln!("{model:?} keys only {level} dBFS: gate open {:.1} % of the time", open * 100.0);
         assert!(open <= max_open, "{model:?} {level}: open {open}");
       }
     }
   }
 
-  /// Share of 10 ms frames (after a 1 s warm-up) in which anything comes out at all.
-  fn open_share(out: &[f32]) -> f32 {
-    let frames: Vec<bool> = out.as_chunks::<480>().0.iter().skip(100).map(|f| f.iter().any(|s| s.abs() > 1e-6)).collect();
+  #[test]
+  fn test_closed_gate_attenuates_by_floor_not_mute() {
+    let mut gate = NoiseGate::new(true);
+    let mut block = vec![1.0f32; 48_000];
+    gate.process(&mut block, 0);
+    let last = block.last().copied().unwrap_or_default();
+    assert!((db(last) - GATE_FLOOR_DB).abs() < 0.1, "{} dB", db(last));
+  }
+
+  /// Share of 10 ms frames (after a 1 s warm-up) in which the gate is open: the gated output
+  /// is within 6 dB of the same model's ungated output (closed = `GATE_FLOOR_DB` under it).
+  fn open_share(gated: &[f32], ungated: &[f32]) -> f32 {
+    let frames: Vec<bool> = gated
+      .as_chunks::<480>()
+      .0
+      .iter()
+      .zip(ungated.as_chunks::<480>().0)
+      .skip(100)
+      .map(|(g, u)| rms(u) > 1e-6 && db(rms(g)) > db(rms(u)) - 6.0)
+      .collect();
     frames.iter().filter(|&&o| o).count() as f32 / frames.len().max(1) as f32
   }
 
@@ -759,12 +832,27 @@ mod tests {
   /// Clean speech at `speech_rms_db` dBFS and the same speech with mechanical keyboard and
   /// mouse clicks mixed in at `snr_db`. Both at 48 kHz.
   fn speech_over_keyboard(speech_rms_db: f32, snr_db: f32) -> (Vec<f32>, Vec<f32>) {
-    mix("speech_clean.wav", &KEYBOARD_CLIPS, speech_rms_db, snr_db)
+    mix("speech_clean.wav", &KEYBOARD_CLIPS, None, speech_rms_db, snr_db)
   }
 
-  /// `speech_over_keyboard` for any fixtures (paths relative to `FIXTURES`).
-  fn mix(speech: &str, noise_clips: &[&str], speech_rms_db: f32, snr_db: f32) -> (Vec<f32>, Vec<f32>) {
-    let clean = read_wav_48k(speech);
+  /// `speech_over_keyboard` for any fixtures (paths relative to `FIXTURES`). `low_cut_hz`
+  /// high-passes the speech first (24 dB/oct, like the mic EQ's low cut): breath pops and
+  /// desk bumps in a raw recording are loud but not speech, and would count as lost speech.
+  fn mix(
+    speech: &str,
+    noise_clips: &[&str],
+    low_cut_hz: Option<f32>,
+    speech_rms_db: f32,
+    snr_db: f32,
+  ) -> (Vec<f32>, Vec<f32>) {
+    let mut clean = read_wav_48k(speech);
+    if let Some(frequency) = low_cut_hz {
+      let mut eq = BiquadCascade::default();
+      let band =
+        BiquadBand { filter_type: FilterType::HighPass, frequency, q: 0.707, slope_db: 24, ..BiquadBand::default() };
+      eq.set_bands(&[band], 48_000.0);
+      eq.process(&mut clean);
+    }
     let mut noise: Vec<f32> = noise_clips.iter().flat_map(|f| read_wav_48k(f)).collect();
     while noise.len() < clean.len() {
       noise.extend_from_within(..);
@@ -909,9 +997,11 @@ mod tests {
     }
     eprintln!("soft% / loud% lost [pause suppression dB], gate auto | no gate");
     for (level, snr) in [(-20.0f32, 0.0f32), (-45.0, 0.0), (-30.0, -10.0)] {
-      let (clean, mixed) = mix(SPEECH, &KEYS, level, snr);
+      let (clean, mixed) = mix(SPEECH, &KEYS, Some(100.0), level, snr);
       for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
-        let row = |q: Quality| format!("{:4.1} / {:3.1} [{:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db);
+        let row = |q: Quality| {
+          format!("{:4.1} / {:3.1} [{:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db)
+        };
         let gate = row(run_quality(model, GATE_AUTO, &clean, &mixed));
         let no_gate = row(run_quality(model, GATE_OFF_DB - 1.0, &clean, &mixed));
         eprintln!("voice {level:>4} dBFS, SNR {snr:>4} dB, {model:<13?} {gate} | {no_gate}");
@@ -920,7 +1010,8 @@ mod tests {
     for level in [-20.0f32, -40.0] {
       let keys = noise_only(&KEYS, level);
       for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
-        eprintln!("keys only {level} dBFS, {model:<13?} gate open {:.1} %", open_share(&run(model, GATE_AUTO, &keys)) * 100.0);
+        let open = open_share(&run(model, GATE_AUTO, &keys), &run(model, GATE_OFF_DB - 1.0, &keys));
+        eprintln!("keys only {level} dBFS, {model:<13?} gate open {:.1} %", open * 100.0);
       }
     }
   }
@@ -960,7 +1051,12 @@ mod tests {
         lp
       })
       .collect();
-    for (name, sig) in [("keys -20", keyboard_only(-20.0)), ("keys -40", keyboard_only(-40.0)), ("fan -50", scale_to_db(&fan, -50.0)), ("fan -30", scale_to_db(&fan, -30.0))] {
+    for (name, sig) in [
+      ("keys -20", keyboard_only(-20.0)),
+      ("keys -40", keyboard_only(-40.0)),
+      ("fan -50", scale_to_db(&fan, -50.0)),
+      ("fan -30", scale_to_db(&fan, -30.0)),
+    ] {
       let mut st = DenoiseState::new();
       let mut scratch = [0.0f32; FRAME_SIZE];
       let probs: Vec<f32> = sig
@@ -971,13 +1067,23 @@ mod tests {
         .map(|f| st.process_frame(&mut scratch, &f.map(|s| s * I16_SCALE)))
         .collect();
       let share = |t: f32| probs.iter().filter(|&&p| p > t).count() as f32 / probs.len() as f32 * 100.0;
-      eprintln!("{name}: frames over 0.05 {:.1} %, 0.1 {:.1} %, 0.2 {:.1} %, 0.5 {:.1} %", share(0.05), share(0.1), share(0.2), share(0.5));
+      eprintln!(
+        "{name}: frames over 0.05 {:.1} %, 0.1 {:.1} %, 0.2 {:.1} %, 0.5 {:.1} %",
+        share(0.05),
+        share(0.1),
+        share(0.2),
+        share(0.5)
+      );
     }
     for model in [DenoiseModel::DeepFilterNet, DenoiseModel::RnNoise] {
       let latency = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize;
-      eprintln!("
-{model:?}  soft%/loud% lost [pause suppression dB]: keys-10dB | -20dBFS | -45dBFS ; open% while typing after speech");
-      for (active, keep) in [(20u32, 0.5f32), (20, 0.1), (20, 0.05), (10, 0.1), (10, 0.05), (5, 0.1), (5, 0.05), (5, 0.2)] {
+      eprintln!(
+        "
+{model:?}  soft%/loud% lost [pause suppression dB]: keys-10dB | -20dBFS | -45dBFS ; open% while typing after speech"
+      );
+      for (active, keep) in
+        [(20u32, 0.5f32), (20, 0.1), (20, 0.05), (10, 0.1), (10, 0.05), (5, 0.1), (5, 0.05), (5, 0.2)]
+      {
         let q: Vec<String> = speech
           .iter()
           .map(|(c, m)| {
@@ -986,12 +1092,18 @@ mod tests {
           })
           .collect();
         let out = run_with(model, keep, active, &talk_then_type);
-        let tail = open_share(&out[speech_end - 48_000..]); // open_share skips its first 1 s
+        let ungated = run(model, GATE_OFF_DB - 1.0, &talk_then_type);
+        let tail = open_share(&out[speech_end - 48_000..], &ungated[speech_end - 48_000..]); // skips its first 1 s
         eprintln!("  active {active:2} keep {keep:4}: {} ; {:4.1}", q.join(" | "), tail * 100.0);
       }
       for (c, m) in &speech {
         let q = measure(c, m, &run(model, GATE_OFF_DB - 1.0, m), latency);
-        eprint!("  no gate: {:4.1}/{:3.1} [{:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db);
+        eprint!(
+          "  no gate: {:4.1}/{:3.1} [{:4.1}]",
+          q.soft_dropouts * 100.0,
+          q.dropouts * 100.0,
+          q.noise_suppression_db
+        );
       }
       eprintln!();
     }
