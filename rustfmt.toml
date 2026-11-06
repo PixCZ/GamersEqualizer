@@ -1,0 +1,4 @@
+# Project style (.claude/rules/code-style.md): two-space indentation, long lines allowed.
+tab_spaces = 2
+max_width = 120
+use_small_heuristics = "Max"

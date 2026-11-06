@@ -1,0 +1,126 @@
+use gamersequalizer_common::shm::{ShmLayout, ShmRingBuffer, SHM_MAGIC, SHM_NAME};
+use std::ptr::NonNull;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, LocalFree, BOOL, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::System::Memory::{
+  CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+};
+
+pub struct SharedMemoryClient {
+  handle: HANDLE,
+  mapped_ptr: NonNull<ShmLayout>,
+}
+
+// SAFETY: the mapping is process-wide memory accessed through atomics; the handle may be
+// closed from any thread.
+unsafe impl Send for SharedMemoryClient {}
+
+impl SharedMemoryClient {
+  /// The daemon's per-session mapping (`SHM_NAME`).
+  pub fn open_or_create() -> Result<Self, String> {
+    Self::create_named(SHM_NAME, None)
+  }
+
+  /// Create (or open if it exists) `name`. `sddl` sets the DACL of a newly created mapping,
+  /// e.g. so audiodg (LOCAL SERVICE) and the logged-on user share a Global mapping.
+  /// A fresh mapping gets default settings.
+  pub fn create_named(name: &str, sddl: Option<&str>) -> Result<Self, String> {
+    let wide_name = wide(name);
+    let size_bytes = ShmLayout::total_size_bytes() as u32;
+    // SAFETY: Win32 calls with owned, NUL-terminated buffers; the descriptor is freed below.
+    unsafe {
+      let mut descriptor = PSECURITY_DESCRIPTOR::default();
+      if let Some(sddl) = sddl {
+        let wide_sddl = wide(sddl);
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          PCWSTR(wide_sddl.as_ptr()),
+          SDDL_REVISION_1,
+          &mut descriptor,
+          None,
+        )
+        .map_err(|e| format!("invalid SDDL: {e}"))?;
+      }
+      let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: BOOL(0),
+      };
+      let result = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        sddl.map(|_| &attributes as *const SECURITY_ATTRIBUTES),
+        PAGE_READWRITE,
+        0,
+        size_bytes,
+        PCWSTR(wide_name.as_ptr()),
+      );
+      if !descriptor.0.is_null() {
+        let _ = LocalFree(HLOCAL(descriptor.0));
+      }
+      let handle = result.map_err(|e| format!("CreateFileMappingW({name}) failed: {e}"))?;
+      let mut client = Self::map(handle)?;
+      let header = &mut client.layout_mut().header;
+      if header.magic != SHM_MAGIC {
+        header.init_defaults();
+      }
+      Ok(client)
+    }
+  }
+
+  /// Open an existing mapping only (no create rights needed, e.g. a Global one from a user process).
+  pub fn open_existing(name: &str) -> Result<Self, String> {
+    let wide_name = wide(name);
+    // SAFETY: NUL-terminated name owned by this frame.
+    unsafe {
+      let handle = OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, PCWSTR(wide_name.as_ptr()))
+        .map_err(|e| format!("OpenFileMappingW({name}) failed: {e}"))?;
+      let client = Self::map(handle)?;
+      if client.layout().header.magic != SHM_MAGIC {
+        return Err(format!("{name} is not initialized"));
+      }
+      Ok(client)
+    }
+  }
+
+  pub fn ring_buffer(&mut self) -> ShmRingBuffer<'_> {
+    unsafe { ShmRingBuffer::from_raw(self.mapped_ptr.as_mut()) }
+  }
+
+  pub fn layout(&self) -> &ShmLayout {
+    unsafe { self.mapped_ptr.as_ref() }
+  }
+
+  pub fn layout_mut(&mut self) -> &mut ShmLayout {
+    unsafe { self.mapped_ptr.as_mut() }
+  }
+
+  /// Takes ownership of `handle` (closed on failure).
+  unsafe fn map(handle: HANDLE) -> Result<Self, String> {
+    if handle.is_invalid() {
+      return Err("file mapping handle is invalid".to_string());
+    }
+    let size = ShmLayout::total_size_bytes();
+    let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size);
+    let Some(mapped_ptr) = NonNull::new(view.Value as *mut ShmLayout) else {
+      let _ = CloseHandle(handle);
+      return Err("MapViewOfFile returned null pointer".to_string());
+    };
+    Ok(Self { handle, mapped_ptr })
+  }
+}
+
+impl Drop for SharedMemoryClient {
+  fn drop(&mut self) {
+    unsafe {
+      let _ = UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
+        Value: self.mapped_ptr.as_ptr() as *mut _,
+      });
+      let _ = CloseHandle(self.handle);
+    }
+  }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+  s.encode_utf16().chain(std::iter::once(0)).collect()
+}

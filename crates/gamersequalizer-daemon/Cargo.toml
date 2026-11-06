@@ -1,0 +1,32 @@
+[package]
+name = "gamersequalizer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gamersequalizer"
+path = "src/main.rs"
+
+[dependencies]
+gamersequalizer-common = { path = "../gamersequalizer-common" }
+gamersequalizer-mic-vst = { path = "../gamersequalizer-mic-vst" }
+windows = { workspace = true }
+windows-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+wgpu = { workspace = true }
+egui_plot = { workspace = true }
+window-vibrancy = { workspace = true }
+tray-icon = { workspace = true }
+muda = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+# Already in the tree via env_logger; local-time formatting of the APO build stamp.
+jiff = "0.2"
+
+[build-dependencies]
+embed-resource = "3.0.12"

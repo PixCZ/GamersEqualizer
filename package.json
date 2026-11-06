@@ -1,0 +1,13 @@
+{
+  "name": "nosonar",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "graph:init": "codegraph init",
+    "graph:sync": "codegraph sync",
+    "graph:status": "codegraph status"
+  },
+  "devDependencies": {
+    "@colbymchenry/codegraph": "^1.6.2"
+  }
+}

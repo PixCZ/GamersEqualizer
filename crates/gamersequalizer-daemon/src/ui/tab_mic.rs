@@ -1,0 +1,617 @@
+use super::state::{AecTelemetry, AppState, DenoiseStatus};
+use super::theme::{self, icons, Severity};
+use crate::i18n::{tr, trf};
+use crate::win_audio::WinAudioSystem;
+use egui::{Color32, RichText, Stroke, Ui};
+use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, VLine};
+use gamersequalizer_common::biquad::MAX_EQ_BANDS;
+use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, NOISE_GATE_AUTO, NOISE_GATE_OFF};
+use gamersequalizer_mic_vst::ai_denoiser::AiVoiceIsolator;
+use gamersequalizer_mic_vst::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
+use std::sync::atomic::Ordering;
+
+const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
+const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
+const AI_COLOR: Color32 = Color32::from_rgb(140, 240, 120);
+const EQ_COLOR: Color32 = Color32::from_rgb(255, 180, 80);
+const OK_COLOR: Color32 = Color32::from_rgb(80, 220, 120);
+/// Lowest level shown on the dBFS meters.
+const METER_FLOOR_DB: f32 = -80.0;
+/// Width of the meters and bars in the AEC grid.
+const BAR_WIDTH: f32 = 280.0;
+/// Extra horizontal gap between the three AEC columns.
+const AEC_COLUMN_GAP: f32 = 12.0;
+/// AEC grid: label column width, room for the value after a meter, row height (= meter).
+const AEC_LABEL_WIDTH: f32 = 110.0;
+const AEC_VALUE_WIDTH: f32 = 70.0;
+const AEC_ROW_HEIGHT: f32 = 20.0;
+const AEC_PLOT_HEIGHT: f32 = 120.0;
+/// Fixed y-axis label width ("0.05"), so the plot area doesn't resize when labels change.
+const AEC_Y_AXIS_WIDTH: f32 = 30.0;
+/// X range of the echo-path plot before the filter has any taps.
+const IMPULSE_MIN_WINDOW_MS: f32 = 10.0;
+
+pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
+  egui::ScrollArea::vertical().id_salt("mic_page").auto_shrink([false, false]).show(ui, |ui| {
+    theme::page_header(
+      ui,
+      icons::MIC,
+      ACCENT,
+      tr("Microphone"),
+      Some(tr("Chain (Windows effect on the microphone, so every app gets it): echo cancellation → AI noise suppression → voice EQ → boost/limiter.")),
+    );
+    super::apo_banner::render_apo_status_line(ui, state);
+    ui.add_space(theme::CARD_GAP);
+
+    input_section(ui, state, win_audio);
+    aec_section(ui, state);
+    denoise_section(ui, state);
+    eq_section(ui, state);
+  });
+}
+
+fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
+  theme::card(ui, |ui| {
+    ui.horizontal(|ui| {
+      theme::card_title(ui, Some((icons::MIC, ACCENT)), tr("Microphone input & sensitivity"));
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let p = theme::palette(ui);
+        let (mute_text, mute_color) = if win_audio.chatmix.mic_muted {
+          (theme::with_icon(icons::MUTE, tr("Muted")), p.err)
+        } else {
+          (theme::with_icon(icons::MIC, tr("Active")), p.text)
+        };
+        if ui.button(RichText::new(mute_text).color(mute_color)).clicked() {
+          win_audio.chatmix.mic_muted = !win_audio.chatmix.mic_muted;
+        }
+      });
+    });
+
+    egui::Grid::new("mic_input_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+      // Hardware microphone selector
+      ui.label(tr("Input device"));
+      ui.horizontal(|ui| {
+        let current_id = state.selected_mic_endpoint_id.clone();
+        let current_name = current_id
+          .as_ref()
+          .and_then(|mid| state.capture_endpoints.iter().find(|e| &e.id == mid))
+          .map(|e| e.name.clone())
+          .unwrap_or_else(|| tr("Default microphone").to_string());
+
+        let mut changed_mic = None;
+        egui::ComboBox::from_id_salt("combo_tab_mic_device").selected_text(&current_name).width(320.0).show_ui(
+          ui,
+          |ui| {
+            for ep in &state.capture_endpoints {
+              let is_sel = current_id.as_deref() == Some(&ep.id);
+              if ui.selectable_label(is_sel, &ep.name).clicked() {
+                changed_mic = Some(ep.id.clone());
+              }
+            }
+          },
+        );
+
+        if let Some(new_id) = changed_mic {
+          state.selected_mic_endpoint_id = Some(new_id.clone());
+          win_audio.chatmix.mic_device_id = Some(new_id.clone());
+          win_audio.mic_stream.set_input_device(Some(new_id.clone()));
+          state.set_shm_selected_mic(&new_id);
+          if let Some((v, m)) = crate::win_audio::chatmix::get_endpoint_volume(&new_id) {
+            win_audio.chatmix.mic_volume = v;
+            win_audio.chatmix.mic_muted = m;
+          }
+        }
+
+        if let Some(mid) = state.selected_mic_endpoint_id.clone() {
+          if super::apo_banner::selected_mic_is_default(state) {
+            theme::status_line(ui, Severity::Success, tr("Windows default"));
+          } else if ui
+            .add(theme::accent_button(ui, tr("Set as Windows default mic")))
+            .on_hover_text(tr("Discord, games and other apps use the Windows default microphone."))
+            .clicked()
+          {
+            super::apo_banner::set_default_mic(state, win_audio, &mid);
+          }
+        }
+      });
+      ui.end_row();
+
+      // Live input meter
+      ui.label(tr("Live input level"));
+      let peak = win_audio.chatmix.mic_peak_level;
+      let db_text = if peak > 0.0001 {
+        format!("{:.0} % ({:.1} dBFS)", (peak * 100.0).round(), 20.0 * peak.log10())
+      } else {
+        "0 % (-inf dBFS)".to_string()
+      };
+      theme::meter(ui, peak, BAR_WIDTH * 1.6, theme::level_color(ui, peak), &db_text);
+      ui.end_row();
+
+      // Sensitivity 0% .. 300%
+      ui.label(tr("Sensitivity"));
+      ui.horizontal(|ui| {
+        let mut vol = win_audio.chatmix.mic_volume;
+        ui.spacing_mut().slider_width = BAR_WIDTH;
+        if ui.add(egui::Slider::new(&mut vol, 0.0..=3.0).show_value(false)).changed() {
+          win_audio.chatmix.mic_volume = vol;
+        }
+        let readout = if vol <= 1.0 {
+          trf("{} % (native)", &[&format!("{:.0}", vol * 100.0)])
+        } else {
+          trf("{} % (+{} dB boost)", &[&format!("{:.0}", vol * 100.0), &format!("{:.1}", 20.0 * vol.log10())])
+        };
+        ui.label(theme::strong(readout, 14.0).color(theme::adapt(ui, EQ_COLOR)));
+        if ui.button(tr("Reset to 100 %")).clicked() {
+          win_audio.chatmix.mic_volume = 1.0;
+        }
+      });
+      ui.end_row();
+    });
+
+    ui.label(theme::caption(tr(
+      "0 % - 100 % moves the Windows input slider. 100 % - 300 % adds a soft-saturated digital boost up to +9.5 dB (3x amplitude).",
+    )));
+  });
+}
+
+fn aec_section(ui: &mut Ui, state: &mut AppState) {
+  theme::card(ui, |ui| {
+    // Header: title, description in a tooltip, on/off switch on the right.
+    let (aec_enabled, ai_strength, gate_db) = mic_controls(state);
+    ui.horizontal(|ui| {
+      theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation (AEC)"));
+      ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
+        "Speaker output is captured (WASAPI loopback) and subtracted from the mic by an adaptive NLMS filter. \
+         The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed \
+         after repeated confirmation.",
+      ));
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut on = aec_enabled;
+        if ui.add(theme::Toggle(&mut on)).on_hover_text(tr("Enable speaker echo cancellation")).changed() {
+          state.update_shm_mic_controls(on, ai_strength, gate_db);
+        }
+      });
+    });
+
+    let t = state.poll_aec_telemetry();
+    let (status, severity) = aec_status_text(&t);
+    ui.horizontal_wrapped(|ui| {
+      theme::status_line(ui, severity, &status);
+      if t.double_talk {
+        theme::status_line(ui, Severity::Warning, tr("You are talking: echo filter on hold")).on_hover_text(tr(
+          "Your voice (or a loud noise) and the headphone sound reach the mic at the same time. \
+           Echo removal keeps running, but the filter stops adjusting itself for a moment, \
+           so it doesn't learn to remove your voice. Normal, nothing to fix.",
+        ));
+      }
+    });
+
+    if !aec_enabled {
+      return;
+    }
+
+    // Three columns: title, a 3-row grid (label | value), then the plot that belongs to them.
+    // Same rows, row height, label width and text styles everywhere, so they line up.
+    ui.add_space(8.0);
+    let p = theme::palette(ui);
+    let gap = AEC_COLUMN_GAP + ui.spacing().item_spacing.x;
+    let col_w = ((ui.available_width() - 2.0 * gap) / 3.0).max(200.0);
+    let meter_w = (col_w - AEC_LABEL_WIDTH - AEC_VALUE_WIDTH).max(40.0);
+    ui.horizontal_top(|ui| {
+      aec_column(ui, col_w, tr("Echo delay"), |ui| {
+        let (delay, hover) = match t.delay_ms {
+          Some(d) => {
+            let src = if t.from_cache { tr("  (from previous session, re-checking)") } else { "" };
+            (format!("{d:.2} ms"), trf("{} samples @ 48 kHz{}", &[&(d * 48.0).round(), &src]))
+          }
+          None => ("—".to_string(), tr("not measured yet: play some sound through the speakers").to_string()),
+        };
+        aec_row(ui, tr("Delay"), |ui| {
+          ui.label(RichText::new(delay).color(p.ok)).on_hover_text(hover);
+        });
+        aec_row(ui, tr("Confidence"), |ui| {
+          aec_meter(ui, t.confidence, meter_w, p.accent, format!("{:.0} %", t.confidence * 100.0));
+        });
+        let last = t.raw_delay_ms.map_or_else(|| tr("no clear peak").to_string(), |d| format!("{d:.2} ms"));
+        aec_row(ui, tr("Last measurement"), |ui| {
+          ui.label(RichText::new(last).color(p.text)).on_hover_text(trf("{} measurements total", &[&t.estimate_count]));
+        });
+      });
+      ui.add_space(AEC_COLUMN_GAP);
+      aec_column(ui, col_w, tr("Echo removed (ERLE)"), |ui| {
+        aec_row(ui, tr("Removed"), |ui| {
+          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db));
+        });
+        let window_ms = format!("{:.1}", t.filter_taps as f32 / 48.0);
+        let pre_ms = format!("{:.1}", t.pre_delay_ms);
+        aec_row(ui, tr("Filter"), |ui| {
+          ui.label(RichText::new(trf("{} taps / {} ms", &[&t.filter_taps, &window_ms])).color(p.text)).on_hover_text(
+            trf(
+              "{} taps = {} ms window, starts {} ms before the measured delay",
+              &[&t.filter_taps, &window_ms, &pre_ms],
+            ),
+          );
+        });
+        aec_row(ui, tr("Pre-delay"), |ui| {
+          ui.label(RichText::new(format!("{pre_ms} ms")).color(p.text));
+        });
+      });
+      ui.add_space(AEC_COLUMN_GAP);
+      aec_column(ui, col_w, tr("Levels (dBFS)"), |ui| {
+        // Not live: the levels are stale, show dashes instead.
+        level_row(ui, tr("Speakers"), t.live.then_some(t.ref_db), meter_w);
+        level_row(ui, tr("Mic in"), t.live.then_some(t.mic_db), meter_w);
+        level_row(ui, tr("Mic out"), t.live.then_some(t.out_db), meter_w);
+      });
+    });
+
+    // Plots in their own row, captions kept to one line, so the plots always line up.
+    ui.add_space(8.0);
+    ui.horizontal_top(|ui| {
+      aec_plot(ui, col_w, tr("Correlation vs. delay"), None, |ui| corr_plot(ui, &t, col_w));
+      ui.add_space(AEC_COLUMN_GAP);
+      aec_plot(ui, col_w, tr("Echo path"), Some(tr("Echo path (adaptive filter impulse response)")), |ui| {
+        impulse_plot(ui, &t, col_w)
+      });
+      ui.add_space(AEC_COLUMN_GAP);
+      aec_plot(ui, col_w, tr("History (60 s): ERLE dB / delay ms"), None, |ui| history_plot(ui, state, col_w));
+    });
+  });
+}
+
+/// One AEC value block: bold title, then the rows in a grid (fixed label width and row
+/// height, so all blocks match).
+fn aec_column(ui: &mut Ui, width: f32, title: &str, rows: impl FnOnce(&mut Ui)) {
+  ui.vertical(|ui| {
+    ui.set_width(width);
+    ui.label(theme::strong(title, 14.0));
+    egui::Grid::new(("aec_grid", title))
+      .num_columns(2)
+      .min_col_width(AEC_LABEL_WIDTH)
+      .min_row_height(AEC_ROW_HEIGHT)
+      .spacing([8.0, 4.0])
+      .show(ui, rows);
+  });
+}
+
+/// One AEC plot: a one-line caption (truncated if too long, full text on hover), then the plot.
+fn aec_plot(ui: &mut Ui, width: f32, caption: &str, hover: Option<&str>, plot: impl FnOnce(&mut Ui)) {
+  ui.vertical(|ui| {
+    ui.set_width(width);
+    let text = RichText::new(caption).color(theme::palette(ui).text_secondary);
+    let r = ui.add(egui::Label::new(text).truncate());
+    if let Some(h) = hover {
+      r.on_hover_text(h);
+    }
+    plot(ui);
+  });
+}
+
+/// One grid row: label in the secondary color, then the value widget.
+fn aec_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
+  ui.label(RichText::new(label).color(theme::palette(ui).text_secondary));
+  value(ui);
+  ui.end_row();
+}
+
+/// Meter with its value in the normal text style of the AEC rows.
+fn aec_meter(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: String) {
+  let text = RichText::new(value).color(theme::palette(ui).text);
+  theme::meter_with(ui, fraction, width, fill, text);
+}
+
+fn aec_status_text(t: &AecTelemetry) -> (String, Severity) {
+  // Shared memory exists but no stream writes it: whatever state it holds is stale.
+  if t.state.is_some() && !t.live {
+    return (tr("Idle: no app is using the microphone now").into(), Severity::Info);
+  }
+  match t.state {
+    Some(AecState::Disabled) => (tr("Disabled").into(), Severity::Info),
+    Some(AecState::NoReference) => {
+      (tr("No speaker reference (loopback not running or no timestamps)").into(), Severity::Error)
+    }
+    Some(AecState::ReferenceSilent) if t.delay_ms.is_some() => {
+      (tr("Ready: nothing playing right now").into(), Severity::Success)
+    }
+    Some(AecState::ReferenceSilent) => (tr("Waiting for speaker audio to measure the delay").into(), Severity::Warning),
+    Some(AecState::Measuring) => (tr("Measuring echo delay...").into(), Severity::Warning),
+    Some(AecState::Locked) => (tr("Active: cancelling speaker echo").into(), Severity::Success),
+    Some(AecState::Unknown(v)) => (trf("Unknown state {} (newer DSP build?)", &[&v]), Severity::Info),
+    None => (tr("Mic DSP not running").into(), Severity::Info),
+  }
+}
+
+/// dBFS level on a -80..0 dB scale (the column title says dBFS, so the value has no unit);
+/// None = no data (a dash and an empty meter).
+fn level_row(ui: &mut Ui, label: &str, db: Option<f32>, width: f32) {
+  let (frac, text) = match db {
+    None => (0.0, "—".to_string()),
+    Some(db) if db <= METER_FLOOR_DB => (0.0, tr("silent").to_string()),
+    Some(db) => (((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0), format!("{db:.1}")),
+  };
+  aec_row(ui, label, |ui| aec_meter(ui, frac, width, theme::level_color(ui, frac), text));
+}
+
+/// Y grid for a plot that starts at 0: lines at tenths and halves, labels at 0, half and `top`
+/// (egui's default 1-2-5 steps leave only "0" labelled on a short plot with a range like 0.05).
+fn y_steps(top: f64) -> impl Fn(egui_plot::GridInput) -> Vec<egui_plot::GridMark> {
+  egui_plot::uniform_grid_spacer(move |_| [top / 10.0, top / 2.0, top])
+}
+
+fn small_plot(id: &str, width: f32) -> Plot<'_> {
+  Plot::new(id)
+    .width(width)
+    .height(AEC_PLOT_HEIGHT)
+    .allow_drag(false)
+    .allow_zoom(false)
+    .allow_scroll(false)
+    .show_axes([true, true])
+    .y_axis_min_width(AEC_Y_AXIS_WIDTH)
+}
+
+fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
+  let n = t.corr.len().max(1);
+  let max_ms = if t.corr_max_delay_ms > 0.0 { t.corr_max_delay_ms } else { 400.0 };
+  let pts: PlotPoints =
+    t.corr.iter().enumerate().map(|(i, &v)| [((i as f32 + 0.5) / n as f32 * max_ms) as f64, v as f64]).collect();
+  let (line, mark) = (theme::adapt(ui, AEC_COLOR), theme::adapt(ui, OK_COLOR));
+  let threshold_color = theme::palette(ui).text_tertiary;
+  small_plot("aec_corr_plot", width)
+    .include_y(0.0)
+    .include_y(1.0)
+    .y_grid_spacer(y_steps(1.0))
+    .include_x(0.0)
+    .include_x(max_ms as f64)
+    .x_axis_formatter(|v, _| format!("{:.0} ms", v.value))
+    // The curve is peak-to-average ratio / full scale: label it as the ratio.
+    .y_axis_formatter(|v, _| format!("{:.0}", v.value * FULL_SCALE_PEAK_RATIO as f64))
+    .label_formatter(|_, p| format!("{:.1} ms\n{:.1}x", p.x, p.y * FULL_SCALE_PEAK_RATIO as f64))
+    .show(ui, |pu| {
+      let threshold = (MIN_PEAK_RATIO / FULL_SCALE_PEAK_RATIO) as f64;
+      pu.hline(HLine::new(threshold).stroke(Stroke::new(1.0_f32, threshold_color)).name(tr("acceptance threshold")));
+      pu.line(Line::new(pts).stroke(Stroke::new(1.5_f32, line)).name("|corr|"));
+      if let Some(d) = t.delay_ms {
+        pu.vline(VLine::new(d as f64).stroke(Stroke::new(1.2_f32, mark)).name(tr("locked delay")));
+      }
+    });
+}
+
+fn impulse_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
+  let n = t.impulse.len().max(1);
+  let window_ms = t.filter_taps as f32 / 48.0;
+  let base_ms = t.delay_ms.unwrap_or(0.0) - t.pre_delay_ms;
+  // No filter yet (0 taps): every point would sit on one x, and egui_plot's auto-bounds jump
+  // around on a zero-width range. Draw nothing and keep a fixed x range instead.
+  let pts: PlotPoints = if t.filter_taps == 0 {
+    PlotPoints::default()
+  } else {
+    t.impulse
+      .iter()
+      .enumerate()
+      .map(|(i, &v)| [(base_ms + (i as f32 + 0.5) / n as f32 * window_ms) as f64, v as f64])
+      .collect()
+  };
+  let peak = t.impulse.iter().fold(0.0f32, |m, v| m.max(*v));
+  // Round the top up to a 1-2-5 value, so the axis labels are short numbers.
+  let top = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0].into_iter().find(|&s| s >= peak as f64).unwrap_or(peak as f64);
+  let (line, mark) = (theme::adapt(ui, EQ_COLOR), theme::adapt(ui, OK_COLOR));
+  small_plot("aec_impulse_plot", width)
+    .include_x(base_ms as f64)
+    .include_x((base_ms + window_ms.max(IMPULSE_MIN_WINDOW_MS)) as f64)
+    .include_y(0.0)
+    .include_y(top)
+    .y_grid_spacer(y_steps(top))
+    .x_axis_formatter(|v, _| format!("{:.0} ms", v.value))
+    .label_formatter(|_, p| format!("{:.2} ms\n|w| {:.3}", p.x, p.y))
+    .show(ui, |pu| {
+      pu.line(Line::new(pts).stroke(Stroke::new(1.5_f32, line)).fill(0.0_f32).name("|w|"));
+      if let Some(d) = t.delay_ms {
+        pu.vline(VLine::new(d as f64).stroke(Stroke::new(1.0_f32, mark)).name(tr("measured delay")));
+      }
+    });
+}
+
+fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
+  let now = state.aec_history.back().map_or(0.0, |p| p.t);
+  let erle: PlotPoints = state.aec_history.iter().map(|p| [p.t - now, p.erle_db as f64]).collect();
+  let delay: PlotPoints = state.aec_history.iter().filter_map(|p| p.delay_ms.map(|d| [p.t - now, d as f64])).collect();
+  let (a, b) = (theme::adapt(ui, AEC_COLOR), theme::adapt(ui, OK_COLOR));
+  small_plot("aec_history_plot", width)
+    .include_x(-60.0)
+    .include_x(0.0)
+    .include_y(0.0)
+    .include_y(40.0)
+    .x_axis_formatter(|v, _| format!("{:.0} s", v.value))
+    .legend(Legend::default())
+    .show(ui, |pu| {
+      pu.line(Line::new(erle).stroke(Stroke::new(1.5_f32, a)).name("ERLE dB"));
+      pu.line(Line::new(delay).stroke(Stroke::new(1.5_f32, b)).name(tr("delay ms")));
+    });
+}
+
+/// At or below this strength the denoiser is bypassed (matches AiVoiceIsolator).
+const DENOISE_OFF_STRENGTH: f32 = 0.001;
+/// Strength restored when a model is picked again after "Off".
+const DENOISE_DEFAULT_STRENGTH: f32 = 0.75;
+
+fn denoise_section(ui: &mut Ui, state: &mut AppState) {
+  theme::card(ui, |ui| {
+    theme::card_title(ui, Some((icons::EQUALIZER, AI_COLOR)), tr("Stage 2: AI noise suppression"));
+
+    let (selected, _) = state.denoise_models();
+    let (aec_enabled, ai_strength, gate_db) = mic_controls(state);
+    // Off = strength 0: the denoiser and the noise gate are bypassed (see AiVoiceIsolator).
+    let off = ai_strength <= DENOISE_OFF_STRENGTH;
+    ui.horizontal(|ui| {
+      ui.label(tr("Model:"));
+      // None = Off.
+      let current = (!off).then_some(selected);
+      let mut choice = current;
+      ui.selectable_value(&mut choice, None, tr("Off")).on_hover_text(tr("No noise suppression and no noise gate."));
+      ui.selectable_value(&mut choice, Some(DenoiseModel::RnNoise), "RNNoise").on_hover_text(trf(
+        "Light classic model (nnnoiseless). ~0.1 % CPU, {}.",
+        &[&latency_text(DenoiseModel::RnNoise)],
+      ));
+      ui.selectable_value(&mut choice, Some(DenoiseModel::DeepFilterNet), "DeepFilterNet 3").on_hover_text(trf(
+        "Best open-source quality, full-band 48 kHz. ~1 % CPU, {}. Switching during a call loads the model (~0.2 s gap).",
+        &[&latency_text(DenoiseModel::DeepFilterNet)],
+      ));
+      ui.selectable_value(&mut choice, Some(DenoiseModel::DpdfNet), "DPDFNet").on_hover_text(trf(
+        "Best on quiet speech under keyboard noise (DPDFNet-2, 48 kHz). About 3x the CPU of DeepFilterNet 3, {}. Switching during a call loads the model (~0.1 s gap).",
+        &[&latency_text(DenoiseModel::DpdfNet)],
+      ));
+      if choice != current {
+        match choice {
+          None => state.update_shm_mic_controls(aec_enabled, 0.0, gate_db),
+          Some(model) => {
+            if model != selected {
+              state.set_denoise_model(model);
+            }
+            if off {
+              state.update_shm_mic_controls(aec_enabled, DENOISE_DEFAULT_STRENGTH, gate_db);
+            }
+          }
+        }
+      }
+    });
+    if off {
+      theme::status_line(ui, Severity::Warning, tr("Noise suppression is off."));
+      return;
+    }
+    let status = state.denoise_status();
+    let (note, severity) = match status {
+      DenoiseStatus::Running(m) => {
+        (trf("Running: {}, adds {}", &[&model_name(m), &latency_text(m)]), Severity::Success)
+      }
+      DenoiseStatus::Idle(m) => (
+        trf(
+          "No app is using the microphone now. {} (adds {}) starts with the next call/recording.",
+          &[&model_name(m), &latency_text(m)],
+        ),
+        Severity::Info,
+      ),
+      DenoiseStatus::Switching(m) => (trf("Switching... running: {}", &[&model_name(m)]), Severity::Warning),
+      DenoiseStatus::Limited { limit, running } => (
+        match limit {
+          DenoiseLimit::Overloaded => trf(
+            "Limited: {} was too slow for real time on this CPU, {} runs instead. Pick {} again to retry.",
+            &[&model_name(selected), &model_name(running), &model_name(selected)],
+          ),
+          DenoiseLimit::LoadFailed => trf(
+            "{} could not be loaded by the audio engine, {} runs instead.",
+            &[&model_name(selected), &model_name(running)],
+          ),
+          other => trf("Limited ({}), running: {}", &[&format!("{other:?}"), &model_name(running)]),
+        },
+        Severity::Error,
+      ),
+      DenoiseStatus::Failed { selected, running } => (
+        trf(
+          "{} could not be loaded by the audio engine, still on {} (adds {}).",
+          &[&model_name(selected), &model_name(running), &latency_text(running)],
+        ),
+        Severity::Error,
+      ),
+    };
+    theme::status_line(ui, severity, &note);
+    if !matches!(status, DenoiseStatus::Idle(_)) {
+      dsp_load_row(ui, state.mic_dsp_load());
+    }
+
+    let (aec_enabled, mut ai_strength, gate_db) = mic_controls(state);
+    let mut changed = false;
+    egui::Grid::new("denoise_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+      ui.label(tr("Suppression strength:"));
+      ui.spacing_mut().slider_width = BAR_WIDTH;
+      changed |= ui.add(egui::Slider::new(&mut ai_strength, 0.0..=1.0).show_value(true)).changed();
+      ui.end_row();
+
+      // Any old threshold value (e.g. -45) means "on": the gate is automatic now.
+      let mut gate = if gate_db <= NOISE_GATE_OFF { NOISE_GATE_OFF } else { NOISE_GATE_AUTO };
+      ui.label(tr("Noise gate:"));
+      ui.horizontal(|ui| {
+        changed |= ui
+          .selectable_value(&mut gate, NOISE_GATE_AUTO, tr("Auto"))
+          .on_hover_text(tr(
+            "Silences the mic while you are not speaking. Opens on speech, not on loudness: \
+             works the same for a loud or quiet voice, and key clicks alone don't open it.",
+          ))
+          .changed();
+        changed |= ui
+          .selectable_value(&mut gate, NOISE_GATE_OFF, tr("Off"))
+          .on_hover_text(tr("Only the noise suppression runs; nothing is muted between words."))
+          .changed();
+      });
+      ui.end_row();
+      if changed {
+        state.update_shm_mic_controls(aec_enabled, ai_strength, gate);
+      }
+    });
+  });
+}
+
+/// CPU time of the whole mic chain against the real-time budget of each audio block.
+fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
+  let p = theme::palette(ui);
+  let color = if load.peak > 1.0 {
+    p.err
+  } else if load.peak > 0.7 {
+    p.warn
+  } else {
+    p.ok
+  };
+  ui.horizontal(|ui| {
+    ui.label(theme::caption(tr("CPU load:")));
+    let value = trf("{} % (peak {} %)", &[&format!("{:.0}", load.avg * 100.0), &format!("{:.0}", load.peak * 100.0)]);
+    theme::meter(ui, load.avg, 180.0, color, &value).on_hover_text(tr(
+      "Time the mic chain needs per audio block, as a share of the block's length. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+    ));
+    let late = RichText::new(trf("late blocks: {}", &[&load.late_blocks])).small();
+    ui.label(if load.late_blocks > 0 { late.color(p.warn) } else { late.weak() });
+  });
+}
+
+/// Measured added latency of a model (see the denoiser's latency test).
+fn latency_text(m: DenoiseModel) -> String {
+  trf("{} ms latency", &[&format!("{:.0}", AiVoiceIsolator::latency_ms(m))])
+}
+
+fn model_name(m: DenoiseModel) -> String {
+  match m {
+    DenoiseModel::RnNoise => "RNNoise".into(),
+    DenoiseModel::DeepFilterNet => "DeepFilterNet 3".into(),
+    DenoiseModel::DpdfNet => "DPDFNet".into(),
+    DenoiseModel::Unknown(v) => trf("unknown model {}", &[&v]),
+  }
+}
+
+fn eq_section(ui: &mut Ui, state: &mut AppState) {
+  theme::card(ui, |ui| {
+    theme::card_title(ui, Some((icons::EQUALIZER, EQ_COLOR)), tr("Stage 3: Voice parametric EQ"));
+    super::mic_preset_bar::render_preset_bar(ui, state);
+    ui.label(theme::caption(tr(
+      "Applied after noise suppression, before the boost/limiter. Changes are live and kept across restarts; \"Save as…\" keeps them as a named preset.",
+    )));
+
+    let height = super::eq_editor::plot_height(ui, 0.3, 180.0, 340.0);
+    if super::eq_editor::band_editor(ui, "mic_eq", &mut state.mic_profile.bands, MAX_EQ_BANDS, EQ_COLOR, &[], height) {
+      state.sync_mic_eq_to_shm();
+      state.mic_eq_unsaved = true;
+    }
+    // Save once the slider is released, not on every drag frame.
+    if state.mic_eq_unsaved && !ui.ctx().input(|i| i.pointer.any_down()) {
+      state.mic_eq_unsaved = false;
+      state.apply_mic_eq();
+    }
+  });
+}
+
+fn mic_controls(state: &AppState) -> (bool, f32, i32) {
+  state.shm_header().map_or((true, 0.75, -45), |h| {
+    (
+      h.aec_enabled.load(Ordering::Relaxed),
+      h.ai_voice_strength_permille.load(Ordering::Relaxed) as f32 / 1000.0,
+      h.noise_gate_threshold_db.load(Ordering::Relaxed),
+    )
+  })
+}

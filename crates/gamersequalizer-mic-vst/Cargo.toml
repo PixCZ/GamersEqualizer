@@ -1,0 +1,32 @@
+[package]
+name = "gamersequalizer-mic-vst"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "gamersequalizer_mic_vst"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gamersequalizer-common = { path = "../gamersequalizer-common" }
+windows = { workspace = true }
+windows-core = { workspace = true }
+nnnoiseless = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+rustfft = "6.4"
+# DeepFilterNet 3 (official repo, pinned commit; crates.io only has an old version without
+# inference). tract is pinned exactly: upstream allows ^0.21.4 but breaks on newer 0.21.x.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", default-features = false, features = ["tract", "default-model"] }
+tract-core = "=0.21.4"
+tract-onnx = "=0.21.4"
+tract-pulse = "=0.21.4"
+tract-hir = "=0.21.4"
+# DPDFNet runs on current tract, ~3x faster than 0.21 on its graph; linked next to the pinned
+# 0.21 above (separate semver versions, no conflict).
+tract-onnx-23 = { package = "tract-onnx", version = "0.23.10" }
+ndarray = "0.15"
+
+[dev-dependencies]
+# Reads the WAV fixtures in test_data/denoise (already in the lock file via other crates).
+hound = "3.5"

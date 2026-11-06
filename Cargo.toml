@@ -1,0 +1,83 @@
+[workspace]
+members = [
+    "crates/gamersequalizer-common",
+    "crates/gamersequalizer-daemon",
+    "crates/gamersequalizer-mic-vst",
+    "crates/gamersequalizer-apo",
+]
+resolver = "2"
+
+[workspace.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Performance",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_Audio_Apo",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "implement",
+] }
+windows-core = "0.58"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+nnnoiseless = "0.5"
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.29"
+# Same wgpu eframe already uses (egui-wgpu turns its default features off); only adds the DX12 backend.
+wgpu = { version = "22", default-features = false, features = ["dx12"] }
+egui_plot = "0.29"
+window-vibrancy = "0.5"
+tray-icon = "0.19"
+muda = "0.15"
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2.0"
+directories = "5.0"
+
+# Dev iterations: optimized but parallel and incremental (all cores, seconds after a small
+# change). Fat LTO with one codegen unit took ~2.5 min single-threaded for little gain.
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+panic = "abort"
+strip = true
+
+# Final distribution build: whole-program optimization, slow.
+#   cargo build --profile dist -p gamersequalizer
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+incremental = false
+
+# Dependencies (not our crates) are built optimized and without debug assertions even in
+# dev builds: tract's debug-only graph check rejects the DeepFilterNet 3 model
+# ("duplicate name /convt3/Conv.bias") that loads and runs fine in release.
+[profile.dev.package."*"]
+opt-level = 2
+debug-assertions = false
+
+# The capture APO runs inside audiodg.exe: it is built with unwinding so its catch_unwind
+# guards turn a DSP panic into pass-through audio instead of killing system audio.
+#   cargo build --profile apo -p gamersequalizer-apo   -> target/apo/gamersequalizer_apo.dll
+[profile.apo]
+inherits = "release"
+panic = "unwind"
