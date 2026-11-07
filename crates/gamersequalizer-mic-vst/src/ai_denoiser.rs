@@ -1,14 +1,16 @@
 //! Neural noise suppression: RNNoise (nnnoiseless, light), DeepFilterNet 3 (higher quality,
 //! ~4 % of a core) or DPDFNet-2 (best on soft speech, ~11 %, see `dpdfnet`). The heavy models
-//! load on first selection (DFN3 ~200 ms, DPDFNet ~120 ms) and then stay in memory. Its runtime is not `Send` (tract uses `Rc`), so it can't be loaded
-//! on another thread: the stream selects the model before audio starts (no gap); switching
-//! live costs one ~0.2 s gap the first time. Upgrade path: a dedicated DF worker thread.
+//! load on first selection (DFN3 ~200 ms, DPDFNet ~120 ms) and then stay in memory. The stream
+//! loads its selected model before audio starts (`set_model`); a live switch (`request_model`)
+//! loads on a short-lived thread while RNNoise keeps running, so the audio thread never stalls.
 
 use crate::dpdfnet::{self, DpdfEngine};
 use df::tract::{DfParams, DfTract, RuntimeParams};
 use gamersequalizer_common::shm::{DenoiseLimit, DenoiseModel};
 use ndarray::Array2;
 use nnnoiseless::{DenoiseState, FRAME_SIZE};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::Instant;
 
 /// nnnoiseless (RNNoise) is trained on i16-range samples, not [-1.0, 1.0].
 const I16_SCALE: f32 = 32768.0;
@@ -68,6 +70,31 @@ const GATE_LOOKAHEAD_SAMPLES: usize = 48 * 30;
 /// at the output: the detector hears the raw input a model latency early, so the gate adds
 /// that latency on top (else DPDFNet's 60 ms lead would leave only ~140 ms).
 const GATE_HOLD_SAMPLES: usize = 48 * 200;
+/// No speech on the input detector for this long puts a heavy model to sleep (see `asleep`).
+const SLEEP_AFTER_SAMPLES: usize = 48_000 * 2;
+/// Crossfade once a takeover's newcomer has filled its latency (5 ms).
+const TAKEOVER_FADE_SAMPLES: usize = 240;
+/// RNNoise runs this long next to the heavy model before it stands in: its state is from the
+/// last pause, and stale it rated the room as speech and woke the model right away.
+const STAND_IN_WARMUP_SAMPLES: usize = 48 * 300;
+/// Input this far over the room's noise floor counts as activity: it keeps the heavy model
+/// awake / wakes it. The voice detector misses whisper and a quiet voice (mic set low), which
+/// RNNoise standing in then lost by 14-20 dB (`leveler_report`); sleeping only in a quiet room
+/// (stationary noise, where RNNoise does as well) keeps them.
+const ACTIVITY_OVER_FLOOR_DB: f32 = 12.0;
+/// Activity must last this long (voice does; a single click does not).
+const ACTIVITY_MIN_SAMPLES: usize = 48 * 20;
+/// The level compared with the floor is smoothed over ~100 ms: single 10 ms blocks of a quiet
+/// room jump 12 dB over its quietest block several times a second and kept the model awake.
+/// The floor itself stays the quietest raw block: a smoothed floor rose to steady typing and to
+/// 4 s of quiet speech, and the model slept through both.
+const ACTIVITY_SMOOTH_SAMPLES: f32 = 48.0 * 100.0;
+/// Noise floor = the quietest block of the last `FLOOR_SEGMENTS` x 100 ms (minimum statistics:
+/// recovers within 1.5 s after a quiet moment; a rising floor at 2 dB/s took 11 s and kept the
+/// model awake in a quiet room).
+const FLOOR_SEGMENTS: usize = 15;
+const FLOOR_SEGMENT_SAMPLES: usize = 4_800;
+const FLOOR_MIN_DB: f32 = -100.0;
 /// Per-sample smoothing of the gate gain: ~1 ms to open, ~50 ms to close (no clicks).
 const GATE_OPEN_COEF: f32 = 1.0 / 48.0;
 const GATE_CLOSE_COEF: f32 = 1.0 / (48.0 * 50.0);
@@ -93,18 +120,79 @@ pub struct AiVoiceIsolator {
   active: DenoiseModel,
   strength: f32, // 0.0 to 1.0
   gate: NoiseGate,
-  vad: VoiceDetector,
+  /// Speech on the raw input (the leveler; the gate, a model latency ahead of the output). Fed by
+  /// the RNNoise denoiser's own voice probability while it runs, else by `in_net`.
+  vad: VoiceHysteresis,
   /// Same detector on the denoised output: keys are gone there, so it keeps hearing a voice the
   /// raw-input one loses under typing (private voice, keys at -10 dB SNR: RNNoise's probability
   /// on soft syllables fell from ~0.95 to <0.1 and the gate cut 18-31 % of them).
-  vad_out: VoiceDetector,
+  vad_out: VoiceHysteresis,
+  /// RNNoise run only for its voice probability: on the raw input while no RNNoise denoises it...
+  in_net: VoiceNet,
+  /// ...and on the denoised output, with the gate on.
+  out_net: VoiceNet,
   /// Lookahead requested by the settings; it runs only while the gate is on.
   lookahead: bool,
   delay: DelayLine,
   bypassed: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
   heard_voice: bool,
+  /// Heavy model asleep: no speech for `sleep_after` samples, so RNNoise (delayed to the heavy
+  /// model's latency) covers the pause and the heavy model stops (DFN3 ~3 %, DPDFNet ~10 % of a
+  /// core). Speech on RNNoise's own detector wakes it.
+  asleep: bool,
+  /// Both run while one takes over from the other (see `Takeover`).
+  takeover: Option<Takeover>,
+  /// Input samples since the input detector last heard speech or saw activity.
+  quiet_samples: usize,
+  /// Quietest block per 100 ms segment, the last `FLOOR_SEGMENTS` (dBFS; +inf = no data yet).
+  floor_segments: [f32; FLOOR_SEGMENTS],
+  floor_pos: usize,
+  floor_segment_samples: usize,
+  /// Input power smoothed over `ACTIVITY_SMOOTH_SAMPLES`.
+  level_power: f32,
+  /// Samples in a row over the floor + `ACTIVITY_OVER_FLOOR_DB`.
+  active_run: usize,
+  sleep_after: usize,
+  /// RNNoise output delayed to the heavy model's latency while it stands in.
+  sleep_delay: DelayLine,
+  /// The second path's copy of the block during a handover.
+  spare: Vec<f32>,
+  /// Heavy model being loaded on the loader thread (one at a time).
+  loading: Option<(DenoiseModel, Receiver<HandOver>)>,
 }
+
+/// The heavy model and the RNNoise stand-in hand over without a gap: from the start both get
+/// the input; the output stays on the old one until the newcomer's first real sample comes out
+/// (both paths have the heavy model's latency, so they are aligned), then crossfades. The input
+/// detector keeps its own pass until the heavy model is off.
+#[derive(Clone, Copy)]
+struct Takeover {
+  to_sleep: bool,
+  /// Output samples since the newcomer started.
+  done: usize,
+  /// Output sample the crossfade starts at: the newcomer's latency (and RNNoise's warm-up).
+  fade_at: usize,
+}
+
+/// A heavy engine, or why it could not be loaded.
+enum Loaded {
+  DeepFilter(Result<Box<DeepFilterEngine>, String>),
+  Dpdf(Result<Box<DpdfEngine>, String>),
+}
+
+/// Carries a `Loaded` from the loader thread to the audio thread, once.
+struct HandOver(Loaded);
+
+// SAFETY: tract's run states hold `Rc`s, so the engines are not `Send`. Moving one is sound
+// because no clone of those `Rc`s stays behind on the loader thread: it builds the whole engine
+// there, never runs the model (neither `load` processes a frame), tract's thread-locals hold
+// only scratch memory of their own (0.21: element-wise temp buffer; 0.23: per-session scratch,
+// created when a session runs), and the thread ends right after the send. The channel orders
+// the build before any use. Re-check on a tract upgrade: a thread-local caching a model `Rc`
+// (or a warm-up run in `load`) would break this.
+#[allow(unsafe_code)]
+unsafe impl Send for HandOver {}
 
 struct RnNoiseEngine {
   denoiser: Box<DenoiseState<'static>>,
@@ -125,15 +213,20 @@ struct DeepFilterEngine {
   error_logged: bool,
 }
 
-/// RNNoise's voice probability; drives the gate for all models. One instance hears the raw
-/// microphone, ahead of the denoised output (DeepFilterNet 40 ms, RNNoise 20 ms), so word
-/// onsets open the gate in time; a second hears the denoised output (`OUT_VOICE_PROB`). Costs one extra RNNoise pass (~1 % of a core) even when RNNoise is the denoiser:
-/// simpler than sharing its VAD; share it if CPU ever matters.
-struct VoiceDetector {
+/// RNNoise run only for its voice probability (see `vad`, `in_net`, `out_net`).
+struct VoiceNet {
   state: Box<DenoiseState<'static>>,
   fifo: Vec<f32>,
   frame: [f32; FRAME_SIZE],
   scratch: [f32; FRAME_SIZE],
+}
+
+/// Speech decision from RNNoise's per-frame voice probability, with hysteresis. The RNNoise
+/// denoiser hears the raw input anyway, so its own probability keys `vad` (a second pass on the
+/// same input cost ~0.26 % of a core). Behind a heavy model `vad` needs its own pass: keying it
+/// on the heavy model's output instead lost laughter (DFN3 removes part of it; the gate then
+/// closed on it, -11 dB on the private scenario take).
+struct VoiceHysteresis {
   /// Consecutive speech frames so far.
   run: u32,
   /// Frames left in which a weaker frame (above `keep_prob`) still counts as speech.
@@ -180,12 +273,26 @@ impl AiVoiceIsolator {
       active: DenoiseModel::RnNoise,
       strength: 0.75,
       gate: NoiseGate::new(true),
-      vad: VoiceDetector::new(),
-      vad_out: VoiceDetector::new_output(),
+      vad: VoiceHysteresis::new(),
+      vad_out: VoiceHysteresis::new_output(),
+      in_net: VoiceNet::new(),
+      out_net: VoiceNet::new(),
+      asleep: false,
+      takeover: None,
+      quiet_samples: 0,
+      floor_segments: [f32::INFINITY; FLOOR_SEGMENTS],
+      floor_pos: 0,
+      floor_segment_samples: 0,
+      level_power: 0.0,
+      active_run: 0,
+      sleep_after: SLEEP_AFTER_SAMPLES,
+      sleep_delay: DelayLine::new(),
+      spare: Vec::with_capacity(4096),
       lookahead: false,
       delay: DelayLine::new(),
       bypassed: false,
       heard_voice: false,
+      loading: None,
     }
   }
 
@@ -205,22 +312,23 @@ impl AiVoiceIsolator {
     GATE_LOOKAHEAD_SAMPLES as f32 / 48.0
   }
 
-  /// Choose the model. A heavy model is loaded on first request (blocking, 0.1-0.2 s); if it
-  /// fails, RNNoise keeps running and the error is kept for the UI/log.
+  /// Choose the model. A heavy model is loaded on first request (blocking, 0.1-0.2 s): only
+  /// before audio runs. If it fails, RNNoise keeps running and the error is kept for the UI/log.
   pub fn set_model(&mut self, model: DenoiseModel) {
-    if model != self.selected {
-      self.overloaded = false; // picking a model again = try it again
-    }
-    self.selected = model;
-    match model {
-      DenoiseModel::DeepFilterNet if self.deepfilter.is_none() && self.df_error.is_none() => {
-        load_into(&mut self.deepfilter, &mut self.df_error, "DeepFilterNet 3", DeepFilterEngine::load)
+    self.select(model);
+    if self.loading.is_none() {
+      if let Some((_, load)) = self.missing_load() {
+        self.store(load());
       }
-      DenoiseModel::DpdfNet if self.dpdfnet.is_none() && self.dpdf_error.is_none() => {
-        load_into(&mut self.dpdfnet, &mut self.dpdf_error, "DPDFNet", DpdfEngine::load)
-      }
-      _ => {}
     }
+  }
+
+  /// `set_model` for the real-time thread: never blocks. A heavy model not loaded yet loads on
+  /// a short-lived thread while RNNoise keeps running, and takes over in the block after it
+  /// arrives (loading in the audio thread stalled the stream, and apps with it, for 0.1-0.2 s).
+  pub fn request_model(&mut self, model: DenoiseModel) {
+    self.select(model);
+    self.start_load();
   }
 
   pub fn selected_model(&self) -> DenoiseModel {
@@ -261,20 +369,27 @@ impl AiVoiceIsolator {
     self.active
   }
 
-  /// The input detector heard speech in the block just processed. That audio leaves this stage
-  /// `output_lead_samples` later (model latency + gate lookahead).
+  /// The strict detector heard speech in the block just processed. That audio leaves this stage
+  /// `output_lead_samples` later.
   pub fn heard_voice(&self) -> bool {
     self.heard_voice
   }
 
+  /// Model latency + gate lookahead (0 while bypassed). The same while a heavy model sleeps.
   pub fn output_lead_samples(&self) -> usize {
     if self.bypassed { 0 } else { latency_samples(self.active) + self.delay.len() }
+  }
+
+  /// The heavy model is stopped for a pause (RNNoise stands in).
+  pub fn asleep(&self) -> bool {
+    self.asleep && self.takeover.is_none()
   }
 
   /// Process microphone samples in place.
   /// RNNoise adds a fixed latency of one frame (10 ms) plus the model's own frame;
   /// every output sample is processed, whatever the block size.
   pub fn process_samples(&mut self, samples: &mut [f32]) {
+    self.poll_load();
     let loaded = match self.selected {
       DenoiseModel::DeepFilterNet => self.deepfilter.is_some(),
       DenoiseModel::DpdfNet => self.dpdfnet.is_some(),
@@ -288,10 +403,12 @@ impl AiVoiceIsolator {
     }
 
     if self.strength <= 0.001 {
-      // Audio passes untouched, but the input detector (one RNNoise pass, ~1 % of a core) keeps
+      // Audio passes untouched, but a detector (one RNNoise pass, ~0.26 % of a core) keeps
       // running: the leveler and the automatic input gain learn only from speech it hears.
       self.bypassed = true;
-      self.heard_voice = self.vad.process(samples);
+      let (vad, mut voice) = (&mut self.vad, false);
+      self.in_net.process(samples, |p| voice |= vad.frame(p));
+      self.heard_voice = voice;
       return;
     }
     if self.bypassed {
@@ -299,22 +416,92 @@ impl AiVoiceIsolator {
       self.reset();
     }
 
-    let voice = self.vad.process(samples); // raw input, before it is denoised in place
-    self.heard_voice = voice;
-    match (self.active, self.deepfilter.as_mut(), self.dpdfnet.as_mut()) {
-      (DenoiseModel::DeepFilterNet, Some(df), _) => df.process(samples, self.strength),
-      (DenoiseModel::DpdfNet, _, Some(dp)) => dp.process(samples, atten_lim(self.strength)),
-      _ => self.rnnoise.process(samples, self.strength),
+    let (active, strength, gate_on) = (self.active, self.strength, self.gate.enabled);
+    let heavy = active.is_heavy();
+    let latency = latency_samples(active);
+    let activity = heavy && self.note_activity(samples);
+    if heavy && self.takeover.is_none() {
+      if !self.asleep && self.quiet_samples >= self.sleep_after {
+        self.start_takeover(true, latency);
+      } else if self.asleep && (self.heard_voice || activity) {
+        self.start_takeover(false, latency);
+      }
     }
-    // The input detector runs a model latency ahead of the output (opens on word onsets in
-    // time); the output one is in step with it, so its hold needs no latency on top.
-    let voice_out = self.gate.enabled && self.vad_out.process(samples);
+    let takeover = self.takeover;
+    let heavy_on = heavy && (!self.asleep || takeover.is_some());
+    let rnnoise_on = !heavy_on || takeover.is_some();
+    let n = samples.len();
+    if heavy_on && rnnoise_on && self.spare.len() < n {
+      self.spare.resize(n, 0.0); // only for a block over the preallocated 85 ms
+    }
+
+    let Self { vad, vad_out, in_net, out_net, rnnoise, deepfilter, dpdfnet, sleep_delay, spare, .. } = self;
+    let (mut voice, mut voice_out) = (false, false);
+    // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
+    // RNNoise's own voice probability while it denoises alone, else one RNNoise pass of its own.
+    if heavy_on {
+      in_net.process(samples, |p| voice |= vad.frame(p));
+    }
+    // During a takeover RNNoise works on a copy, the heavy model in place.
+    let stand_in = match spare.get_mut(..n) {
+      Some(copy) if heavy_on && rnnoise_on => {
+        copy.copy_from_slice(samples);
+        Some(copy)
+      }
+      _ => None,
+    };
+    if heavy_on {
+      match (active, deepfilter.as_mut(), dpdfnet.as_mut()) {
+        (DenoiseModel::DeepFilterNet, Some(df), _) => df.process(samples, strength),
+        (DenoiseModel::DpdfNet, _, Some(dp)) => dp.process(samples, atten_lim(strength)),
+        _ => {}
+      }
+    }
+    if rnnoise_on {
+      let buf: &mut [f32] = match stand_in {
+        Some(copy) => copy,
+        None => &mut *samples,
+      };
+      rnnoise.process(buf, strength, |p| {
+        if !heavy_on {
+          voice |= vad.frame(p);
+        }
+      });
+      if heavy {
+        sleep_delay.process(buf); // standing in: delayed to the heavy model's latency
+      }
+    }
+    if let (Some(t), true, Some(copy)) = (takeover, heavy_on && rnnoise_on, spare.get(..n)) {
+      for (i, (out, &stand)) in samples.iter_mut().zip(copy).enumerate() {
+        // Newcomer's share: 0 until its first real sample is out, then a short crossfade.
+        let w = ((t.done + i).saturating_sub(t.fade_at) as f32 / TAKEOVER_FADE_SAMPLES as f32).min(1.0);
+        let (old, new) = if t.to_sleep { (*out, stand) } else { (stand, *out) };
+        *out = old + (new - old) * w;
+      }
+    }
+    // The output detector, in step with the output (its hold needs no latency on top). Not while
+    // a heavy model sleeps: it would hear the keys RNNoise leaves in (DFN3, loud typing: gate
+    // open 25 % instead of 1 %); the input detector alone wakes the model.
+    if gate_on && (heavy_on || !heavy) {
+      out_net.process(samples, |p| voice_out |= vad_out.frame(p));
+    }
+    if let Some(mut t) = takeover {
+      t.done += n;
+      self.takeover = if t.done >= t.fade_at + TAKEOVER_FADE_SAMPLES {
+        self.asleep = t.to_sleep;
+        None
+      } else {
+        Some(t)
+      };
+    }
+    self.quiet_samples = if voice || activity { 0 } else { self.quiet_samples.saturating_add(n) };
+    self.heard_voice = voice;
     // Lookahead: the gated audio is older than what the detectors just heard, so the gate opens
     // that much before an onset; the hold covers the delay too, so word tails stay as long.
-    self.delay.set_len(if self.gate.enabled && self.lookahead { GATE_LOOKAHEAD_SAMPLES } else { 0 });
+    self.delay.set_len(if gate_on && self.lookahead { GATE_LOOKAHEAD_SAMPLES } else { 0 });
     self.delay.process(samples);
     let hold = match (voice, voice_out) {
-      (true, _) => GATE_HOLD_SAMPLES + latency_samples(self.active) + self.delay.len(),
+      (true, _) => GATE_HOLD_SAMPLES + latency + self.delay.len(),
       (false, true) => GATE_HOLD_SAMPLES + self.delay.len(),
       (false, false) => 0,
     };
@@ -324,13 +511,125 @@ impl AiVoiceIsolator {
   pub fn reset(&mut self) {
     self.reset_engines();
     self.gate = NoiseGate::new(self.gate.enabled);
-    self.vad = VoiceDetector::new();
-    self.vad_out = VoiceDetector::new_output();
+    self.vad = VoiceHysteresis::new();
+    self.vad_out = VoiceHysteresis::new_output();
+    self.in_net = VoiceNet::new();
+    self.out_net = VoiceNet::new();
     self.delay.clear();
     self.bypassed = false;
   }
 
+  /// Tracks the raw input's noise floor; true while the input has been over it by
+  /// `ACTIVITY_OVER_FLOOR_DB` for `ACTIVITY_MIN_SAMPLES` (anything but a quiet room).
+  fn note_activity(&mut self, samples: &[f32]) -> bool {
+    if samples.is_empty() {
+      return false;
+    }
+    let power = samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32;
+    if !power.is_finite() {
+      return false; // a NaN block must not stick in the level or the floor
+    }
+    let k = 1.0 - (-(samples.len() as f32) / ACTIVITY_SMOOTH_SAMPLES).exp();
+    self.level_power += (power - self.level_power) * k;
+    let level_db = 10.0 * (self.level_power + 1e-12).log10();
+    let db = (10.0 * (power + 1e-12).log10()).max(FLOOR_MIN_DB);
+    if self.floor_segment_samples >= FLOOR_SEGMENT_SAMPLES {
+      self.floor_segment_samples = 0;
+      self.floor_pos = (self.floor_pos + 1) % FLOOR_SEGMENTS;
+      if let Some(seg) = self.floor_segments.get_mut(self.floor_pos) {
+        *seg = f32::INFINITY;
+      }
+    }
+    if let Some(seg) = self.floor_segments.get_mut(self.floor_pos) {
+      *seg = seg.min(db);
+    }
+    self.floor_segment_samples += samples.len();
+    let floor = self.floor_segments.iter().copied().fold(f32::INFINITY, f32::min);
+    self.active_run = if level_db > floor + ACTIVITY_OVER_FLOOR_DB { self.active_run + samples.len() } else { 0 };
+    self.active_run >= ACTIVITY_MIN_SAMPLES
+  }
+
+  /// Start handing a pause to RNNoise (`to_sleep`) or speech back to the heavy model.
+  fn start_takeover(&mut self, to_sleep: bool, latency: usize) {
+    if to_sleep {
+      self.rnnoise.restart();
+      self.sleep_delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
+      self.sleep_delay.clear();
+    } else {
+      // Its FIFOs hold audio from before the pause; the model's own state warms up again.
+      if let Some(df) = self.deepfilter.as_mut() {
+        df.reset();
+      }
+      if let Some(dp) = self.dpdfnet.as_mut() {
+        dp.restart();
+      }
+      self.in_net.fifo.clear();
+    }
+    let fade_at = if to_sleep { latency.max(STAND_IN_WARMUP_SAMPLES) } else { latency };
+    self.takeover = Some(Takeover { to_sleep, done: 0, fade_at });
+  }
+
+  fn select(&mut self, model: DenoiseModel) {
+    if model != self.selected {
+      self.overloaded = false; // picking a model again = try it again
+    }
+    self.selected = model;
+  }
+
+  /// Loader for the selected heavy model, if it is neither loaded nor known to fail.
+  fn missing_load(&self) -> Option<(DenoiseModel, fn() -> Loaded)> {
+    match self.selected {
+      DenoiseModel::DeepFilterNet if self.deepfilter.is_none() && self.df_error.is_none() => {
+        Some((DenoiseModel::DeepFilterNet, load_deepfilter))
+      }
+      DenoiseModel::DpdfNet if self.dpdfnet.is_none() && self.dpdf_error.is_none() => {
+        Some((DenoiseModel::DpdfNet, load_dpdfnet))
+      }
+      _ => None,
+    }
+  }
+
+  fn start_load(&mut self) {
+    if self.loading.is_some() {
+      return; // one at a time; `poll_load` starts the next when this one lands
+    }
+    let Some((model, load)) = self.missing_load() else {
+      return;
+    };
+    let (tx, rx) = mpsc::channel();
+    // Receiver gone (stream ended) = the send fails and the engine is dropped on this thread.
+    let spawned = std::thread::Builder::new().name("denoise-model-load".into()).spawn(move || tx.send(HandOver(load())));
+    match spawned {
+      Ok(_) => self.loading = Some((model, rx)),
+      Err(e) => self.store(load_failed(model, format!("could not start the loader thread: {e}"))),
+    }
+  }
+
+  /// Non-blocking: takes over a model the loader thread finished.
+  fn poll_load(&mut self) {
+    let Some((model, rx)) = self.loading.as_ref() else {
+      return;
+    };
+    let loaded = match rx.try_recv() {
+      Ok(HandOver(loaded)) => loaded,
+      Err(TryRecvError::Empty) => return,
+      Err(TryRecvError::Disconnected) => load_failed(*model, "the loader thread stopped".into()),
+    };
+    self.loading = None;
+    self.store(loaded);
+    self.start_load(); // another heavy model may have been selected meanwhile
+  }
+
+  fn store(&mut self, loaded: Loaded) {
+    match loaded {
+      Loaded::DeepFilter(r) => put(&mut self.deepfilter, &mut self.df_error, r),
+      Loaded::Dpdf(r) => put(&mut self.dpdfnet, &mut self.dpdf_error, r),
+    }
+  }
+
   fn reset_engines(&mut self) {
+    (self.asleep, self.takeover, self.quiet_samples) = (false, None, 0);
+    self.sleep_delay.clear();
     self.rnnoise.reset();
     if let Some(df) = self.deepfilter.as_mut() {
       df.reset();
@@ -341,23 +640,42 @@ impl AiVoiceIsolator {
   }
 }
 
-/// Loads a heavy engine once, logging the outcome; the error is kept so it is not retried.
-fn load_into<E>(
-  slot: &mut Option<Box<E>>,
-  error: &mut Option<String>,
-  name: &str,
-  load: impl FnOnce() -> Result<E, String>,
-) {
-  let t0 = std::time::Instant::now();
+/// Loads a heavy engine, logging the outcome (also on the loader thread; audiodg has no logger).
+fn load_logged<E>(name: &str, load: fn() -> Result<E, String>) -> Result<Box<E>, String> {
+  let t0 = Instant::now();
   match load() {
     Ok(engine) => {
       log::info!("[Denoise] {name} model loaded in {:?}", t0.elapsed());
-      *slot = Some(Box::new(engine));
+      Ok(Box::new(engine))
     }
     Err(e) => {
       log::error!("[Denoise] {name} failed to load, staying on RNNoise: {e}");
-      *error = Some(e);
+      Err(e)
     }
+  }
+}
+
+fn load_deepfilter() -> Loaded {
+  Loaded::DeepFilter(load_logged("DeepFilterNet 3", DeepFilterEngine::load))
+}
+
+fn load_dpdfnet() -> Loaded {
+  Loaded::Dpdf(load_logged("DPDFNet", DpdfEngine::load))
+}
+
+/// A load of `model` that could not run (no thread, or the loader died).
+fn load_failed(model: DenoiseModel, why: String) -> Loaded {
+  log::error!("[Denoise] {model:?} failed to load, staying on RNNoise: {why}");
+  match model {
+    DenoiseModel::DpdfNet => Loaded::Dpdf(Err(why)),
+    _ => Loaded::DeepFilter(Err(why)),
+  }
+}
+
+fn put<E>(slot: &mut Option<Box<E>>, error: &mut Option<String>, loaded: Result<Box<E>, String>) {
+  match loaded {
+    Ok(engine) => *slot = Some(engine),
+    Err(e) => *error = Some(e),
   }
 }
 
@@ -381,7 +699,8 @@ impl RnNoiseEngine {
     }
   }
 
-  fn process(&mut self, samples: &mut [f32], strength: f32) {
+  /// `on_prob`: RNNoise's voice probability of each input frame it completes.
+  fn process(&mut self, samples: &mut [f32], strength: f32, mut on_prob: impl FnMut(f32)) {
     self.input_fifo.extend_from_slice(samples);
 
     let mut temp_out = [0.0f32; FRAME_SIZE];
@@ -393,7 +712,7 @@ impl RnNoiseEngine {
         *dst = src * I16_SCALE;
       }
 
-      self.denoiser.process_frame(&mut temp_out, &temp_in);
+      on_prob(self.denoiser.process_frame(&mut temp_out, &temp_in));
 
       for (wet, dry) in temp_out.iter().zip(self.prev_dry.iter()) {
         self.output_fifo.push(alpha * (wet / I16_SCALE) + (1.0 - alpha) * (dry / I16_SCALE));
@@ -406,6 +725,12 @@ impl RnNoiseEngine {
 
   fn reset(&mut self) {
     self.denoiser = DenoiseState::new();
+    self.restart();
+  }
+
+  /// Fresh buffers, the network state kept: a cold RNNoise rates the first frames of typing as
+  /// speech, so a fresh one at every pause woke the heavy model again (gate open 6-7 % on keys).
+  fn restart(&mut self) {
     self.input_fifo.clear();
     self.output_fifo = primed_fifo(FRAME_SIZE);
     self.prev_dry = [0.0; FRAME_SIZE];
@@ -462,13 +787,31 @@ impl DeepFilterEngine {
   }
 }
 
-impl VoiceDetector {
+impl VoiceNet {
   fn new() -> Self {
     Self {
       state: DenoiseState::new(),
       fifo: Vec::with_capacity(FRAME_SIZE * 4),
       frame: [0.0; FRAME_SIZE],
       scratch: [0.0; FRAME_SIZE],
+    }
+  }
+
+  /// Calls `on_prob` with the voice probability of each frame completed in this block.
+  fn process(&mut self, samples: &[f32], mut on_prob: impl FnMut(f32)) {
+    self.fifo.extend_from_slice(samples);
+    while self.fifo.len() >= FRAME_SIZE {
+      for (dst, src) in self.frame.iter_mut().zip(self.fifo.drain(..FRAME_SIZE)) {
+        *dst = src * I16_SCALE;
+      }
+      on_prob(self.state.process_frame(&mut self.scratch, &self.frame));
+    }
+  }
+}
+
+impl VoiceHysteresis {
+  fn new() -> Self {
+    Self {
       run: 0,
       active_left: 0,
       keep_prob: VOICE_KEEP_PROB,
@@ -489,21 +832,12 @@ impl VoiceDetector {
     }
   }
 
-  /// True if any frame completed in this block is speech.
-  fn process(&mut self, samples: &[f32]) -> bool {
-    self.fifo.extend_from_slice(samples);
-    let mut voice = false;
-    while self.fifo.len() >= FRAME_SIZE {
-      for (dst, src) in self.frame.iter_mut().zip(self.fifo.drain(..FRAME_SIZE)) {
-        *dst = src * I16_SCALE;
-      }
-      let prob = self.state.process_frame(&mut self.scratch, &self.frame);
-      self.run = if prob > self.open_prob { self.run.saturating_add(1) } else { 0 };
-      // Hysteresis: opening needs a clear syllable; once talking, a soft one keeps it open.
-      let frame_voice = self.run >= self.min_frames || (self.active_left > 0 && prob > self.keep_prob);
-      self.active_left = if frame_voice { self.active_frames } else { self.active_left.saturating_sub(1) };
-      voice |= frame_voice;
-    }
+  /// One frame's voice probability -> is it speech.
+  fn frame(&mut self, prob: f32) -> bool {
+    self.run = if prob > self.open_prob { self.run.saturating_add(1) } else { 0 };
+    // Hysteresis: opening needs a clear syllable; once talking, a soft one keeps it open.
+    let voice = self.run >= self.min_frames || (self.active_left > 0 && prob > self.keep_prob);
+    self.active_left = if voice { self.active_frames } else { self.active_left.saturating_sub(1) };
     voice
   }
 }
@@ -672,6 +1006,76 @@ mod tests {
     let mut block = vec![0.1f32; 480];
     isolator.process_samples(&mut block);
     assert_eq!(isolator.active_model(), DenoiseModel::RnNoise);
+  }
+
+  #[test]
+  fn test_heavy_model_sleeps_in_pauses_and_wakes_without_a_gap() {
+    let (clean, _) = speech_over_keyboard(-30.0, 0.0);
+    let hiss = |secs: usize| {
+      let mut x = 1u32;
+      (0..secs * 48_000)
+        .map(|_| {
+          x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+          ((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 1e-3 // white noise, -66 dBFS
+        })
+        .collect::<Vec<f32>>()
+    };
+    let mut input = hiss(3);
+    input.extend_from_slice(&clean);
+    // 5 s: the clean speech has digital silence, which holds the noise floor down for 1.5 s.
+    input.extend(hiss(5));
+    for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+      let run = |sleep_after: usize| {
+        let mut iso = AiVoiceIsolator::new();
+        iso.set_model(model);
+        iso.set_gate_threshold_db(GATE_OFF_DB - 1.0);
+        iso.sleep_after = sleep_after;
+        let (mut out, mut asleep) = (input.clone(), Vec::new());
+        for block in out.chunks_mut(480) {
+          iso.process_samples(block);
+          asleep.push(iso.asleep());
+        }
+        (out, asleep)
+      };
+      let (out, asleep) = run(SLEEP_AFTER_SAMPLES);
+      let (reference, _) = run(usize::MAX);
+      assert!(asleep.get(299).copied().unwrap_or(false), "{model:?}: asleep after 3 s of hiss");
+      assert!(asleep.last().copied().unwrap_or(false), "{model:?}: asleep again after the speech");
+      let speech_blocks = (300..300 + clean.len() / 480).filter(|&b| !asleep[b]).count();
+      assert!(speech_blocks > clean.len() / 480 / 2, "{model:?}: awake in {speech_blocks} speech blocks");
+      // No gap: wherever the never-sleeping run is loud, the sleeping one is too.
+      let frame_db = |x: &[f32]| 10.0 * (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32 + 1e-20).log10();
+      for (i, (o, r)) in out.chunks(480).zip(reference.chunks(480)).enumerate() {
+        if frame_db(r) > -50.0 {
+          assert!(frame_db(o) > frame_db(r) - 12.0, "{model:?} block {i}: {:.1} dB vs {:.1} dB", frame_db(o), frame_db(r));
+        }
+      }
+    }
+  }
+
+  #[test]
+  fn test_live_switch_loads_off_thread_while_rnnoise_runs() {
+    // Regression: a live switch loaded the model inside the audio callback (0.1-0.2 s stall).
+    let mut isolator = AiVoiceIsolator::new();
+    isolator.request_model(DenoiseModel::DeepFilterNet);
+    let started = Instant::now();
+    let mut block = vec![0.01f32; 480];
+    isolator.process_samples(&mut block);
+    assert_eq!(isolator.active_model(), DenoiseModel::RnNoise, "RNNoise runs until the model arrives");
+    assert!(started.elapsed().as_millis() < 50, "the block waited for the load: {:?}", started.elapsed());
+    while isolator.active_model() != DenoiseModel::DeepFilterNet {
+      assert!(started.elapsed().as_secs() < 20, "never took over, load error: {:?}", isolator.df_error);
+      std::thread::sleep(std::time::Duration::from_millis(10));
+      isolator.process_samples(&mut block);
+      assert!(block.iter().all(|s| s.is_finite()));
+    }
+    // A second heavy model selected while none is loading: same path.
+    isolator.request_model(DenoiseModel::DpdfNet);
+    while isolator.active_model() != DenoiseModel::DpdfNet {
+      assert!(started.elapsed().as_secs() < 40, "never took over, load error: {:?}", isolator.dpdf_error);
+      std::thread::sleep(std::time::Duration::from_millis(10));
+      isolator.process_samples(&mut block);
+    }
   }
 
   #[test]
@@ -1794,4 +2198,5 @@ mod tests {
       eprintln!();
     }
   }
+
 }

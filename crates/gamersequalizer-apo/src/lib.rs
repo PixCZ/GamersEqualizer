@@ -106,6 +106,8 @@ const CLOCK_CORRECTION_DIVISOR: i64 = 256;
 const COPYRIGHT: &str = "GamersEqualizer";
 /// Stream EQ crossfade when a stream changes channel (e.g. once it is paired).
 const STREAM_FADE_SECONDS: f32 = 0.02;
+/// Mic calls per published jitter peak (~1 s at 10 ms blocks).
+const CALL_TIMING_WINDOW_CALLS: u32 = 100;
 
 const OFF_APO: usize = offset_of!(ApoObject, apo);
 const OFF_RT: usize = offset_of!(ApoObject, rt);
@@ -199,6 +201,16 @@ struct MicProcessor {
   owner: OwnerWatch,
   /// Pass through unless a daemon owns the mapping. Only tests turn it off (no daemon there).
   follow_owner: bool,
+  timing: CallTiming,
+}
+
+/// How regularly the audio engine calls the mic APO (debug log): an app gets its data late
+/// when a call comes late, e.g. because the previous one blocked.
+#[derive(Default)]
+struct CallTiming {
+  last: Option<Instant>,
+  calls: u32,
+  jitter_peak_us: u64,
 }
 
 /// Capture time of each block from a sample counter, slowly steered towards the raw
@@ -869,6 +881,7 @@ impl MicProcessor {
         clock: MicClock::new(rate),
         owner: OwnerWatch::default(),
         follow_owner: true,
+        timing: CallTiming::default(),
       }
     }))
     .ok()
@@ -886,9 +899,11 @@ impl MicProcessor {
       self.mono_out.resize(frames, 0.0);
     }
     let qpc_hns = self.clock.next(qpc_hns, frames as u64);
+    let now = Instant::now();
+    self.timing.note(now, frames, self.clock.rate, self.plugin.shm_header());
     // Nobody's settings to apply (app not running for the user at the console): the raw mic.
     let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, .. } = self;
-    if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, Instant::now())) {
+    if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, now)) {
       return;
     }
     let (Some(input), Some(output)) = (mono_in.get_mut(..frames), mono_out.get_mut(..frames)) else {
@@ -921,6 +936,30 @@ impl MicProcessor {
     }
     for (frame, &sample) in buf.chunks_exact_mut(channels).zip(output.iter()) {
       frame.fill(sample);
+    }
+  }
+}
+
+impl CallTiming {
+  /// One engine call at `now` for a block of `frames` at `rate` Hz.
+  fn note(&mut self, now: Instant, frames: usize, rate: u32, h: Option<&ShmHeader>) {
+    let block_us = frames as u64 * 1_000_000 / u64::from(rate.max(1));
+    if let Some(last) = self.last.replace(now) {
+      let interval_us = u64::try_from(now.duration_since(last).as_micros()).unwrap_or(u64::MAX);
+      self.jitter_peak_us = self.jitter_peak_us.max(interval_us.abs_diff(block_us));
+      if interval_us.saturating_mul(2) > block_us.saturating_mul(3) {
+        if let Some(h) = h {
+          h.mic_call_gaps.fetch_add(1, Ordering::Relaxed);
+        }
+      }
+    }
+    self.calls += 1;
+    if self.calls >= CALL_TIMING_WINDOW_CALLS {
+      if let Some(h) = h {
+        h.mic_call_jitter_peak_us.store(u32::try_from(self.jitter_peak_us).unwrap_or(u32::MAX), Ordering::Relaxed);
+      }
+      self.calls = 0;
+      self.jitter_peak_us = 0;
     }
   }
 }
@@ -1271,6 +1310,31 @@ mod tests {
     let (dry, out) = block(&mut p);
     assert_eq!(out, dry);
     assert!(!p.failed);
+  }
+
+  #[test]
+  fn call_timing_counts_late_calls_and_publishes_the_jitter_peak() {
+    use std::time::Duration;
+    let name = format!("Local\\GamersEqualizer_ApoTimingTest_{}", std::process::id());
+    let shm = SharedMemoryClient::create_named(&name, None).unwrap();
+    let h = &shm.layout().header;
+    let mut timing = CallTiming::default();
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + Duration::from_millis(n);
+    // 10 ms blocks, one call 2 ms late, then one 200 ms late (a stalled callback).
+    let mut t = 0;
+    for step in [10, 12, 10, 200].into_iter().chain(std::iter::repeat_n(10, 200)) {
+      t += step;
+      timing.note(ms(t), 480, 48_000, Some(h));
+    }
+    assert_eq!(h.mic_call_gaps.load(Ordering::Relaxed), 1, "only the stalled call is a gap");
+    // The window with the stall was published, then a steady one replaced it.
+    assert_eq!(h.mic_call_jitter_peak_us.load(Ordering::Relaxed), 0);
+    let mut timing = CallTiming::default();
+    for i in 0..=CALL_TIMING_WINDOW_CALLS as u64 {
+      timing.note(ms(i * 10 + if i == 5 { 3 } else { 0 }), 480, 48_000, Some(h));
+    }
+    assert_eq!(h.mic_call_jitter_peak_us.load(Ordering::Relaxed), 3_000);
   }
 
   #[test]

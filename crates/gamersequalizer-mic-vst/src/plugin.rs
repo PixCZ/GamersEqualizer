@@ -298,11 +298,11 @@ impl GamersEqualizerPlugin {
 
     self.ai_denoiser.set_strength(ai_strength);
     self.ai_denoiser.set_gate_threshold_db(gate_db);
-    // Loading a heavy model blocks this call once (0.1-0.2 s): not a sign of a slow CPU.
-    let loads_model = model != self.ai_denoiser.selected_model();
-    if loads_model {
-      self.ai_denoiser.set_model(model);
+    // Never blocks: a heavy model not loaded yet loads on its own thread, RNNoise runs meanwhile.
+    if model != self.ai_denoiser.selected_model() {
+      self.ai_denoiser.request_model(model);
     }
+    let model_before = self.ai_denoiser.active_model();
     if eq_version.is_some() && eq_version != self.eq_version {
       self.eq_version = eq_version;
       let bands = self.shm_header().map(|h| h.read_mic_eq()).unwrap_or_default();
@@ -404,7 +404,8 @@ impl GamersEqualizerPlugin {
 
     let block_secs = frames as f32 / self.sample_rate.max(1.0);
     let load = started.elapsed().as_secs_f32() / block_secs;
-    if !loads_model {
+    // The block a model takes over in sets up its scratch memory: not a sign of a slow CPU.
+    if self.ai_denoiser.active_model() == model_before {
       self.load.add(load);
     }
     #[cfg(feature = "debug-capture")]

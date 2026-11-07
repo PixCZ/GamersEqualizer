@@ -1,10 +1,11 @@
 //! Turns mic DSP telemetry into log lines: stream started/stopped, model actually running,
-//! CPU overload (late blocks) and what was limited because of it. The APO runs in audiodg
+//! CPU overload (late blocks) and what was limited because of it, plus a debug summary of the
+//! audio engine's call timing (jitter, stalls) and DSP load. The APO runs in audiodg
 //! without a logger, so this (in the process that owns the shared memory) logs for it too.
 
 use gamersequalizer_common::shm::{DenoiseLimit, DenoiseModel, ShmHeader};
 use gamersequalizer_mic_vst::ai_denoiser::AiVoiceIsolator;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,12 @@ pub struct DspWatch {
   late_unreported: u32,
   peak_unreported: u32,
   last_report: Option<Instant>,
+  /// Debug summary since the last report: worst call jitter (us), stalled calls, DSP load.
+  gaps: Option<u32>,
+  gaps_unreported: u32,
+  jitter_peak_us: u32,
+  load_peak: u32,
+  load_avg_max: u32,
 }
 
 impl DspWatch {
@@ -85,10 +92,32 @@ impl DspWatch {
       self.late_unreported += new_late;
       self.peak_unreported = self.peak_unreported.max(h.mic_dsp_load_peak_permille.load(Ordering::Relaxed));
     }
+    let gaps = h.mic_call_gaps.load(Ordering::Relaxed);
+    self.gaps_unreported += self.gaps.map_or(0, |prev| gaps.saturating_sub(prev));
+    self.gaps = Some(gaps);
+    self.jitter_peak_us = self.jitter_peak_us.max(h.mic_call_jitter_peak_us.load(Ordering::Relaxed));
+    self.load_peak = self.load_peak.max(h.mic_dsp_load_peak_permille.load(Ordering::Relaxed));
+    self.load_avg_max = self.load_avg_max.max(h.mic_dsp_load_avg_permille.load(Ordering::Relaxed));
     if self.last_report.is_none_or(|t| now.duration_since(t) >= OVERLOAD_REPORT_EVERY) {
       self.flush_overload(h);
+      self.flush_timing();
       self.last_report = Some(now);
     }
+  }
+
+  /// Shortcut: call timing is measured in the APO only (not the in-process bridge).
+  fn flush_timing(&mut self) {
+    debug!(
+      "[DSP] mic timing: call jitter peak {:.1} ms, {} stalled calls (>1.5 blocks late), DSP load peak {:.0} %, avg max {:.0} %",
+      self.jitter_peak_us as f32 / 1000.0,
+      self.gaps_unreported,
+      self.load_peak as f32 / 10.0,
+      self.load_avg_max as f32 / 10.0
+    );
+    self.gaps_unreported = 0;
+    self.jitter_peak_us = 0;
+    self.load_peak = 0;
+    self.load_avg_max = 0;
   }
 
   fn flush_overload(&mut self, h: &ShmHeader) {

@@ -88,6 +88,12 @@ impl DpdfEngine {
 
   pub fn reset(&mut self) {
     self.state = tensor1(&self.init_state);
+    self.restart();
+  }
+
+  /// Fresh buffers, but the recurrent state kept: after a pause the model resumes warm (a cold
+  /// state over-suppresses the first ~100 ms of speech).
+  pub fn restart(&mut self) {
     self.in_buf.clear();
     self.in_buf.resize(WIN - HOP, 0.0);
     self.overlap.fill(0.0);

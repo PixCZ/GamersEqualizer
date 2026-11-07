@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v12";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v13";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v12";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v13";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 12;
+pub const SHM_VERSION: u32 = 13;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -244,6 +244,13 @@ pub struct ShmHeader {
   /// Daemon -> GUI: Windows mic volume the automatic input gain set, permille (0 = none). The
   /// window must not read it as the user's volume.
   pub mic_auto_gain_permille: AtomicU32,
+
+  // --- v13: timing of the audio engine's calls into the mic APO (APO -> daemon debug log) ---
+  /// Largest gap between the interval of two calls and the block length, last ~1 s, in us.
+  pub mic_call_jitter_peak_us: AtomicU32,
+  /// Calls (cumulative) that came over 1.5 blocks after the previous one: the stream stalled
+  /// and apps got their data late.
+  pub mic_call_gaps: AtomicU32,
 }
 
 /// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
@@ -440,6 +447,8 @@ impl Default for ShmHeader {
       mic_input_clips: AtomicU32::new(0),
       mic_speech_ms: AtomicU32::new(0),
       mic_auto_gain_permille: AtomicU32::new(0),
+      mic_call_jitter_peak_us: AtomicU32::new(0),
+      mic_call_gaps: AtomicU32::new(0),
     };
     h.init_defaults();
     h
@@ -600,6 +609,8 @@ impl ShmHeader {
     self.mic_leveler_level_db_x10.store(src.mic_leveler_level_db_x10.load(r), r);
     self.mic_input_clips.store(src.mic_input_clips.load(r), r);
     self.mic_speech_ms.store(src.mic_speech_ms.load(r), r);
+    self.mic_call_jitter_peak_us.store(src.mic_call_jitter_peak_us.load(r), r);
+    self.mic_call_gaps.store(src.mic_call_gaps.load(r), r);
     self.aec_state.store(src.aec_state.load(r), r);
     self.aec_delay_us.store(src.aec_delay_us.load(r), r);
     self.aec_raw_delay_us.store(src.aec_raw_delay_us.load(r), r);
