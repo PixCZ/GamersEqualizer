@@ -35,21 +35,102 @@ pub struct AudioSessionInfo {
   pub bus: AudioBus,
 }
 
-/// Apps on the Chat channel (ChatMix volume, chat stream EQ). Lowercase exe names.
-pub const CHAT_EXES: &[&str] =
-  &["discord.exe", "telegram.exe", "slack.exe", "teams.exe", "skype.exe", "zoom.exe", "whatsapp.exe"];
-/// Apps on the Media channel.
+/// Apps on the Chat channel (ChatMix volume, chat stream EQ). Lowercase exe file names.
+/// Hand-kept: app lists (e.g. Wikipedia's VoIP comparison) don't give exe names. Anything
+/// missing the user drags in the mixer (`app_channels`). Calls in a browser land on Media:
+/// streams are classified by process, not by website.
+pub const CHAT_EXES: &[&str] = &[
+  // Voice chat for gamers
+  "discord.exe",
+  "discordptb.exe",
+  "discordcanary.exe",
+  "vesktop.exe",
+  "ts3client_win64.exe",
+  "ts3client_win32.exe",
+  "teamspeak.exe",
+  "mumble.exe",
+  "guilded.exe",
+  "ventrilo.exe",
+  // Messengers
+  "signal.exe",
+  "telegram.exe",
+  "whatsapp.exe",
+  "whatsapp.root.exe",
+  "viber.exe",
+  "messenger.exe",
+  "skype.exe",
+  "element.exe",
+  "wire.exe",
+  "line.exe",
+  "wechat.exe",
+  "weixin.exe",
+  // Work / meetings
+  "teams.exe",
+  "ms-teams.exe",
+  "slack.exe",
+  "zoom.exe",
+  "webex.exe",
+  "ciscocollabhost.exe",
+  "atmgr.exe",
+  "mattermost.exe",
+  "rocket.chat.exe",
+  "ringcentral.exe",
+  "zulip.exe",
+];
+/// Apps on the Media channel: browsers, music and video players. Same rules as `CHAT_EXES`.
 pub const MEDIA_EXES: &[&str] = &[
+  // Browsers
   "chrome.exe",
+  "chromium.exe",
   "msedge.exe",
   "firefox.exe",
+  "librewolf.exe",
+  "waterfox.exe",
+  "floorp.exe",
+  "zen.exe",
   "brave.exe",
   "opera.exe",
+  "vivaldi.exe",
+  "arc.exe",
+  "thorium.exe",
+  // Music
   "spotify.exe",
-  "vlc.exe",
-  "foobar2000.exe",
   "tidal.exe",
+  "deezer.exe",
+  "qobuz.exe",
+  "applemusic.exe",
+  "itunes.exe",
+  "amazon music.exe",
+  "cider.exe",
+  "foobar2000.exe",
   "musicbee.exe",
+  "aimp.exe",
+  "winamp.exe",
+  "mediamonkey.exe",
+  "dopamine.exe",
+  "strawberry.exe",
+  "clementine.exe",
+  "audacious.exe",
+  "roon.exe",
+  "plexamp.exe",
+  // Video
+  "vlc.exe",
+  "mpv.exe",
+  "mpc-hc.exe",
+  "mpc-hc64.exe",
+  "mpc-be.exe",
+  "mpc-be64.exe",
+  "potplayer.exe",
+  "potplayer64.exe",
+  "potplayermini.exe",
+  "potplayermini64.exe",
+  "smplayer.exe",
+  "kodi.exe",
+  "plex.exe",
+  "jellyfinmediaplayer.exe",
+  "stremio.exe",
+  "wmplayer.exe",
+  "microsoft.media.player.exe",
 ];
 
 pub struct ChatMixController {
@@ -878,6 +959,15 @@ mod tests {
     set_endpoint_volume(mic_id, initial.0);
     let restored = get_endpoint_volume(mic_id).unwrap();
     println!("Restored to: {:?}", restored);
+  }
+
+  #[test]
+  fn app_lists_are_lowercase_exes_without_duplicates_or_overlap() {
+    let mut seen = HashSet::new();
+    for exe in CHAT_EXES.iter().chain(MEDIA_EXES) {
+      assert!(exe.ends_with(".exe") && *exe == exe.to_ascii_lowercase(), "{exe}: lookups are lowercase");
+      assert!(seen.insert(*exe), "{exe} is listed twice (or on both channels)");
+    }
   }
 
   #[test]

@@ -7,15 +7,26 @@
 //! interleave). Shortcut: it is rotated only at startup (> `MAX_LOG_BYTES` -> `.old`), as a
 //! file held open by the other process can't be renamed. Upgrade to per-process files if
 //! a single session ever produces more than that.
+//!
+//! Debug lines are written only while "Save debug to disk" (Log page) is on: a marker file next
+//! to the log, so both processes follow it (each checks it every `DEBUG_MARKER_CHECK`).
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 const LOG_FILE: &str = "gamersequalizer.log";
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
-/// Our crates at info; libraries (wgpu logs every frame at info) only warnings.
-const DEFAULT_FILTER: &str = "warn,gamersequalizer=info,gamersequalizer_mic_vst=info,gamersequalizer_common=info";
+/// Our crates up to debug (gated by `DEBUG_TO_DISK`); libraries (wgpu logs every frame at info)
+/// only warnings.
+const DEFAULT_FILTER: &str = "warn,gamersequalizer=debug,gamersequalizer_mic_vst=debug,gamersequalizer_common=debug";
+/// Exists = debug lines are saved.
+const DEBUG_MARKER: &str = "save_debug";
+const DEBUG_MARKER_CHECK: Duration = Duration::from_secs(2);
+
+static DEBUG_TO_DISK: AtomicBool = AtomicBool::new(false);
 
 /// Severity of a log line, parsed back from the file for the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,22 +50,57 @@ struct TeeWriter {
   file: Option<File>,
 }
 
+/// env_logger's filter, plus: debug/trace only while `DEBUG_TO_DISK`.
+struct GatedLogger {
+  inner: env_logger::Logger,
+}
+
 /// Install the logger (bootstrap, before anything logs). `process` tags the lines ("ui" /
 /// "service"). `RUST_LOG` still overrides `DEFAULT_FILTER`.
 pub fn init(process: &'static str) {
   let path = log_path();
   let file = open_log(&path);
   let file_ok = file.is_some();
-  env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_FILTER))
+  let inner = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_FILTER))
     .format(move |buf, record| {
       let ts = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S%.3f");
       writeln!(buf, "{ts} {:<5} {process:<7} {}", record.level(), record.args())
     })
     .target(env_logger::Target::Pipe(Box::new(TeeWriter { file })))
-    .init();
+    .build();
+  let max = inner.filter();
+  DEBUG_TO_DISK.store(debug_marker().exists(), Ordering::Relaxed);
+  if log::set_boxed_logger(Box::new(GatedLogger { inner })).is_ok() {
+    log::set_max_level(max);
+  }
   if !file_ok {
     log::warn!("[Log] could not open {}, logging to stderr only", path.display());
   }
+  // The other process may switch it: follow the marker file.
+  let spawned = std::thread::Builder::new().name("log-debug-marker".into()).spawn(|| loop {
+    std::thread::sleep(DEBUG_MARKER_CHECK);
+    DEBUG_TO_DISK.store(debug_marker().exists(), Ordering::Relaxed);
+  });
+  if let Err(e) = spawned {
+    log::warn!("[Log] could not watch the debug setting ({e}): it applies from the next start");
+  }
+}
+
+/// Debug lines are being saved ("Save debug to disk" on the Log page).
+pub fn debug_to_disk() -> bool {
+  DEBUG_TO_DISK.load(Ordering::Relaxed)
+}
+
+/// Switch saving debug lines for both processes (the other one follows within ~2 s).
+pub fn set_debug_to_disk(on: bool) {
+  let path = debug_marker();
+  let result = if on { std::fs::write(&path, b"") } else { std::fs::remove_file(&path) };
+  match result {
+    Ok(()) => DEBUG_TO_DISK.store(on, Ordering::Relaxed),
+    Err(e) if !on && e.kind() == io::ErrorKind::NotFound => DEBUG_TO_DISK.store(false, Ordering::Relaxed),
+    Err(e) => log::warn!("[Log] could not switch saving debug lines ({}): {e}", path.display()),
+  }
+  log::info!("[Log] saving debug lines {}", if on { "on" } else { "off" });
 }
 
 pub fn log_dir() -> PathBuf {
@@ -102,7 +148,27 @@ impl Write for TeeWriter {
   }
 }
 
+impl log::Log for GatedLogger {
+  fn enabled(&self, metadata: &log::Metadata) -> bool {
+    (metadata.level() <= log::Level::Info || debug_to_disk()) && self.inner.enabled(metadata)
+  }
+
+  fn log(&self, record: &log::Record) {
+    if self.enabled(record.metadata()) {
+      self.inner.log(record);
+    }
+  }
+
+  fn flush(&self) {
+    self.inner.flush();
+  }
+}
+
 // --- private helpers ---------------------------------------------------------------------
+
+fn debug_marker() -> PathBuf {
+  log_dir().join(DEBUG_MARKER)
+}
 
 fn open_log(path: &Path) -> Option<File> {
   let dir = path.parent()?;

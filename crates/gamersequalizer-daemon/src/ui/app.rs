@@ -173,7 +173,7 @@ impl eframe::App for GamersEqualizerApp {
     let page = chrome.inner_margin(egui::Margin { left: 24.0, right: 24.0, top: 8.0, bottom: 8.0 });
     egui::CentralPanel::default().frame(page).show(ctx, |ui| {
       match self.state.active_tab {
-        // The mixer strips fill the window height; the mic page scrolls by itself.
+        // The mixer strips fill the window height (it scrolls itself); so does the mic page.
         ActiveTab::Mixer => render_tab_mixer(ui, &mut self.state, &mut self.win_audio),
         ActiveTab::Mic => render_tab_mic(ui, &mut self.state, &mut self.win_audio),
         ActiveTab::Log => super::tab_log::render_tab_log(ui, &mut self.state),

@@ -1,0 +1,5 @@
+# Link the C runtime statically: without it the exe and the APO DLL need VCRUNTIME140.dll
+# (Visual C++ Redistributable), which a tester's PC may not have. audiodg would then fail to
+# load the APO. Applies to dev builds too, so what we test is what we ship.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -25,6 +25,7 @@ Target layout (created as the work needs it, not up front):
 | `frontend/`           | React + Vite + Zustand (+ Three.js)                      |
 | `_database/`          | SQLite migrations; `.sqlx/` holds offline query metadata |
 | `test_data/`          | Test fixtures                                            |
+| `packaging/`          | Tester guide (`CTI-ME.txt`), winget manifest draft       |
 | `.claude/rules/`      | Detailed agent rules: architecture, code style, testing  |
 | `secrets/`            | Never read, edit, or commit                              |
 
@@ -50,8 +51,9 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 
 ## Dev loop
 
-- `scripts/dev-rebuild.ps1 [-Apo] [-Test] [-Start]`: stops the running app, builds it (and with `-Apo` also
-  the microphone APO DLL), runs tests and clippy, and starts the app again.
+- `scripts/dev-rebuild.ps1 [-Apo] [-Test] [-Package] [-Start]`: stops the running app, builds it (and with
+  `-Apo` also the microphone APO DLL), runs tests and clippy, makes a tester ZIP (`-Package`, see below)
+  and starts the app again.
 - Claude Code: delegate it to the `dev-rebuild` subagent (`.claude/agents/dev-rebuild.md`, Haiku), so build
   output stays out of the main context.
 - Debug capture: `-Apo -DebugCapture` builds the APO with the `debug-capture` feature. After installing it,
@@ -60,6 +62,23 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   `test_data/private/captures/` (git-ignored). Never ship an APO built with it.
 - The APO is installed via the app's banner or `scripts/apo-install.ps1`. Both need admin and restart
   Windows audio, so a human runs them.
+
+## Tester package
+
+Portable ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls its system parts itself):
+`gamersequalizer.exe` + `gamersequalizer_apo.dll` + `CTI-ME.txt` (Czech tester guide, `packaging/CTI-ME.txt`).
+
+- `scripts/package.ps1`: final build (`dist` profile, fat LTO, minutes). `-Fast` packages the `release`
+  build instead (seconds); `scripts/dev-rebuild.ps1 -Package` does that after the dev build.
+- Output: `target/package/GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>[-dirty][-fast].zip`.
+  Old ZIPs are never deleted or overwritten; only `target/package/staging` is cleared.
+- `apo-install.ps1` / `apo-uninstall.ps1` are built into the exe (`include_str!` in
+  `win_audio/apo_install.rs`) and written to `%LOCALAPPDATA%\GamersEqualizer\scripts` before each
+  elevated run. The DLL stays a separate file next to the exe (audiodg loads it from disk).
+- The C runtime is linked statically (`.cargo/config.toml`), so testers need no Visual C++ Redistributable;
+  `package.ps1` fails if a binary still imports `VCRUNTIME140.dll`.
+- Never package a `-DebugCapture` APO (`dev-rebuild.ps1` skips `-Package` with it).
+- Binaries are unsigned: testers see SmartScreen; Smart App Control blocks them entirely.
 
 ## Ground rules
 

@@ -1,0 +1,30 @@
+GamersEqualizer - testovací verze
+=================================
+
+Spuštění
+--------
+1. ZIP rozbal do vlastní složky (např. C:\GamersEqualizer). Nespouštěj ho přímo ze ZIPu.
+   Oba soubory (exe a dll) musí zůstat vedle sebe: aplikace z té složky instaluje zvukové efekty.
+2. Spusť gamersequalizer.exe.
+   Windows ukáže "Systém Windows ochránil váš počítač" (aplikace není podepsaná):
+   klikni "Další informace" -> "Přesto spustit".
+3. V aplikaci se objeví lišta k instalaci efektů pro mikrofon / sluchátka. Klikni na ni
+   a potvrď dotaz správce (UAC). Zvuk ve Windows na pár sekund vypadne, to je normální.
+   Aplikace, které měly otevřený mikrofon (Discord, hra), pak znovu otevři.
+4. Pokud aplikace hlásí, že efekty nejsou aktivní: Nastavení > Systém > Zvuk > zařízení >
+   "Vylepšení zvuku" musí být zapnuté.
+
+Když se exe vůbec nespustí
+--------------------------
+- Zapnuté "Inteligentní řízení aplikací" (Smart App Control) nepodepsané programy blokuje
+  úplně. Pozor: když ho vypneš, zpátky zapnout jde jen přeinstalací Windows.
+
+Odinstalace
+-----------
+V aplikaci Nastavení > "Odinstalovat z Windows" (odebere efekty ze zvukových zařízení,
+automatické spouštění, volitelně i nastavení). Pak smaž složku s aplikací.
+
+Hlášení chyb
+------------
+Pošli popis, co jsi dělal, a log ze složky %APPDATA%\GamersEqualizer
+(vlož tu cestu do adresního řádku Průzkumníka).

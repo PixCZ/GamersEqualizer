@@ -174,6 +174,8 @@ Stop-Service Audiosrv -Force
 try {
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   Copy-Item $SourceDll $InstalledDll -Force
+  # A DLL from a downloaded ZIP carries the internet zone mark; drop it from the installed copy.
+  Unblock-File $InstalledDll
 
   foreach ($job in $jobs) {
     $fxKey = Join-Path $job.Key 'FxProperties'

@@ -22,7 +22,7 @@ const BOTTOM_SLACK: f32 = 4.0;
 const TOPICS: [(&str, &[&str]); 3] = [
   (tk("All"), &[]),
   (tk("Game detection"), &["[Game]", "[OutputEq]"]),
-  (tk("Microphone"), &["[Mic", "[Denoise]", "[AEC]", "[ApoLink]", "[DSP]"]),
+  (tk("Microphone"), &["[Mic", "[Denoise]", "[AEC]", "[ApoLink]", "[DSP]", "[Leveler]"]),
 ];
 /// Most severe first; a choice shows itself and everything above it.
 const LEVELS: [(LineLevel, &str); 4] = [
@@ -98,6 +98,15 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
       .checkbox(&mut view.libraries, tr("Library messages"))
       .on_hover_text(tr("Also show messages from libraries (graphics driver, window toolkit)."))
       .changed();
+    ui.separator();
+    let mut save_debug = app_log::debug_to_disk();
+    if ui
+      .checkbox(&mut save_debug, tr("Save debug to disk"))
+      .on_hover_text(tr("Also write detailed debug lines to the log file, e.g. every voice leveler change and why. Off: they are not recorded at all."))
+      .changed()
+    {
+      app_log::set_debug_to_disk(save_debug);
+    }
   });
   ui.horizontal(|ui| {
     ui.label(tr("Search:"));

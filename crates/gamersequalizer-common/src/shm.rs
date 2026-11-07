@@ -388,7 +388,7 @@ impl Default for ShmHeader {
       mic_eq_version: AtomicU32::new(0),
       mic_eq_band_count: AtomicU32::new(0),
       mic_eq_bands: std::array::from_fn(|_| ShmEqBand::default()),
-      denoise_model: AtomicU32::new(0),
+      denoise_model: AtomicU32::new(0), // set in init_defaults
       denoise_model_active: AtomicU32::new(0),
       ref_seq: AtomicU32::new(0),
       ref_snap_index: AtomicU32::new(0),
@@ -485,7 +485,8 @@ impl ShmHeader {
     self.media_muted.store(false, Ordering::Relaxed);
     self.mic_muted.store(false, Ordering::Relaxed);
     self.chatmix_balance_permille.store(0, Ordering::Relaxed);
-    self.denoise_model.store(DenoiseModel::RnNoise.to_u32(), Ordering::Relaxed);
+    // Best quality at ~1 % CPU; the DSP falls back to RNNoise if it fails to load or overloads.
+    self.denoise_model.store(DenoiseModel::DeepFilterNet.to_u32(), Ordering::Relaxed);
     self.mic_leveler_enabled.store(true, Ordering::Relaxed);
     self.mic_leveler_target_db_x10.store(MIC_LEVELER_DEFAULT_TARGET_DB_X10, Ordering::Relaxed);
   }

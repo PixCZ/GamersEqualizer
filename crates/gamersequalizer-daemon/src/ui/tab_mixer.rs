@@ -5,7 +5,7 @@ use crate::win_audio::app_channels::{self, AppChannel};
 use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
 use egui::{Color32, RichText, Rounding, Sense, Ui, Vec2};
 use gamersequalizer_common::streams::StreamBus;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
 /// Smallest height of the app list in each channel strip; it grows (faders shrink) with more apps.
@@ -57,9 +57,30 @@ struct Strip<'a> {
   /// Height of the apps list (same in every strip so they line up).
   list_h: f32,
   meter: Option<f32>,
+  footers: &'a FooterSync,
+}
+
+/// Footers differ in height (device dropdown vs. a caption line). Each strip's apps list grows
+/// by what its footer is shorter than the tallest one, so all strips end at the same line.
+/// Heights are measured while drawing, so this uses last frame's (the page repaints anyway).
+struct FooterSync {
+  /// Tallest footer last frame.
+  tallest: f32,
+  /// Tallest footer so far this frame.
+  tallest_now: Cell<f32>,
 }
 
 pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
+  // The strips fill the window height (measured here, outside the scroll area). Once the faders
+  // are at their minimum (small monitors) the rest scrolls, so ChatMix stays reachable.
+  let page_h = ui.available_height();
+  egui::ScrollArea::vertical()
+    .id_salt("mixer_page")
+    .auto_shrink([false, false])
+    .show(ui, |ui| mixer_page(ui, state, win_audio, page_h));
+}
+
+fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem, page_h: f32) {
   let sessions = win_audio.chatmix.list_active_sessions();
 
   let game_apps = apps_on(&sessions, AudioBus::Game);
@@ -70,15 +91,18 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
   all_apps.sort_by_key(|a| a.to_ascii_lowercase());
   let recording = recording_apps_cached();
 
-  // The page doesn't scroll, so a longer app list takes its height from the faders. Only when
-  // they are at their minimum does the list scroll. Master's list (everything) is left out,
+  // A longer app list takes its height from the faders. Only when they are at their minimum
+  // does the list scroll (and the page, if the window is still too short). Master's list (everything) is left out,
   // it would always win; it scrolls within the shared height.
   let rows = [game_apps.len(), chat_apps.len(), media_apps.len(), recording.len()].into_iter().max().unwrap_or(0);
   let wanted_list = (rows as f32 * APP_ROW_HEIGHT).max(APPS_LIST_HEIGHT);
-  let room = ui.available_height() - PAGE_WITHOUT_FADERS;
+  let room = page_h - PAGE_WITHOUT_FADERS;
   let fader_h = (room - (wanted_list - APPS_LIST_HEIGHT)).clamp(FADER_MIN, FADER_MAX);
   let list_h = wanted_list.min(APPS_LIST_HEIGHT + (room - fader_h).max(0.0));
   let mut moved: AppMove = None;
+  let tallest_id = egui::Id::new("mixer_tallest_footer");
+  let footers =
+    FooterSync { tallest: ui.data(|d| d.get_temp(tallest_id)).unwrap_or(0.0), tallest_now: Cell::new(0.0) };
 
   theme::page_header(
     ui,
@@ -113,6 +137,7 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       max_vol: 1.0,
       fader_h,
       list_h,
+      footers: &footers,
       meter: None,
     };
     render_strip(
@@ -142,6 +167,7 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       max_vol: 1.0,
       fader_h,
       list_h,
+      footers: &footers,
       meter: None,
     };
     render_strip(
@@ -170,6 +196,7 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       max_vol: 1.0,
       fader_h,
       list_h,
+      footers: &footers,
       meter: None,
     };
     render_strip(
@@ -226,6 +253,7 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       max_vol: 1.0,
       fader_h,
       list_h,
+      footers: &footers,
       meter: None,
     };
     render_strip(
@@ -251,6 +279,7 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       max_vol: 3.0,
       fader_h,
       list_h,
+      footers: &footers,
       meter: Some(win_audio.chatmix.mic_peak_level),
     };
     render_strip(
@@ -301,6 +330,8 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       }
     }
   });
+
+  ui.data_mut(|d| d.insert_temp(tallest_id, footers.tallest_now.get()));
 
   if let Some(tab) = jump_tab {
     state.active_tab = tab;
@@ -440,10 +471,17 @@ fn render_strip(
 
       // 4. Apps box
       // ui.columns lays out justified, which would stretch wrapped labels word by word.
+      let footer_id = ui.id().with(("strip_footer", strip.title));
+      let own_footer: f32 = ui.data(|d| d.get_temp(footer_id)).unwrap_or(strip.footers.tallest);
+      let list_h = strip.list_h + (strip.footers.tallest - own_footer).max(0.0);
       ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-        render_apps_box(ui, strip.title, color, strip.list_h, apps)
+        render_apps_box(ui, strip.title, color, list_h, apps)
       });
+      let footer_top = ui.min_rect().bottom();
       footer(ui);
+      let footer_h = ui.min_rect().bottom() - footer_top;
+      ui.data_mut(|d| d.insert_temp(footer_id, footer_h));
+      strip.footers.tallest_now.set(strip.footers.tallest_now.get().max(footer_h));
     });
 }
 

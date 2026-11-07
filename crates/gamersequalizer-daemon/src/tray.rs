@@ -132,7 +132,7 @@ impl TrayManager {
   /// Principle 1: Air-gapped update check via OS default browser
   pub fn open_updates_browser() {
     unsafe {
-      ShellExecuteW(None, w!("open"), w!("https://github.com/opensonar/opensonar/releases"), None, None, SW_SHOWNORMAL);
+      ShellExecuteW(None, w!("open"), w!("https://github.com/PixCZ/GamersEqualizer/releases"), None, None, SW_SHOWNORMAL);
     }
   }
 }

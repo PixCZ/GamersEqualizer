@@ -24,8 +24,12 @@ const MIC_APO_CLSID: &str = "{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}";
 const OUTPUT_APO_CLSID: &str = "{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}";
 const STREAM_APO_CLSID: &str = "{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}";
 const DLL_NAME: &str = "gamersequalizer_apo.dll";
+/// The scripts are built into the exe, so a tester gets one exe + the DLL. Written out to
+/// `%LOCALAPPDATA%\GamersEqualizer\scripts` right before each elevated run.
 const SCRIPT_NAME: &str = "apo-install.ps1";
+const SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-install.ps1"));
 const UNINSTALL_SCRIPT_NAME: &str = "apo-uninstall.ps1";
+const UNINSTALL_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-uninstall.ps1"));
 /// Composite SFX/MFX/EFX effect lists in an endpoint's FxProperties.
 const FX_LIST_VALUES: [&str; 3] = [
   "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13",
@@ -64,7 +68,7 @@ pub struct ApoCheck {
   pub bundled_version: Option<String>,
   /// Endpoint GUID of the checked microphone (`{cf0a2270-...}`).
   pub endpoint_guid: Option<String>,
-  /// Bundled DLL + install script found: the fix button can work.
+  /// Bundled DLL found (the install script is built in): the fix button can work.
   pub can_install: bool,
 }
 
@@ -96,7 +100,7 @@ pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
     installed_version: installed_stamp.map(|(_, t)| format_time(t)),
     bundled_version: bundled_stamp.map(|(_, t)| format_time(t)),
     endpoint_guid,
-    can_install: bundled.is_some() && install_script().is_some(),
+    can_install: bundled.is_some(),
   }
 }
 
@@ -107,8 +111,8 @@ pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
     return Ok(());
   }
   let endpoints = endpoint_args(targets)?;
-  let script = install_script().ok_or("install script not found next to the app")?;
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
+  let script = write_script(SCRIPT_NAME, SCRIPT)?;
   let params = format!(
     "-NoProfile -ExecutionPolicy Bypass -File \"{}\" -Endpoint {endpoints} -SourceDll \"{}\" -FromApp",
     script.display(),
@@ -148,7 +152,7 @@ pub fn is_registered() -> bool {
 /// Starts the uninstall script elevated (UAC prompt): removes every APO class from every
 /// endpoint, the COM registration, the DLL and the install backups. Returns once launched.
 pub fn launch_uninstall() -> Result<(), String> {
-  let script = script(UNINSTALL_SCRIPT_NAME).ok_or("uninstall script not found next to the app")?;
+  let script = write_script(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT)?;
   let params = format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" -RemoveBackups -FromApp", script.display());
   run_elevated(&params, "uninstaller")
 }
@@ -195,16 +199,17 @@ fn bundled_dll() -> Option<PathBuf> {
   [dir.join("..").join("apo").join(DLL_NAME), dir.join(DLL_NAME)].into_iter().find(|p| p.is_file())
 }
 
-fn install_script() -> Option<PathBuf> {
-  script(SCRIPT_NAME)
-}
-
-/// Next to the exe (distribution), then the dev tree's `scripts/`.
-fn script(name: &str) -> Option<PathBuf> {
-  let dir = exe_dir()?;
-  [dir.join("scripts").join(name), dir.join("..").join("..").join("scripts").join(name)]
-    .into_iter()
-    .find(|p| p.is_file())
+/// Writes a built-in script fresh before every run, so an old or edited copy is never used.
+/// Known limit: the folder is user-writable and the script then runs elevated; a process of
+/// this same user could swap it in between. That user can already replace the portable exe,
+/// so this adds no new hole. Move to Program Files when there is a real installer.
+fn write_script(name: &str, content: &str) -> Result<PathBuf, String> {
+  let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
+  let dir = PathBuf::from(base).join("GamersEqualizer").join("scripts");
+  std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+  let path = dir.join(name);
+  std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+  Ok(path)
 }
 
 fn hklm_subkeys(key: &str) -> Vec<String> {

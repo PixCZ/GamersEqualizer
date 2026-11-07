@@ -9,8 +9,10 @@
      -DebugCapture (with -Apo): builds it with the `debug-capture` feature, so the mic chain records
      every stage on request (cargo run --release -p gamersequalizer-apo --example debug_capture).
   4. -Test: cargo test --workspace, plus clippy on the workspace (warnings are listed, not fatal).
-  5. Reports whether the installed APO (needs admin to install) is older than target\apo.
-  6. -Start: starts target\release\gamersequalizer.exe.
+  5. -Package: tester ZIP from this release build (scripts\package.ps1 -Fast, a few seconds).
+     The final build for testers is scripts\package.ps1 without -Fast (fat LTO, minutes).
+  6. Reports whether the installed APO (needs admin to install) is older than target\apo.
+  7. -Start: starts target\release\gamersequalizer.exe.
 
   Exit code 0 = all requested steps passed. The last lines are a one-line-per-step summary.
 
@@ -18,11 +20,13 @@
   .\scripts\dev-rebuild.ps1 -Test -Start
   .\scripts\dev-rebuild.ps1 -Apo -Test
   .\scripts\dev-rebuild.ps1 -Apo -DebugCapture
+  .\scripts\dev-rebuild.ps1 -Apo -Test -Package
 #>
 param(
   [switch]$Apo,
   [switch]$DebugCapture,
   [switch]$Test,
+  [switch]$Package,
   [switch]$Start
 )
 
@@ -77,6 +81,13 @@ if ($Test -and -not $failed) {
     $warnings = ([regex]::Matches($out, '(?m)^warning: (?!`).*$')).Count
     Write-Host "clippy warnings: $warnings"
   }
+}
+
+if ($Package -and $DebugCapture) {
+  # package.ps1 would rebuild the APO without debug-capture and replace this build.
+  $summary.Add('INFO  -Package skipped: never package a -DebugCapture APO')
+} elseif ($Package -and -not $failed) {
+  Step 'package (tester ZIP, release build)' { & (Join-Path $PSScriptRoot 'package.ps1') -Fast }
 }
 
 $installed = Join-Path $env:ProgramFiles 'GamersEqualizer\apo\gamersequalizer_apo.dll'
