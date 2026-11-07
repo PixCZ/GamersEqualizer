@@ -733,3 +733,32 @@ replayed offline on the raw mic. No fallback, CPU fine (DFN3 5 %, DPDFNet 13 % m
   2880 for every block size, like DFN3 (one hop of buffering). Regression: the latency test now runs
   441 / 480 / 96 / 144-frame blocks (failed for DPDFNet at 480 before).
 - Not verified live yet: needs the APO reinstalled.
+
+## Milestone 28: Spatial sound format shown and watched (2026-11-07)
+
+The header only said "Spatial sound: Active", and the tray check only noticed spatial sound turning off,
+not Dolby Atmos being replaced by Windows Sonic (a Windows update, an expired Dolby licence).
+
+- **Which format runs.** No public API says it; Windows keeps it in the endpoint's property store,
+  mirrored in `HKLM\...\MMDevices\Audio\Render\{guid}\Properties` (readable without admin):
+  - `{fd8a7b27-0b18-4025-ab1c-bdd6b32e1604},2`: the running renderer id at byte 12; a 9-byte value when off.
+  - `{a45429a4-aa63-4480-b7f8-3f2552daee93},2..N`: the formats offered on that output, 842 bytes each:
+    UTF-16 display name at 8 (in the Windows language), app id at 0x208, renderer id at 0x308. Every
+    installed renderer registers here, so DTS or a future one needs no code.
+  - `{8a845654-d6c3-4cd7-b4eb-243d4bd99032},2` (the user's pick, id at 16) is not used.
+  - Ids seen: Dolby Atmos for Headphones `1459ac38-...`, Dolby Atmos for speakers `4c81e564-...`,
+    Windows Sonic `b53d940c-...`, DTS Headphone:X `4444acb0-...`, DTS Virtual:X `adafd3c6-...`.
+  - `dolby_atmos::active_format`; verified live: "Dolby Atmos for Headphones" on the headphones, None on
+    an output with spatial sound off. Layout read on Windows 11 26300; if it changes, the UI falls back
+    to "Active" and the on/off check keeps working.
+- **Header** (Headphones page): "Spatial sound: <format>", re-read every 3 s, and "Change..." opening
+  `ms-settings:sound-defaultoutputproperties` (the default output's page with the spatial sound choice).
+- **What "right" means.** The app cannot know what the user wants, so it learns: the first format seen on
+  an output is the user's (`HealthMemory::spatial_formats`, per output, in `health.json`; old files load).
+  Off at first start: nothing is learned until it is turned on.
+- **Watch.** Another format on that output -> `Issue::SpatialChanged`: tray badge, Windows notification,
+  and in the window a warning-colored row "Spatial sound: X instead of Y" with "Keep X" (it becomes the
+  user's) and "Change...". Turned off -> the existing `SpatialOff`, now naming the lost format.
+- Known limit: Windows does not say who changed it, so a switch made by the user in Windows is flagged
+  once too; "Keep" accepts it. Switching the format from the app is not done: no public API, only
+  rewriting those properties as admin + restarting the audio service, undocumented.
