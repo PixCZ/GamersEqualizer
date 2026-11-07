@@ -7,6 +7,11 @@ edition = "2021"
 name = "gamersequalizer_mic_vst"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Debug builds only: the mic chain records every stage for the capture tool
+# (`cargo run -p gamersequalizer-apo --example debug_capture`). Off in normal builds.
+debug-capture = []
+
 [dependencies]
 gamersequalizer-common = { path = "../gamersequalizer-common" }
 windows = { workspace = true }
@@ -15,6 +20,8 @@ nnnoiseless = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 rustfft = "6.4"
+# Real-input FFT for the echo canceller (already in the tree via deep_filter).
+realfft = "3.5"
 # DeepFilterNet 3 (official repo, pinned commit; crates.io only has an old version without
 # inference). tract is pinned exactly: upstream allows ^0.21.4 but breaks on newer 0.21.x.
 deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", default-features = false, features = ["tract", "default-model"] }

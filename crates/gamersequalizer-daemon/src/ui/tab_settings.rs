@@ -1,5 +1,5 @@
-//! Settings page: appearance (light/dark), language, start with Windows, and the window /
-//! service actions that used to sit at the bottom of the navigation pane.
+//! Settings page: appearance (light/dark), language, start with Windows, the window /
+//! service actions that used to sit at the bottom of the navigation pane, and uninstall.
 
 use super::prefs::ThemePref;
 use super::state::AppState;
@@ -8,6 +8,14 @@ use crate::i18n::{self, tr, trf, LanguagePref, LANGUAGES};
 use egui::{Color32, RichText, Ui};
 
 const COLOR: Color32 = Color32::from_rgb(150, 150, 150);
+
+/// Uninstall card: asks once more before doing anything.
+#[derive(Default)]
+pub struct UninstallUi {
+  confirming: bool,
+  remove_user_data: bool,
+  error: Option<String>,
+}
 
 pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   theme::page_header(ui, icons::SETTINGS, COLOR, tr("Settings"), None);
@@ -104,8 +112,52 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
     });
   });
 
+  uninstall_card(ui, state);
+
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::INFO, COLOR)), tr("About"));
     ui.label(format!("GamersEqualizer {}", env!("CARGO_PKG_VERSION")));
+  });
+}
+
+fn uninstall_card(ui: &mut Ui, state: &mut AppState) {
+  theme::card(ui, |ui| {
+    theme::card_title(ui, Some((icons::DELETE, COLOR)), tr("Uninstall from Windows"));
+    ui.label(theme::caption(tr(
+      "Removes everything the app registered in Windows: the microphone and output effects on all audio devices (administrator rights, audio stops for a few seconds), their backups, start with Windows and the notifications. Then the app exits.",
+    )));
+    if !state.uninstall_ui.confirming {
+      if ui.button(theme::with_icon(icons::DELETE, tr("Uninstall..."))).clicked() {
+        state.uninstall_ui.confirming = true;
+        state.uninstall_ui.error = None;
+      }
+    } else {
+      ui.checkbox(&mut state.uninstall_ui.remove_user_data, tr("Also delete my settings, profiles and logs"));
+      let mut go = false;
+      ui.horizontal(|ui| {
+        let err = theme::palette(ui).err;
+        go = ui.button(RichText::new(theme::with_icon(icons::DELETE, tr("Uninstall and exit"))).color(err)).clicked();
+        if ui.button(tr("Cancel")).clicked() {
+          state.uninstall_ui.confirming = false;
+        }
+      });
+      if go {
+        match crate::uninstall::uninstall_all(state.uninstall_ui.remove_user_data) {
+          Ok(()) => {
+            state.signal_daemon_shutdown();
+            std::process::exit(0);
+          }
+          Err(e) => {
+            log::warn!("[Settings] uninstall failed: {e}");
+            state.uninstall_ui.error = Some(e);
+            state.uninstall_ui.confirming = false;
+          }
+        }
+      }
+    }
+    if let Some(e) = &state.uninstall_ui.error {
+      theme::status_line(ui, Severity::Error, &trf("Uninstall failed: {}", &[e]));
+    }
+    ui.label(theme::caption(tr("The app folder itself is not deleted; remove it yourself after the app exits.")));
   });
 }

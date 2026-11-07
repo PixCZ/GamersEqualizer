@@ -32,6 +32,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 
 use super::app_channels::{self, AppChannel};
 use super::chatmix::{get_exe_name_from_pid, CHAT_EXES, MEDIA_EXES};
+use super::console_owner::ConsoleOwner;
 
 // ---------------------------------------------------------------------------------------
 // Constants
@@ -80,6 +81,8 @@ struct Router {
   pairs: HashMap<u64, String>,
   /// Some stream EQ is active, so streams are metered and paired (logged on change).
   routing: bool,
+  /// Only the console session's daemon pairs streams (the APO serves that user).
+  console: ConsoleOwner,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -142,6 +145,10 @@ impl Router {
       std::thread::sleep(OPEN_RETRY);
       return Ok(());
     };
+    if !self.console.is_owner() {
+      std::thread::sleep(EVAL_INTERVAL);
+      return Ok(());
+    }
     // No chat / media EQ: the APO passes every stream through, so skip the 200 Hz metering.
     // Known limit: after an EQ is turned on, new pairings need ~1.5 s of fresh meter history.
     let active = apo.layout().header.stream_eq_active();

@@ -51,6 +51,13 @@ fn main() {
       h.aec_enabled.load(r),
     );
     last_write = write;
+    // The APO processes only while owner_beat moves (~10/s); out_blocks = output APO calls.
+    println!(
+      "  owner_beat={} out_blocks={} denoise={}",
+      h.owner_beat.load(r),
+      h.out_apo_blocks.load(r),
+      h.denoise_model.load(r)
+    );
     if let Some(l) = local_h {
       let w = l.write_frame_index.load(r);
       println!("  daemon ring: tap={} ref_frames/s={}", l.tap_active.load(r), w.wrapping_sub(last_local));

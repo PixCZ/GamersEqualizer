@@ -1,11 +1,13 @@
 pub mod apo_banner;
 pub mod app;
+pub mod audio_settings;
 pub mod eq_editor;
 pub mod eq_graph;
 pub mod header;
 pub mod mic_preset_bar;
 pub mod mic_presets;
 pub mod prefs;
+pub mod setup;
 pub mod state;
 pub mod tab_eq;
 pub mod tab_headphones;

@@ -59,6 +59,7 @@ pub mod icons {
   pub const GLOBE: Icon = Icon { glyph: '\u{E774}', emoji: "🌐" };
   pub const COLOR: Icon = Icon { glyph: '\u{E790}', emoji: "🎨" };
   pub const EQUALIZER: Icon = Icon { glyph: '\u{E9E9}', emoji: "🎚" };
+  pub const DELETE: Icon = Icon { glyph: '\u{E74D}', emoji: "🗑" };
 }
 
 /// Message severity of an info bar / status text.

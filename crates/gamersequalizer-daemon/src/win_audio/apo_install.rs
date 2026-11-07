@@ -1,6 +1,7 @@
 //! Is an APO installed, current, and active on the endpoint in use (mic chain on the
 //! microphone, output EQ on the output)? And a one-click (UAC-elevated) run of
-//! `scripts/apo-install.ps1` to fix it. Both APOs are classes of the same DLL.
+//! `scripts/apo-install.ps1` to fix it, and of `scripts/apo-uninstall.ps1` to remove it from
+//! the system. Both APOs are classes of the same DLL.
 //!
 //! "Version" is the DLL's build time: the install script copies the file with its timestamp,
 //! so a bundled DLL newer than the installed one means an update is available.
@@ -8,8 +9,12 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use windows::core::{w, PCWSTR};
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ};
+use windows::core::{w, PCWSTR, PWSTR};
+use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::System::Registry::{
+  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_MULTI_SZ,
+  RRF_RT_REG_SZ,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -20,6 +25,7 @@ const OUTPUT_APO_CLSID: &str = "{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}";
 const STREAM_APO_CLSID: &str = "{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}";
 const DLL_NAME: &str = "gamersequalizer_apo.dll";
 const SCRIPT_NAME: &str = "apo-install.ps1";
+const UNINSTALL_SCRIPT_NAME: &str = "apo-uninstall.ps1";
 /// Composite SFX/MFX/EFX effect lists in an endpoint's FxProperties.
 const FX_LIST_VALUES: [&str; 3] = [
   "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13",
@@ -94,26 +100,60 @@ pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
   }
 }
 
-/// Starts the install script elevated (UAC prompt) for one microphone. Returns once the
-/// window is launched; the caller re-checks afterwards.
-pub fn launch_install(endpoint_guid: &str) -> Result<(), String> {
-  launch_install_flow(Flow::Capture, endpoint_guid)
-}
-
-pub fn launch_install_flow(flow: Flow, endpoint_guid: &str) -> Result<(), String> {
-  // The GUID came from the device id; reject anything that could break the command line.
-  if !endpoint_guid.chars().all(|c| c.is_ascii_hexdigit() || "{}-".contains(c)) {
-    return Err(format!("unexpected endpoint id {endpoint_guid}"));
+/// Starts the install script elevated for every (flow, endpoint GUID): one UAC prompt and one
+/// Windows audio restart. Returns once the window is launched; the caller re-checks afterwards.
+pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
+  if targets.is_empty() {
+    return Ok(());
   }
+  let endpoints = endpoint_args(targets)?;
   let script = install_script().ok_or("install script not found next to the app")?;
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
   let params = format!(
-    "-NoProfile -ExecutionPolicy Bypass -File \"{}\" -Flow {} -EndpointId \"{}\" -SourceDll \"{}\" -FromApp",
+    "-NoProfile -ExecutionPolicy Bypass -File \"{}\" -Endpoint {endpoints} -SourceDll \"{}\" -FromApp",
     script.display(),
-    flow.as_str(),
-    endpoint_guid,
     dll.display()
   );
+  run_elevated(&params, "installer")
+}
+
+/// `Capture:{guid},Render:{guid}` (one PowerShell array argument, no spaces).
+fn endpoint_args(targets: &[(Flow, &str)]) -> Result<String, String> {
+  let mut parts = Vec::with_capacity(targets.len());
+  for (flow, guid) in targets {
+    // The GUID came from the device id; reject anything that could break the command line.
+    if guid.is_empty() || !guid.chars().all(|c| c.is_ascii_hexdigit() || "{}-".contains(c)) {
+      return Err(format!("unexpected endpoint id {guid}"));
+    }
+    parts.push(format!("{}:{guid}", flow.as_str()));
+  }
+  Ok(parts.join(","))
+}
+
+/// Is this flow's APO in the effect lists of any endpoint (also unplugged ones)? Tells a new
+/// sound card the user's effect is missing on apart from "never wanted it there".
+pub fn installed_on_any(flow: Flow) -> bool {
+  let root = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\{}", flow.as_str());
+  hklm_subkeys(&root).iter().any(|guid| endpoint_has_apo(flow, guid))
+}
+
+/// Anything of ours left in the system: the installed DLL or a registered COM class.
+pub fn is_registered() -> bool {
+  installed_dll().is_some()
+    || [MIC_APO_CLSID, OUTPUT_APO_CLSID, STREAM_APO_CLSID]
+      .iter()
+      .any(|clsid| hklm_key_exists(&format!("SOFTWARE\\Classes\\CLSID\\{clsid}")))
+}
+
+/// Starts the uninstall script elevated (UAC prompt): removes every APO class from every
+/// endpoint, the COM registration, the DLL and the install backups. Returns once launched.
+pub fn launch_uninstall() -> Result<(), String> {
+  let script = script(UNINSTALL_SCRIPT_NAME).ok_or("uninstall script not found next to the app")?;
+  let params = format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" -RemoveBackups -FromApp", script.display());
+  run_elevated(&params, "uninstaller")
+}
+
+fn run_elevated(params: &str, what: &str) -> Result<(), String> {
   let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
   // SAFETY: NUL-terminated strings owned by this frame.
   let result =
@@ -121,7 +161,7 @@ pub fn launch_install_flow(flow: Flow, endpoint_guid: &str) -> Result<(), String
   if result.0 as isize > SHELL_EXECUTE_OK {
     Ok(())
   } else {
-    Err(format!("could not start the installer (cancelled UAC prompt? code {})", result.0 as isize))
+    Err(format!("could not start the {what} (cancelled UAC prompt? code {})", result.0 as isize))
   }
 }
 
@@ -156,10 +196,54 @@ fn bundled_dll() -> Option<PathBuf> {
 }
 
 fn install_script() -> Option<PathBuf> {
+  script(SCRIPT_NAME)
+}
+
+/// Next to the exe (distribution), then the dev tree's `scripts/`.
+fn script(name: &str) -> Option<PathBuf> {
   let dir = exe_dir()?;
-  [dir.join("scripts").join(SCRIPT_NAME), dir.join("..").join("..").join("scripts").join(SCRIPT_NAME)]
+  [dir.join("scripts").join(name), dir.join("..").join("..").join("scripts").join(name)]
     .into_iter()
     .find(|p| p.is_file())
+}
+
+fn hklm_subkeys(key: &str) -> Vec<String> {
+  /// Bound for the enumeration (a PC never has this many audio endpoints).
+  const MAX_SUBKEYS: u32 = 4096;
+  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+  let mut hkey = HKEY::default();
+  let mut out = Vec::new();
+  // SAFETY: the handle is closed below; the name buffer is a local array of the size passed.
+  unsafe {
+    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+      return out;
+    }
+    for index in 0..MAX_SUBKEYS {
+      let mut name = [0u16; 256];
+      let mut len = name.len() as u32;
+      if RegEnumKeyExW(hkey, index, PWSTR(name.as_mut_ptr()), &mut len, None, PWSTR::null(), None, None)
+        != ERROR_SUCCESS
+      {
+        break;
+      }
+      out.push(String::from_utf16_lossy(name.get(..len as usize).unwrap_or_default()));
+    }
+    let _ = RegCloseKey(hkey);
+  }
+  out
+}
+
+fn hklm_key_exists(key: &str) -> bool {
+  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+  let mut hkey = HKEY::default();
+  // SAFETY: NUL-terminated key name owned by this frame; the handle is closed right away.
+  unsafe {
+    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+      return false;
+    }
+    let _ = RegCloseKey(hkey);
+  }
+  true
 }
 
 fn exe_dir() -> Option<PathBuf> {
@@ -178,7 +262,7 @@ fn format_time(t: SystemTime) -> String {
 }
 
 /// `{0.0.1.00000000}.{cf0a2270-...}` -> `{cf0a2270-...}`
-fn endpoint_guid_of(capture_id: &str) -> Option<String> {
+pub(crate) fn endpoint_guid_of(capture_id: &str) -> Option<String> {
   let (_, guid) = capture_id.rsplit_once('.')?;
   (guid.starts_with('{') && guid.ends_with('}')).then(|| guid.to_string())
 }
@@ -225,7 +309,15 @@ mod tests {
 
   #[test]
   fn install_refuses_ids_that_could_inject_arguments() {
-    let err = launch_install("{x\" -Evil \"}").unwrap_err();
+    let err = launch_install_many(&[(Flow::Capture, "{x\" -Evil \"}")]).unwrap_err();
     assert!(err.contains("unexpected"), "{err}");
+    let err = launch_install_many(&[(Flow::Capture, "{a}"), (Flow::Render, "")]).unwrap_err();
+    assert!(err.contains("unexpected"), "{err}");
+  }
+
+  #[test]
+  fn several_endpoints_become_one_script_argument() {
+    let args = endpoint_args(&[(Flow::Capture, "{cf0a-1}"), (Flow::Render, "{b45c-2}")]).unwrap();
+    assert_eq!(args, "Capture:{cf0a-1},Render:{b45c-2}");
   }
 }

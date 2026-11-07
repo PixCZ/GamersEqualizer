@@ -1515,6 +1515,7 @@ dependencies = [
  "log",
  "ndarray 0.15.6",
  "nnnoiseless",
+ "realfft",
  "rustfft",
  "tract-core 0.21.4",
  "tract-hir 0.21.4",

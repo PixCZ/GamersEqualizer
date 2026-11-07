@@ -1,22 +1,26 @@
 //! "The app is not working correctly" info bar under the top bar, on every tab, from app start.
-//! Lists each setup problem (mic effect missing / outdated / not on this mic, the mic in use is
-//! not the Windows default) with the reason and a one-click fix.
+//! Lists each setup problem (mic effect missing / outdated / not on this mic, the output EQ
+//! missing on a new output device, the mic in use is not the Windows default) with the reason
+//! and a one-click fix. Above it, a warning while an app records into a muted microphone.
 //!
-//! Like Android's permission rationale: a fix that triggers a system prompt (UAC) first says
-//! why it is needed and what will happen, and only then asks Windows. "Not now" keeps the app
-//! running degraded; the bar stays until the problem is gone.
+//! Fixes that need administrator rights open the setup card (`setup.rs`): it explains why and
+//! what will happen, then asks Windows once for all of them. "Not now" keeps the app running
+//! degraded; the bar stays until the problem is gone.
 
 use egui::{RichText, Ui};
 use std::time::{Duration, Instant};
 
 use super::state::AppState;
 use super::theme::{self, Severity};
+use crate::health::{Fix, Issue};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus};
 use crate::win_audio::WinAudioSystem;
 
 /// Registry + file metadata only: cheap enough to notice a finished install quickly.
 const RECHECK_INTERVAL: Duration = Duration::from_secs(3);
+/// "Recording into a muted mic" must show up quickly (a few registry reads, one volume read).
+const MIC_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct ApoBanner {
@@ -26,17 +30,24 @@ pub struct ApoBanner {
   checked_at: Option<Instant>,
   /// Result of the last fix click (error or "confirm the administrator prompt").
   message: Option<String>,
-  /// The "why administrator rights" explanation is open (step before the UAC prompt).
-  explaining_install: bool,
+  /// An app records while the mic is muted / at 0 % / off (`Issue::MicSilenced`).
+  mic_silenced: Option<Issue>,
+  mic_checked_at: Option<Instant>,
 }
 
 enum Problem {
   Apo { title: String, button: &'static str },
+  NewOutput { name: String },
   NotDefaultMic { mic_name: String },
 }
 
 /// Re-reads the setup state every few seconds (or right after a fix). Call once per frame.
 pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
+  if state.apo_banner.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_RECHECK_INTERVAL) {
+    let default_mic = win_audio.endpoint_lock.get_default_capture_id();
+    state.apo_banner.mic_silenced = crate::health::mic_silenced_issue(default_mic);
+    state.apo_banner.mic_checked_at = Some(Instant::now());
+  }
   let banner = &state.apo_banner;
   if banner.checked_at.is_some_and(|t| t.elapsed() < RECHECK_INTERVAL) {
     return;
@@ -47,7 +58,6 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
   let banner = &mut state.apo_banner;
   if check.status == ApoStatus::Active {
     banner.message = None;
-    banner.explaining_install = false;
   }
   banner.check = Some(check);
   banner.default_mic_id = default_mic;
@@ -58,6 +68,59 @@ pub fn has_problems(state: &AppState) -> bool {
   !problems(state).is_empty()
 }
 
+/// Mic processing state from the last check (None before the first one).
+pub fn mic_check(state: &AppState) -> Option<&ApoCheck> {
+  state.apo_banner.check.as_ref()
+}
+
+/// Display name of the microphone the processing is checked on.
+pub fn mic_in_use_name(state: &AppState) -> String {
+  let id = state.selected_mic_endpoint_id.as_deref().or(state.apo_banner.default_mic_id.as_deref());
+  state
+    .capture_endpoints
+    .iter()
+    .find(|e| Some(e.id.as_str()) == id)
+    .map(|e| e.name.clone())
+    .unwrap_or_else(|| tr("The selected microphone").to_string())
+}
+
+/// Check again on the next frame (an installer was started).
+pub fn recheck(state: &mut AppState) {
+  state.apo_banner.checked_at = None;
+}
+
+pub fn has_mic_warning(state: &AppState) -> bool {
+  state.apo_banner.mic_silenced.is_some()
+}
+
+/// Warning bar while an app records into a muted / silent / missing microphone; render only
+/// when `has_mic_warning`. The background service shows the same as a tray badge + notification.
+pub fn render_mic_warning(ui: &mut Ui, state: &mut AppState) {
+  let Some(issue) = state.apo_banner.mic_silenced.clone() else {
+    return;
+  };
+  let mut clicked = None;
+  theme::info_bar(ui, Severity::Warning, |ui| {
+    ui.label(theme::strong(issue.title(), 15.0));
+    ui.horizontal_wrapped(|ui| {
+      ui.label(tr("Nobody hears you."));
+      for (label, fix) in issue.fixes() {
+        if ui.add(theme::accent_button(ui, &label)).clicked() {
+          clicked = Some(fix);
+        }
+      }
+    });
+  });
+  ui.add_space(6.0);
+  match clicked {
+    Some(Fix::UnmuteMic(id)) => crate::win_audio::chatmix::set_endpoint_mute(&id, false),
+    Some(Fix::RaiseMicVolume(id)) => crate::win_audio::chatmix::set_endpoint_volume(&id, 1.0),
+    Some(Fix::OpenSoundSettings) => crate::win_audio::shell::open_sound_settings(),
+    _ => return,
+  }
+  state.apo_banner.mic_checked_at = None;
+}
+
 /// Full-width error info bar; render only when `has_problems`.
 pub fn render_health_bar(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
   let list = problems(state);
@@ -66,6 +129,7 @@ pub fn render_health_bar(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudio
     for problem in list {
       match problem {
         Problem::Apo { title, button } => apo_row(ui, state, &title, button),
+        Problem::NewOutput { name } => new_output_row(ui, state, &name),
         Problem::NotDefaultMic { mic_name } => default_mic_row(ui, state, win_audio, &mic_name),
       }
     }
@@ -154,6 +218,9 @@ fn problems(state: &AppState) -> Vec<Problem> {
       list.push(Problem::Apo { title, button });
     }
   }
+  if let Some(name) = super::setup::output_needs_setup(state) {
+    list.push(Problem::NewOutput { name: name.to_string() });
+  }
   if !selected_mic_is_default(state) {
     let sel = state.selected_mic_endpoint_id.as_deref();
     let mic_name = state
@@ -180,45 +247,22 @@ fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str) {
       );
       return;
     }
-    if !state.apo_banner.explaining_install && ui.add(theme::accent_button(ui, tr(button))).clicked() {
-      state.apo_banner.explaining_install = true;
+    // The setup card explains the admin prompt and bundles every admin step into one.
+    if !super::setup::visible(state) && ui.add(theme::accent_button(ui, tr(button))).clicked() {
+      super::setup::open(state);
     }
   });
-  if !state.apo_banner.explaining_install || !check.can_install {
-    return;
-  }
-  // Rationale before the system prompt: what, why admin, what the user will notice.
-  theme::inset_frame(ui).show(ui, |ui| {
-    ui.set_width(ui.available_width());
-    ui.label(theme::strong(tr("Why does this need administrator rights?"), 14.0));
-    ui.label(tr(
-      "The processing runs inside Windows audio itself (a microphone effect), so every app gets the clean voice \
-       without any setup in that app. Installing a Windows audio effect is a system change, so Windows will ask \
-       you to allow it.\n\
-       What happens: a Windows prompt asks for permission, a small installer window runs, and Windows audio \
-       restarts for a few seconds. Apps that use the microphone (Discord, games) may need to be reopened.\n\
-       Nothing else is changed, and the app keeps working if you say no (just without the processing).",
+}
+
+fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str) {
+  ui.horizontal_wrapped(|ui| {
+    ui.label(trf(
+      "Output EQ is not set up on \"{}\" (a new sound device?): your headphone correction and EQ are not applied to it.",
+      &[&name],
     ));
-    ui.horizontal(|ui| {
-      if ui.add(theme::accent_button(ui, tr("Continue – ask Windows"))).clicked() {
-        state.apo_banner.explaining_install = false;
-        if let Some(guid) = check.endpoint_guid.as_deref() {
-          state.apo_banner.message = Some(match apo_install::launch_install(guid) {
-            Ok(()) => {
-              tr("Installer started: confirm the Windows prompt. This message disappears when it is done.").to_string()
-            }
-            Err(e) => {
-              log::warn!("[APO] install could not start: {e}");
-              e
-            }
-          });
-        }
-        state.apo_banner.checked_at = None;
-      }
-      if ui.button(tr("Not now")).clicked() {
-        state.apo_banner.explaining_install = false;
-      }
-    });
+    if !super::setup::visible(state) && ui.add(theme::accent_button(ui, tr("Set up…"))).clicked() {
+      super::setup::open(state);
+    }
   });
 }
 

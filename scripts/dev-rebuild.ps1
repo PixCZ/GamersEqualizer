@@ -6,6 +6,8 @@
   1. Stops every gamersequalizer.exe (the GUI and the background daemon) so the exe isn't locked.
   2. cargo build --release -p gamersequalizer (the app).
   3. -Apo: cargo build --profile apo -p gamersequalizer-apo (the microphone APO DLL, unwinding profile).
+     -DebugCapture (with -Apo): builds it with the `debug-capture` feature, so the mic chain records
+     every stage on request (cargo run --release -p gamersequalizer-apo --example debug_capture).
   4. -Test: cargo test --workspace, plus clippy on the workspace (warnings are listed, not fatal).
   5. Reports whether the installed APO (needs admin to install) is older than target\apo.
   6. -Start: starts target\release\gamersequalizer.exe.
@@ -15,9 +17,11 @@
 .EXAMPLE
   .\scripts\dev-rebuild.ps1 -Test -Start
   .\scripts\dev-rebuild.ps1 -Apo -Test
+  .\scripts\dev-rebuild.ps1 -Apo -DebugCapture
 #>
 param(
   [switch]$Apo,
+  [switch]$DebugCapture,
   [switch]$Test,
   [switch]$Start
 )
@@ -53,7 +57,14 @@ Step 'stop app' {
 }
 
 if (-not $failed) { Step 'build app (release)' { cargo build --release -p gamersequalizer } }
-if ($Apo -and -not $failed) { Step 'build APO (apo profile)' { cargo build --profile apo -p gamersequalizer-apo } }
+if ($DebugCapture -and -not $Apo) { $summary.Add('INFO  -DebugCapture only applies with -Apo') }
+if ($Apo -and -not $failed) {
+  if ($DebugCapture) {
+    Step 'build APO (apo profile, debug capture)' { cargo build --profile apo -p gamersequalizer-apo --features debug-capture }
+  } else {
+    Step 'build APO (apo profile)' { cargo build --profile apo -p gamersequalizer-apo }
+  }
+}
 
 if ($Test -and -not $failed) {
   Step 'cargo test --workspace' { cargo test --workspace }

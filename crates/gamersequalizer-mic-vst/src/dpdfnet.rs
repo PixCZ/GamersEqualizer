@@ -23,12 +23,17 @@ const BINS: usize = WIN / 2 + 1;
 /// The enhanced spectrum of frame t belongs to input frame t - 4 (measured: total delay
 /// 2880 samples = 480 priming + 480 STFT overlap + 4 hops). The dry signal for the strength
 /// blend is delayed by the same 4 hops, else it would comb-filter.
+/// The STFT overlap is the HOP zeros `in_buf` starts with, so a frame runs as soon as one hop
+/// arrives, like DeepFilterNet 3. Waiting for a full window instead made the delay depend on
+/// the block size (2400 at 480-frame blocks, 2880 at 441), and the gate trusts the constant.
 const LOOKAHEAD_HOPS: usize = 4;
 /// Added latency, 48 kHz samples (checked in `test_measured_latency_matches_constants`).
 pub const LATENCY_SAMPLES: usize = HOP + (WIN - HOP) + LOOKAHEAD_HOPS * HOP;
 
 pub struct DpdfEngine {
-  plan: Arc<TypedSimplePlan>,
+  /// One run state for the engine's lifetime: `plan.run()` would build a fresh one (and
+  /// allocate every intermediate buffer) per 10 ms frame.
+  runner: TypedSimpleState,
   init_state: Vec<f32>,
   state: Tensor,
   fft: Arc<dyn Fft<f32>>,
@@ -84,6 +89,7 @@ impl DpdfEngine {
   pub fn reset(&mut self) {
     self.state = tensor1(&self.init_state);
     self.in_buf.clear();
+    self.in_buf.resize(WIN - HOP, 0.0);
     self.overlap.fill(0.0);
     self.dry = VecDeque::from(vec![0.0; LOOKAHEAD_HOPS * HOP]);
     self.output_fifo = crate::ai_denoiser::primed_fifo(HOP);
@@ -133,7 +139,7 @@ impl DpdfEngine {
       })
       .collect();
     let mut engine = Self {
-      plan,
+      runner: plan.spawn()?,
       state: tensor1(&init_state),
       init_state,
       fft,
@@ -164,7 +170,7 @@ impl DpdfEngine {
       *im = c.im;
     }
     let state = std::mem::replace(&mut self.state, tensor0(0f32));
-    let outputs = match self.plan.run(tvec![input.into(), state.into()]) {
+    let outputs = match self.runner.run(tvec![input.into(), state.into()]) {
       Ok(o) => o,
       Err(e) => {
         self.state = tensor1(&self.init_state); // the state moved into the failed run

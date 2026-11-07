@@ -1,11 +1,21 @@
 use crate::aec::{AcousticEchoCanceller, PRE_DELAY_SAMPLES};
 use crate::ai_denoiser::AiVoiceIsolator;
+use crate::clip_detector::ClipDetector;
 use crate::delay_estimator::{DelayEstimator, LockChange, WindowOutcome, FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
 use crate::shared_memory::SharedMemoryClient;
+use crate::voice_leveler::VoiceLeveler;
 use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::soft_limit;
-use gamersequalizer_common::shm::{AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS};
+use gamersequalizer_common::shm::{
+  AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
+  NOISE_GATE_AUTO_LOOKAHEAD,
+};
 use std::sync::atomic::Ordering;
+
+#[cfg(feature = "debug-capture")]
+use crate::debug_capture::{CaptureWriter, DebugCaptureMap};
+#[cfg(feature = "debug-capture")]
+use gamersequalizer_common::debug_capture::*;
 
 /// Publish telemetry every 10 blocks (~100 ms): enough for a smooth UI, negligible cost.
 const TELEMETRY_EVERY_BLOCKS: u32 = 10;
@@ -34,6 +44,13 @@ pub struct GamersEqualizerPlugin {
   delay_estimator: DelayEstimator,
   aec: AcousticEchoCanceller,
   ai_denoiser: AiVoiceIsolator,
+  leveler: VoiceLeveler,
+  /// Last "Learn again" sequence seen (None before the first block).
+  leveler_reset_seen: Option<u32>,
+  /// After "Learn again" in this stream, the saved level is stale until the daemon clears it.
+  leveler_seed_blocked: bool,
+  /// Settings before the leveler (they change the speech level it sees), last block.
+  leveler_inputs: Option<LevelerInputs>,
   eq: BiquadCascade,
   eq_version: Option<u32>,
   pub sample_rate: f32,
@@ -43,11 +60,33 @@ pub struct GamersEqualizerPlugin {
   aec_state: AecState,
   /// Last `aec_cached_delay_samples` seen in shared memory (warm start when it changes).
   cached_delay_seen: u32,
+  /// Last `aec_reference_seq` seen: when it changes, the speaker output was switched.
+  reference_seq_seen: u32,
   block_counter: u32,
   ref_rms: f32,
   mic_rms: f32,
   out_rms: f32,
   load: DspLoad,
+  /// Clipped raw input samples (full scale or flat tops), all time (wraps).
+  input_clips: u32,
+  clip_detector: ClipDetector,
+  /// Shift of the reference fed to the AEC in the last block (None: the AEC didn't run).
+  aec_ref_offset: Option<u32>,
+  #[cfg(feature = "debug-capture")]
+  capture: Option<CaptureWriter>,
+}
+
+/// Everything before the leveler that changes the speech level it learns: when any of it changes,
+/// the learned level is stale. Raw shared-memory values, so a slider drag is "changed" every block.
+/// The Windows mic volume is not part of it: the leveler is told its gain and compensates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LevelerInputs {
+  aec_enabled: bool,
+  ai_strength_permille: u32,
+  gate_db: i32,
+  /// The model that runs (a fallback to RNNoise counts too).
+  active_model: u32,
+  eq_version: Option<u32>,
 }
 
 /// CPU time of the mic chain relative to real time, per telemetry window.
@@ -76,6 +115,10 @@ impl GamersEqualizerPlugin {
       delay_estimator: DelayEstimator::new(),
       aec: AcousticEchoCanceller::default_48k(),
       ai_denoiser: AiVoiceIsolator::new(),
+      leveler: VoiceLeveler::new(),
+      leveler_reset_seen: None,
+      leveler_seed_blocked: false,
+      leveler_inputs: None,
       eq: BiquadCascade::default(),
       eq_version: None,
       sample_rate,
@@ -84,12 +127,24 @@ impl GamersEqualizerPlugin {
       tap_frames: Vec::with_capacity(2048),
       aec_state: AecState::Disabled,
       cached_delay_seen: 0,
+      reference_seq_seen: 0,
       block_counter: 0,
       ref_rms: 0.0,
       mic_rms: 0.0,
       out_rms: 0.0,
       load: DspLoad::default(),
+      input_clips: 0,
+      clip_detector: ClipDetector::default(),
+      aec_ref_offset: None,
+      #[cfg(feature = "debug-capture")]
+      capture: None,
     }
+  }
+
+  /// Debug builds: record every stage into `map` when the capture tool asks for it.
+  #[cfg(feature = "debug-capture")]
+  pub fn attach_debug_capture(&mut self, map: DebugCaptureMap, device_rate: u32) {
+    self.capture = Some(CaptureWriter::new(map, device_rate));
   }
 
   /// Warm-start the echo canceller with a delay measured in an earlier session.
@@ -186,16 +241,29 @@ impl GamersEqualizerPlugin {
     if let Some(dst) = self.mic_mono_temp.get_mut(..frames) {
       dst.copy_from_slice(mic_in);
     }
+    #[cfg(feature = "debug-capture")]
+    let capturing = self.capture_input(mic_in, mic_qpc_hns);
 
     // Fetch control parameters from shared memory
     let mut aec_enabled = true;
     let mut ai_strength = 0.75f32;
-    let mut gate_db = 0.0f32; // automatic gate until settings are read
+    let mut gate_db = NOISE_GATE_AUTO_LOOKAHEAD as f32; // the default until settings are read
     let mut mic_permille = 1000u32;
     let mut model = DenoiseModel::RnNoise;
     let mut eq_version = None;
     let mut cached_delay = 0u32;
+    let mut reference_seq = self.reference_seq_seen;
+    let mut leveler_on = true;
+    let mut input_gain_x10 = 0;
+    let (mut leveler_target_x10, mut leveler_reset_seq, mut leveler_saved_x10) = (MIC_LEVELER_DEFAULT_TARGET_DB_X10, 0, 0);
     if let Some(header) = self.shm_header() {
+      leveler_on = header.mic_leveler_enabled.load(Ordering::Relaxed);
+      input_gain_x10 = header.mic_input_gain_db_x10.load(Ordering::Relaxed);
+      leveler_target_x10 = header.mic_leveler_target_db_x10.load(Ordering::Relaxed);
+      leveler_reset_seq = header.mic_leveler_reset_seq.load(Ordering::Relaxed);
+      leveler_saved_x10 = header.mic_leveler_saved_level_db_x10.load(Ordering::Relaxed);
+      // Acquire before the cached delay: the daemon stores the new output's delay first.
+      reference_seq = header.aec_reference_seq.load(Ordering::Acquire);
       cached_delay = header.aec_cached_delay_samples.load(Ordering::Relaxed);
       aec_enabled = header.aec_enabled.load(Ordering::Relaxed);
       ai_strength = header.ai_voice_strength_permille.load(Ordering::Relaxed) as f32 / 1000.0;
@@ -206,6 +274,16 @@ impl GamersEqualizerPlugin {
       }
       model = DenoiseModel::from_u32(header.denoise_model.load(Ordering::Relaxed));
       eq_version = Some(header.mic_eq_version.load(Ordering::Acquire));
+    }
+
+    // Speaker output switched: the locked delay and the learned echo path are the old
+    // device's. Start over, warm-started below with the delay remembered for the new one.
+    if reference_seq != self.reference_seq_seen {
+      self.reference_seq_seen = reference_seq;
+      log::info!("[AEC] speaker output changed: echo delay and filter start over");
+      self.delay_estimator.forget_lock();
+      self.aec.reset();
+      self.cached_delay_seen = 0;
     }
 
     // Delay remembered from an earlier session (daemon cache): only as a warm start, a delay
@@ -232,29 +310,89 @@ impl GamersEqualizerPlugin {
     }
 
     self.mic_rms = smooth_rms(self.mic_rms, mic_in);
+    // The converter clipped (only a lower input gain fixes that; the daemon decides).
+    self.input_clips = self.input_clips.wrapping_add(self.clip_detector.count(mic_in));
 
     // Stage 1: Classical DSP Acoustic Echo Cancellation (NO AI)
+    self.aec_ref_offset = None;
     self.aec_state = if aec_enabled { self.run_aec(frames, mic_in, mic_qpc_hns) } else { AecState::Disabled };
 
     let Some(mic) = self.mic_mono_temp.get_mut(..frames) else {
       return;
     };
+    #[cfg(feature = "debug-capture")]
+    if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
+      match self.ref_buffer.get(..frames).filter(|_| self.aec_ref_offset.is_some()) {
+        Some(refs) => cap.stage(STAGE_REF_AEC, refs),
+        None => cap.stage_silent(STAGE_REF_AEC),
+      }
+      cap.stage(STAGE_AFTER_AEC, mic);
+    }
 
     // Stage 2: Neural noise suppression (RNNoise, DeepFilterNet or DPDFNet)
     self.ai_denoiser.process_samples(mic);
+    #[cfg(feature = "debug-capture")]
+    if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
+      cap.stage(STAGE_AFTER_DENOISE, mic);
+    }
 
     // Stage 3: Parametric voice EQ
     if !self.eq.is_empty() {
       self.eq.process(mic);
     }
+    #[cfg(feature = "debug-capture")]
+    if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
+      cap.stage(STAGE_AFTER_EQ, mic);
+    }
 
-    // Stage 4: Digital boost (100..300 %) + soft limiter, always last so EQ boosts can't clip
-    let boost = if mic_permille > 1000 { mic_permille as f32 / 1000.0 } else { 1.0 };
+    // Stage 4: Learning voice leveler (speech to one level; learns only while the detector hears speech)
+    // "Learn again" (a new sequence number): forget, and don't take the old saved level back.
+    if self.leveler_reset_seen.is_some_and(|s| s != leveler_reset_seq) {
+      self.leveler.reset();
+      self.leveler_seed_blocked = true;
+    }
+    self.leveler_reset_seen = Some(leveler_reset_seq);
+    // A setting before the leveler moved (volume, denoiser, EQ, ...): relearn fast, gain held.
+    let inputs = LevelerInputs {
+      aec_enabled,
+      ai_strength_permille: (ai_strength * 1000.0).round() as u32,
+      gate_db: gate_db as i32,
+      active_model: self.ai_denoiser.active_model().to_u32(),
+      eq_version: self.eq_version,
+    };
+    if self.leveler_inputs.is_some_and(|prev| prev != inputs) {
+      self.leveler.relearn();
+    }
+    self.leveler_inputs = Some(inputs);
+    self.leveler.set_input_gain_db(input_gain_x10 as f32 / 10.0);
+    self.leveler.set_target_db(leveler_target_x10 as f32 / 10.0);
+    if leveler_on {
+      // Level learned in an earlier stream on this mic (it may arrive a few blocks late).
+      if leveler_saved_x10 != 0 && !self.leveler_seed_blocked {
+        self.leveler.seed(leveler_saved_x10 as f32 / 10.0);
+      }
+      self.leveler.process(mic, self.ai_denoiser.heard_voice(), self.ai_denoiser.output_lead_samples());
+    } else {
+      self.leveler.reset();
+    }
+    #[cfg(feature = "debug-capture")]
+    if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
+      cap.stage(STAGE_AFTER_LEVELER, mic);
+    }
+
+    // Stage 5: volume + soft limiter, always last so EQ boosts can't clip. With the leveler the
+    // mic volume (0..300 %) is how loud others hear you: 100 % = the target, 50 % = 6 dB under it
+    // (the leveler took the Windows volume out of the input). Without it: only the boost > 100 %.
+    let boost = if leveler_on || mic_permille > 1000 { mic_permille as f32 / 1000.0 } else { 1.0 };
     for sample in mic.iter_mut() {
       *sample = soft_limit(*sample * boost);
     }
 
     self.out_rms = smooth_rms(self.out_rms, mic);
+    #[cfg(feature = "debug-capture")]
+    if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
+      cap.stage(STAGE_OUT, mic);
+    }
 
     // Output cleaned microphone audio
     for out in outputs.iter_mut() {
@@ -264,9 +402,25 @@ impl GamersEqualizerPlugin {
       }
     }
 
+    let block_secs = frames as f32 / self.sample_rate.max(1.0);
+    let load = started.elapsed().as_secs_f32() / block_secs;
     if !loads_model {
-      let block_secs = frames as f32 / self.sample_rate.max(1.0);
-      self.load.add(started.elapsed().as_secs_f32() / block_secs);
+      self.load.add(load);
+    }
+    #[cfg(feature = "debug-capture")]
+    if capturing {
+      let settings = BlockSettings {
+        aec_enabled,
+        ai_strength,
+        gate_db,
+        leveler_on,
+        leveler_target_db: leveler_target_x10 as f32 / 10.0,
+        input_gain_db: input_gain_x10 as f32 / 10.0,
+        mic_volume: mic_permille as f32 / 1000.0,
+        boost,
+        load,
+      };
+      self.capture_finish(frames, mic_qpc_hns, &settings);
     }
     self.block_counter = self.block_counter.wrapping_add(1);
     if self.block_counter.is_multiple_of(TELEMETRY_EVERY_BLOCKS) {
@@ -279,7 +433,7 @@ impl GamersEqualizerPlugin {
   }
 
   fn run_aec(&mut self, frames: usize, mic_in: &[f32], mic_qpc_hns: Option<u64>) -> AecState {
-    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, .. } = self;
+    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, .. } = self;
     let Some(shm) = shm_client.as_mut() else {
       return AecState::NoReference;
     };
@@ -318,6 +472,7 @@ impl GamersEqualizerPlugin {
     };
     let offset = delay.saturating_sub(PRE_DELAY_SAMPLES) as u32;
     ring.read_frames_from(idx.wrapping_sub(offset), refs);
+    *aec_ref_offset = Some(offset);
     *ref_rms = smooth_rms(*ref_rms, refs);
 
     // Runs even when silent: it doesn't adapt then, but keeps its history continuous.
@@ -343,6 +498,11 @@ impl GamersEqualizerPlugin {
     h.mic_dsp_load_peak_permille.store(permille(self.load.peak), Ordering::Relaxed);
     h.mic_dsp_load_avg_permille.store(permille(self.load.average()), Ordering::Relaxed);
     h.mic_dsp_overruns.store(self.load.late_total, Ordering::Relaxed);
+    h.mic_leveler_gain_db_x10.store((self.leveler.gain_db() * 10.0).round() as i32, Ordering::Relaxed);
+    let level_x10 = self.leveler.level_db().map_or(0, |l| ((l * 10.0).round() as i32).min(-1));
+    h.mic_leveler_level_db_x10.store(level_x10, Ordering::Relaxed);
+    h.mic_input_clips.store(self.input_clips, Ordering::Relaxed);
+    h.mic_speech_ms.store(self.leveler.speech_ms(), Ordering::Relaxed);
 
     let est = &self.delay_estimator;
     let to_us = |samples: f32| (samples / 48_000.0 * 1e6).round().max(0.0) as u32;
@@ -376,12 +536,115 @@ impl GamersEqualizerPlugin {
     for (slot, v) in h.aec_corr.iter().zip(est.corr_curve()) {
       slot.store(v.to_bits(), Ordering::Relaxed);
     }
+    // Last, with Release: a daemon that sees this seq also sees the delay written above.
+    h.aec_reference_seq_seen.store(self.reference_seq_seen, Ordering::Release);
     h.aec_telemetry_seq.fetch_add(1, Ordering::Release);
   }
 
-  fn shm_header(&self) -> Option<&ShmHeader> {
+  pub fn shm_header(&self) -> Option<&ShmHeader> {
     self.shm_client.as_ref().map(|c| &c.layout().header)
   }
+
+  /// Starts a capture block if one is recording: raw mic + the reference at mic time.
+  #[cfg(feature = "debug-capture")]
+  fn capture_input(&mut self, mic_in: &[f32], mic_qpc_hns: Option<u64>) -> bool {
+    let Self { capture, shm_client, .. } = self;
+    let Some(cap) = capture.as_mut() else {
+      return false;
+    };
+    if !cap.begin_block(mic_in.len(), mic_qpc_hns) {
+      return false;
+    }
+    cap.stage(STAGE_MIC_RAW, mic_in);
+    let ring = shm_client.as_mut().map(|s| s.ring_buffer());
+    let idx = ring.as_ref().zip(mic_qpc_hns).and_then(|(r, t)| r.header().ref_index_at(t));
+    let wrote = match (ring, idx, cap.scratch.get_mut(..mic_in.len())) {
+      (Some(ring), Some(idx), Some(dst)) => {
+        ring.read_frames_from(idx, dst);
+        true
+      }
+      _ => false,
+    };
+    if wrote {
+      cap.stage_scratch(STAGE_REF_AT_MIC);
+    } else {
+      cap.stage_silent(STAGE_REF_AT_MIC);
+    }
+    true
+  }
+
+  #[cfg(feature = "debug-capture")]
+  fn capture_finish(&mut self, frames: usize, mic_qpc_hns: Option<u64>, s: &BlockSettings) {
+    let Some(cap) = self.capture.as_ref() else {
+      return;
+    };
+    let est = &self.delay_estimator;
+    let b = |v: bool| if v { 1.0 } else { 0.0 };
+    let (raw_delay, peak_ratio) = match est.last_outcome() {
+      Some(WindowOutcome::Estimate { delay_samples, peak_ratio }) => (delay_samples, peak_ratio),
+      Some(WindowOutcome::NoPeak { peak_ratio }) => (-1.0, peak_ratio),
+      _ => (-1.0, 0.0),
+    };
+    let ref_age_ms = self
+      .shm_header()
+      .zip(mic_qpc_hns)
+      .and_then(|(h, t)| h.ref_age_hns(t))
+      .map_or(-1.0, |a| a as f32 / 10_000.0);
+    let db = |rms: f32| db_x10(rms) as f32 / 10.0;
+    let vars: [f32; DEBUG_VARS.len()] = [
+      cap.frame() as f32,
+      frames as f32,
+      cap.t_ms(mic_qpc_hns),
+      b(s.aec_enabled),
+      self.aec_state.to_u32() as f32,
+      est.current_delay().map_or(-1.0, |d| d as f32),
+      b(est.is_from_cache()),
+      raw_delay,
+      peak_ratio,
+      est.estimate_count() as f32,
+      self.aec_ref_offset.map_or(-1.0, |o| o as f32),
+      ref_age_ms,
+      db(self.ref_rms),
+      db(self.mic_rms),
+      db(self.out_rms),
+      self.aec.erle_db(),
+      b(self.aec.is_double_talk()),
+      self.aec.taps() as f32,
+      self.ai_denoiser.selected_model().to_u32() as f32,
+      self.ai_denoiser.active_model().to_u32() as f32,
+      self.ai_denoiser.limit().to_u32() as f32,
+      s.ai_strength,
+      s.gate_db,
+      b(self.ai_denoiser.heard_voice()),
+      self.ai_denoiser.output_lead_samples() as f32,
+      self.eq_version.map_or(-1.0, |v| v as f32),
+      b(s.leveler_on),
+      s.leveler_target_db,
+      self.leveler.gain_db(),
+      self.leveler.level_db().unwrap_or(f32::NAN),
+      s.input_gain_db,
+      s.mic_volume,
+      s.boost,
+      s.load,
+    ];
+    if let Some(cap) = self.capture.as_mut() {
+      cap.end_block(&vars);
+    }
+  }
+}
+
+/// Per-block settings the capture records next to the chain's state.
+#[cfg(feature = "debug-capture")]
+struct BlockSettings {
+  aec_enabled: bool,
+  ai_strength: f32,
+  gate_db: f32,
+  leveler_on: bool,
+  leveler_target_db: f32,
+  input_gain_db: f32,
+  mic_volume: f32,
+  boost: f32,
+  load: f32,
 }
 
 impl DspLoad {
@@ -428,11 +691,19 @@ fn smooth_rms(prev: f32, block: &[f32]) -> f32 {
     return prev;
   }
   let rms = (block.iter().map(|x| x * x).sum::<f32>() / block.len() as f32).sqrt();
-  0.7 * prev + 0.3 * rms
+  let next = 0.7 * prev + 0.3 * rms;
+  // A non-finite value would stick forever (0.7 * inf = inf): drop this block instead.
+  match (next.is_finite(), prev.is_finite()) {
+    (true, _) => next,
+    (false, true) => prev,
+    (false, false) => 0.0,
+  }
 }
 
+/// dBFS x 10, limited to -120..+20 dB (an inf/NaN level must not saturate to i32::MAX).
 fn db_x10(rms: f32) -> i32 {
-  (200.0 * rms.max(1e-6).log10()).round() as i32
+  let rms = if rms.is_finite() { rms.clamp(1e-6, 10.0) } else { 1e-6 };
+  (200.0 * rms.log10()).round() as i32
 }
 
 #[cfg(test)]
@@ -458,6 +729,18 @@ mod tests {
     assert_eq!(db_x10(1.0), 0);
     assert_eq!(db_x10(0.1), -200);
     assert_eq!(db_x10(0.0), -1200);
+    assert_eq!(db_x10(f32::INFINITY), -1200);
+    assert_eq!(db_x10(f32::NAN), -1200);
+    assert_eq!(db_x10(1e30), 200);
+  }
+
+  #[test]
+  fn test_smooth_rms_recovers_from_non_finite_block() {
+    // Regression: one inf sample pinned the speaker meter at "214748364.7" for good.
+    let rms = smooth_rms(0.1, &[f32::INFINITY, 0.0]);
+    assert_eq!(rms, 0.1);
+    assert_eq!(smooth_rms(f32::INFINITY, &[f32::NAN]), 0.0);
+    assert!((smooth_rms(rms, &[0.1; 4]) - 0.1).abs() < 1e-6);
   }
 
   #[test]

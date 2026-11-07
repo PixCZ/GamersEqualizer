@@ -1,6 +1,7 @@
 use super::app_channels::{self, AppChannel};
 use super::endpoint_lock::AudioEndpointInfo;
 use std::collections::HashSet;
+use std::time::Instant;
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
@@ -11,6 +12,10 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_core::Interface;
+
+/// `QueryHardwareSupport` bit: the device applies the volume itself (endpointvolume.h; the
+/// windows crate doesn't export it).
+const ENDPOINT_HARDWARE_SUPPORT_VOLUME: u32 = 0x1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioBus {
@@ -67,6 +72,11 @@ pub struct ChatMixController {
   pub media_device_id: Option<String>,
   pub mic_device_id: Option<String>,
   pub mic_peak_level: f32,
+  /// Windows mic volume the automatic input gain set (`mic_volume` stays what the user or an app
+  /// asked for). Seeing exactly this level in Windows is ours, anything else is someone's wish.
+  pub mic_hw_auto: Option<f32>,
+  /// When someone else (user, app) last changed the mic volume: the automatic gain waits.
+  pub mic_changed_at: Option<Instant>,
 
   // Track last applied values to avoid redundant COM calls
   last_applied_master_vol: f32,
@@ -115,6 +125,8 @@ impl ChatMixController {
       media_device_id: None,
       mic_device_id: None,
       mic_peak_level: 0.0,
+      mic_hw_auto: None,
+      mic_changed_at: None,
       last_applied_master_vol: initial_master_vol,
       last_applied_master_muted: initial_master_muted,
       last_applied_game_vol: 1.0,
@@ -194,36 +206,7 @@ impl ChatMixController {
       .map(|d| d.id.clone());
 
     // 2. Identify physical Master endpoint
-    let default_is_virtual = if let Some(def_id) = default_id {
-      devices
-        .iter()
-        .find(|d| d.id == def_id)
-        .map(|d| {
-          let n = d.name.to_lowercase();
-          n.contains("sonar") || n.contains("virtual") || n.contains("cable") || n.contains("game")
-        })
-        .unwrap_or(false)
-    } else {
-      false
-    };
-
-    if default_is_virtual {
-      // Pick first physical output device (non-virtual, non-sonar, e.g. Realtek)
-      self.master_device_id = devices
-        .iter()
-        .find(|d| {
-          let n = d.name.to_lowercase();
-          !n.contains("sonar")
-            && !n.contains("virtual")
-            && !n.contains("cable")
-            && !n.contains("steam")
-            && !n.contains("oculus")
-        })
-        .map(|d| d.id.clone())
-        .or_else(|| default_id.map(|s| s.to_string()));
-    } else {
-      self.master_device_id = default_id.map(|s| s.to_string());
-    }
+    self.master_device_id = physical_master_id(devices, default_id);
 
     // Initialize channel volumes directly from the resolved endpoints
     if let Some(ref id) = self.master_device_id {
@@ -350,9 +333,13 @@ impl ChatMixController {
     let mic_vol_opt =
       if let Some(ref id) = self.mic_device_id { get_endpoint_volume(id) } else { get_system_mic_volume() };
     if let Some((sys_mic_vol, sys_mic_muted)) = mic_vol_opt {
-      if (sys_mic_vol - self.mic_volume.min(1.0)).abs() > 0.015 {
+      let expected = self.mic_hw_auto.unwrap_or(self.mic_volume.min(1.0));
+      if (sys_mic_vol - expected).abs() > 0.015 {
+        // Someone else moved it: that is the volume they want, the automatic gain steps back.
         self.mic_volume = sys_mic_vol;
         self.last_applied_mic_vol = sys_mic_vol;
+        self.mic_hw_auto = None;
+        self.mic_changed_at = Some(Instant::now());
         changed = true;
       }
       if sys_mic_muted != self.last_applied_mic_muted {
@@ -375,6 +362,31 @@ impl ChatMixController {
     }
 
     changed
+  }
+
+  /// The automatic input gain sets the Windows mic volume to `level` (the wish stays).
+  pub fn set_mic_hw_auto(&mut self, device_id: &str, level: f32) {
+    set_endpoint_volume(device_id, level);
+    self.mic_hw_auto = Some(level);
+  }
+
+  /// Automatic input gain off: Windows gets the volume the user/app asked for back.
+  pub fn clear_mic_hw_auto(&mut self, device_id: &str) {
+    if self.mic_hw_auto.take().is_some() {
+      let level = self.mic_volume.min(1.0);
+      set_endpoint_volume(device_id, level);
+      self.last_applied_mic_vol = level;
+    }
+  }
+
+  /// Take over a wish + automatic level from another process (window start, service restart):
+  /// only while Windows still shows that automatic level, else someone changed it meanwhile.
+  pub fn adopt_mic_auto(&mut self, wish: f32, auto: f32) {
+    if (self.mic_volume - auto).abs() <= 0.015 {
+      self.mic_volume = wish;
+      self.last_applied_mic_vol = wish.min(1.0);
+      self.mic_hw_auto = Some(auto);
+    }
   }
 
   pub fn set_current_game(&mut self, exe_name: Option<String>) {
@@ -618,6 +630,21 @@ pub fn get_endpoint_volume(device_id: &str) -> Option<(f32, bool)> {
   }
 }
 
+/// Windows mic/speaker volume of an endpoint in dB (the gain it applies), and whether the device
+/// does it in hardware (only then does a lower volume prevent the converter from clipping).
+pub fn get_endpoint_volume_db(device_id: &str) -> Option<(f32, bool)> {
+  unsafe {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
+    let endpoint_vol: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
+    let db = endpoint_vol.GetMasterVolumeLevel().ok()?;
+    let hardware = endpoint_vol.QueryHardwareSupport().is_ok_and(|mask| mask & ENDPOINT_HARDWARE_SUPPORT_VOLUME != 0);
+    Some((db, hardware))
+  }
+}
+
 pub fn set_endpoint_volume(device_id: &str, level: f32) {
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -792,6 +819,28 @@ pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
   }
 }
 
+
+/// The physical output the Master channel controls and the echo reference is captured from:
+/// the Windows default output, or the first physical one when the default is a virtual device.
+pub fn physical_master_id(devices: &[AudioEndpointInfo], default_id: Option<&str>) -> Option<String> {
+  let virtual_name = |n: &str| n.contains("sonar") || n.contains("virtual") || n.contains("cable") || n.contains("game");
+  let default_is_virtual = default_id
+    .and_then(|def_id| devices.iter().find(|d| d.id == def_id))
+    .is_some_and(|d| virtual_name(&d.name.to_lowercase()));
+  if !default_is_virtual {
+    return default_id.map(|s| s.to_string());
+  }
+  // Pick first physical output device (non-virtual, non-sonar, e.g. Realtek)
+  devices
+    .iter()
+    .find(|d| {
+      let n = d.name.to_lowercase();
+      !n.contains("sonar") && !n.contains("virtual") && !n.contains("cable") && !n.contains("steam") && !n.contains("oculus")
+    })
+    .map(|d| d.id.clone())
+    .or_else(|| default_id.map(|s| s.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -829,5 +878,15 @@ mod tests {
     set_endpoint_volume(mic_id, initial.0);
     let restored = get_endpoint_volume(mic_id).unwrap();
     println!("Restored to: {:?}", restored);
+  }
+
+  #[test]
+  fn master_follows_a_physical_default_and_skips_a_virtual_one() {
+    let dev = |id: &str, name: &str| AudioEndpointInfo { id: id.into(), name: name.into(), is_default: false };
+    let devices = [dev("cable", "CABLE Input (VB-Audio Virtual Cable)"), dev("phones", "Headphones"), dev("monitor", "LG Monitor")];
+    assert_eq!(physical_master_id(&devices, Some("monitor")).as_deref(), Some("monitor"));
+    assert_eq!(physical_master_id(&devices, Some("phones")).as_deref(), Some("phones"));
+    assert_eq!(physical_master_id(&devices, Some("cable")).as_deref(), Some("phones"), "virtual default: first physical");
+    assert_eq!(physical_master_id(&devices, None), None);
   }
 }

@@ -38,7 +38,12 @@ impl eframe::App for GamersEqualizerApp {
       crate::ensure_daemon_running();
     }
 
-    // 1. Synchronize system master and mic volume from Windows in real time
+    // 1. Synchronize system master and mic volume from Windows in real time. A mic level the
+    // service's automatic input gain set is not the user's volume.
+    if let Some(h) = self.state.shm_header() {
+      let auto = h.mic_auto_gain_permille.load(std::sync::atomic::Ordering::Relaxed);
+      self.win_audio.chatmix.mic_hw_auto = (auto > 0).then(|| auto as f32 / 1000.0);
+    }
     if self.win_audio.chatmix.sync_from_system() {
       self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
     }
@@ -95,7 +100,16 @@ impl eframe::App for GamersEqualizerApp {
       if self.state.selected_chat_endpoint_id.is_none() {
         self.state.selected_chat_endpoint_id = self.win_audio.chatmix.chat_device_id.clone().or(current_sys_comms);
       }
-      if self.state.selected_mic_endpoint_id.is_none() {
+      // Keep the picked mic while it is connected (`bind_endpoints` just reset it to a guess).
+      let picked = self
+        .state
+        .selected_mic_endpoint_id
+        .clone()
+        .filter(|id| self.state.capture_endpoints.iter().any(|d| &d.id == id));
+      if let Some(id) = picked {
+        self.win_audio.chatmix.mic_device_id = Some(id);
+      } else {
+        // Shortcut: an unplugged pick is replaced (and saved) for good, not restored on replug.
         let mid = self
           .win_audio
           .chatmix
@@ -108,8 +122,9 @@ impl eframe::App for GamersEqualizerApp {
           self.win_audio.mic_stream.set_input_device(Some(id.clone()));
         }
       }
-      self.state.spatial_status = self.win_audio.dolby_guard.check_spatial_status();
+      self.state.spatial_checked_at = None;
     }
+    super::header::refresh_spatial(&mut self.state, &mut self.win_audio);
 
     // Echo reference follows the Master output (the stream reopens only when it changes).
     self.win_audio.mic_stream.set_reference_device(self.win_audio.chatmix.master_device_id.clone());
@@ -126,12 +141,25 @@ impl eframe::App for GamersEqualizerApp {
       });
     // Setup problems are shown right away on every tab, not hidden in the Mic tab.
     super::apo_banner::refresh(&mut self.state, &self.win_audio);
-    if super::apo_banner::has_problems(&self.state) {
+    super::setup::refresh(&mut self.state, &self.win_audio);
+    let mic_warning = super::apo_banner::has_mic_warning(&self.state);
+    let setup = super::setup::visible(&self.state);
+    let problems = super::apo_banner::has_problems(&self.state);
+    if mic_warning || setup || problems {
       egui::TopBottomPanel::top("health_bar")
         .show_separator_line(false)
         .frame(chrome.inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 0.0, bottom: 4.0 }))
         .show(ctx, |ui| {
-          super::apo_banner::render_health_bar(ui, &mut self.state, &self.win_audio);
+          // Most urgent first: someone is talking into a muted mic right now.
+          if mic_warning {
+            super::apo_banner::render_mic_warning(ui, &mut self.state);
+          }
+          if setup {
+            super::setup::render(ui, &mut self.state);
+          }
+          if problems {
+            super::apo_banner::render_health_bar(ui, &mut self.state, &self.win_audio);
+          }
         });
     }
     egui::SidePanel::left("nav")
@@ -140,7 +168,7 @@ impl eframe::App for GamersEqualizerApp {
       .show_separator_line(false)
       .frame(chrome.inner_margin(egui::Margin { left: 8.0, right: 8.0, top: 4.0, bottom: 8.0 }))
       .show(ctx, |ui| {
-        render_nav(ui, &mut self.state, &self.win_audio);
+        render_nav(ui, &mut self.state);
       });
     let page = chrome.inner_margin(egui::Margin { left: 24.0, right: 24.0, top: 8.0, bottom: 8.0 });
     egui::CentralPanel::default().frame(page).show(ctx, |ui| {
@@ -153,7 +181,7 @@ impl eframe::App for GamersEqualizerApp {
           // Own scroll state per page: with egui's default id all pages shared one, and the
           // Log page's "follow" offset (f32::MAX) left the other pages scrolled past their content.
           egui::ScrollArea::vertical().id_salt(("page", tab)).auto_shrink([false, false]).show(ui, |ui| match tab {
-            ActiveTab::Headphones => super::tab_headphones::render_tab_headphones(ui, &mut self.state, &self.win_audio),
+            ActiveTab::Headphones => super::tab_headphones::render_tab_headphones(ui, &mut self.state, &mut self.win_audio),
             ActiveTab::Settings => super::tab_settings::render_tab_settings(ui, &mut self.state),
             other => render_tab_eq(ui, &mut self.state, other),
           });
@@ -164,6 +192,7 @@ impl eframe::App for GamersEqualizerApp {
     // 4. Apply volume adjustments to live Windows audio sessions/endpoints & sync SHM
     self.win_audio.chatmix.apply_mix();
     self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
+    self.state.save_audio_settings_if_changed(ctx.input(|i| i.pointer.any_down()));
 
     // Request continuous repaint while window is visible for smooth meters
     ctx.request_repaint_after(std::time::Duration::from_millis(30));

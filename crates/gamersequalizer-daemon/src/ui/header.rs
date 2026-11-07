@@ -1,15 +1,18 @@
 //! Window frame in the style of Windows 11 Settings: a slim top bar (app, service status,
-//! quick headphone switch, master switch), a navigation pane on the left, and the output
-//! device card shown on the Mixer page.
+//! master switch), a navigation pane on the left, and the output device card and picker
+//! shared by the Headphones and Mixer pages.
 
 use super::state::{ActiveTab, AppState};
 use super::theme::{self, icons, Icon};
 use crate::i18n::{tk, tr, trf};
-use crate::win_audio::WinAudioSystem;
+use crate::win_audio::dolby_atmos::active_format;
+use crate::win_audio::{shell, SpatialAudioStatus, WinAudioSystem};
 use egui::{Color32, RichText, Ui};
-use gamersequalizer_common::profile::AudioMode;
+use std::time::{Duration, Instant};
 
 pub const NAV_WIDTH: f32 = 248.0;
+/// One spatial-audio activation + a few registry reads.
+const SPATIAL_RECHECK: Duration = Duration::from_secs(3);
 const BRAND: Color32 = Color32::from_rgb(255, 120, 40);
 
 /// One row of the navigation pane.
@@ -22,7 +25,12 @@ enum Nav {
 const NAV: [Nav; 10] = [
   Nav::Section(tk("Output")),
   Nav::Item(ActiveTab::Mixer, icons::VOLUME, tk("Mixer & device"), tk("Volumes per app group, output device, ChatMix")),
-  Nav::Item(ActiveTab::Headphones, icons::HEADPHONES, tk("Headphones"), tk("Correction for your headphones (AutoEQ)")),
+  Nav::Item(
+    ActiveTab::Headphones,
+    icons::HEADPHONES,
+    tk("Output & headphones"),
+    tk("Output device and the correction for your headphones (AutoEQ)"),
+  ),
   Nav::Item(ActiveTab::Game, icons::GAME, tk("Game"), tk("Game profiles, automatic game detection")),
   Nav::Item(ActiveTab::Chat, icons::CHAT, tk("Chat"), tk("Voice EQ for Discord & co., instead of the game profile")),
   Nav::Item(ActiveTab::Media, icons::MEDIA, tk("Media"), tk("Music / video EQ for browsers and players")),
@@ -39,6 +47,17 @@ const NAV: [Nav; 10] = [
 
 /// Top bar: always visible, only what is needed from every page.
 pub fn render_top_bar(ui: &mut Ui, state: &mut AppState) {
+  // The bar moves the window like a title bar: drag to move, double-click to maximize.
+  // Registered before the widgets, so the switch and status pill keep their own clicks;
+  // labels don't select text here, or the app name would swallow the drag.
+  let bar = ui.interact(ui.max_rect(), ui.id().with("window_drag"), egui::Sense::click_and_drag());
+  ui.style_mut().interaction.selectable_labels = false;
+  if bar.drag_started_by(egui::PointerButton::Primary) {
+    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+  } else if bar.double_clicked() {
+    let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+  }
   ui.horizontal(|ui| {
     ui.add_space(8.0);
     let brand = theme::adapt(ui, BRAND);
@@ -56,14 +75,12 @@ pub fn render_top_bar(ui: &mut Ui, state: &mut AppState) {
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
       ui.add_space(8.0);
       master_switch(ui, state);
-      ui.add_space(8.0);
-      headphone_switch(ui, state);
     });
   });
 }
 
 /// Left navigation pane with the window/service actions at the bottom.
-pub fn render_nav(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
+pub fn render_nav(ui: &mut Ui, state: &mut AppState) {
   ui.add_space(4.0);
   ui.spacing_mut().item_spacing.y = 2.0;
   for row in &NAV {
@@ -85,60 +102,21 @@ pub fn render_nav(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem)
     {
       state.active_tab = ActiveTab::Settings;
     }
-    ui.add_space(6.0);
-    let output = state
-      .endpoints
-      .iter()
-      .find(|e| Some(&e.id) == win_audio.chatmix.master_device_id.as_ref())
-      .map(|e| e.name.clone())
-      .unwrap_or_else(|| tr("Default output").to_string());
-    ui.horizontal(|ui| {
-      ui.add_space(12.0);
-      let c = theme::palette(ui).text_tertiary;
-      theme::icon_label(ui, icons::VOLUME, 12.0, c, theme::caption(super::truncate_chars(&output, 30)));
-    })
-    .response
-    .on_hover_text(trf("Current output: {}\nChange it on the Mixer & device page.", &[&output]));
   });
 }
 
-/// Output device, hijack lock, headphones/speakers mode and spatial sound status (Mixer page).
+/// Output device, hijack lock and spatial sound status (Headphones page).
 pub fn render_device_card(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   theme::card(ui, |ui| {
     ui.horizontal_wrapped(|ui| {
       let c = theme::palette(ui).text;
       theme::icon_label(ui, icons::SPEAKERS, 16.0, c, theme::strong(tr("Output device"), 14.0));
+      if let Some(id) = output_combo(ui, state, "output_device_combo", 340.0, 44) {
+        select_output(state, win_audio, id);
+      }
 
       let is_locked = win_audio.endpoint_lock.is_locked();
       let hijacks = win_audio.endpoint_lock.hijack_count();
-      let current_name = state
-        .endpoints
-        .iter()
-        .find(|e| Some(&e.id) == state.selected_endpoint_id.as_ref())
-        .map(|e| e.name.clone())
-        .unwrap_or_else(|| tr("Default System Output").to_string());
-
-      egui::ComboBox::from_id_salt("output_device_combo")
-        .selected_text(super::truncate_chars(&current_name, 44))
-        .width(340.0)
-        .show_ui(ui, |ui| {
-          for endpoint in &state.endpoints {
-            let selected = Some(&endpoint.id) == state.selected_endpoint_id.as_ref();
-            if ui.selectable_label(selected, &endpoint.name).clicked() {
-              state.selected_endpoint_id = Some(endpoint.id.clone());
-              win_audio.chatmix.master_device_id = Some(endpoint.id.clone());
-              let _ = win_audio.endpoint_lock.set_as_default_device(&endpoint.id);
-              // Picked here = intended: the tray must not report it as a lost default.
-              crate::health::remember_output(state.storage.base_dir(), &endpoint.id);
-              if is_locked {
-                win_audio.endpoint_lock.lock_device(endpoint.id.clone());
-              }
-              state.spatial_status = win_audio.dolby_guard.check_spatial_status();
-              win_audio.chatmix.sync_from_system();
-            }
-          }
-        });
-
       let p = theme::palette(ui);
       let lock_text = if is_locked {
         RichText::new(theme::with_icon(icons::LOCK, &trf("Locked ({} blocked)", &[&hijacks]))).color(p.ok)
@@ -162,26 +140,116 @@ pub fn render_device_card(ui: &mut Ui, state: &mut AppState, win_audio: &mut Win
     });
 
     ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-      ui.label(RichText::new(tr("Mode")).color(theme::palette(ui).text_secondary));
-      let is_hp = state.audio_mode == AudioMode::Headphones;
-      if ui.selectable_label(is_hp, theme::with_icon(icons::HEADPHONES, tr("Headphones"))).clicked() {
-        state.audio_mode = AudioMode::Headphones;
-      }
-      if ui.selectable_label(!is_hp, theme::with_icon(icons::SPEAKERS, tr("Speakers"))).clicked() {
-        state.audio_mode = AudioMode::Speakers;
-      }
-      ui.add_space(12.0);
-      let active = state.spatial_status.is_active();
-      let p = theme::palette(ui);
-      let color = if active { theme::adapt(ui, Color32::from_rgb(0, 180, 216)) } else { p.text_tertiary };
-      status_pill(ui, color, &format!("{}: {}", tr("Spatial sound"), tr(state.spatial_status.label())))
-        .on_hover_text(tr("Windows spatial sound on this device (Dolby Atmos, DTS:X, Windows Sonic). The headphone and game EQ run after it."));
-    });
+    render_spatial_row(ui, state);
   });
 }
 
+/// Re-reads spatial sound on the default output every `SPATIAL_RECHECK` (or right after
+/// `spatial_checked_at = None`). Call once per frame.
+pub fn refresh_spatial(state: &mut AppState, win_audio: &mut WinAudioSystem) {
+  if state.spatial_checked_at.is_some_and(|t| t.elapsed() < SPATIAL_RECHECK) {
+    return;
+  }
+  state.spatial_checked_at = Some(Instant::now());
+  state.spatial_status = win_audio.dolby_guard.check_spatial_status();
+  let output = win_audio.endpoint_lock.get_default_output_id();
+  let active = state.spatial_status.is_active();
+  state.spatial_format = output.as_deref().filter(|_| active).and_then(active_format);
+  // Learned by the background service (`health`); the window only reads it.
+  state.spatial_expected = output.as_deref().and_then(|id| crate::health::expected_spatial(state.storage.base_dir(), id));
+  state.spatial_output_id = output;
+}
+
+/// Output device picker (the Windows default output); returns the device picked this frame,
+/// to pass to `select_output`. Shared by the device card and the mixer's Master strip, so
+/// both change the same thing.
+pub fn output_combo(ui: &mut Ui, state: &AppState, id: &str, width: f32, max_chars: usize) -> Option<String> {
+  let current_name = state
+    .endpoints
+    .iter()
+    .find(|e| Some(&e.id) == state.selected_endpoint_id.as_ref())
+    .map(|e| e.name.clone())
+    .unwrap_or_else(|| tr("Default System Output").to_string());
+  let mut picked = None;
+  egui::ComboBox::from_id_salt(id)
+    .selected_text(super::truncate_chars(&current_name, max_chars))
+    .width(width)
+    .show_ui(ui, |ui| {
+      for endpoint in &state.endpoints {
+        let selected = Some(&endpoint.id) == state.selected_endpoint_id.as_ref();
+        if ui.selectable_label(selected, &endpoint.name).clicked() {
+          picked = Some(endpoint.id.clone());
+        }
+      }
+    })
+    .response
+    .on_hover_text(&current_name);
+  picked
+}
+
+/// Makes `id` the output: Windows default, Master, lock target and spatial sound check.
+pub fn select_output(state: &mut AppState, win_audio: &mut WinAudioSystem, id: String) {
+  state.selected_endpoint_id = Some(id.clone());
+  win_audio.chatmix.master_device_id = Some(id.clone());
+  let _ = win_audio.endpoint_lock.set_as_default_device(&id);
+  // Picked here = intended: the tray must not report it as a lost default.
+  crate::health::remember_output(state.storage.base_dir(), &id);
+  if win_audio.endpoint_lock.is_locked() {
+    win_audio.endpoint_lock.lock_device(id);
+  }
+  state.spatial_checked_at = None;
+  win_audio.chatmix.sync_from_system();
+}
+
 // --- private helpers ---------------------------------------------------------------------
+
+/// "Spatial sound: Dolby Atmos for Headphones" + a button to the Windows page where it is
+/// chosen. Warning color, icon and "Keep" when it is not the format the user had.
+fn render_spatial_row(ui: &mut Ui, state: &mut AppState) {
+  let active = state.spatial_status.is_active();
+  let current_name = match (&state.spatial_format, active) {
+    (Some(f), true) => f.label(tr("Active")).to_string(),
+    _ => tr(state.spatial_status.label()).to_string(),
+  };
+  // Off (with a known format before) or another format: the user's setting was lost.
+  let lost = match (&state.spatial_expected, &state.spatial_format) {
+    (Some(expected), Some(now)) => (expected.id != now.id).then_some(expected),
+    (Some(expected), None) if state.spatial_status == SpatialAudioStatus::Disabled => Some(expected),
+    _ => None,
+  };
+  let p = theme::palette(ui);
+  let mut keep = None;
+  ui.horizontal_wrapped(|ui| {
+    if let Some(expected) = lost {
+      let text = trf(
+        "Spatial sound: {} instead of {}",
+        &[&current_name, &expected.label(tr("your format"))],
+      );
+      ui.label(RichText::new(theme::with_icon(icons::WARNING, &text)).small().color(p.warn))
+        .on_hover_text(tr("Something changed spatial sound on this device (a Windows or driver update, another app). Switch it back in the Windows settings, or keep the new one."));
+      if let Some(now) = state.spatial_format.clone() {
+        if ui.small_button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
+          keep = Some(now);
+        }
+      }
+    } else {
+      let color = if active { theme::adapt(ui, Color32::from_rgb(0, 180, 216)) } else { p.text_tertiary };
+      status_pill(ui, color, &format!("{}: {}", tr("Spatial sound"), current_name))
+        .on_hover_text(tr("Windows spatial sound on this device (Dolby Atmos, DTS:X, Windows Sonic). The headphone and game EQ run after it."));
+    }
+    if ui
+      .small_button(tr("Change…"))
+      .on_hover_text(tr("Opens the Windows settings of this device, where spatial sound is chosen."))
+      .clicked()
+    {
+      shell::open_spatial_sound_settings();
+    }
+  });
+  if let (Some(format), Some(id)) = (keep, state.spatial_output_id.clone()) {
+    crate::health::remember_spatial(state.storage.base_dir(), &id, &format);
+    state.spatial_checked_at = None;
+  }
+}
 
 /// Colored dot + secondary text, the Windows way to show a state next to a title.
 fn status_pill(ui: &mut Ui, color: Color32, text: &str) -> egui::Response {
@@ -200,47 +268,20 @@ fn master_switch(ui: &mut Ui, state: &mut AppState) {
      noise suppression, EQ, boost). OFF = what you would hear without this app.",
   );
   let mut v = on;
-  let label = if on { tr("Processing on") } else { tr("All off (original sound)") };
+  let (title, detail) = if on {
+    (tr("Sound adjustments on"), tr("Headphone & game EQ, mic filters"))
+  } else {
+    (tr("Sound adjustments off"), tr("You hear the original sound, as without the app"))
+  };
   let p = theme::palette(ui);
   let clicked = ui.add(theme::Toggle(&mut v)).on_hover_text(hint).clicked();
-  ui.label(theme::strong(label, 14.0).color(if on { p.text } else { p.warn })).on_hover_text(hint);
+  ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.label(theme::strong(title, 14.0).color(if on { p.text } else { p.warn })).on_hover_text(hint);
+    ui.label(theme::caption(detail)).on_hover_text(hint);
+  });
   if clicked {
     state.output_eq.settings.enabled = !on;
     state.output_eq_do(|eq, shm| eq.save_settings(shm));
-  }
-}
-
-/// Quick headphone switch (remembered for the current output device).
-fn headphone_switch(ui: &mut Ui, state: &mut AppState) {
-  let current = state.output_eq.headphone_profile_name().map(str::to_string);
-  let mut picked: Option<Option<String>> = None;
-  let mut add = false;
-  egui::ComboBox::from_id_salt("top_headphones")
-    .selected_text(theme::with_icon(
-      icons::HEADPHONES,
-      &super::truncate_chars(current.as_deref().unwrap_or(tr("No correction")), 26),
-    ))
-    .width(240.0)
-    .show_ui(ui, |ui| {
-      if ui.selectable_label(current.is_none(), tr("No correction (flat)")).clicked() {
-        picked = Some(None);
-      }
-      for p in &state.output_eq.headphone_profiles {
-        if ui.selectable_label(current.as_deref() == Some(p.name.as_str()), &p.name).clicked() {
-          picked = Some(Some(p.name.clone()));
-        }
-      }
-      add = ui.selectable_label(false, format!("➕  {}", tr("Add headphones..."))).clicked();
-    })
-    .response
-    .on_hover_text(tr(
-      "Switch between your headphones. Remembered per output device: changing the output switches it too.",
-    ));
-  if let Some(choice) = picked {
-    state.output_eq_do(|eq, shm| eq.select_headphone(choice, shm));
-  }
-  if add {
-    state.active_tab = ActiveTab::Headphones;
-    state.headphones_ui.open_wizard();
   }
 }

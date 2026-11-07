@@ -8,30 +8,28 @@ pub mod health;
 pub mod i18n;
 pub mod i18n_cs;
 pub mod mic_usage;
+pub mod notify;
 pub mod output_eq;
 pub mod sonar_importer;
 pub mod tray;
 pub mod ui;
+pub mod uninstall;
 pub mod win_audio;
 
 use eframe::egui_wgpu::{self, wgpu};
-use gamersequalizer_common::shm::{ShmLayout, SHM_NAME};
 use log::{debug, error, info};
 use sonar_importer::{import_sonar_db, ProfileStorage, DEFAULT_SONAR_DB_PATH};
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use ui::{AppState, GamersEqualizerApp};
 use win_audio::WinAudioSystem;
-use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, INVALID_HANDLE_VALUE};
+use windows::core::w;
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
-use windows::Win32::System::Memory::{
-  CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
-};
+use windows::Win32::System::Memory::UnmapViewOfFile;
 use windows::Win32::System::Threading::CreateMutexW;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -93,7 +91,9 @@ fn run_background_daemon() {
   }
 
   // Open or create shared memory for IPC
-  let (shm_handle, shm_ptr) = open_or_create_shm();
+  let (shm_handle, shm_ptr) = ui::state::open_or_create_shm(storage.base_dir());
+  let mut last_mic_version = 0;
+  let mut last_default_out: Option<String> = None;
   if let Some(ptr) = shm_ptr {
     let header = unsafe { &mut (*ptr.as_ptr()).header };
     header.daemon_active.store(true, Ordering::SeqCst);
@@ -102,6 +102,15 @@ fn run_background_daemon() {
     let devices = win_audio.endpoint_lock.enumerate_playback_devices();
     let def_id = win_audio.endpoint_lock.get_default_output_id();
     win_audio.chatmix.bind_endpoints(&devices, def_id.as_deref());
+    last_default_out = def_id;
+    // Saved (or, if the window runs, current) channel levels instead of 100 %.
+    ui::audio_settings::restore_mixer(header, &mut win_audio.chatmix);
+    // The mic the user picked, if it is still connected.
+    let captures = win_audio.endpoint_lock.enumerate_capture_devices();
+    if let Some(id) = header.get_selected_mic_id().filter(|id| captures.iter().any(|d| &d.id == id)) {
+      win_audio.chatmix.mic_device_id = Some(id);
+    }
+    last_mic_version = header.mic_id_version.load(Ordering::Relaxed);
 
     header.master_volume_permille.store((win_audio.chatmix.master_volume * 1000.0).round() as u32, Ordering::Relaxed);
     header.master_muted.store(win_audio.chatmix.master_muted, Ordering::Relaxed);
@@ -126,10 +135,12 @@ fn run_background_daemon() {
   win_audio.mic_stream.set_reference_device(win_audio.chatmix.master_device_id.clone());
   win_audio.mic_stream.start();
 
-  let mut last_mic_version = 0;
   let mut last_volume_sync: Option<Instant> = None;
+  let mut last_output_check: Option<Instant> = None;
   let mut last_session_mix: Option<Instant> = None;
   let mut last_mix_inputs = None;
+  // Windows mic volume as the leveler's input gain, stepped at the extremes only.
+  let mut mic_gain = win_audio::mic_gain::MicGainLink::default();
 
   // Notification-area icon: the window "hides to tray" by closing, the service keeps the icon.
   let mut tray_host = tray::TrayHost::new();
@@ -170,11 +181,30 @@ fn run_background_daemon() {
       if cur_mic_ver != last_mic_version {
         last_mic_version = cur_mic_ver;
         if let Some(new_mic_id) = header.get_selected_mic_id() {
+          let old = win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
+          mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
           win_audio.chatmix.mic_device_id = Some(new_mic_id.clone());
           win_audio.mic_stream.set_input_device(Some(new_mic_id));
         }
       }
 
+      // The Windows default output changed (in Windows, in the window, in another app): the
+      // Master channel and the echo reference follow it. Only the output is re-resolved; the
+      // mic choice and levels stay (`bind_endpoints` would reset them). Before this the service
+      // kept capturing the reference from the output it started with.
+      if last_output_check.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL) {
+        last_output_check = Some(Instant::now());
+        let default_out = win_audio.endpoint_lock.get_default_output_id();
+        if default_out.is_some() && default_out != last_default_out {
+          let devices = win_audio.endpoint_lock.enumerate_playback_devices();
+          let master = win_audio::chatmix::physical_master_id(&devices, default_out.as_deref());
+          if master != win_audio.chatmix.master_device_id {
+            info!("[GamersEqualizer] default output changed: Master and echo reference now {:?}", master);
+            win_audio.chatmix.master_device_id = master;
+          }
+          last_default_out = default_out;
+        }
+      }
       // Follow output device changes for the echo reference (reopens only on change).
       win_audio.mic_stream.set_reference_device(win_audio.chatmix.master_device_id.clone());
 
@@ -182,6 +212,8 @@ fn run_background_daemon() {
       let sync_due = last_volume_sync.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL);
       if sync_due {
         last_volume_sync = Some(Instant::now());
+        // The wish (may be a boost > 100 %) is what the window wrote; Windows only shows <= 100 %.
+        win_audio.chatmix.mic_volume = header.mic_volume_permille.load(Ordering::Relaxed) as f32 / 1000.0;
       }
       if sync_due && win_audio.chatmix.sync_from_system() {
         header
@@ -196,6 +228,12 @@ fn run_background_daemon() {
         header.media_muted.store(win_audio.chatmix.media_muted, Ordering::Relaxed);
         header.mic_volume_permille.store((win_audio.chatmix.mic_volume * 1000.0).round() as u32, Ordering::Relaxed);
         header.mic_muted.store(win_audio.chatmix.mic_muted, Ordering::Relaxed);
+      }
+      if sync_due {
+        let mic_id = win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
+        if mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref()) {
+          app_state.save_audio_settings_if_changed(false);
+        }
       }
 
       // 2. Read sub-bus levels from SHM for background session scaling
@@ -307,6 +345,13 @@ fn run_gui_mode() {
   let devices = win_audio.endpoint_lock.enumerate_playback_devices();
   let def_id = win_audio.endpoint_lock.get_default_output_id();
   win_audio.chatmix.bind_endpoints(&devices, def_id.as_deref());
+  // The service's (or the saved) channel levels; the window would otherwise reset them to 100 %.
+  if let Some(h) = state.shm_header() {
+    ui::audio_settings::restore_mixer(h, &mut win_audio.chatmix);
+  }
+  if let Some(id) = state.selected_mic_endpoint_id.clone() {
+    win_audio.chatmix.mic_device_id = Some(id);
+  }
 
   if let Some(ref mid) = win_audio.chatmix.master_device_id {
     state.selected_endpoint_id = Some(mid.clone());
@@ -406,41 +451,5 @@ fn wgpu_backends() -> wgpu::Backends {
   } else {
     info!("[GamersEqualizer] graphics: no DX12 GPU, using Vulkan/GL");
     wgpu::Backends::PRIMARY | wgpu::Backends::GL
-  }
-}
-
-fn open_or_create_shm() -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
-  unsafe {
-    let wide_name: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-    let size_bytes = ShmLayout::total_size_bytes() as u32;
-
-    let handle =
-      match CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, size_bytes, PCWSTR(wide_name.as_ptr())) {
-        Ok(h) => h,
-        Err(_) => return (None, None),
-      };
-
-    let map_ptr = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size_bytes as usize);
-    if map_ptr.Value.is_null() {
-      let _ = CloseHandle(handle);
-      return (None, None);
-    }
-
-    let ptr = NonNull::new(map_ptr.Value as *mut ShmLayout);
-    if let Some(p) = ptr {
-      let header = &mut (*p.as_ptr()).header;
-      if header.magic != gamersequalizer_common::shm::SHM_MAGIC {
-        header.init_defaults();
-        if let Some((vol, mute)) = win_audio::chatmix::get_system_master_volume() {
-          header.master_volume_permille.store((vol * 1000.0).round() as u32, Ordering::Relaxed);
-          header.master_muted.store(mute, Ordering::Relaxed);
-        }
-        if let Some((vol, mute)) = win_audio::chatmix::get_system_mic_volume() {
-          header.mic_volume_permille.store((vol * 1000.0).round() as u32, Ordering::Relaxed);
-          header.mic_muted.store(mute, Ordering::Relaxed);
-        }
-      }
-    }
-    (Some(handle), ptr)
   }
 }

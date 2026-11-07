@@ -14,7 +14,7 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-  DispatchMessageW, FindWindowW, IsIconic, PeekMessageW, PostMessageW, SetForegroundWindow, ShowWindow,
+  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, PeekMessageW, PostMessageW, SetForegroundWindow, ShowWindow,
   TranslateMessage, MSG, PM_REMOVE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE,
 };
 
@@ -222,6 +222,11 @@ impl Default for TrayHost {
 /// The open main window, if any.
 pub fn find_window() -> Option<HWND> {
   unsafe { FindWindowW(PCWSTR::null(), &HSTRING::from(WINDOW_TITLE)) }.ok().filter(|h| !h.is_invalid())
+}
+
+/// The main window is open and the active window (its own bar shows problems; no notification).
+pub fn window_in_front() -> bool {
+  find_window().is_some_and(|h| unsafe { GetForegroundWindow() } == h)
 }
 
 /// Brings an existing window to the front (restoring it if minimized). Returns false if none is open.

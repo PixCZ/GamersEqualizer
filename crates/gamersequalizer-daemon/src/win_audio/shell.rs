@@ -30,6 +30,14 @@ pub fn open_sound_settings() {
   }
 }
 
+/// Windows Settings page of the default output device, with its "Spatial sound" choice.
+pub fn open_spatial_sound_settings() {
+  // SAFETY: constant NUL-terminated strings.
+  unsafe {
+    ShellExecuteW(None, w!("open"), w!("ms-settings:sound-defaultoutputproperties"), None, None, SW_SHOWNORMAL);
+  }
+}
+
 /// Modal "open" dialog for `.txt` files. None if cancelled.
 pub fn pick_text_file(title: &str) -> Option<PathBuf> {
   let mut file = [0u16; 1024];

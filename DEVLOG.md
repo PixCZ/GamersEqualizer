@@ -556,3 +556,180 @@ First live run (Brave playing music, The Division 2 in the background):
   its mtime changes (checked at most once a second). The router re-reads each session's channel on every
   refresh, so a move reaches the chat/media EQ within about 1 s.
 - Limit: the assignment is per exe, not per window/tab (all Brave tabs share one channel).
+
+## Milestone 22: Whisper analysis, learning voice leveler (2026-11-06)
+
+Whisper analysis on own recordings (in git-ignored `test_data/private/`; one contains licensed music and never
+leaves the machine). Reports: `docs/mic-processing-report.md`, `docs/whisper-step1-results.md`. Tests
+(`#[ignore]`, need the private files): `scenario_report`, `whisper_probe`, `whisper_sweep`, `vad_timeline`,
+`leveler_report`.
+
+- The RNNoise voice detector (both gate keys) never hears whisper: probability ~0, gain or lower thresholds
+  don't help. A closed gate takes 12 dB off it.
+- The models themselves lose whisper (energy after a 100 Hz low cut, no gate): DFN3 -8..-11 dB, DPDFNet
+  -11..-33 dB, RNNoise -1..-4.5 dB. DFN3 loses it even at strength 0.25.
+- Gate keys tried and rejected: DFN3 `lsnr` (higher in a quiet room than on whisper) and output energy over a
+  tracked floor (48 variants; none keeps the gate shut in a quiet room without losing whisper).
+- `DF_MIN_DB_THRESH = -20` is below DFN3's lowest `lsnr` (-15): that stage never runs.
+
+**Learning voice leveler** (`mic-vst/src/voice_leveler.rs`): new chain stage after the voice EQ, before
+boost/limiter, on by default. Mic tab card "Stage 4: Voice leveler" (toggle + current gain).
+- Learns the speech level only from frames the input voice detector heard as speech. The flag is delayed by
+  the denoiser's latency + lookahead (`AiVoiceIsolator::heard_voice`, `output_lead_samples`).
+- Power mean of speech frames: rate 1/n (fast first, then ever slower) up to 30 s of speech, then fixed 1/3000.
+  After 3 s of speech a frame counts at most 6 dB from the estimate (shouts, coughs).
+- Gain = target minus the level, -6..+24 dB, ~100 ms smoothing; constant between words. Target is a Mic tab
+  slider (-36..-12 dBFS, default -24, saved in `audio_settings.json`).
+- The chain lives as long as the mic stream (APO: LockForProcess .. UnlockForProcess, i.e. while some app has
+  the mic open). The learned level is saved per microphone in `%APPDATA%\GamersEqualizer\voice_level_cache.json`
+  (by `ApoLink`, when it moved 0.5 dB, at most every 10 s) and handed back to the next stream: the first word
+  gets the right gain, and the remembered level counts as only 1 s of speech, so the first sentences can still
+  move it quickly. "Learn again" forgets it. Shortcut: the in-process bridge path doesn't persist it.
+- SHM v10: `mic_leveler_enabled`, `mic_leveler_target_db_x10`, `mic_leveler_reset_seq` (GUI -> DSP, mirrored),
+  `mic_leveler_saved_level_db_x10` (daemon -> DSP), `mic_leveler_gain_db_x10`, `mic_leveler_level_db_x10`
+  (DSP -> GUI/daemon).
+- Measured (`leveler_report`, own voice, RNNoise): output voice -21.7..-24.1 dBFS at the recorded level and
+  -23.0..-24.0 with the input 12 dB lower (gain +7.5 / +19.6 dB). At -24 dB input it hits the +24 dB cap.
+- **Settings change = learn again, fast.** When any setting before the leveler changes (Windows mic volume,
+  echo cancellation on/off, AI strength, gate, the running model incl. an overload fallback, voice EQ),
+  `VoiceLeveler::relearn` restarts only the learning rate: the learned level and the gain stay, the level
+  just counts as 0.3 s of speech, so the rate is 1/n again (and the outlier clamp off until 3 s). The level
+  saved from an earlier stream is not taken back. Test, settled at the slowest rate: input +10 dB -> within
+  1.5 dB of the target after 1-2 s of speech; input -10 dB -> gain +7 dB of the 10 after 3 s (without the
+  restart: under 1 dB). The boost (> 100 %) and the target come after/inside the leveler and don't trigger
+  it. A slider drag restarts it every block until it is released. (The Windows mic volume no longer
+  triggers it: see milestone 23.)
+- Slowest learning is capped: the rate never drops under 1/3000 per speech frame (memory ~30 s of speech).
+  Limit: as a power mean it follows a louder voice faster (~45 s of speech for +10 dB) than a softer one
+  (~100 s for -10 dB); a setting change no longer depends on that.
+- Not verified live yet: needs the app and the APO rebuilt (`dev-rebuild.ps1 -Apo`) and the APO reinstalled
+  (layout changed).
+
+## Milestone 23: Mic volume around the leveler, automatic input gain (2026-11-06)
+
+With the leveler on, the Windows mic volume used to be undone by it (it sits before the APO), and
+apps with their own gain control (Teams, Zoom, Chrome/WebRTC) move exactly that volume: two gain
+controls fighting. Now the volume has two separate jobs.
+
+- **The volume is how loud others hear you.** The daemon reads the endpoint volume in dB
+  (`GetMasterVolumeLevel`) every 250 ms -> `mic_input_gain_db_x10`. The leveler learns the level
+  without it (`VoiceLeveler::set_input_gain_db`), so a volume change is compensated exactly and at once,
+  with no relearning (test: -10 dB -> on target within 0.5 s, learned level unchanged). Stage 5 then applies
+  the wish (`mic_volume_permille`, 0..300 %) after the leveler: 100 % = the target, 50 % = 6 dB under it,
+  200 % = 6 dB over. When an app's gain control lowers the mic, the output really gets quieter and the app
+  settles. Without the leveler nothing changed (Windows volume + boost > 100 %).
+- **Automatic input gain** (`win_audio::mic_gain`): the daemon moves the Windows volume itself, only at the
+  extremes, to keep the signal out of clipping and out of the noise. Dead band: while the leveler's gain
+  stays in its range and nothing clips, the volume stays wherever it is.
+  - Down 15 % on clipping: 50 clipped raw samples (|x| >= 0.98, counted by the DSP -> `mic_input_clips`)
+    within 10 s, at most every 3 s.
+  - Up 10 % after 20 s of speech (`mic_speech_ms`) with the leveler at +18 dB or more; down 10 % after 20 s at
+    -5 dB or less (its cut cap). At most one step per 30 s.
+  - Never under 20 % or over 100 %. Steps only in a pause (no speech since the last tick), because the DSP
+    learns the new dB a moment after Windows applies it.
+  - Hysteresis by step size: after a step the leveler needs ~that much less, far from the edge.
+  - Only on devices with a hardware volume (`QueryHardwareSupport`); a software volume scales after the
+    converter, which neither prevents clipping nor improves the noise. Off with the leveler, the master
+    bypass or mute: Windows gets the wish back.
+- **Ours or someone else's:** `ChatMixController::mic_hw_auto` is the level the automatic gain set. Windows
+  showing exactly that = ours; anything else = the user or an app: it becomes the wish, the automatic level
+  is dropped and it waits 30 s. The window learns the automatic level from `mic_auto_gain_permille` (SHM v11)
+  so it doesn't read it as the user's volume. The daemon now takes the wish from shared memory each tick
+  (before it only wrote it, so a boost set in the window could be overwritten by the daemon's 100 %).
+- Saved in `audio_settings.json` (`mic_auto_gain_permille` + `mic_auto_wish_permille`); on start the wish
+  comes back only while Windows still shows that automatic level.
+- Mic tab: the sensitivity caption explains the new meaning with the leveler on and shows the automatic
+  level when one is set.
+- Limits / shortcuts: "ours" is recognized by the level, not by Windows' event context (polling, no COM
+  callback): someone setting exactly our level in the same 250 ms is read as ours. The volume steps are in
+  Windows slider units, whose dB per step depends on the device (the leveler gets the real dB, so that only
+  changes the step size). Microphone boost (+10/+20/+30 dB in the driver) is not touched. The saved leveler
+  level from v10 was learned with the volume in it; the first sentences correct it.
+- Not verified live: needs `dev-rebuild.ps1 -Apo` and the APO reinstalled (SHM v11).
+
+## Milestone 24: Debug capture of the mic chain (2026-11-06)
+
+Real data for tuning the AEC (and the rest of the chain) without guessing: the APO records every stage,
+sample-aligned, as it runs inside audiodg.
+
+- Cargo feature `debug-capture` (mic-vst, forwarded by the APO crate), `dev-rebuild.ps1 -Apo -DebugCapture`.
+  Without it the code is not compiled in; the only always-on addition is one `Option<u32>` per block
+  (the AEC's reference shift).
+- The APO creates `Global\GamersEqualizer_DebugCapture_v1` (~96 MB pagefile-backed, physical pages only when
+  written; layout in `gamersequalizer_common::debug_capture`). The tool sets `Requested`, the first mic stream
+  claims it (`Recording`), writes per block and sets `Done` at the target length (max 60 s).
+- Tool: `cargo run --release -p gamersequalizer-apo --example debug_capture -- [seconds] [out_dir]`, default
+  `test_data/private/captures/<UTC time>/` (git-ignored). Writes mono f32 48 kHz WAVs:
+  `01_mic_raw`, `02_ref_at_mic` (reference at mic time, no echo delay: lets a new AEC do its own delay
+  search), `03_ref_aec` (as fed to the AEC), `04_after_aec`, `05_after_denoise`, `06_after_eq`,
+  `07_after_leveler`, `08_out`; `vars.tsv` (34 columns per block: AEC state, delay, ERLE, double talk, model,
+  gate, voice detector, leveler, gains, load); `info.txt` (chain constants + column meanings).
+- Limits: chain rate only (a 44.1 kHz device is recorded after the resampler, first channel); `load`
+  includes the capture's own writes; the stall timeout (3 s without frames) saves a partial capture; with
+  several mics streaming, the first one to see the request records.
+- Not verified live yet: needs the APO built with the feature and reinstalled (admin).
+
+## Milestone 25: Echo canceller rewritten as MDF with residual-echo step control (2026-11-07)
+
+The first live debug captures showed the old NLMS AEC made the mic **louder** while audio played
+(+5..+15 dB, ERLE <= 5 dB). The offline replay (`aec::tests::capture_replay`, ignored, `AEC_CAPTURE=<dir>`)
+reproduced it exactly; a control with the real reference through a known path plus real room noise was
+amplified too (-58.2 -> -43.8 dB) while textbook NLMS on the same data was not. Cause: the output used a
+frozen copy of fast-fluctuating NLMS weights (a copy refreshed every block amplified as well).
+
+- `aec.rs` is now a multidelay block frequency-domain filter (MDF, Speex's structure): 5 ms frames
+  (240, real FFT 480 via `realfft`, already in the tree), 5 partitions = 1200 taps (25 ms), pre-emphasis 0.9,
+  gradient constraint on one partition per frame.
+- Learning rate per bin from the residual echo estimate (Valin 2007: leakage = correlation of error and echo
+  power fluctuations): fast with echo only, almost frozen when the error is near-end. No Geigel detector.
+  Speex's extra `0.3 x RER` floor per bin is left out: it let a low voice tone (small after pre-emphasis)
+  drive adaptation and the echo leaked during double talk.
+- Foreground/background with Speex's variance tests; plus a guard: output smoothed power > mic + 3 dB ->
+  both filters restart (an AEC may fail to remove echo, it must never add noise).
+- Blocks that are multiples of 240 pass with zero latency; other sizes switch once to a 5 ms buffer.
+- API unchanged except `new(taps)` (no step size). `is_double_talk` now means "error mostly near-end while
+  audio plays" (residual-to-error ratio < 0.05), shown as before.
+- Results: capture 2026-11-07 09:16 replayed never louder than the raw mic (old: up to +15 dB); control
+  -58.2 -> -61.6 dB with room noise alone at -61.8 (echo essentially gone). CPU 0.12 % of a core
+  (old ~1.4 %). Tests: weak echo under speech-like audio never louder (regression, old: +4.4 dB), room
+  response > 20 dB, double talk keeps voice (< 1 dB change) and echo cancelled > 15 dB, quiet voice under
+  loud reference > 20 dB, relearn after a path change > 15 dB, latency 0 / one frame.
+- Not verified live yet (APO reinstall). The capture had weak echo (at room-noise level), so real
+  suppression on loud speakers is still unmeasured: next capture with louder speakers.
+
+## Milestone 26: Echo reference and delay follow an output switch (2026-11-07)
+
+Capture 2026-11-07 10:11 (monitor speakers over HDMI, two switches during the minute) showed two gaps:
+
+- The daemon never rebound the echo reference when the Windows default output changed: after switching
+  to the monitor the reference stayed on the headphones (silent). Now the daemon loop checks the default
+  output every 250 ms and moves Master + reference to it (`chatmix::physical_master_id`, skips virtual
+  devices). Verified live: the loopback reopens within ~20-50 ms.
+- The APO kept the old output's echo delay: 5 s after monitor -> headphones (272 instead of 46 samples)
+  and 3 s back; meanwhile the headphone echo passed (correlation 0.74 -> 0.37). The daemon also saved that
+  stale delay under the new device's key (`aec_delay_cache.json` held 252 for the headphones).
+  Fix (shared memory v12): the daemon bumps `aec_reference_seq` after storing the new output's cached
+  delay; the APO then drops its delay lock (`DelayEstimator::forget_lock`, no allocation), resets the AEC
+  and warm-starts from that cached delay. It echoes the seq in `aec_reference_seq_seen`, and the daemon
+  saves a delay only when that matches. The in-process bridge already restarted on a reference change.
+- HDMI monitor delay ~250-320 samples (5-7 ms) vs headphones 46: well inside the 400 ms search.
+- Not verified live yet: needs the APO reinstalled (layout change).
+
+## Milestone 27: DeepFilterNet 3 stops ducking unvoiced speech, DPDFNet delay fixed (2026-11-07)
+
+Capture 2026-11-07 10:44 (60 s, model switched live RNNoise -> DFN3 -> DPDFNet), all three models then
+replayed offline on the raw mic. No fallback, CPU fine (DFN3 5 %, DPDFNet 13 % median per block).
+
+- DFN3 ducked clean speech by 10-15 dB, broadband and choppy (hop by hop), mostly unvoiced frames
+  (s, f, breath): 20 % of loud unvoiced frames lost > 6 dB (DPDFNet 11 %, RNNoise 3 %), voiced 4.9 %.
+  Its own local SNR rated those frames 20-29 dB, so it was the ERB mask, not the low-SNR zeroing that
+  `DF_MIN_DB_THRESH` handles. `DF_MAX_DB_ERB_THRESH` 30 -> 25 (frames above it pass untouched):
+  unvoiced 19.8 -> 10.5 %, voiced 4.9 -> 1.5 %, pause suppression in a quiet room 4.9 -> 3.2 dB.
+  Synthetic speech-over-keys report and key suppression unchanged. DPDFNet still removes far more in
+  pauses (34 dB) and stays the better pick.
+- DPDFNet waited for a full 960-sample window before its first frame, so its delay depended on the block
+  size: 2400 samples at the APO's 480-frame blocks, 2880 (the constant) at 441. The gate and leveler
+  trust the constant, so at 48 kHz they ran 10 ms late. `in_buf` now starts with one hop of zeros:
+  2880 for every block size, like DFN3 (one hop of buffering). Regression: the latency test now runs
+  441 / 480 / 96 / 144-frame blocks (failed for DPDFNet at 480 before).
+- Not verified live yet: needs the APO reinstalled.

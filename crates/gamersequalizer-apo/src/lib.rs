@@ -48,12 +48,13 @@ use std::ffi::c_void;
 use std::mem::{offset_of, size_of};
 use std::ptr::{addr_of_mut, null_mut};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::time::Instant;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
-use gamersequalizer_common::shm::{ShmHeader, APO_SHM_NAME, REF_SAMPLE_RATE};
+use gamersequalizer_common::shm::{OwnerWatch, ShmHeader, APO_SHM_NAME, REF_SAMPLE_RATE};
 use gamersequalizer_common::streams::{StreamBus, StreamInfo};
 use gamersequalizer_mic_vst::{GamersEqualizerPlugin, SharedMemoryClient};
 use rate_bridge::RateBridge;
@@ -164,6 +165,8 @@ struct StreamProcessor {
   /// Processed copy while crossfading. Grows (allocates) only if the engine sends a
   /// larger buffer than before.
   scratch: Vec<f32>,
+  /// No live owner (see `OwnerWatch`): treated like the master switch, the EQ fades out.
+  owner: OwnerWatch,
   failed: bool,
 }
 
@@ -179,6 +182,7 @@ struct OutputProcessor {
   version: Option<u32>,
   /// Anything to do (bands or a preamp); false = pass through.
   active: bool,
+  owner: OwnerWatch,
   failed: bool,
 }
 
@@ -192,6 +196,9 @@ struct MicProcessor {
   /// Set after a panic in the chain: pass audio through from then on.
   failed: bool,
   clock: MicClock,
+  owner: OwnerWatch,
+  /// Pass through unless a daemon owns the mapping. Only tests turn it off (no daemon there).
+  follow_owner: bool,
 }
 
 /// Capture time of each block from a sample counter, slowly steered towards the raw
@@ -662,6 +669,7 @@ impl StreamProcessor {
         wet: 0.0,
         fade_step: 1.0 / (STREAM_FADE_SECONDS * sample_rate.max(1.0)),
         scratch: Vec::with_capacity(4096),
+        owner: OwnerWatch::default(),
         failed: false,
       }
     }))
@@ -694,8 +702,9 @@ impl StreamProcessor {
 
   fn process_eq(&mut self, buf: &mut [f32], channels: usize, bus: StreamBus) {
     let h: &ShmHeader = &self.shm.layout().header;
+    let owned = self.owner.live(h, Instant::now());
     let target = match bus.eq_index().and_then(|i| h.stream_eq.get(i)) {
-      Some(eq) if !h.master_bypass.load(Ordering::Relaxed) => Some((bus, eq.version.load(Ordering::Acquire))),
+      Some(eq) if owned && !h.master_bypass.load(Ordering::Relaxed) => Some((bus, eq.version.load(Ordering::Acquire))),
       _ => None,
     };
     match (self.built, target) {
@@ -781,6 +790,7 @@ impl OutputProcessor {
       limiter: PeakLimiter::new(sample_rate),
       version: None,
       active: false,
+      owner: OwnerWatch::default(),
       failed: false,
     }))
     .ok()
@@ -805,7 +815,8 @@ impl OutputProcessor {
     h.out_apo_blocks.fetch_add(1, Ordering::Relaxed);
     h.out_apo_sample_rate.store(self.sample_rate as u32, Ordering::Relaxed);
     h.out_apo_channels.store(channels as u32, Ordering::Relaxed);
-    if h.master_bypass.load(Ordering::Relaxed) {
+    // Nobody's settings to apply (app not running for the user at the console): untouched.
+    if !self.owner.live(h, Instant::now()) || h.master_bypass.load(Ordering::Relaxed) {
       return;
     }
     let version = h.out_eq_version.load(Ordering::Acquire);
@@ -845,6 +856,10 @@ impl MicProcessor {
       let shm = SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL)).ok();
       let mut plugin = GamersEqualizerPlugin::with_shm(REF_SAMPLE_RATE as f32, shm);
       plugin.preload_selected_model();
+      #[cfg(feature = "debug-capture")]
+      if let Ok(map) = gamersequalizer_mic_vst::debug_capture::DebugCaptureMap::create(APO_SHM_SDDL) {
+        plugin.attach_debug_capture(map, rate);
+      }
       MicProcessor {
         plugin,
         mono_in: vec![0.0; 4096],
@@ -852,6 +867,8 @@ impl MicProcessor {
         bridge,
         failed: false,
         clock: MicClock::new(rate),
+        owner: OwnerWatch::default(),
+        follow_owner: true,
       }
     }))
     .ok()
@@ -869,7 +886,11 @@ impl MicProcessor {
       self.mono_out.resize(frames, 0.0);
     }
     let qpc_hns = self.clock.next(qpc_hns, frames as u64);
-    let Self { plugin, mono_in, mono_out, bridge, failed, .. } = self;
+    // Nobody's settings to apply (app not running for the user at the console): the raw mic.
+    let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, .. } = self;
+    if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, Instant::now())) {
+      return;
+    }
     let (Some(input), Some(output)) = (mono_in.get_mut(..frames), mono_out.get_mut(..frames)) else {
       return;
     };
@@ -1124,7 +1145,15 @@ mod tests {
   fn chain_writes_processed_mono_to_every_channel() {
     // In a user test process the Global mapping can't be created: the chain runs without it.
     let mut processor = MicProcessor::create(48_000).unwrap();
-    let mut buf: Vec<f32> = (0..960).flat_map(|i| [((i as f32) * 0.05).sin() * 0.3, 0.9]).collect();
+    let input: Vec<f32> = (0..960).flat_map(|i| [((i as f32) * 0.05).sin() * 0.3, 0.9]).collect();
+
+    // No daemon owns the mapping: the raw mic, untouched.
+    let mut buf = input.clone();
+    processor.process(&mut buf, 2, now_hns());
+    assert_eq!(buf, input);
+
+    processor.follow_owner = false;
+    let mut buf = input;
     for _ in 0..20 {
       processor.process(&mut buf, 2, now_hns());
     }
@@ -1137,6 +1166,7 @@ mod tests {
     // 44.1 kHz USB mics, 16/8 kHz Bluetooth headsets, 96 kHz interfaces.
     for rate in [8_000u32, 16_000, 44_100, 96_000] {
       let mut processor = MicProcessor::create(rate).unwrap();
+      processor.follow_owner = false;
       assert!(processor.bridge.is_some(), "{rate} Hz needs the resampling bridge");
       let frames = rate as usize / 100;
       for block in 0..50 {
@@ -1172,8 +1202,14 @@ mod tests {
     assert_eq!(buf, sine(0.1));
     assert_eq!(h.out_apo_blocks.load(Ordering::Relaxed), 1);
 
-    // +12 dB at 1 kHz with a -6 dB preamp: ~+6 dB on both channels.
+    // +12 dB at 1 kHz with a -6 dB preamp, but no daemon beating: still untouched.
     h.write_out_eq(&[BiquadBand { gain_db: 12.0, ..BiquadBand::default() }], -6.0);
+    let mut buf = sine(0.1);
+    processor.process(&mut buf, 2);
+    assert_eq!(buf, sine(0.1));
+
+    // The owner beats: ~+6 dB on both channels.
+    h.owner_beat.fetch_add(1, Ordering::Release);
     let mut buf = sine(0.1);
     processor.process(&mut buf, 2);
     let gain_db = 20.0 * (peak(&buf) / 0.1).log10();
@@ -1214,7 +1250,8 @@ mod tests {
     assert_eq!(out, dry);
     assert!(table.slots[index].frames.load(Ordering::Relaxed) >= 480);
 
-    // Paired with chat (-12 dB at 1 kHz): fades in over 20 ms, then -12 dB.
+    // Paired with chat (-12 dB at 1 kHz), owner beating: fades in over 20 ms, then -12 dB.
+    h.owner_beat.fetch_add(1, Ordering::Release);
     h.stream_eq[0].write(&[BiquadBand { gain_db: -12.0, ..BiquadBand::default() }], 0.0);
     table.slots[index].bus.store(StreamBus::Chat.to_u32(), Ordering::Relaxed);
     let (_, first) = block(&mut p);

@@ -27,38 +27,9 @@ impl SharedMemoryClient {
   /// e.g. so audiodg (LOCAL SERVICE) and the logged-on user share a Global mapping.
   /// A fresh mapping gets default settings.
   pub fn create_named(name: &str, sddl: Option<&str>) -> Result<Self, String> {
-    let wide_name = wide(name);
-    let size_bytes = ShmLayout::total_size_bytes() as u32;
-    // SAFETY: Win32 calls with owned, NUL-terminated buffers; the descriptor is freed below.
+    // SAFETY: the handle is a fresh file mapping of the layout's size.
     unsafe {
-      let mut descriptor = PSECURITY_DESCRIPTOR::default();
-      if let Some(sddl) = sddl {
-        let wide_sddl = wide(sddl);
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-          PCWSTR(wide_sddl.as_ptr()),
-          SDDL_REVISION_1,
-          &mut descriptor,
-          None,
-        )
-        .map_err(|e| format!("invalid SDDL: {e}"))?;
-      }
-      let attributes = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: descriptor.0,
-        bInheritHandle: BOOL(0),
-      };
-      let result = CreateFileMappingW(
-        INVALID_HANDLE_VALUE,
-        sddl.map(|_| &attributes as *const SECURITY_ATTRIBUTES),
-        PAGE_READWRITE,
-        0,
-        size_bytes,
-        PCWSTR(wide_name.as_ptr()),
-      );
-      if !descriptor.0.is_null() {
-        let _ = LocalFree(HLOCAL(descriptor.0));
-      }
-      let handle = result.map_err(|e| format!("CreateFileMappingW({name}) failed: {e}"))?;
+      let handle = create_mapping(name, sddl, ShmLayout::total_size_bytes())?;
       let mut client = Self::map(handle)?;
       let header = &mut client.layout_mut().header;
       if header.magic != SHM_MAGIC {
@@ -121,6 +92,38 @@ impl Drop for SharedMemoryClient {
   }
 }
 
-fn wide(s: &str) -> Vec<u16> {
+/// Create (or open) a pagefile-backed mapping of `size` bytes; `sddl` sets the DACL when created.
+pub(crate) fn create_mapping(name: &str, sddl: Option<&str>, size: usize) -> Result<HANDLE, String> {
+  let wide_name = wide(name);
+  let size = u64::try_from(size).map_err(|_| "mapping too large".to_string())?;
+  // SAFETY: Win32 calls with owned, NUL-terminated buffers; the descriptor is freed below.
+  unsafe {
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    if let Some(sddl) = sddl {
+      let wide_sddl = wide(sddl);
+      ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(wide_sddl.as_ptr()), SDDL_REVISION_1, &mut descriptor, None)
+        .map_err(|e| format!("invalid SDDL: {e}"))?;
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+      nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+      lpSecurityDescriptor: descriptor.0,
+      bInheritHandle: BOOL(0),
+    };
+    let result = CreateFileMappingW(
+      INVALID_HANDLE_VALUE,
+      sddl.map(|_| &attributes as *const SECURITY_ATTRIBUTES),
+      PAGE_READWRITE,
+      (size >> 32) as u32,
+      size as u32,
+      PCWSTR(wide_name.as_ptr()),
+    );
+    if !descriptor.0.is_null() {
+      let _ = LocalFree(HLOCAL(descriptor.0));
+    }
+    result.map_err(|e| format!("CreateFileMappingW({name}) failed: {e}"))
+  }
+}
+
+pub(crate) fn wide(s: &str) -> Vec<u16> {
   s.encode_utf16().chain(std::iter::once(0)).collect()
 }

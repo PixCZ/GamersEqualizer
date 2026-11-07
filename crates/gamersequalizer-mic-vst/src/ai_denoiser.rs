@@ -19,8 +19,12 @@ const DF_MAX_ATTEN_DB: f32 = 60.0;
 /// -10 dB dropped 16-26 % of soft syllables under loud mechanical keys; -20 dB drops 3-8 %
 /// with the same key suppression (`test_deepfilter_keeps_soft_speech_over_keyboard`).
 const DF_MIN_DB_THRESH: f32 = -20.0;
-/// Upstream defaults for the two upper stages (skip DF / skip all processing on clean speech).
-const DF_MAX_DB_ERB_THRESH: f32 = 30.0;
+/// Above this local SNR DeepFilterNet leaves a frame untouched. Upstream's 30 dB let its ERB
+/// mask duck clean unvoiced speech (s, f, breath) by 10-15 dB in frames it rated 20-29 dB:
+/// on a real mic take 20 % of loud unvoiced frames lost > 6 dB, at 25 dB 10 % (DPDFNet 11 %),
+/// for ~2 dB less suppression in a quiet room's pauses (the gate covers those).
+const DF_MAX_DB_ERB_THRESH: f32 = 25.0;
+/// Upstream default: above this only the ERB stage runs (no deep filtering).
 const DF_MAX_DB_DF_THRESH: f32 = 20.0;
 /// A frame is speech above this RNNoise voice probability. Measured on mechanical keys + mouse
 /// clicks without speech: never fired at 0.5 (DeepFilterNet's local SNR fired on 9-31 %).
@@ -52,6 +56,14 @@ const GATE_FLOOR_DB: f32 = -12.0;
 /// Shared-memory gate value at or below this = gate off; anything above = automatic gate.
 /// (The setting used to be a level threshold; the gate no longer has one.)
 const GATE_OFF_DB: f32 = -79.5;
+/// Gate value at or above this = automatic gate with lookahead (`NOISE_GATE_AUTO_LOOKAHEAD`).
+const GATE_LOOKAHEAD_DB: f32 = 0.5;
+/// Lookahead: the output is delayed this long, so the gate opens before a word onset reaches it
+/// (the detectors still hear it undelayed). Measured on a private voice under its own keyboard
+/// (`private_report`): soft syllables the gate cuts over no gate, 30 ms: DFN3 1.4-3.7 -> 0.3-2.3 %,
+/// DPDFNet 0.8-1.3 -> 0.2-0.9 %, RNNoise 1.9-3.5 -> 1.4-1.9 %; 50 ms only ~0.4 points better.
+/// Keys alone open the gate no more often.
+const GATE_LOOKAHEAD_SAMPLES: usize = 48 * 30;
 /// Gate stays open this long after the last speech frame (word tails, short pauses), counted
 /// at the output: the detector hears the raw input a model latency early, so the gate adds
 /// that latency on top (else DPDFNet's 60 ms lead would leave only ~140 ms).
@@ -86,7 +98,12 @@ pub struct AiVoiceIsolator {
   /// raw-input one loses under typing (private voice, keys at -10 dB SNR: RNNoise's probability
   /// on soft syllables fell from ~0.95 to <0.1 and the gate cut 18-31 % of them).
   vad_out: VoiceDetector,
+  /// Lookahead requested by the settings; it runs only while the gate is on.
+  lookahead: bool,
+  delay: DelayLine,
   bypassed: bool,
+  /// The input detector heard speech in the last block (it runs while bypassed too).
+  heard_voice: bool,
 }
 
 struct RnNoiseEngine {
@@ -131,6 +148,12 @@ struct VoiceDetector {
 /// chopping, and closed only attenuates (`GATE_FLOOR_DB`). No level threshold, so it works the
 /// same for a loud or a quiet voice (day vs. evening). Classic attack/hold/release keyed by a VAD.
 /// Tuned to never cut a voice; some loud keys get through (see `OUT_VOICE_PROB`).
+/// Fixed delay (ring buffer); empty = no delay. Allocates only when its length changes.
+struct DelayLine {
+  buf: Vec<f32>,
+  pos: usize,
+}
+
 struct NoiseGate {
   enabled: bool,
   hold_left: usize,
@@ -159,7 +182,10 @@ impl AiVoiceIsolator {
       gate: NoiseGate::new(true),
       vad: VoiceDetector::new(),
       vad_out: VoiceDetector::new_output(),
+      lookahead: false,
+      delay: DelayLine::new(),
       bypassed: false,
+      heard_voice: false,
     }
   }
 
@@ -167,9 +193,16 @@ impl AiVoiceIsolator {
     self.strength = strength.clamp(0.0, 1.0);
   }
 
-  /// Shared-memory gate setting: at or below `GATE_OFF_DB` = off, anything else = automatic.
+  /// Shared-memory gate setting: at or below `GATE_OFF_DB` = off, at or above
+  /// `GATE_LOOKAHEAD_DB` = automatic with lookahead, anything between = automatic.
   pub fn set_gate_threshold_db(&mut self, db: f32) {
     self.gate.enabled = db > GATE_OFF_DB;
+    self.lookahead = db >= GATE_LOOKAHEAD_DB;
+  }
+
+  /// Delay the gate lookahead adds on top of the model, in ms (only while the gate is on).
+  pub fn lookahead_ms() -> f32 {
+    GATE_LOOKAHEAD_SAMPLES as f32 / 48.0
   }
 
   /// Choose the model. A heavy model is loaded on first request (blocking, 0.1-0.2 s); if it
@@ -228,6 +261,16 @@ impl AiVoiceIsolator {
     self.active
   }
 
+  /// The input detector heard speech in the block just processed. That audio leaves this stage
+  /// `output_lead_samples` later (model latency + gate lookahead).
+  pub fn heard_voice(&self) -> bool {
+    self.heard_voice
+  }
+
+  pub fn output_lead_samples(&self) -> usize {
+    if self.bypassed { 0 } else { latency_samples(self.active) + self.delay.len() }
+  }
+
   /// Process microphone samples in place.
   /// RNNoise adds a fixed latency of one frame (10 ms) plus the model's own frame;
   /// every output sample is processed, whatever the block size.
@@ -245,7 +288,10 @@ impl AiVoiceIsolator {
     }
 
     if self.strength <= 0.001 {
+      // Audio passes untouched, but the input detector (one RNNoise pass, ~1 % of a core) keeps
+      // running: the leveler and the automatic input gain learn only from speech it hears.
       self.bypassed = true;
+      self.heard_voice = self.vad.process(samples);
       return;
     }
     if self.bypassed {
@@ -254,6 +300,7 @@ impl AiVoiceIsolator {
     }
 
     let voice = self.vad.process(samples); // raw input, before it is denoised in place
+    self.heard_voice = voice;
     match (self.active, self.deepfilter.as_mut(), self.dpdfnet.as_mut()) {
       (DenoiseModel::DeepFilterNet, Some(df), _) => df.process(samples, self.strength),
       (DenoiseModel::DpdfNet, _, Some(dp)) => dp.process(samples, atten_lim(self.strength)),
@@ -262,9 +309,13 @@ impl AiVoiceIsolator {
     // The input detector runs a model latency ahead of the output (opens on word onsets in
     // time); the output one is in step with it, so its hold needs no latency on top.
     let voice_out = self.gate.enabled && self.vad_out.process(samples);
+    // Lookahead: the gated audio is older than what the detectors just heard, so the gate opens
+    // that much before an onset; the hold covers the delay too, so word tails stay as long.
+    self.delay.set_len(if self.gate.enabled && self.lookahead { GATE_LOOKAHEAD_SAMPLES } else { 0 });
+    self.delay.process(samples);
     let hold = match (voice, voice_out) {
-      (true, _) => GATE_HOLD_SAMPLES + latency_samples(self.active),
-      (false, true) => GATE_HOLD_SAMPLES,
+      (true, _) => GATE_HOLD_SAMPLES + latency_samples(self.active) + self.delay.len(),
+      (false, true) => GATE_HOLD_SAMPLES + self.delay.len(),
       (false, false) => 0,
     };
     self.gate.process(samples, hold);
@@ -275,6 +326,7 @@ impl AiVoiceIsolator {
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceDetector::new();
     self.vad_out = VoiceDetector::new_output();
+    self.delay.clear();
     self.bypassed = false;
   }
 
@@ -456,6 +508,42 @@ impl VoiceDetector {
   }
 }
 
+impl DelayLine {
+  fn new() -> Self {
+    Self { buf: Vec::new(), pos: 0 }
+  }
+
+  fn len(&self) -> usize {
+    self.buf.len()
+  }
+
+  /// Changing the length restarts from silence: a gap once, when the setting changes.
+  fn set_len(&mut self, len: usize) {
+    if len != self.buf.len() {
+      self.buf = vec![0.0; len];
+      self.pos = 0;
+    }
+  }
+
+  fn clear(&mut self) {
+    self.buf.fill(0.0);
+    self.pos = 0;
+  }
+
+  fn process(&mut self, samples: &mut [f32]) {
+    let len = self.buf.len();
+    if len == 0 {
+      return;
+    }
+    for s in samples.iter_mut() {
+      if let Some(slot) = self.buf.get_mut(self.pos) {
+        std::mem::swap(slot, s);
+      }
+      self.pos = (self.pos + 1) % len;
+    }
+  }
+}
+
 impl NoiseGate {
   fn new(enabled: bool) -> Self {
     Self { enabled, hold_left: 0, gain: 0.0, floor: 10f32.powf(GATE_FLOOR_DB / 20.0) }
@@ -552,6 +640,22 @@ mod tests {
   }
 
   #[test]
+  fn test_bypass_still_hears_speech_for_the_leveler() {
+    // Regression: with the denoiser off no detector ran, so the leveler never learned.
+    let (clean, _) = speech_over_keyboard(-30.0, 0.0);
+    let mut isolator = AiVoiceIsolator::new();
+    isolator.set_strength(0.0);
+    let (mut speech_blocks, mut x) = (0, clean.clone());
+    for b in x.chunks_mut(480) {
+      isolator.process_samples(b);
+      speech_blocks += usize::from(isolator.heard_voice());
+    }
+    assert_eq!(x, clean, "bypass leaves the audio untouched");
+    assert_eq!(isolator.output_lead_samples(), 0);
+    assert!(speech_blocks > clean.len() / 480 / 10, "heard speech in {speech_blocks} blocks");
+  }
+
+  #[test]
   fn test_deepfilter_loads_and_switches_both_ways() {
     let mut isolator = AiVoiceIsolator::new();
     isolator.set_gate_threshold_db(-80.0);
@@ -597,18 +701,62 @@ mod tests {
 
   #[test]
   fn test_measured_latency_matches_constants() {
+    // The APO feeds 480 (48 kHz device) or 96 (rate bridge) frames; 441 / 144 stand for hosts
+    // and low-latency engine periods that don't divide a 10 ms hop. The gate and the leveler
+    // trust the constant, so it must hold for every block size (DPDFNet ran 10 ms early at 480).
     for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
-      let measured = measure_latency_samples(model);
-      let expected = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize;
-      eprintln!("{model:?}: measured latency {measured} samples ({:.1} ms)", measured as f32 / 48.0);
-      // Even at minimal strength the heavy models still output ~half wet signal; DPDFNet's
-      // filtering shifts that half's phase by a few samples.
-      let tolerance = if model == DenoiseModel::DpdfNet { 4 } else { 2 };
-      assert!(
-        measured.abs_diff(expected) <= tolerance,
-        "{model:?}: measured {measured} samples, constant says {expected}"
-      );
+      for block in [441, 480, 96, 144] {
+        let measured = measure_latency_samples(model, -80.0, block);
+        let expected = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize;
+        eprintln!("{model:?}, {block}-frame blocks: measured latency {measured} samples ({:.1} ms)", measured as f32 / 48.0);
+        // Even at minimal strength the heavy models still output ~half wet signal; DPDFNet's
+        // filtering shifts that half's phase by a few samples.
+        let tolerance = if model == DenoiseModel::DpdfNet { 4 } else { 2 };
+        assert!(
+          measured.abs_diff(expected) <= tolerance,
+          "{model:?}, {block}-frame blocks: measured {measured} samples, constant says {expected}"
+        );
+      }
     }
+  }
+
+  #[test]
+  fn test_lookahead_adds_its_delay_only_with_the_gate_on() {
+    let model = DenoiseModel::RnNoise;
+    let base = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize;
+    let ahead = measure_latency_samples(model, GATE_AUTO_LOOKAHEAD, 441);
+    assert!(ahead.abs_diff(base + GATE_LOOKAHEAD_SAMPLES) <= 2, "{ahead} vs {base} + lookahead");
+    // Off gate: lookahead would only add latency, so it does not run.
+    let mut isolator = AiVoiceIsolator::new();
+    isolator.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+    isolator.set_gate_threshold_db(-80.0);
+    let mut block = vec![0.1f32; 480];
+    isolator.process_samples(&mut block);
+    assert_eq!(isolator.delay.len(), 0);
+  }
+
+  #[test]
+  fn test_lookahead_keeps_more_word_onsets() {
+    // Onsets after pauses under loud keys are what the gate still cut (see GATE_LOOKAHEAD_SAMPLES).
+    let (clean, mixed) = speech_over_keyboard(-30.0, -10.0);
+    for model in [DenoiseModel::DeepFilterNet, DenoiseModel::RnNoise] {
+      let auto = run_quality(model, GATE_AUTO, &clean, &mixed);
+      let ahead = run_quality(model, GATE_AUTO_LOOKAHEAD, &clean, &mixed);
+      eprintln!("{model:?}: auto {auto:?}, lookahead {ahead:?}");
+      assert!(ahead.soft_dropouts <= auto.soft_dropouts, "{model:?}: {ahead:?} vs {auto:?}");
+      assert!(ahead.dropouts <= auto.dropouts, "{model:?}: {ahead:?} vs {auto:?}");
+    }
+  }
+
+  #[test]
+  fn test_delay_line_delays_across_blocks() {
+    let mut delay = DelayLine::new();
+    delay.set_len(3);
+    let mut a = [1.0f32, 2.0];
+    let mut b = [3.0f32, 4.0, 5.0];
+    delay.process(&mut a);
+    delay.process(&mut b);
+    assert_eq!((a, b), ([0.0, 0.0], [0.0, 1.0, 2.0]));
   }
 
   #[test]
@@ -788,8 +936,9 @@ mod tests {
     frames.iter().filter(|&&o| o).count() as f32 / frames.len().max(1) as f32
   }
 
-  /// What the UI writes for "Auto".
+  /// What the UI writes for "Auto" / "Auto" with "Protect word onsets".
   const GATE_AUTO: f32 = 0.0;
+  const GATE_AUTO_LOOKAHEAD: f32 = 1.0;
 
   /// Default strength, 10 ms blocks like the audio engine.
   fn run(model: DenoiseModel, gate_db: f32, input: &[f32]) -> Vec<f32> {
@@ -805,7 +954,8 @@ mod tests {
   }
 
   fn run_quality(model: DenoiseModel, gate_db: f32, clean: &[f32], mixed: &[f32]) -> Quality {
-    let latency = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize;
+    let lookahead = if gate_db >= GATE_LOOKAHEAD_DB { GATE_LOOKAHEAD_SAMPLES } else { 0 };
+    let latency = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize + lookahead;
     measure(clean, mixed, &run(model, gate_db, mixed), latency)
   }
 
@@ -910,17 +1060,18 @@ mod tests {
     }
   }
 
-  /// Mono WAV fixture as f32, linearly resampled to 48 kHz (good enough for test noise).
+  /// WAV fixture as f32 (first channel, like the APO), linearly resampled to 48 kHz (good
+  /// enough for test noise).
   fn read_wav_48k(name: &str) -> Vec<f32> {
     let mut reader = hound::WavReader::open(format!("{FIXTURES}/{name}")).unwrap();
     let spec = reader.spec();
-    assert_eq!(spec.channels, 1, "{name}");
+    let channels = spec.channels.max(1) as usize;
     let samples: Vec<f32> = match spec.sample_format {
       hound::SampleFormat::Int => {
         let scale = (1i64 << (spec.bits_per_sample - 1)) as f32;
-        reader.samples::<i32>().map(|s| s.unwrap() as f32 / scale).collect()
+        reader.samples::<i32>().step_by(channels).map(|s| s.unwrap() as f32 / scale).collect()
       }
-      hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
+      hound::SampleFormat::Float => reader.samples::<f32>().step_by(channels).map(|s| s.unwrap()).collect(),
     };
     if spec.sample_rate == 48_000 {
       return samples;
@@ -951,13 +1102,13 @@ mod tests {
 
   /// Runs noise through the model at minimal strength (mostly dry, so the signal survives) in
   /// odd-sized blocks and finds the input->output lag by cross-correlation.
-  fn measure_latency_samples(model: DenoiseModel) -> usize {
+  fn measure_latency_samples(model: DenoiseModel, gate_db: f32, block: usize) -> usize {
     const LEN: usize = 48_000;
     const MAX_LAG: usize = 3_000;
     let mut isolator = AiVoiceIsolator::new();
     isolator.set_model(model);
     isolator.set_strength(0.01);
-    isolator.set_gate_threshold_db(-80.0);
+    isolator.set_gate_threshold_db(gate_db);
     let mut x = 12_345u32;
     let input: Vec<f32> = (0..LEN)
       .map(|_| {
@@ -966,8 +1117,8 @@ mod tests {
       })
       .collect();
     let mut output = input.clone();
-    for block in output.chunks_mut(441) {
-      isolator.process_samples(block);
+    for chunk in output.chunks_mut(block) {
+      isolator.process_samples(chunk);
     }
     assert_eq!(isolator.active_model(), model);
     const SKIP: usize = 6_000; // model warm-up; must be >= MAX_LAG
@@ -995,7 +1146,7 @@ mod tests {
       eprintln!("skipped: put speech.wav and keys.wav into test_data/private/");
       return;
     }
-    eprintln!("soft% / loud% lost [pause suppression dB], gate auto | no gate");
+    eprintln!("soft% / loud% lost [pause suppression dB], gate auto | auto + lookahead | no gate");
     for (level, snr) in [(-20.0f32, 0.0f32), (-45.0, 0.0), (-30.0, -10.0)] {
       let (clean, mixed) = mix(SPEECH, &KEYS, Some(100.0), level, snr);
       for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
@@ -1003,16 +1154,551 @@ mod tests {
           format!("{:4.1} / {:3.1} [{:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db)
         };
         let gate = row(run_quality(model, GATE_AUTO, &clean, &mixed));
+        let ahead = row(run_quality(model, GATE_AUTO_LOOKAHEAD, &clean, &mixed));
         let no_gate = row(run_quality(model, GATE_OFF_DB - 1.0, &clean, &mixed));
-        eprintln!("voice {level:>4} dBFS, SNR {snr:>4} dB, {model:<13?} {gate} | {no_gate}");
+        eprintln!("voice {level:>4} dBFS, SNR {snr:>4} dB, {model:<13?} {gate} | {ahead} | {no_gate}");
       }
     }
     for level in [-20.0f32, -40.0] {
       let keys = noise_only(&KEYS, level);
       for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
-        let open = open_share(&run(model, GATE_AUTO, &keys), &run(model, GATE_OFF_DB - 1.0, &keys));
-        eprintln!("keys only {level} dBFS, {model:<13?} gate open {:.1} %", open * 100.0);
+        let ungated = run(model, GATE_OFF_DB - 1.0, &keys);
+        let open = open_share(&run(model, GATE_AUTO, &keys), &ungated);
+        let ahead = run(model, GATE_AUTO_LOOKAHEAD, &keys);
+        let open_ahead = open_share(ahead.get(GATE_LOOKAHEAD_SAMPLES..).unwrap_or_default(), &ungated);
+        eprintln!(
+          "keys only {level} dBFS, {model:<13?} gate open {:.1} %, with lookahead {:.1} %",
+          open * 100.0,
+          open_ahead * 100.0
+        );
       }
+    }
+  }
+
+  /// Report on one long take of the test script (git-ignored `test_data/private/scenario.wav`).
+  /// No clean reference exists, so per second it prints the input level, the raw-input voice
+  /// probability and per model the output level without / with the gate (auto + lookahead,
+  /// the default) and the gate's open share; then a summary split into seconds with and without
+  /// speech, and CPU time. Writes the processed takes to `test_data/private/out/` for listening.
+  /// `cargo test -p gamersequalizer-mic-vst --release scenario_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn scenario_report() {
+    const SCENARIO: &str = "../private/scenario.wav";
+    const SEC: usize = 48_000;
+    let models = [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise];
+    if !std::path::Path::new(FIXTURES).join(SCENARIO).exists() {
+      eprintln!("skipped: put scenario.wav into test_data/private/");
+      return;
+    }
+    let input = read_wav_48k(SCENARIO);
+    let secs = input.len() / SEC;
+    let out_dir = std::path::Path::new(FIXTURES).join("../private/out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let mut st = DenoiseState::new();
+    let mut scratch = [0.0f32; FRAME_SIZE];
+    let probs: Vec<f32> =
+      input.as_chunks::<FRAME_SIZE>().0.iter().map(|f| st.process_frame(&mut scratch, &f.map(|s| s * I16_SCALE))).collect();
+
+    // Per model: (ungated, gated), both aligned with the input.
+    let mut outs = Vec::new();
+    for model in models {
+      let t0 = std::time::Instant::now();
+      let ungated = run(model, GATE_OFF_DB - 1.0, &input);
+      let cpu = t0.elapsed().as_secs_f32() / (input.len() as f32 / SEC as f32);
+      let gated = run(model, GATE_AUTO_LOOKAHEAD, &input);
+      let lat = latency_samples(model);
+      let ungated = ungated[lat..].to_vec();
+      let gated = gated[lat + GATE_LOOKAHEAD_SAMPLES..].to_vec();
+      eprintln!("{model:?}: CPU {:.1} % of one core (denoiser + input detector, no gate)", cpu * 100.0);
+      for (name, sig) in [("nogate", &ungated), ("gate", &gated)] {
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(out_dir.join(format!("{model:?}_{name}.wav")), spec).unwrap();
+        sig.iter().for_each(|s| w.write_sample(*s).unwrap());
+        w.finalize().unwrap();
+      }
+      outs.push((ungated, gated));
+    }
+
+    let sec_db = |x: &[f32], s: usize| db(rms(x.get(s * SEC..(s + 1) * SEC).unwrap_or_default()));
+    // Gate open share in second s: frames where gated is within 6 dB of ungated.
+    let open = |g: &[f32], u: &[f32], s: usize| {
+      let range = s * SEC..(s + 1) * SEC;
+      let (g, u) = (g.get(range.clone()).unwrap_or_default(), u.get(range).unwrap_or_default());
+      let f: Vec<bool> = g.as_chunks::<480>().0.iter().zip(u.as_chunks::<480>().0).filter(|(_, u)| rms(*u) > 1e-6).map(|(g, u)| db(rms(g)) > db(rms(u)) - 6.0).collect();
+      f.iter().filter(|&&o| o).count() as f32 / f.len().max(1) as f32 * 100.0
+    };
+    let voice_share = |s: usize| {
+      let p = probs.get(s * 100..(s + 1) * 100).unwrap_or_default();
+      p.iter().filter(|&&p| p > VOICE_PROB).count() as f32 / p.len().max(1) as f32 * 100.0
+    };
+    eprintln!("\n  s   in dB  vad>0.5%  | per model: no gate dB / gate dB / gate open %   (DFN3 | DPDFNet | RNNoise)");
+    for s in 0..secs {
+      let cols: Vec<String> = outs
+        .iter()
+        .map(|(u, g)| format!("{:6.1} {:6.1} {:5.1}", sec_db(u, s), sec_db(g, s), open(g, u, s)))
+        .collect();
+      eprintln!("{s:4} {:6.1} {:7.1}    | {}", sec_db(&input, s), voice_share(s), cols.join(" | "));
+    }
+
+    // Seconds with clear speech (raw detector > 0.5 on >= 30 % of frames) vs none (0 %).
+    let speech: Vec<usize> = (0..secs).filter(|&s| voice_share(s) >= 30.0).collect();
+    let quiet: Vec<usize> = (0..secs).filter(|&s| voice_share(s) == 0.0).collect();
+    eprintln!("\nspeech seconds {}, no-speech seconds {}, other {}", speech.len(), quiet.len(), secs - speech.len() - quiet.len());
+    let energy = |x: &[f32], set: &[usize]| set.iter().map(|&s| x.get(s * SEC..(s + 1) * SEC).unwrap_or_default().iter().map(|v| v * v).sum::<f32>()).sum::<f32>().max(1e-12);
+    for (model, (u, g)) in models.iter().zip(&outs) {
+      // Voice frames (raw detector > 0.5) where the gate was closed (gated > 6 dB under ungated).
+      let (mut vf, mut cut) = (0usize, 0usize);
+      for (i, p) in probs.iter().enumerate() {
+        let r = i * FRAME_SIZE..(i + 1) * FRAME_SIZE;
+        if let (true, Some(gf), Some(uf)) = (*p > VOICE_PROB, g.get(r.clone()), u.get(r)) {
+          vf += 1;
+          cut += (rms(uf) > 1e-6 && db(rms(gf)) <= db(rms(uf)) - 6.0) as usize;
+        }
+      }
+      eprintln!(
+        "{model:<13?} no-speech seconds suppressed {:5.1} dB (no gate {:5.1}) | speech seconds level {:+5.1} dB vs input (no gate {:+5.1}) | voice frames under closed gate {:.2} %",
+        10.0 * (energy(&input, &quiet) / energy(g, &quiet)).log10(),
+        10.0 * (energy(&input, &quiet) / energy(u, &quiet)).log10(),
+        10.0 * (energy(g, &speech) / energy(&input, &speech)).log10(),
+        10.0 * (energy(u, &speech) / energy(&input, &speech)).log10(),
+        cut as f32 / vf.max(1) as f32 * 100.0
+      );
+    }
+  }
+
+  /// Whisper analysis, step 1 (`docs/whisper-step1-results.md`): what each possible gate key sees on
+  /// whisper vs. voice, room noise and typing, on a recording of the whisper script. Prints
+  /// distributions, no thresholds. Run:
+  /// `cargo test -p gamersequalizer-mic-vst --release whisper_probe -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn whisper_probe() {
+    // Recorded from the whisper script; bounds found with `vad_timeline` (pauses between sections).
+    const SCENARIO: &str = "../private/whisper_scenario.wav";
+    const KEYS: &str = "../private/keys.wav";
+    const HALF_SEC: usize = 24_000;
+    if [SCENARIO, KEYS].iter().any(|f| !std::path::Path::new(FIXTURES).join(f).exists()) {
+      eprintln!("skipped: put whisper_scenario.wav and keys.wav into test_data/private/");
+      return;
+    }
+    let signals = [read_wav_48k(SCENARIO), read_wav_48k(KEYS)];
+    let keys_len = signals[1].len();
+    let s = |a: usize, b: usize| a * HALF_SEC..b * HALF_SEC; // in half seconds
+    // (name, signal index, samples) -- 10 ms frame ranges are derived from these.
+    let segments: [(&str, usize, std::ops::Range<usize>); 9] = [
+      ("room 1-18 s", 0, s(2, 36)),
+      ("whisper 20-24 s", 0, s(40, 48)),
+      ("quiet whisp 26.5-31.5", 0, s(53, 63)),
+      ("whisp+type 36-41 s", 0, s(72, 82)),
+      ("voice 45-49 s", 0, s(90, 98)),
+      ("voice 53.5-57.5 s", 0, s(107, 115)),
+      ("keys only 59.5-68.5", 0, s(119, 137)),
+      ("alternate 75-82 s", 0, s(150, 164)),
+      ("keys.wav", 1, 0..keys_len),
+    ];
+    let frames = |r: &std::ops::Range<usize>| r.start / FRAME_SIZE..r.end / FRAME_SIZE;
+    let probs = |x: &[f32], gain_db: f32| -> Vec<f32> {
+      let g = 10f32.powf(gain_db / 20.0) * I16_SCALE;
+      let mut st = DenoiseState::new();
+      let mut scratch = [0.0f32; FRAME_SIZE];
+      x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| st.process_frame(&mut scratch, &f.map(|s| (s * g).clamp(-32768.0, 32767.0)))).collect()
+    };
+    let frame_db = |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| db(rms(f))).collect() };
+    let pct = |v: &[f32], p: f32| -> f32 {
+      let mut s = v.to_vec();
+      s.sort_by(f32::total_cmp);
+      s.get(((s.len().max(1) - 1) as f32 * p) as usize).copied().unwrap_or(f32::NAN)
+    };
+    let share = |v: &[bool]| v.iter().filter(|&&b| b).count() as f32 / v.len().max(1) as f32 * 100.0;
+    let prob_stats = |v: &[f32]| {
+      let over = |t: f32| v.iter().filter(|&&p| p > t).count() as f32 / v.len().max(1) as f32 * 100.0;
+      format!("p50 {:.2} p90 {:.2} max {:.2} | >0.05 {:4.1}% >0.3 {:4.1}% >0.5 {:4.1}%", pct(v, 0.5), pct(v, 0.9), pct(v, 1.0), over(0.05), over(0.3), over(0.5))
+    };
+    // Clamped: model outputs are shorter than the input by their latency.
+    let slice = |v: &[f32], r: std::ops::Range<usize>| v.get(r.start.min(v.len())..r.end.min(v.len())).unwrap_or_default().to_vec();
+
+    eprintln!("== RNNoise voice probability on the raw input, gain applied only to the detector");
+    for gain in [0.0f32, 12.0, 24.0] {
+      let p: Vec<Vec<f32>> = signals.iter().map(|s| probs(s, gain)).collect();
+      for (name, i, r) in &segments {
+        eprintln!("  +{gain:2} dB {name:<20} {}", prob_stats(&slice(&p[*i], frames(r))));
+      }
+    }
+
+    // Ungated model outputs, aligned with the input.
+    let models = [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise];
+    let outs: Vec<Vec<Vec<f32>>> = models
+      .iter()
+      .map(|&m| signals.iter().map(|s| run(m, GATE_OFF_DB - 1.0, s).get(latency_samples(m)..).unwrap_or_default().to_vec()).collect())
+      .collect();
+    eprintln!("\n== Output detector (RNNoise probability on the ungated model output) and output level per 10 ms frame");
+    for (m, out) in models.iter().zip(&outs) {
+      let p: Vec<Vec<f32>> = out.iter().map(|s| probs(s, 0.0)).collect();
+      let l: Vec<Vec<f32>> = out.iter().map(|s| frame_db(s)).collect();
+      for (name, i, r) in &segments {
+        let lv = slice(&l[*i], frames(r));
+        eprintln!(
+          "  {m:<13?} {name:<20} {} | dBFS p10 {:6.1} p50 {:6.1} p90 {:6.1} max {:6.1}",
+          prob_stats(&slice(&p[*i], frames(r))),
+          pct(&lv, 0.1),
+          pct(&lv, 0.5),
+          pct(&lv, 0.9),
+          pct(&lv, 1.0)
+        );
+      }
+    }
+
+    // DFN3 local SNR per hop (the value `DeepFilterEngine::process` drops), default strength.
+    let lsnr: Vec<Vec<f32>> = signals
+      .iter()
+      .map(|s| {
+        let mut e = DeepFilterEngine::load().unwrap();
+        e.model.atten_lim = atten_lim(0.75);
+        assert_eq!(e.hop, FRAME_SIZE);
+        s.as_chunks::<FRAME_SIZE>()
+          .0
+          .iter()
+          .map(|f| {
+            e.in_frame.iter_mut().zip(f).for_each(|(d, x)| *d = *x);
+            e.model.process(e.in_frame.view(), e.out_frame.view_mut()).unwrap()
+          })
+          .collect()
+      })
+      .collect();
+    eprintln!("\n== DFN3 lsnr (dB); min over the whole file: {:.1}", lsnr.iter().flatten().copied().fold(f32::MAX, f32::min));
+    let runs = |v: &[bool], n: u32| -> Vec<bool> {
+      let mut c = 0u32;
+      v.iter().map(|&b| {
+        c = if b { c + 1 } else { 0 };
+        c >= n
+      }).collect()
+    };
+    for (name, i, r) in &segments {
+      let v = slice(&lsnr[*i], frames(r));
+      let key = |t: f32, n: u32| share(&runs(&v.iter().map(|&x| x > t).collect::<Vec<_>>(), n));
+      eprintln!(
+        "  {name:<20} p10 {:5.1} p50 {:5.1} p90 {:5.1} max {:5.1} | key lsnr>0 x5 {:4.1}% >5 x5 {:4.1}% >10 x5 {:4.1}% >10 x10 {:4.1}%",
+        pct(&v, 0.1),
+        pct(&v, 0.5),
+        pct(&v, 0.9),
+        pct(&v, 1.0),
+        key(0.0, 5),
+        key(5.0, 5),
+        key(10.0, 5),
+        key(10.0, 10)
+      );
+    }
+
+    // Idea N2: DFN3 output energy over a tracked floor (rises 2 dB/s, falls at once, >= -75 dBFS).
+    eprintln!("\n== N2 key: share of frames the DFN3 output energy key would open (open dB over floor x frames in a row)");
+    let n2 = |x: &[f32], open_db: f32, min_frames: u32| -> Vec<bool> {
+      let mut floor = -75.0f32;
+      let above: Vec<bool> = frame_db(x)
+        .iter()
+        .map(|&l| {
+          floor = if l < floor { l } else { floor + 0.02 }.max(-75.0);
+          l > floor + open_db
+        })
+        .collect();
+      runs(&above, min_frames)
+    };
+    // With the gate's hold (200 ms after the last keyed frame), what the gate would actually do.
+    let held = |k: &[bool]| -> Vec<bool> {
+      let hold = (GATE_HOLD_SAMPLES / FRAME_SIZE) as u32;
+      let mut left = 0u32;
+      k.iter().map(|&b| {
+        left = if b { hold } else { left.saturating_sub(1) };
+        left > 0
+      }).collect()
+    };
+    let configs = [(12.0f32, 5u32), (9.0, 5), (15.0, 5), (12.0, 10)];
+    let keyed: Vec<Vec<Vec<bool>>> = configs.iter().map(|&(o, n)| outs[0].iter().map(|s| n2(s, o, n)).collect()).collect();
+    for (label, with_hold) in [("raw", false), ("+200 ms hold", true)] {
+      eprintln!("  -- {label}");
+      for (name, i, r) in &segments {
+        let cols: Vec<String> = configs
+          .iter()
+          .zip(&keyed)
+          .map(|((o, n), k)| {
+            let k = if with_hold { held(&k[*i]) } else { k[*i].clone() };
+            let f = frames(r);
+            format!("{o:2}dB x{n:2}: {:5.1}%", share(k.get(f.start.min(k.len())..f.end.min(k.len())).unwrap_or_default()))
+          })
+          .collect();
+        eprintln!("  {name:<20} {}", cols.join(" | "));
+      }
+    }
+  }
+
+  /// Whisper analysis, round 2 (`docs/whisper-step1-results.md`, chapter 7): sweep of the DFN3
+  /// output energy gate key (floor source x threshold x run counter x hold), scored in energy, plus
+  /// whisper under `keys.wav` and DFN3 on room noise amplified. The gate is simulated per 10 ms frame
+  /// (open = 0 dB, closed = the floor), without the RNNoise detectors (they never open on whisper).
+  /// `cargo test -p gamersequalizer-mic-vst --release whisper_sweep -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn whisper_sweep() {
+    const SCENARIO: &str = "../private/whisper_scenario.wav";
+    const KEYS: &str = "../private/keys.wav";
+    const HALF_SEC: usize = 24_000;
+    if [SCENARIO, KEYS].iter().any(|f| !std::path::Path::new(FIXTURES).join(f).exists()) {
+      eprintln!("skipped: put whisper_scenario.wav and keys.wav into test_data/private/");
+      return;
+    }
+    let lat = latency_samples(DenoiseModel::DeepFilterNet);
+    let dfn = |x: &[f32]| -> Vec<f32> { run(DenoiseModel::DeepFilterNet, GATE_OFF_DB - 1.0, x).get(lat..).unwrap_or_default().to_vec() };
+    let inputs = [read_wav_48k(SCENARIO), read_wav_48k(KEYS)];
+    let outs: Vec<Vec<f32>> = inputs.iter().map(|x| dfn(x)).collect();
+    let s = |a: usize, b: usize| a * HALF_SEC / FRAME_SIZE..b * HALF_SEC / FRAME_SIZE; // frames
+    let keys_frames = outs[1].len() / FRAME_SIZE;
+    let segments = [
+      ("whisper", 0, s(40, 48)),
+      ("quiet wh", 0, s(53, 63)),
+      ("wh+type", 0, s(72, 82)),
+      ("voice", 0, s(90, 98)),
+      ("room", 0, s(2, 36)),
+      ("keys", 0, s(119, 137)),
+      ("keys.wav", 1, 0..keys_frames),
+    ];
+    let frame_db = |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| db(rms(f))).collect() };
+    let frame_e = |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| f.iter().map(|v| v * v).sum()).collect() };
+    let pct = |v: &[f32], p: f32| -> f32 {
+      let mut s = v.to_vec();
+      s.sort_by(f32::total_cmp);
+      s.get(((s.len().max(1) - 1) as f32 * p) as usize).copied().unwrap_or(f32::NAN)
+    };
+
+    // 1c: frame-level spread of the raw input and the DFN3 output in the quiet room.
+    let room = s(2, 36);
+    for (name, x) in [("raw input", &inputs[0]), ("DFN3 output", &outs[0])] {
+      let l = frame_db(x);
+      let l = l.get(room.clone()).unwrap_or_default();
+      eprintln!("room {name:<12} per 10 ms: p10 {:6.1} p50 {:6.1} p90 {:6.1} p99 {:6.1} dBFS", pct(l, 0.1), pct(l, 0.5), pct(l, 0.9), pct(l, 0.99));
+    }
+
+    // The key: floor from raw input or from the output, level from the output.
+    let key = |inp: &[f32], out: &[f32], from_input: bool, open_db: f32, forgive: bool, hold: u32| -> Vec<bool> {
+      let (li, lo) = (frame_db(inp), frame_db(out));
+      let mut floor = -75.0f32;
+      let (mut run, mut below, mut left) = (0u32, 0u32, 0u32);
+      lo.iter()
+        .zip(&li)
+        .map(|(&o, &i)| {
+          let src = if from_input { i } else { o };
+          floor = if src < floor { src } else { floor + 0.02 }.max(-75.0);
+          if o > floor + open_db {
+            run += 1;
+            below = 0;
+          } else {
+            below += 1;
+            if !forgive || below >= 2 {
+              run = 0;
+            }
+          }
+          left = if run >= 5 { hold.max(1) } else { left.saturating_sub(1) };
+          left > 0
+        })
+        .collect()
+    };
+    // Energy with the simulated gate over energy without it, dB (0 = gate always open).
+    let closed = 10f32.powf(2.0 * GATE_FLOOR_DB / 20.0);
+    let loss = |e: &[f32], k: &[bool], r: std::ops::Range<usize>| -> f32 {
+      let (mut g, mut u) = (1e-12f32, 1e-12f32);
+      for (e, k) in e.get(r.clone()).unwrap_or_default().iter().zip(k.get(r).unwrap_or_default()) {
+        u += e;
+        g += if *k { *e } else { e * closed };
+      }
+      10.0 * (g / u).log10()
+    };
+    let energies: Vec<Vec<f32>> = outs.iter().map(|o| frame_e(o)).collect();
+    eprintln!("\n== Sweep. Speech columns: loss vs no gate (0 best). Noise columns: noise let through (0 = gate shut, 12 = open)");
+    eprintln!("  floor  open forgive hold | {}", segments.iter().map(|(n, _, _)| format!("{n:>8}")).collect::<Vec<_>>().join(" "));
+    for from_input in [false, true] {
+      for open_db in [6.0f32, 9.0, 12.0] {
+        for forgive in [false, true] {
+          for hold_ms in [0u32, 50, 100, 200] {
+            let keyed: Vec<Vec<bool>> = inputs.iter().zip(&outs).map(|(i, o)| key(i, o, from_input, open_db, forgive, hold_ms / 10)).collect();
+            let cols: Vec<String> = segments
+              .iter()
+              .enumerate()
+              .map(|(n, (_, i, r))| {
+                let l = loss(&energies[*i], &keyed[*i], r.clone());
+                format!("{:8.1}", if n < 4 { l } else { l - GATE_FLOOR_DB })
+              })
+              .collect();
+            eprintln!("  {:<6} {open_db:4} {:<7} {hold_ms:4} | {}", if from_input { "input" } else { "output" }, forgive, cols.join(" "));
+          }
+        }
+      }
+    }
+
+    // Step 2: clean whisper (20-24 s + 26.5-31.5 s) under keys.wav, DFN3 without gate.
+    let sc = &inputs[0];
+    let whisper: Vec<f32> = [40..48, 53..63].iter().flat_map(|r| sc.get(r.start * HALF_SEC..r.end * HALF_SEC).unwrap_or_default().iter().copied()).collect();
+    let keys: Vec<f32> = inputs[1].iter().cycle().take(whisper.len()).copied().collect();
+    eprintln!("\n== Whisper under keys.wav, DFN3 without gate (dropouts: frames > 15 dB under the clean whisper)");
+    for snr in [None, Some(0.0f32), Some(-10.0)] {
+      let mixed: Vec<f32> = match snr {
+        None => whisper.clone(),
+        Some(snr) => {
+          let g = rms(&whisper) / rms(&keys).max(1e-9) / 10f32.powf(snr / 20.0);
+          whisper.iter().zip(&keys).map(|(w, k)| w + k * g).collect()
+        }
+      };
+      let out = run(DenoiseModel::DeepFilterNet, GATE_OFF_DB - 1.0, &mixed);
+      let q = measure(&whisper, &mixed, &out, lat);
+      eprintln!("  SNR {snr:?}: loud whisper lost {:4.1} %, soft {:4.1} %", q.dropouts * 100.0, q.soft_dropouts * 100.0);
+    }
+
+    // What each model alone (no gate) keeps of the whisper sections, energy out / in, both after
+    // the default EQ's 100 Hz low cut (breath pops and desk thumps are removed there anyway).
+    let low_cut = |x: &[f32]| {
+      let mut eq = BiquadCascade::default();
+      let band = BiquadBand { filter_type: FilterType::HighPass, frequency: 100.0, q: 0.707, slope_db: 48, ..BiquadBand::default() };
+      eq.set_bands(&[band], 48_000.0);
+      let mut y = x.to_vec();
+      eq.process(&mut y);
+      y
+    };
+    let sc_raw = sc;
+    let sc_lc = low_cut(sc_raw);
+    eprintln!("\n== Model alone on the recorded sections, output energy vs input (dB), after a 100 Hz low cut");
+    for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
+      let sc = &sc_lc;
+      let l = latency_samples(model);
+      let out = low_cut(&run(model, GATE_OFF_DB - 1.0, sc_raw));
+      let ratio = |a: usize, b: usize| {
+        let e = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>().max(1e-12);
+        let o = out.get(a * HALF_SEC + l..b * HALF_SEC + l).unwrap_or_default();
+        10.0 * (e(o) / e(sc.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default())).log10()
+      };
+      eprintln!(
+        "  {model:<13?} whisper {:6.1} | quiet whisper {:6.1} | whisper+type {:6.1} | voice {:6.1} | room {:6.1}",
+        ratio(40, 48),
+        ratio(53, 63),
+        ratio(72, 82),
+        ratio(90, 98),
+        ratio(2, 36)
+      );
+    }
+
+    // A "whisper mode" candidate: lower strength, no gate. Whisper kept vs noise removed.
+    eprintln!("\n== Strength sweep, no gate: whisper / quiet whisper / whisper+type kept, room / keys.wav removed (dB)");
+    for model in [DenoiseModel::DeepFilterNet, DenoiseModel::RnNoise] {
+      for strength in [0.25f32, 0.4, 0.5, 0.75] {
+        let l = latency_samples(model);
+        let go = |x: &[f32]| {
+          let mut iso = AiVoiceIsolator::new();
+          iso.set_model(model);
+          iso.set_gate_threshold_db(GATE_OFF_DB - 1.0);
+          iso.set_strength(strength);
+          let mut o = x.to_vec();
+          o.chunks_mut(480).for_each(|b| iso.process_samples(b));
+          o
+        };
+        let e = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>().max(1e-12);
+        let (o, ok) = (go(sc), go(&inputs[1]));
+        let ratio = |a: usize, b: usize| {
+          10.0 * (e(o.get(a * HALF_SEC + l..b * HALF_SEC + l).unwrap_or_default()) / e(sc.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default())).log10()
+        };
+        let keys_removed = 10.0 * (e(&inputs[1]) / e(ok.get(l..).unwrap_or_default())).log10();
+        eprintln!(
+          "  {model:<13?} {strength:4}: whisper {:5.1} {:5.1} {:5.1} | room {:5.1} keys.wav {:5.1}",
+          ratio(40, 48),
+          ratio(53, 63),
+          ratio(72, 82),
+          -ratio(2, 36),
+          keys_removed
+        );
+      }
+    }
+
+    // Chapter 7: does DFN3 suppress quiet room noise better when fed 20 dB hotter?
+    let room_in = sc.get(HALF_SEC * 2..HALF_SEC * 36).unwrap_or_default();
+    for gain_db in [0.0f32, 20.0] {
+      let g = 10f32.powf(gain_db / 20.0);
+      let hot: Vec<f32> = room_in.iter().map(|x| x * g).collect();
+      let out: Vec<f32> = dfn(&hot).iter().map(|x| x / g).collect();
+      let skip = 100 * FRAME_SIZE; // warm-up
+      let e = |x: &[f32]| x.get(skip..).unwrap_or_default().iter().map(|v| v * v).sum::<f32>().max(1e-12);
+      eprintln!("room noise into DFN3 at +{gain_db:2} dB: suppressed {:5.1} dB", 10.0 * (e(room_in) / e(&out)).log10());
+    }
+  }
+
+  /// The learning voice leveler on the private recordings: denoiser (RNNoise, default gate) +
+  /// leveler, the input at its own level and 12 dB / 24 dB lower (a mic set low). Prints the gain
+  /// over time and the output level of voice and room sections. Run:
+  /// `cargo test -p gamersequalizer-mic-vst --release leveler_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn leveler_report() {
+    use crate::voice_leveler::VoiceLeveler;
+    const HALF_SEC: usize = 24_000;
+    let path = "../private/whisper_scenario.wav";
+    if !std::path::Path::new(FIXTURES).join(path).exists() {
+      return eprintln!("skipped: put whisper_scenario.wav into test_data/private/");
+    }
+    let input = read_wav_48k(path);
+    let e_db = |x: &[f32], a: usize, b: usize| {
+      let s = x.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default();
+      10.0 * (s.iter().map(|v| v * v).sum::<f32>() / s.len().max(1) as f32).max(1e-12).log10()
+    };
+    for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet] {
+      for att_db in [0.0f32, -12.0, -24.0] {
+        let g = 10f32.powf(att_db / 20.0);
+        let mut x: Vec<f32> = input.iter().map(|s| s * g).collect();
+        let mut iso = AiVoiceIsolator::new();
+        iso.set_model(model);
+        iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+        let mut lv = VoiceLeveler::new();
+        let mut gains = Vec::new();
+        for (i, b) in x.chunks_mut(480).enumerate() {
+          iso.process_samples(b);
+          lv.process(b, iso.heard_voice(), iso.output_lead_samples());
+          if i % 50 == 49 {
+            gains.push(lv.gain_db());
+          }
+        }
+        let lead = latency_samples(model) + GATE_LOOKAHEAD_SAMPLES;
+        let out = x.get(lead..).unwrap_or_default();
+        let at = |s: f32| gains.get((s * 2.0) as usize).copied().unwrap_or(f32::NAN);
+        eprintln!(
+          "{model:<13?} input {att_db:+3} dB | gain at 20 s {:+5.1}, 46 s {:+5.1}, 47 s {:+5.1}, 50 s {:+5.1}, 60 s {:+5.1}, 84 s {:+5.1} | out: voice 45-49 {:6.1} voice 53-57 {:6.1} alternate {:6.1} room {:6.1} whisper {:6.1} dBFS",
+          at(20.0),
+          at(46.0),
+          at(47.0),
+          at(50.0),
+          at(60.0),
+          at(83.5),
+          e_db(out, 90, 98),
+          e_db(out, 107, 115),
+          e_db(out, 150, 164),
+          e_db(out, 2, 36),
+          e_db(out, 40, 48)
+        );
+      }
+    }
+  }
+
+  /// Per 0.5 s of a private recording: level, raw RNNoise voice share (> 0.5) and clicky 10 ms
+  /// frames (peak 20 dB over RMS: keys). For finding section bounds. Run (file in test_data/private/):
+  /// `$env:WAV="x.wav"; cargo test -p gamersequalizer-mic-vst --release vad_timeline -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn vad_timeline() {
+    let Ok(name) = std::env::var("WAV") else { return eprintln!("skipped: set WAV") };
+    let x = read_wav_48k(&format!("../private/{name}"));
+    let mut st = DenoiseState::new();
+    let mut scratch = [0.0f32; FRAME_SIZE];
+    let frames = x.as_chunks::<FRAME_SIZE>().0;
+    let p: Vec<f32> = frames.iter().map(|f| st.process_frame(&mut scratch, &f.map(|s| s * I16_SCALE))).collect();
+    for (i, (pc, fc)) in p.chunks(50).zip(frames.chunks(50)).enumerate() {
+      let all: Vec<f32> = fc.iter().flatten().copied().collect();
+      let voice = pc.iter().filter(|&&v| v > VOICE_PROB).count() * 2;
+      let clicks = fc.iter().filter(|f| db(f.iter().fold(0.0f32, |m, s| m.max(s.abs()))) - db(rms(*f)) > 20.0).count();
+      eprintln!("{:5.1} {:6.1} dB voice {voice:3}% clicks {clicks:2} {}", i as f32 * 0.5, db(rms(&all)), "#".repeat(voice / 5));
     }
   }
 

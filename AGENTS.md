@@ -54,6 +54,10 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   the microphone APO DLL), runs tests and clippy, and starts the app again.
 - Claude Code: delegate it to the `dev-rebuild` subagent (`.claude/agents/dev-rebuild.md`, Haiku), so build
   output stays out of the main context.
+- Debug capture: `-Apo -DebugCapture` builds the APO with the `debug-capture` feature. After installing it,
+  `cargo run --release -p gamersequalizer-apo --example debug_capture -- [seconds]` records up to 60 s of
+  every mic-chain stage (WAV) plus per-block variables (`vars.tsv`, `info.txt`) into
+  `test_data/private/captures/` (git-ignored). Never ship an APO built with it.
 - The APO is installed via the app's banner or `scripts/apo-install.ps1`. Both need admin and restart
   Windows audio, so a human runs them.
 

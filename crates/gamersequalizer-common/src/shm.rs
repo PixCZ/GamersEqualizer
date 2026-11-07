@@ -2,18 +2,26 @@ use crate::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
 use crate::profile::{expand_slopes, BiquadBand, FilterType};
 use crate::streams::{StreamTable, STREAM_EQ_BUSES};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v8";
+/// Bump both names together with `SHM_VERSION` on every layout change.
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v12";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v8";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v12";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 8;
+pub const SHM_VERSION: u32 = 12;
+/// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
+pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
 pub const RING_BUFFER_CAPACITY: usize = 131072;
+/// Reference samples read from the ring are clamped to +-this (+18 dBFS; a float mix may go
+/// above 1.0). The ring is written by another process: one inf/NaN/huge sample would otherwise
+/// turn the AEC output into NaN and pin the speaker level meter at +inf forever.
+const REF_SAMPLE_MAX: f32 = 8.0;
 pub const REF_SAMPLE_RATE: u32 = 48_000;
 pub const AEC_IMPULSE_POINTS: usize = 64;
 pub const AEC_CORR_POINTS: usize = 128;
@@ -21,9 +29,14 @@ const HNS_PER_SEC: i64 = 10_000_000;
 /// UTF-16 slots of the active-game strings (profile name, label).
 pub const GAME_TEXT_LEN: usize = 128;
 /// `noise_gate_threshold_db` values. The gate is automatic (keyed by a voice detector), so the
-/// field is only on/off now: at or below `NOISE_GATE_OFF` = off, anything else = automatic.
+/// field is only a mode now: at or below `NOISE_GATE_OFF` = off, `NOISE_GATE_AUTO_LOOKAHEAD`
+/// (or above) = automatic with word-onset protection (the DSP delays the output so the gate
+/// opens early), anything between = automatic. Old DSP builds read the lookahead value as "auto".
 pub const NOISE_GATE_AUTO: i32 = 0;
+pub const NOISE_GATE_AUTO_LOOKAHEAD: i32 = 1;
 pub const NOISE_GATE_OFF: i32 = -80;
+/// The APO processes only while `owner_beat` changed within this time (the owner bumps it ~10x/s).
+pub const OWNER_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// One parametric EQ band in shared memory (f32 values stored as bits).
 #[repr(C)]
@@ -98,7 +111,7 @@ pub struct ShmHeader {
   // Runtime control flags updated by GUI / Daemon
   pub aec_enabled: AtomicBool,
   pub ai_voice_strength_permille: AtomicU32, // 0 to 1000 (0.0 to 1.0)
-  pub noise_gate_threshold_db: AtomicI32,    // NOISE_GATE_AUTO or NOISE_GATE_OFF
+  pub noise_gate_threshold_db: AtomicI32,    // NOISE_GATE_AUTO[_LOOKAHEAD] or NOISE_GATE_OFF
 
   // Telemetry fed back by VST to GUI
   pub erle_db_times_10: AtomicI32, // e.g. 185 = 18.5 dB echo return loss enhancement
@@ -162,6 +175,12 @@ pub struct ShmHeader {
   // --- v4: echo delay remembered by the daemon (daemon -> DSP), 48 kHz samples, 0 = none.
   // The APO (LOCAL SERVICE) can't read the user's cache file, so it gets the value here.
   pub aec_cached_delay_samples: AtomicU32,
+  // --- v12: the reference output changed (daemon -> DSP). Bumped *after* the new output's
+  // `aec_cached_delay_samples` is stored: the DSP drops its delay lock and starts from that.
+  pub aec_reference_seq: AtomicU32,
+  /// DSP -> daemon: the `aec_reference_seq` the reported delay belongs to. The daemon saves a
+  /// delay only when this matches, so the old output's delay never lands under the new key.
+  pub aec_reference_seq_seen: AtomicU32,
 
   // --- v5: master switch + output EQ (headphone correction + game profile) ---
   /// Everything off: the output EQ and the mic chain pass audio through unchanged.
@@ -193,6 +212,45 @@ pub struct ShmHeader {
 
   // --- v8: stream EQ per channel (daemon -> stream APO), `StreamBus::WITH_EQ` order ---
   pub stream_eq: [ShmStreamEq; STREAM_EQ_BUSES],
+
+  // --- v9: owner heartbeat (daemon of the active console session -> APO) ---
+  /// Bumped by the one daemon whose settings the APO follows. Unchanged for `OWNER_TIMEOUT`
+  /// (nobody runs the app, it exited or crashed, another Windows user is at the console) =
+  /// the APO passes all audio through untouched: it never applies stale or someone else's settings.
+  pub owner_beat: AtomicU32,
+
+  // --- v10: learning voice leveler ---
+  /// GUI -> DSP: bring speech to one level (after the voice EQ, before boost/limiter).
+  pub mic_leveler_enabled: AtomicBool,
+  /// DSP -> GUI: gain the leveler applies now, dB x 10.
+  pub mic_leveler_gain_db_x10: AtomicI32,
+  /// GUI -> DSP: output loudness the user wants, dBFS x 10.
+  pub mic_leveler_target_db_x10: AtomicI32,
+  /// GUI -> DSP: bumped by "Learn again" (forget the learned level).
+  pub mic_leveler_reset_seq: AtomicU32,
+  /// Daemon -> DSP: level learned earlier for this microphone, dBFS x 10 (0 = none).
+  pub mic_leveler_saved_level_db_x10: AtomicI32,
+  /// DSP -> daemon: level learned so far, dBFS x 10 (0 = none yet); the daemon saves it per mic.
+  pub mic_leveler_level_db_x10: AtomicI32,
+
+  // --- v11: mic volume around the leveler, automatic input gain ---
+  /// Daemon -> DSP: gain of the Windows mic volume (applied before the APO), dB x 10. The leveler
+  /// learns the level without it, so a volume change is compensated at once (0 = 0 dB / unknown).
+  pub mic_input_gain_db_x10: AtomicI32,
+  /// DSP -> daemon: raw input samples at full scale (cumulative): the converter clipped.
+  pub mic_input_clips: AtomicU32,
+  /// DSP -> daemon: speech the leveler learned from (cumulative ms).
+  pub mic_speech_ms: AtomicU32,
+  /// Daemon -> GUI: Windows mic volume the automatic input gain set, permille (0 = none). The
+  /// window must not read it as the user's volume.
+  pub mic_auto_gain_permille: AtomicU32,
+}
+
+/// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
+#[derive(Debug, Default)]
+pub struct OwnerWatch {
+  /// Last beat value and when it last changed (None = not seen changing yet).
+  seen: Option<(u32, Option<Instant>)>,
 }
 
 /// Game detected by the detection owner (daemon, or the GUI without a daemon).
@@ -308,7 +366,7 @@ impl Default for ShmHeader {
       read_frame_index: AtomicU32::new(0),
       aec_enabled: AtomicBool::new(true),
       ai_voice_strength_permille: AtomicU32::new(750), // 75% default
-      noise_gate_threshold_db: AtomicI32::new(NOISE_GATE_AUTO),
+      noise_gate_threshold_db: AtomicI32::new(NOISE_GATE_AUTO_LOOKAHEAD),
       erle_db_times_10: AtomicI32::new(0),
       tap_active: AtomicBool::new(false),
       mic_active: AtomicBool::new(false),
@@ -352,6 +410,8 @@ impl Default for ShmHeader {
       aec_corr: std::array::from_fn(|_| AtomicU32::new(0)),
       aec_corr_max_delay_us: AtomicU32::new(0),
       aec_cached_delay_samples: AtomicU32::new(0),
+      aec_reference_seq: AtomicU32::new(0),
+      aec_reference_seq_seen: AtomicU32::new(0),
       master_bypass: AtomicBool::new(false),
       out_eq_version: AtomicU32::new(0),
       out_eq_band_count: AtomicU32::new(0),
@@ -369,6 +429,17 @@ impl Default for ShmHeader {
       mic_dsp_overruns: AtomicU32::new(0),
       denoise_limit: AtomicU32::new(0),
       stream_eq: std::array::from_fn(|_| ShmStreamEq::default()),
+      owner_beat: AtomicU32::new(0),
+      mic_leveler_enabled: AtomicBool::new(true),
+      mic_leveler_gain_db_x10: AtomicI32::new(0),
+      mic_leveler_target_db_x10: AtomicI32::new(MIC_LEVELER_DEFAULT_TARGET_DB_X10),
+      mic_leveler_reset_seq: AtomicU32::new(0),
+      mic_leveler_saved_level_db_x10: AtomicI32::new(0),
+      mic_leveler_level_db_x10: AtomicI32::new(0),
+      mic_input_gain_db_x10: AtomicI32::new(0),
+      mic_input_clips: AtomicU32::new(0),
+      mic_speech_ms: AtomicU32::new(0),
+      mic_auto_gain_permille: AtomicU32::new(0),
     };
     h.init_defaults();
     h
@@ -402,7 +473,7 @@ impl ShmHeader {
     self.capacity_frames = RING_BUFFER_CAPACITY as u32;
     self.aec_enabled.store(true, Ordering::Relaxed);
     self.ai_voice_strength_permille.store(750, Ordering::Relaxed);
-    self.noise_gate_threshold_db.store(NOISE_GATE_AUTO, Ordering::Relaxed);
+    self.noise_gate_threshold_db.store(NOISE_GATE_AUTO_LOOKAHEAD, Ordering::Relaxed);
     self.master_volume_permille.store(1000, Ordering::Relaxed);
     self.game_volume_permille.store(1000, Ordering::Relaxed);
     self.chat_volume_permille.store(1000, Ordering::Relaxed);
@@ -415,10 +486,13 @@ impl ShmHeader {
     self.mic_muted.store(false, Ordering::Relaxed);
     self.chatmix_balance_permille.store(0, Ordering::Relaxed);
     self.denoise_model.store(DenoiseModel::RnNoise.to_u32(), Ordering::Relaxed);
+    self.mic_leveler_enabled.store(true, Ordering::Relaxed);
+    self.mic_leveler_target_db_x10.store(MIC_LEVELER_DEFAULT_TARGET_DB_X10, Ordering::Relaxed);
   }
 
-  /// GUI -> DSP settings, for mirroring the daemon's mapping into the APO's.
-  pub fn copy_controls_from(&self, src: &ShmHeader) {
+  /// GUI -> DSP settings, for mirroring the daemon's mapping into the APO's. `all` also copies
+  /// the EQs whose version number happens to match (a new owner: the numbers are another daemon's).
+  pub fn copy_controls_from(&self, src: &ShmHeader, all: bool) {
     let r = Ordering::Relaxed;
     self.aec_enabled.store(src.aec_enabled.load(r), r);
     self.ai_voice_strength_permille.store(src.ai_voice_strength_permille.load(r), r);
@@ -427,20 +501,24 @@ impl ShmHeader {
     self.mic_muted.store(src.mic_muted.load(r), r);
     self.denoise_model.store(src.denoise_model.load(r), r);
     self.master_bypass.store(src.master_bypass.load(r), r);
+    self.mic_leveler_enabled.store(src.mic_leveler_enabled.load(r), r);
+    self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);
+    self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
+    self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
     let version = src.mic_eq_version.load(Ordering::Acquire);
-    if version != self.mic_eq_version.load(Ordering::Acquire) {
+    if all || version != self.mic_eq_version.load(Ordering::Acquire) {
       self.write_mic_eq(&src.read_mic_eq());
       self.mic_eq_version.store(version, Ordering::Release);
     }
     let version = src.out_eq_version.load(Ordering::Acquire);
-    if version != self.out_eq_version.load(Ordering::Acquire) {
+    if all || version != self.out_eq_version.load(Ordering::Acquire) {
       let (bands, preamp) = src.read_out_eq();
       self.write_out_eq(&bands, preamp);
       self.out_eq_version.store(version, Ordering::Release);
     }
     for (dst, src) in self.stream_eq.iter().zip(&src.stream_eq) {
       let version = src.version.load(Ordering::Acquire);
-      if version != dst.version.load(Ordering::Acquire) {
+      if all || version != dst.version.load(Ordering::Acquire) {
         let (bands, preamp) = src.read();
         dst.write(&bands, preamp);
         dst.version.store(version, Ordering::Release);
@@ -517,6 +595,10 @@ impl ShmHeader {
     self.mic_dsp_load_peak_permille.store(src.mic_dsp_load_peak_permille.load(r), r);
     self.mic_dsp_load_avg_permille.store(src.mic_dsp_load_avg_permille.load(r), r);
     self.mic_dsp_overruns.store(src.mic_dsp_overruns.load(r), r);
+    self.mic_leveler_gain_db_x10.store(src.mic_leveler_gain_db_x10.load(r), r);
+    self.mic_leveler_level_db_x10.store(src.mic_leveler_level_db_x10.load(r), r);
+    self.mic_input_clips.store(src.mic_input_clips.load(r), r);
+    self.mic_speech_ms.store(src.mic_speech_ms.load(r), r);
     self.aec_state.store(src.aec_state.load(r), r);
     self.aec_delay_us.store(src.aec_delay_us.load(r), r);
     self.aec_raw_delay_us.store(src.aec_raw_delay_us.load(r), r);
@@ -601,6 +683,21 @@ impl Default for ShmStreamEq {
       preamp_db_bits: AtomicU32::new(0),
       bands: std::array::from_fn(|_| ShmEqBand::default()),
     }
+  }
+}
+
+impl OwnerWatch {
+  /// An owner is publishing settings right now. False until the beat is seen to change, so a
+  /// value left behind by an owner that is gone never counts.
+  pub fn live(&mut self, h: &ShmHeader, now: Instant) -> bool {
+    let beat = h.owner_beat.load(Ordering::Acquire);
+    let changed_at = match self.seen {
+      None => None,
+      Some((last, at)) if last == beat => at,
+      Some(_) => Some(now),
+    };
+    self.seen = Some((beat, changed_at));
+    changed_at.is_some_and(|t| now.duration_since(t) < OWNER_TIMEOUT)
   }
 }
 
@@ -778,8 +875,13 @@ impl<'a> ShmRingBuffer<'a> {
 
   fn read_slot(&self, pos: u32) -> f32 {
     let idx = pos as usize % RING_BUFFER_CAPACITY;
-    // Convert stereo to mono reference: (left + right) * 0.5
-    self.layout.buffer.get(idx).map_or(0.0, |f| (f.left + f.right) * 0.5)
+    // Convert stereo to mono reference: (left + right) * 0.5, non-finite = silence.
+    let mono = self.layout.buffer.get(idx).map_or(0.0, |f| (f.left + f.right) * 0.5);
+    if mono.is_finite() {
+      mono.clamp(-REF_SAMPLE_MAX, REF_SAMPLE_MAX)
+    } else {
+      0.0
+    }
   }
 }
 
@@ -848,6 +950,22 @@ mod tests {
   }
 
   #[test]
+  fn test_ring_read_sanitizes_garbage() {
+    let mut mem = new_layout();
+    let mut ring = unsafe { ShmRingBuffer::from_raw(&mut mem) };
+    let frames = [
+      StereoFrame { left: f32::INFINITY, right: 0.0 },
+      StereoFrame { left: f32::NAN, right: 0.5 },
+      StereoFrame { left: 1e30, right: 1e30 },
+      StereoFrame { left: 0.5, right: 0.5 },
+    ];
+    ring.push_frames(&frames);
+    let mut out = [1.0f32; 4];
+    ring.read_frames_from(0, &mut out);
+    assert_eq!(out, [0.0, 0.0, REF_SAMPLE_MAX, 0.5]);
+  }
+
+  #[test]
   fn test_mic_eq_roundtrip() {
     let header = ShmHeader::default();
     let bands = vec![
@@ -871,7 +989,7 @@ mod tests {
     assert_eq!(src.read_out_eq(), (bands.clone(), -3.5));
 
     let dst = ShmHeader::default();
-    dst.copy_controls_from(&src);
+    dst.copy_controls_from(&src, false);
     assert_eq!(dst.read_out_eq(), (bands, -3.5));
     assert!(dst.master_bypass.load(Ordering::Relaxed));
   }
@@ -881,10 +999,38 @@ mod tests {
     let (src, dst) = (ShmHeader::default(), ShmHeader::default());
     let band = BiquadBand { gain_db: -4.0, frequency: 2500.0, ..BiquadBand::default() };
     src.stream_eq[1].write(std::slice::from_ref(&band), -1.5);
-    dst.copy_controls_from(&src);
+    dst.copy_controls_from(&src, false);
     assert_eq!(dst.stream_eq[1].read(), (vec![band], -1.5));
     assert_eq!(dst.stream_eq[0].read(), (vec![], 0.0));
     assert_eq!(dst.stream_eq[1].version.load(Ordering::Relaxed), src.stream_eq[1].version.load(Ordering::Relaxed));
+  }
+
+  #[test]
+  fn owner_watch_needs_a_changing_beat() {
+    let h = ShmHeader::default();
+    let mut watch = OwnerWatch::default();
+    let t0 = Instant::now();
+    h.owner_beat.store(41, Ordering::Relaxed);
+    assert!(!watch.live(&h, t0), "a leftover beat is not an owner");
+    assert!(!watch.live(&h, t0 + Duration::from_millis(100)));
+    h.owner_beat.fetch_add(1, Ordering::Relaxed);
+    assert!(watch.live(&h, t0 + Duration::from_millis(200)));
+    assert!(watch.live(&h, t0 + Duration::from_millis(200) + OWNER_TIMEOUT / 2));
+    assert!(!watch.live(&h, t0 + Duration::from_millis(200) + OWNER_TIMEOUT), "owner gone");
+    h.owner_beat.fetch_add(1, Ordering::Relaxed);
+    assert!(watch.live(&h, t0 + OWNER_TIMEOUT * 2), "owner back");
+  }
+
+  #[test]
+  fn new_owner_copies_eqs_even_with_equal_versions() {
+    let (src, dst) = (ShmHeader::default(), ShmHeader::default());
+    let band = BiquadBand { gain_db: 3.0, ..BiquadBand::default() };
+    src.write_mic_eq(std::slice::from_ref(&band));
+    dst.write_mic_eq(&[]); // another daemon's EQ, same version number
+    dst.copy_controls_from(&src, false);
+    assert_eq!(dst.read_mic_eq(), vec![]);
+    dst.copy_controls_from(&src, true);
+    assert_eq!(dst.read_mic_eq(), vec![band]);
   }
 
   #[test]

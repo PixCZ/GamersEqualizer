@@ -1,19 +1,21 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Installs a GamersEqualizer APO on one physical endpoint:
+  Installs GamersEqualizer APOs on one or more physical endpoints in one go:
   -Flow Capture (default): the mic chain (AEC, noise suppression, EQ, boost) on a microphone.
   -Flow Render: the output EQ (headphone correction + game profile, EFX) plus the stream EQ
     (chat / media profiles per app stream, SFX) on headphones/speakers.
   -Flow Render -Slot SFX: the stream EQ only.  -NoStreamEq: the output EQ only.
+  -Endpoint 'Capture:{guid}','Render:{guid}': several endpoints at once (default slots). The
+    app uses this so the user approves one administrator prompt and audio restarts only once.
 
 .DESCRIPTION
-  - Backs up the endpoint's FxProperties key (reg export) to %ProgramData%\GamersEqualizer\apo-backup.
+  - Backs up each endpoint's FxProperties key (reg export) to %ProgramData%\GamersEqualizer\apo-backup.
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
-  - Registers the COM class and the APO. Settings come from the running app (shared memory).
-  - APPENDS our CLSIDs to the endpoint's composite effect lists (EFX / SFX). Existing
+  - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
+  - APPENDS our CLSIDs to each endpoint's composite effect lists (EFX / SFX). Existing
     Realtek/Microsoft effects stay in place and run before ours.
-  - Restarts the Windows Audio service (all audio stops for a few seconds).
+  - Restarts the Windows Audio service once (all audio stops for a few seconds).
 
   Undo: scripts\apo-uninstall.ps1 (optionally -RestoreBackup <file.reg>).
 
@@ -22,9 +24,12 @@
   .\apo-install.ps1 -EndpointId '{cf0a2270-1885-4dd6-82a5-f636e9efadd5}'
   .\apo-install.ps1 -Flow Render -EndpointId '{b45cef56-a56b-49b0-88c0-4af057026718}'
   .\apo-install.ps1 -Flow Render -Slot SFX -EndpointId '{b45cef56-a56b-49b0-88c0-4af057026718}'
+  .\apo-install.ps1 -Endpoint 'Capture:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}','Render:{b45cef56-a56b-49b0-88c0-4af057026718}'
 #>
 param(
   [string]$EndpointId,
+  # Several endpoints, each 'Capture:{guid}' or 'Render:{guid}'. Overrides -Flow / -EndpointId.
+  [string[]]$Endpoint,
   # DLL to install; default: the dev build in target\apo.
   [string]$SourceDll,
   # Started by the app's "fix" button: keep the window open on errors, briefly on success.
@@ -47,21 +52,12 @@ trap {
 
 # Must match CLSID_GAIN_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
 # crates/gamersequalizer-apo/src/lib.rs. All classes live in the same DLL.
-if ($Flow -eq 'Capture' -and $Slot -eq 'SFX') { throw 'The SFX slot is only used on render endpoints (-Flow Render).' }
 $Classes = @{
   Capture = @{ Clsid = '{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}'; Name = 'GamersEqualizer Mic Chain' }
   Render  = @{ Clsid = '{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}'; Name = 'GamersEqualizer Output EQ' }
   Stream  = @{ Clsid = '{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}'; Name = 'GamersEqualizer Stream EQ' }
 }
-# (class, slot) pairs to install on this endpoint.
-$Targets = @()
-if ($Flow -eq 'Capture') { $Targets += , @('Capture', $Slot) }
-elseif ($Slot -eq 'SFX') { $Targets += , @('Stream', 'SFX') }
-else {
-  $Targets += , @('Render', $Slot)
-  if (-not $NoStreamEq) { $Targets += , @('Stream', 'SFX') }
-}
-$DeviceWord = @{ Capture = 'microphone'; Render = 'output device' }[$Flow]
+$DeviceWords = @{ Capture = 'microphone'; Render = 'output device' }
 $ApoInterfaces = @(
   '{fd7f2b29-24d0-4b5c-b177-592c39f9ca10}', # IAudioProcessingObject
   '{9e1d6a6d-ddbc-4e95-a4c7-ad64ba37846c}', # IAudioProcessingObjectRT
@@ -75,7 +71,7 @@ $InstallDir = Join-Path $env:ProgramFiles 'GamersEqualizer\apo'
 $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
 $BackupDir = Join-Path $env:ProgramData 'GamersEqualizer\apo-backup'
 
-$FlowRoot = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$Flow"
+$AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
 # Composite (Windows 11, REG_MULTI_SZ) and legacy (REG_SZ) value names per slot.
 $CompositeValues = @{ SFX = "$FxGuid,13"; MFX = "$FxGuid,14"; EFX = "$FxGuid,15" }
@@ -98,101 +94,142 @@ function Set-FxValue([string]$subKey, [string]$name, [string[]]$value) {
   finally { $key.Dispose() }
 }
 
-function Get-ActiveEndpoints {
-  Get-ChildItem $FlowRoot | Where-Object { (Get-ItemProperty $_.PSPath).DeviceState -eq 1 } | ForEach-Object {
+function Get-ActiveEndpoints([string]$flow) {
+  Get-ChildItem (Join-Path $AudioRoot $flow) | Where-Object { (Get-ItemProperty $_.PSPath).DeviceState -eq 1 } | ForEach-Object {
     $props = Get-ItemProperty "$($_.PSPath)\Properties" -ErrorAction SilentlyContinue
     [pscustomobject]@{ Id = $_.PSChildName; Name = "$($props.$NameProp) ($($props.$DeviceDescProp))" }
   }
 }
 
-# --- Pick the endpoint ------------------------------------------------------------------
-$active = @(Get-ActiveEndpoints)
-if (-not $EndpointId) {
-  if ($active.Count -ne 1) {
-    $active | Format-Table -AutoSize | Out-String | Write-Host
-    throw "Found $($active.Count) active $($DeviceWord)s; pass -EndpointId with one of the ids above."
+# (class, slot) pairs for one endpoint.
+function Get-Targets([string]$flow, [string]$slot, [bool]$noStreamEq) {
+  if ($flow -eq 'Capture') {
+    if ($slot -eq 'SFX') { throw 'The SFX slot is only used on render endpoints (-Flow Render).' }
+    return , @(, @('Capture', $slot))
   }
-  $EndpointId = $active[0].Id
+  if ($slot -eq 'SFX') { return , @(, @('Stream', 'SFX')) }
+  $targets = @(, @('Render', $slot))
+  if (-not $noStreamEq) { $targets += , @('Stream', 'SFX') }
+  return , $targets
 }
-$endpoint = $active | Where-Object { $_.Id -ieq $EndpointId }
-if (-not $endpoint) { throw "Endpoint $EndpointId is not an active $Flow device." }
 
-$endpointKey = Join-Path $FlowRoot $EndpointId
-$fxKey = Join-Path $endpointKey 'FxProperties'
-if (-not (Test-Path $fxKey)) {
-  throw "Endpoint has no FxProperties key (no effects configured); not supported by this prototype."
+# Checks one endpoint before anything changes; returns the job to install.
+function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$noStreamEq) {
+  $word = $DeviceWords[$flow]
+  $active = @(Get-ActiveEndpoints $flow)
+  if (-not $endpointId) {
+    if ($active.Count -ne 1) {
+      $active | Format-Table -AutoSize | Out-String | Write-Host
+      throw "Found $($active.Count) active $($word)s; pass -EndpointId with one of the ids above."
+    }
+    $endpointId = $active[0].Id
+  }
+  $ep = $active | Where-Object { $_.Id -ieq $endpointId }
+  if (-not $ep) { throw "Endpoint $endpointId is not an active $flow device." }
+  $endpointKey = Join-Path (Join-Path $AudioRoot $flow) $endpointId
+  if (-not (Test-Path (Join-Path $endpointKey 'FxProperties'))) {
+    throw "$($ep.Name) has no FxProperties key (no effects configured); not supported by this prototype."
+  }
+  [pscustomobject]@{
+    Flow = $flow; Id = $endpointId; Name = $ep.Name; Word = $word; Key = $endpointKey
+    Targets = Get-Targets $flow $slot $noStreamEq
+  }
+}
+
+# --- Check every endpoint first: an error leaves the system untouched ----------------------
+$jobs = @()
+if ($Endpoint) {
+  # `powershell -File ... -Endpoint a,b` (how the app starts this) passes ONE string "a,b";
+  # only `-Command` or a call from PowerShell makes it an array. Split either way.
+  foreach ($spec in ($Endpoint -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $flowName, $id = $spec -split ':', 2
+    if ($DeviceWords.Keys -notcontains $flowName -or -not $id) { throw "Bad -Endpoint '$spec' (expected Capture:{guid} or Render:{guid})." }
+    $jobs += Resolve-Job $flowName $id 'EFX' $false
+  }
+}
+else {
+  $jobs += Resolve-Job $Flow $EndpointId $Slot $NoStreamEq.IsPresent
 }
 if (-not (Test-Path $SourceDll)) {
   throw "DLL not found: $SourceDll. Build it first: cargo build --profile apo -p gamersequalizer-apo"
 }
-$what = ($Targets | ForEach-Object { "$($Classes[$_[0]].Name) ($($_[1]))" }) -join ', '
-Write-Host "Target: $($endpoint.Name) $EndpointId`: $what"
+foreach ($job in $jobs) {
+  $what = ($job.Targets | ForEach-Object { "$($Classes[$_[0]].Name) ($($_[1]))" }) -join ', '
+  Write-Host "Target: $($job.Name) $($job.Id)`: $what"
+}
 
 # --- Backup -----------------------------------------------------------------------------
 New-Item -ItemType Directory -Force $BackupDir | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$backupFile = Join-Path $BackupDir "$EndpointId-FxProperties-$stamp.reg"
-$regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$Flow\$EndpointId\FxProperties"
-& reg.exe export $regPath $backupFile /y | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed." }
-Write-Host "Backup: $backupFile"
+foreach ($job in $jobs) {
+  $backupFile = Join-Path $BackupDir "$($job.Id)-FxProperties-$stamp.reg"
+  $regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
+  & reg.exe export $regPath $backupFile /y | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed." }
+  Write-Host "Backup: $backupFile"
+}
 
-# --- Install (audio service stopped so audiodg releases an older DLL) ---------------------
+# --- Install (audio service stopped once, so audiodg releases an older DLL) ---------------
 Stop-Service Audiosrv -Force
 try {
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   Copy-Item $SourceDll $InstalledDll -Force
 
-  foreach ($target in $Targets) {
-    $Clsid = $Classes[$target[0]].Clsid
-    $FriendlyName = $Classes[$target[0]].Name
-    $TargetSlot = $target[1]
+  foreach ($job in $jobs) {
+    $fxKey = Join-Path $job.Key 'FxProperties'
+    foreach ($target in $job.Targets) {
+      $Clsid = $Classes[$target[0]].Clsid
+      $FriendlyName = $Classes[$target[0]].Name
+      $TargetSlot = $target[1]
 
-    $clsidKey = "HKLM:\SOFTWARE\Classes\CLSID\$Clsid"
-    New-Item -Force "$clsidKey\InprocServer32" | Out-Null
-    Set-Item $clsidKey -Value $FriendlyName
-    Set-Item "$clsidKey\InprocServer32" -Value $InstalledDll
-    New-ItemProperty "$clsidKey\InprocServer32" -Name ThreadingModel -Value 'Both' -PropertyType String -Force | Out-Null
+      $clsidKey = "HKLM:\SOFTWARE\Classes\CLSID\$Clsid"
+      New-Item -Force "$clsidKey\InprocServer32" | Out-Null
+      Set-Item $clsidKey -Value $FriendlyName
+      Set-Item "$clsidKey\InprocServer32" -Value $InstalledDll
+      New-ItemProperty "$clsidKey\InprocServer32" -Name ThreadingModel -Value 'Both' -PropertyType String -Force | Out-Null
 
-    $apoKey = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$Clsid"
-    New-Item -Force $apoKey | Out-Null
-    $dwords = @{
-      MajorVersion = 1; MinorVersion = 0; Flags = 15
-      MinInputConnections = 1; MaxInputConnections = 1; MinOutputConnections = 1; MaxOutputConnections = 1
-      MaxInstances = -1; NumAPOInterfaces = $ApoInterfaces.Count
-    }
-    foreach ($k in $dwords.Keys) { New-ItemProperty $apoKey -Name $k -Value $dwords[$k] -PropertyType DWord -Force | Out-Null }
-    New-ItemProperty $apoKey -Name FriendlyName -Value $FriendlyName -PropertyType String -Force | Out-Null
-    New-ItemProperty $apoKey -Name Copyright -Value 'GamersEqualizer' -PropertyType String -Force | Out-Null
-    for ($i = 0; $i -lt $ApoInterfaces.Count; $i++) {
-      New-ItemProperty $apoKey -Name "APOInterface$i" -Value $ApoInterfaces[$i] -PropertyType String -Force | Out-Null
-    }
+      $apoKey = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$Clsid"
+      New-Item -Force $apoKey | Out-Null
+      $dwords = @{
+        MajorVersion = 1; MinorVersion = 0; Flags = 15
+        MinInputConnections = 1; MaxInputConnections = 1; MinOutputConnections = 1; MaxOutputConnections = 1
+        MaxInstances = -1; NumAPOInterfaces = $ApoInterfaces.Count
+      }
+      foreach ($k in $dwords.Keys) { New-ItemProperty $apoKey -Name $k -Value $dwords[$k] -PropertyType DWord -Force | Out-Null }
+      New-ItemProperty $apoKey -Name FriendlyName -Value $FriendlyName -PropertyType String -Force | Out-Null
+      New-ItemProperty $apoKey -Name Copyright -Value 'GamersEqualizer' -PropertyType String -Force | Out-Null
+      for ($i = 0; $i -lt $ApoInterfaces.Count; $i++) {
+        New-ItemProperty $apoKey -Name "APOInterface$i" -Value $ApoInterfaces[$i] -PropertyType String -Force | Out-Null
+      }
 
-    # Append to the composite list; seed it from the legacy single value so that effect is kept.
-    $CompositeValue = $CompositeValues[$TargetSlot]
-    $fx = Get-ItemProperty $fxKey
-    $list = @()
-    if ($null -ne $fx.$CompositeValue) { $list = @($fx.$CompositeValue) }
-    else {
-      $legacy = $LegacyValues[$TargetSlot] | ForEach-Object { $fx.$_ } |
-        Where-Object { $null -ne $_ -and $_ -ne '{00000000-0000-0000-0000-000000000000}' } | Select-Object -First 1
-      if ($legacy) { $list = @($legacy) }
+      # Append to the composite list; seed it from the legacy single value so that effect is kept.
+      $CompositeValue = $CompositeValues[$TargetSlot]
+      $fx = Get-ItemProperty $fxKey
+      $list = @()
+      if ($null -ne $fx.$CompositeValue) { $list = @($fx.$CompositeValue) }
+      else {
+        $legacy = $LegacyValues[$TargetSlot] | ForEach-Object { $fx.$_ } |
+          Where-Object { $null -ne $_ -and $_ -ne '{00000000-0000-0000-0000-000000000000}' } | Select-Object -First 1
+        if ($legacy) { $list = @($legacy) }
+      }
+      if (-not ($list | Where-Object { $_ -ieq $Clsid })) { $list += $Clsid }
+      Set-FxValue "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties" $CompositeValue ([string[]]$list)
+      Write-Host "$($job.Name) $TargetSlot chain: $($list -join ' -> ')"
     }
-    if (-not ($list | Where-Object { $_ -ieq $Clsid })) { $list += $Clsid }
-    Set-FxValue "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$Flow\$EndpointId\FxProperties" $CompositeValue ([string[]]$list)
-    Write-Host "$TargetSlot chain: $($list -join ' -> ')"
   }
 }
 finally {
   Start-Service Audiosrv
 }
 
-$sysFx = (Get-ItemProperty (Join-Path $endpointKey 'Properties')).$DisableSysFxProp
-if ($sysFx -eq 1) {
-  Write-Warning "Audio enhancements are OFF for this $DeviceWord; turn them on (Settings > Sound > device > Audio enhancements), or the APO is not loaded."
+foreach ($job in $jobs) {
+  $sysFx = (Get-ItemProperty (Join-Path $job.Key 'Properties')).$DisableSysFxProp
+  if ($sysFx -eq 1) {
+    Write-Warning "Audio enhancements are OFF for $($job.Name); turn them on (Settings > Sound > device > Audio enhancements), or the APO is not loaded."
+  }
 }
 
 Write-Host ''
-Write-Host "Installed. Apps that had the $DeviceWord open lost it when the audio service restarted: reopen them."
+Write-Host 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
 Write-Host 'Settings come from the GamersEqualizer app; keep it running.'
 if ($FromApp) { Start-Sleep -Seconds 3 }

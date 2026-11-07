@@ -15,8 +15,8 @@ const APP_ROW_HEIGHT: f32 = 24.0;
 /// Vertical fader height range; it grows with the window.
 const FADER_MIN: f32 = 110.0;
 const FADER_MAX: f32 = 260.0;
-/// Everything on the page except the faders (header, device card, strip parts, ChatMix).
-const PAGE_WITHOUT_FADERS: f32 = 560.0;
+/// Everything on the page except the faders (header, strip parts, ChatMix).
+const PAGE_WITHOUT_FADERS: f32 = 480.0;
 const MASTER_COLOR: Color32 = Color32::from_rgb(78, 168, 222);
 const GAME_COLOR: Color32 = Color32::from_rgb(82, 183, 136);
 const CHAT_COLOR: Color32 = Color32::from_rgb(72, 202, 228);
@@ -85,9 +85,8 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
     icons::VOLUME,
     MASTER_COLOR,
     tr("Mixer & device"),
-    Some(tr("Volume per app group, the output device and the game/chat balance.")),
+    Some(tr("Volume per app group, where each one plays and the game/chat balance.")),
   );
-  super::header::render_device_card(ui, state, win_audio);
 
   // 5 Proportional Columns filling exact window width
   let mut jump_tab = None;
@@ -101,11 +100,11 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       let name = id.and_then(|id| state.endpoints.iter().find(|e| &e.id == id)).map(|e| e.name.clone());
       trf("Output: {}", &[&name.unwrap_or_else(|| fallback.to_string())])
     };
-    let master_tag = output_of(win_audio.chatmix.master_device_id.as_ref(), tr("Windows default"));
     let game_tag = output_of(win_audio.chatmix.game_device_id.as_ref(), tr("same as Master"));
     let media_tag = output_of(win_audio.chatmix.media_device_id.as_ref(), tr("same as Master"));
 
     // 1. MASTER
+    let mut picked_output = None;
     let strip = Strip {
       title: tr("Master"),
       icon: icons::VOLUME,
@@ -123,8 +122,16 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
       &mut win_audio.chatmix.master_muted,
       AppsBox::List { caption: tr("Playing on all channels"), empty: tr("None active"), apps: &all_apps, hover: None },
       || jump_tab = Some(ActiveTab::Headphones),
-      |ui: &mut Ui| footer_tag(ui, &master_tag),
+      |ui: &mut Ui| {
+        let width = ui.available_width() - 28.0;
+        let chars = ((width - 20.0) / 6.5).max(6.0) as usize;
+        picked_output = super::header::output_combo(ui, state, "master_output_dropdown", width, chars);
+      },
     );
+
+    if let Some(id) = picked_output {
+      super::header::select_output(state, win_audio, id);
+    }
 
     // 2. GAME
     let strip = Strip {

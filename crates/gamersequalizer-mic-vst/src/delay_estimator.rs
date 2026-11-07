@@ -130,6 +130,18 @@ impl DelayEstimator {
     self.candidate = None;
   }
 
+  /// The speaker output changed: the locked delay belongs to the old device. Forget it (and
+  /// the half-measured window) without reallocating, so this is safe on the audio thread.
+  pub fn forget_lock(&mut self) {
+    self.locked = None;
+    self.locked_windows = 0;
+    self.reported = None;
+    self.locked_from_cache = false;
+    self.candidate = None;
+    self.last_outcome = None;
+    self.restart_window();
+  }
+
   /// Delay the echo canceller should use (48 kHz samples), once confirmed.
   pub fn current_delay(&self) -> Option<usize> {
     self.reported
@@ -424,6 +436,22 @@ mod tests {
     let _ = run(&mut est, 4_000, 4, &reference);
     let d = est.current_delay().unwrap_or(0);
     assert!((d as i64 - 4_000).abs() <= 6, "expected switch to ~4000, got {d}");
+  }
+
+  #[test]
+  fn test_output_switch_takes_the_new_device_delay_at_once() {
+    // Regression (capture 20261107-101152): after switching monitor -> headphones the old
+    // monitor delay stayed locked for 5 s, and its value was saved under the headphones.
+    let reference = noise(12 * 48_000, 4);
+    let mut est = DelayEstimator::new();
+    let _ = run(&mut est, 2_345, 4, &reference);
+    assert!(est.current_delay().is_some_and(|d| d.abs_diff(2_345) <= 6));
+
+    est.forget_lock();
+    assert_eq!(est.current_delay(), None);
+    est.set_cached_delay(46);
+    assert_eq!(est.current_delay(), Some(46));
+    assert!(est.is_from_cache(), "a cached delay must not be saved back as measured");
   }
 
   #[test]

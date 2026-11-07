@@ -125,8 +125,9 @@ mod tests {
   use super::*;
 
   /// Files whose `tr("...")` / `trf("...")` literals must all be translated.
-  const SOURCES: [(&str, &str); 17] = [
+  const SOURCES: [(&str, &str); 18] = [
     ("tray.rs", include_str!("tray.rs")),
+    ("ui/setup.rs", include_str!("ui/setup.rs")),
     ("health.rs", include_str!("health.rs")),
     ("ui/apo_banner.rs", include_str!("ui/apo_banner.rs")),
     ("ui/eq_editor.rs", include_str!("ui/eq_editor.rs")),

@@ -7,6 +7,10 @@ description = "Prototype capture APO (gain only) loaded by audiodg on a physical
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# `scripts/dev-rebuild.ps1 -Apo -DebugCapture`: the APO records the mic chain on request.
+debug-capture = ["gamersequalizer-mic-vst/debug-capture"]
+
 [dependencies]
 windows = { workspace = true }
 windows-core = { workspace = true }

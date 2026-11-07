@@ -9,14 +9,31 @@
   restarts the Windows Audio service.
   -RestoreBackup <file.reg> additionally re-imports an FxProperties backup made by apo-install.ps1
   (byte-for-byte original state of that endpoint).
+  -RemoveBackups also deletes those backups (%ProgramData%\GamersEqualizer); the app's
+  "Uninstall from Windows" button passes it.
 #>
-param([string]$RestoreBackup)
+param(
+  [string]$RestoreBackup,
+  [switch]$RemoveBackups,
+  # Started by the app: keep the window open on errors, briefly on success.
+  [switch]$FromApp
+)
 
 $ErrorActionPreference = 'Stop'
+trap {
+  if ($FromApp) {
+    Write-Host "`nUninstall failed: $_" -ForegroundColor Red
+    Read-Host 'Press Enter to close'
+    exit 1
+  }
+  break
+}
 
 # Mic chain, output EQ and stream EQ (all in the same DLL).
 $Clsids = @('{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}', '{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}', '{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}')
-$InstallDir = Join-Path $env:ProgramFiles 'GamersEqualizer\apo'
+$ProgramDir = Join-Path $env:ProgramFiles 'GamersEqualizer'
+$InstallDir = Join-Path $ProgramDir 'apo'
+$BackupRoot = Join-Path $env:ProgramData 'GamersEqualizer'
 $MmDevices = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 
 # FxProperties grants Administrators only SetValue + read; the registry provider asks for more
@@ -57,7 +74,7 @@ try {
     if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed (exit $LASTEXITCODE)" } else { Write-Host "Restored $RestoreBackup" }
   }
 
-  $keys = @('HKLM:\SOFTWARE\GamersEqualizer\Apo')
+  $keys = @('HKLM:\SOFTWARE\GamersEqualizer')
   foreach ($c in $Clsids) {
     $keys += "HKLM:\SOFTWARE\Classes\CLSID\$c", "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$c"
   }
@@ -65,8 +82,14 @@ try {
     if (Test-Path $key) { Remove-Item $key -Recurse -Force }
   }
   if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
+  if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
+  if ($RemoveBackups -and (Test-Path $BackupRoot)) {
+    Remove-Item $BackupRoot -Recurse -Force
+    Write-Host "Removed backups in $BackupRoot"
+  }
 }
 finally {
   Start-Service Audiosrv
 }
 Write-Host 'Uninstalled.'
+if ($FromApp) { Start-Sleep -Seconds 3 }

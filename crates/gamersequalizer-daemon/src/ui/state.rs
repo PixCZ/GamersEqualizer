@@ -1,14 +1,14 @@
 use crate::output_eq::OutputEq;
 use crate::sonar_importer::ProfileStorage;
-use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus};
+use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
-use gamersequalizer_common::profile::{collapse_slopes, slots_used, AudioMode, ParametricProfile, VadType};
+use gamersequalizer_common::profile::{collapse_slopes, slots_used, ParametricProfile, VadType};
 use gamersequalizer_common::shm::ShmHeader as ShmHeaderT;
 use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout, APO_SHM_NAME, SHM_NAME};
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use windows::core::PCWSTR;
@@ -123,13 +123,19 @@ impl OutputLayer {
 
 pub struct AppState {
   pub active_tab: ActiveTab,
-  pub audio_mode: AudioMode,
   pub endpoints: Vec<AudioEndpointInfo>,
   pub capture_endpoints: Vec<AudioEndpointInfo>,
   pub selected_endpoint_id: Option<String>,
   pub selected_chat_endpoint_id: Option<String>,
   pub selected_mic_endpoint_id: Option<String>,
   pub spatial_status: SpatialAudioStatus,
+  /// Format running on the default output, and the one the user has there (health memory).
+  pub spatial_format: Option<SpatialFormat>,
+  pub spatial_expected: Option<SpatialFormat>,
+  /// The default output both were read on.
+  pub spatial_output_id: Option<String>,
+  /// None = check on the next frame.
+  pub spatial_checked_at: Option<std::time::Instant>,
   pub active_game_name: Option<String>,
   pub autostart_enabled: bool,
   /// Language and theme (also read by the background service for the tray menu).
@@ -164,12 +170,16 @@ pub struct AppState {
   /// Mic EQ changed but not yet written to disk (saved when the slider is released).
   pub mic_eq_unsaved: bool,
   pub apo_banner: super::apo_banner::ApoBanner,
+  pub uninstall_ui: super::tab_settings::UninstallUi,
+  pub setup: super::setup::SetupUi,
   pub log_view: super::tab_log::LogView,
   aec_last_seq: u32,
   /// Last mic DSP telemetry seq and when it changed (is any mic stream processing?).
   /// None until first read, so a seq left over in shared memory doesn't count as live.
   mic_dsp_seen: (Option<u32>, Option<std::time::Instant>),
   denoise_switched_at: Option<std::time::Instant>,
+  /// Mic chain + mixer choices as last written to disk (see `save_audio_settings_if_changed`).
+  audio_settings_saved: super::audio_settings::AudioSettings,
   /// Double-talk lasts ~30 ms: keep the indicator lit long enough to read.
   double_talk_until: Option<std::time::Instant>,
   started_at: std::time::Instant,
@@ -184,7 +194,11 @@ impl AppState {
       .map(|p| p.profile.clone())
       .unwrap_or_else(|| ParametricProfile::new(super::mic_presets::DEFAULT_PRESET, VadType::Mic));
 
-    let (shm_handle, shm_ptr) = open_or_create_shm();
+    let (shm_handle, shm_ptr) = open_or_create_shm(storage.base_dir());
+    // SAFETY: as in `shm_header`; the mapping is unmapped only in Drop.
+    let shm = shm_ptr.map(|p| unsafe { &(*p.as_ptr()).header });
+    let audio_settings_saved = shm.map(super::audio_settings::AudioSettings::from_header).unwrap_or_default();
+    let selected_mic_endpoint_id = shm.and_then(|h| h.get_selected_mic_id());
 
     let mic_profile = load_mic_profile(&storage).unwrap_or(mic_profile);
     let output_eq = OutputEq::new(storage.clone());
@@ -194,13 +208,16 @@ impl AppState {
 
     let state = Self {
       active_tab: ActiveTab::Mixer,
-      audio_mode: AudioMode::Headphones,
       endpoints: Vec::new(),
       capture_endpoints: Vec::new(),
       selected_endpoint_id: None,
       selected_chat_endpoint_id: None,
-      selected_mic_endpoint_id: None,
+      selected_mic_endpoint_id,
       spatial_status: SpatialAudioStatus::Disabled,
+      spatial_format: None,
+      spatial_expected: None,
+      spatial_output_id: None,
+      spatial_checked_at: None,
       active_game_name: None,
       autostart_enabled,
       prefs,
@@ -219,10 +236,13 @@ impl AppState {
       aec_history: VecDeque::with_capacity(AEC_HISTORY_LEN),
       mic_eq_unsaved: false,
       apo_banner: Default::default(),
+      uninstall_ui: Default::default(),
+      setup: Default::default(),
       log_view: Default::default(),
       aec_last_seq: 0,
       mic_dsp_seen: (None, None),
       denoise_switched_at: None,
+      audio_settings_saved,
       double_talk_until: None,
       started_at: std::time::Instant::now(),
     };
@@ -334,6 +354,21 @@ impl AppState {
     self.mic_profile.bands.truncate(MAX_EQ_BANDS);
     self.sync_mic_eq_to_shm();
     save_mic_profile(&self.storage, &self.mic_profile);
+  }
+
+  /// Remember the mic chain and mixer across restarts. Call once per frame; writes only when
+  /// something changed and no slider is being dragged.
+  pub fn save_audio_settings_if_changed(&mut self, dragging: bool) {
+    if dragging {
+      return;
+    }
+    let Some(now) = self.shm_header().map(super::audio_settings::AudioSettings::from_header) else {
+      return;
+    };
+    if now != self.audio_settings_saved {
+      now.save(self.storage.base_dir());
+      self.audio_settings_saved = now;
+    }
   }
 
   pub fn denoise_models(&self) -> (DenoiseModel, DenoiseModel) {
@@ -514,7 +549,9 @@ fn save_mic_profile(storage: &ProfileStorage, profile: &ParametricProfile) {
   }
 }
 
-fn open_or_create_shm() -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
+/// Open the daemon <-> window mapping; a new one (nothing else runs) gets the defaults, the
+/// Windows volumes and then the user's saved choices from `settings_dir`.
+pub(crate) fn open_or_create_shm(settings_dir: &Path) -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
   unsafe {
     let wide_name: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
     let size_bytes = ShmLayout::total_size_bytes() as u32;
@@ -544,6 +581,7 @@ fn open_or_create_shm() -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
           header.mic_volume_permille.store((vol * 1000.0).round() as u32, Ordering::Relaxed);
           header.mic_muted.store(mute, Ordering::Relaxed);
         }
+        super::audio_settings::AudioSettings::load_or_default(settings_dir).apply_to_header(header);
       }
     }
     (Some(handle), ptr)

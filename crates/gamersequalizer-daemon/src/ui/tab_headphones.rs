@@ -89,7 +89,7 @@ impl HeadphonesUi {
   }
 }
 
-pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
+pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   let device_id = win_audio.chatmix.master_device_id.clone();
   let device_name = state
     .endpoints
@@ -99,7 +99,14 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &WinA
     .unwrap_or_else(|| tr("Default output").to_string());
   init_ui(state, &device_name);
 
-  theme::page_header(ui, icons::HEADPHONES, COLOR, tr("Headphone correction"), Some(&trf("On {}", &[&device_name])));
+  theme::page_header(
+    ui,
+    icons::HEADPHONES,
+    COLOR,
+    tr("Output & headphones"),
+    Some(tr("Pick where the sound goes, then the correction for it. Speakers or a headset without a profile: None.")),
+  );
+  super::header::render_device_card(ui, state, win_audio);
   output_apo_status(ui, state, device_id.as_deref());
   if !state.output_eq.settings.enabled {
     theme::info_bar(ui, Severity::Warning, |ui| {
@@ -154,7 +161,7 @@ fn my_headphones_row(ui: &mut Ui, state: &mut AppState) {
     ));
     let current = state.output_eq.headphone_profile_name().map(str::to_string);
     let mut picked: Option<Option<String>> = None;
-    if ui.selectable_label(current.is_none(), tr("None (flat)")).clicked() {
+    if ui.selectable_label(current.is_none(), tr("None (speakers, flat)")).clicked() {
       picked = Some(None);
     }
     for profile in &state.output_eq.headphone_profiles {
@@ -685,7 +692,7 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
   }
   theme::info_bar(ui, severity, |ui| {
     ui.label(text);
-    if let (Some(label), Some(guid)) = (button, check.endpoint_guid.as_deref()) {
+    if let (Some(label), Some(_)) = (button, check.endpoint_guid.as_deref()) {
       if !check.can_install {
         ui.label(theme::caption(tr("(installer files not found next to the app)")));
       } else if ui
@@ -695,10 +702,8 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
         ))
         .clicked()
       {
-        state.headphones_ui.message = Some(match apo_install::launch_install_flow(Flow::Render, guid) {
-          Ok(()) => tr("Installer started: confirm the administrator prompt.").to_string(),
-          Err(e) => e,
-        });
+        // The setup card explains the prompt and adds the mic processing if that is missing too.
+        super::setup::open(state);
         state.headphones_ui.apo = None;
       }
     }

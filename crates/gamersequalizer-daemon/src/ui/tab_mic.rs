@@ -5,9 +5,12 @@ use crate::win_audio::WinAudioSystem;
 use egui::{Color32, RichText, Stroke, Ui};
 use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, VLine};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
-use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, NOISE_GATE_AUTO, NOISE_GATE_OFF};
+use gamersequalizer_common::shm::{
+  AecState, DenoiseLimit, DenoiseModel, NOISE_GATE_AUTO, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
+};
 use gamersequalizer_mic_vst::ai_denoiser::AiVoiceIsolator;
 use gamersequalizer_mic_vst::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
+use gamersequalizer_mic_vst::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
 use std::sync::atomic::Ordering;
 
 const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
@@ -30,6 +33,8 @@ const AEC_PLOT_HEIGHT: f32 = 120.0;
 const AEC_Y_AXIS_WIDTH: f32 = 30.0;
 /// X range of the echo-path plot before the filter has any taps.
 const IMPULSE_MIN_WINDOW_MS: f32 = 10.0;
+/// Clipping this recent is shown as a warning.
+const CLIP_RECENT_SECS: f64 = 60.0;
 
 pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   egui::ScrollArea::vertical().id_salt("mic_page").auto_shrink([false, false]).show(ui, |ui| {
@@ -38,7 +43,7 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
       icons::MIC,
       ACCENT,
       tr("Microphone"),
-      Some(tr("Chain (Windows effect on the microphone, so every app gets it): echo cancellation → AI noise suppression → voice EQ → boost/limiter.")),
+      Some(tr("Chain (Windows effect on the microphone, so every app gets it): echo cancellation → AI noise suppression → voice EQ → voice leveler → boost/limiter.")),
     );
     super::apo_banner::render_apo_status_line(ui, state);
     ui.add_space(theme::CARD_GAP);
@@ -47,6 +52,75 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
     aec_section(ui, state);
     denoise_section(ui, state);
     eq_section(ui, state);
+    leveler_section(ui, state);
+  });
+}
+
+fn leveler_section(ui: &mut Ui, state: &mut AppState) {
+  let Some(h) = state.shm_header() else {
+    return;
+  };
+  let on = h.mic_leveler_enabled.load(Ordering::Relaxed);
+  let gain_db = h.mic_leveler_gain_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
+  theme::card(ui, |ui| {
+    ui.horizontal(|ui| {
+      theme::card_title(ui, Some((icons::MIC, ACCENT)), tr("Stage 4: Voice leveler"));
+      ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
+        "Brings your voice to the same loudness whether you talk softly or loudly, or the mic is set low. \
+         It learns your level only while it hears you speak: quickly in the first seconds, then ever slower, \
+         so one shout or cough changes nothing. Between words the gain stays put, it does not pump up the noise.",
+      ));
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut new_on = on;
+        if ui.add(theme::Toggle(&mut new_on)).on_hover_text(tr("Enable voice leveler")).changed() {
+          h.mic_leveler_enabled.store(new_on, Ordering::Relaxed);
+        }
+      });
+    });
+    if !on {
+      return;
+    }
+    egui::Grid::new("leveler_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+      ui.label(tr("Target loudness:"));
+      ui.horizontal(|ui| {
+        let mut target = h.mic_leveler_target_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
+        ui.spacing_mut().slider_width = BAR_WIDTH;
+        let slider = egui::Slider::new(&mut target, MIN_TARGET_DB..=MAX_TARGET_DB).step_by(1.0).show_value(false);
+        if ui.add(slider).on_hover_text(tr("How loud others hear you. The leveler gets your voice there by itself.")).changed() {
+          h.mic_leveler_target_db_x10.store((target * 10.0).round() as i32, Ordering::Relaxed);
+        }
+        let word = if target <= DEFAULT_TARGET_DB - 4.0 {
+          tr("quieter")
+        } else if target >= DEFAULT_TARGET_DB + 4.0 {
+          tr("louder")
+        } else {
+          tr("normal")
+        };
+        ui.label(format!("{word} ({target:.0} dBFS)"));
+        if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.small_button(tr("Default")).clicked() {
+          h.mic_leveler_target_db_x10.store((DEFAULT_TARGET_DB * 10.0).round() as i32, Ordering::Relaxed);
+        }
+      });
+      ui.end_row();
+
+      ui.label(tr("Now:"));
+      ui.horizontal(|ui| {
+        let text = if gain_db.abs() < 0.05 {
+          tr("Listening: say a few words").to_string()
+        } else {
+          trf("Gain {} dB", &[&format!("{gain_db:+.1}")])
+        };
+        ui.label(text);
+        if ui
+          .button(tr("Learn again"))
+          .on_hover_text(tr("Forget the learned level of this microphone and learn it from your next words (new mic, mic moved)."))
+          .clicked()
+        {
+          h.mic_leveler_reset_seq.fetch_add(1, Ordering::Relaxed);
+        }
+      });
+      ui.end_row();
+    });
   });
 }
 
@@ -127,6 +201,12 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       theme::meter(ui, peak, BAR_WIDTH * 1.6, theme::level_color(ui, peak), &db_text);
       ui.end_row();
 
+      if let Some(clips) = state.shm_header().map(|h| h.mic_input_clips.load(Ordering::Relaxed)) {
+        ui.label(tr("Clipping"));
+        clipping_status(ui, clips);
+        ui.end_row();
+      }
+
       // Sensitivity 0% .. 300%
       ui.label(tr("Sensitivity"));
       ui.horizontal(|ui| {
@@ -148,10 +228,46 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       ui.end_row();
     });
 
-    ui.label(theme::caption(tr(
-      "0 % - 100 % moves the Windows input slider. 100 % - 300 % adds a soft-saturated digital boost up to +9.5 dB (3x amplitude).",
-    )));
+    let r = Ordering::Relaxed;
+    let leveler = state.shm_header().map(|h| (h.mic_leveler_enabled.load(r), h.mic_auto_gain_permille.load(r)));
+    let caption = match leveler {
+      Some((true, _)) => tr(
+        "With the voice leveler on this is how loud others hear you: 100 % = the leveler's target, 50 % = 6 dB under it. The Windows input level only keeps the signal clean; the app moves it by itself when the mic clips or is far too quiet.",
+      ),
+      _ => tr(
+        "0 % - 100 % moves the Windows input slider. 100 % - 300 % adds a soft-saturated digital boost up to +9.5 dB (3x amplitude).",
+      ),
+    };
+    ui.label(theme::caption(caption));
+    if let Some((true, auto)) = leveler.filter(|&(_, auto)| auto > 0) {
+      ui.label(theme::caption(trf("Windows input level set automatically: {} %", &[&format!("{:.0}", auto as f32 / 10.0)])));
+    }
   });
+}
+
+/// Shows whether the raw mic clipped recently (DSP counter: full-scale samples and flat tops).
+/// The counter is cumulative; the time of the last increase lives in egui's memory.
+fn clipping_status(ui: &mut Ui, clips: u32) {
+  let id = egui::Id::new("mic_clip_seen");
+  let now = ui.input(|i| i.time);
+  let (seen, last_at) = ui.ctx().data(|d| d.get_temp::<(u32, Option<f64>)>(id)).unwrap_or((clips, None));
+  // A smaller counter = the DSP restarted (new stream): no new clipping.
+  let last_at = if clips > seen { Some(now) } else { last_at };
+  ui.ctx().data_mut(|d| d.insert_temp(id, (clips, last_at)));
+  match last_at.map(|t| now - t).filter(|&ago| ago < CLIP_RECENT_SECS) {
+    Some(ago) => {
+      theme::status_line(ui, Severity::Warning, &trf("Mic clipped {} s ago", &[&format!("{:.0}", ago)]))
+        .on_hover_text(tr(
+          "The sound card's input distorts: the wave is cut at its top. Lower the Windows input level, and check \
+           \"Microphone Boost\" in the Windows sound control panel (device properties, Levels): it amplifies before \
+           the input level, so lowering the level alone doesn't help. With the voice leveler on the app lowers the \
+           input level by itself.",
+        ));
+    }
+    None => {
+      theme::status_line(ui, Severity::Success, tr("No clipping"));
+    }
+  }
 }
 
 fn aec_section(ui: &mut Ui, state: &mut AppState) {
@@ -442,24 +558,22 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
     let (aec_enabled, ai_strength, gate_db) = mic_controls(state);
     // Off = strength 0: the denoiser and the noise gate are bypassed (see AiVoiceIsolator).
     let off = ai_strength <= DENOISE_OFF_STRENGTH;
+    let ahead = gate_db >= NOISE_GATE_AUTO_LOOKAHEAD;
     ui.horizontal(|ui| {
       ui.label(tr("Model:"));
       // None = Off.
       let current = (!off).then_some(selected);
       let mut choice = current;
       ui.selectable_value(&mut choice, None, tr("Off")).on_hover_text(tr("No noise suppression and no noise gate."));
-      ui.selectable_value(&mut choice, Some(DenoiseModel::RnNoise), "RNNoise").on_hover_text(trf(
-        "Light classic model (nnnoiseless). ~0.1 % CPU, {}.",
-        &[&latency_text(DenoiseModel::RnNoise)],
-      ));
-      ui.selectable_value(&mut choice, Some(DenoiseModel::DeepFilterNet), "DeepFilterNet 3").on_hover_text(trf(
-        "Best open-source quality, full-band 48 kHz. ~1 % CPU, {}. Switching during a call loads the model (~0.2 s gap).",
-        &[&latency_text(DenoiseModel::DeepFilterNet)],
-      ));
-      ui.selectable_value(&mut choice, Some(DenoiseModel::DpdfNet), "DPDFNet").on_hover_text(trf(
-        "Best on quiet speech under keyboard noise (DPDFNet-2, 48 kHz). About 3x the CPU of DeepFilterNet 3, {}. Switching during a call loads the model (~0.1 s gap).",
-        &[&latency_text(DenoiseModel::DpdfNet)],
-      ));
+      for (model, about) in [
+        (DenoiseModel::RnNoise, tr(RNNOISE_ABOUT)),
+        (DenoiseModel::DeepFilterNet, tr(DEEPFILTER_ABOUT)),
+        (DenoiseModel::DpdfNet, tr(DPDFNET_ABOUT)),
+      ] {
+        let label = format!("{} · {}", model_name(model), ms_text(total_latency_ms(model, ahead)));
+        ui.selectable_value(&mut choice, Some(model), label)
+          .on_hover_text(format!("{about}\n\n{}", latency_breakdown(model, ahead)));
+      }
       if choice != current {
         match choice {
           None => state.update_shm_mic_controls(aec_enabled, 0.0, gate_db),
@@ -481,12 +595,12 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
     let status = state.denoise_status();
     let (note, severity) = match status {
       DenoiseStatus::Running(m) => {
-        (trf("Running: {}, adds {}", &[&model_name(m), &latency_text(m)]), Severity::Success)
+        (trf("Running: {}, adds {}", &[&model_name(m), &latency_text(m, ahead)]), Severity::Success)
       }
       DenoiseStatus::Idle(m) => (
         trf(
           "No app is using the microphone now. {} (adds {}) starts with the next call/recording.",
-          &[&model_name(m), &latency_text(m)],
+          &[&model_name(m), &latency_text(m, ahead)],
         ),
         Severity::Info,
       ),
@@ -508,7 +622,7 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
       DenoiseStatus::Failed { selected, running } => (
         trf(
           "{} could not be loaded by the audio engine, still on {} (adds {}).",
-          &[&model_name(selected), &model_name(running), &latency_text(running)],
+          &[&model_name(selected), &model_name(running), &latency_text(running, ahead)],
         ),
         Severity::Error,
       ),
@@ -527,23 +641,45 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
       ui.end_row();
 
       // Any old threshold value (e.g. -45) means "on": the gate is automatic now.
-      let mut gate = if gate_db <= NOISE_GATE_OFF { NOISE_GATE_OFF } else { NOISE_GATE_AUTO };
+      let mut gate_auto = gate_db > NOISE_GATE_OFF;
+      // Shown ticked while the gate is off: that is what turning the gate on gives (the default).
+      let mut protect = !gate_auto || gate_db >= NOISE_GATE_AUTO_LOOKAHEAD;
       ui.label(tr("Noise gate:"));
       ui.horizontal(|ui| {
         changed |= ui
-          .selectable_value(&mut gate, NOISE_GATE_AUTO, tr("Auto"))
+          .selectable_value(&mut gate_auto, true, tr("Auto"))
           .on_hover_text(tr(
-            "Silences the mic while you are not speaking. Opens on speech, not on loudness: \
-             works the same for a loud or quiet voice, and key clicks alone don't open it.",
+            "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: \
+             works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing \
+             sometimes gets through (most often with RNNoise, which removes the least).",
           ))
           .changed();
         changed |= ui
-          .selectable_value(&mut gate, NOISE_GATE_OFF, tr("Off"))
-          .on_hover_text(tr("Only the noise suppression runs; nothing is muted between words."))
+          .selectable_value(&mut gate_auto, false, tr("Off"))
+          .on_hover_text(tr("Only the noise suppression runs; nothing is turned down between words."))
+          .changed();
+      });
+      ui.end_row();
+
+      ui.label("");
+      ui.add_enabled_ui(gate_auto, |ui| {
+        let text = trf("Protect word onsets (+{})", &[&ms_text(AiVoiceIsolator::lookahead_ms())]);
+        changed |= ui
+          .checkbox(&mut protect, text)
+          .on_hover_text(tr(
+            "Holds your voice back briefly so the gate is already open when a word starts after a pause. \
+             Without it the first syllable can come out quieter. Adds this much delay; \
+             only active while the gate is on.",
+          ))
           .changed();
       });
       ui.end_row();
       if changed {
+        let gate = match (gate_auto, protect) {
+          (false, _) => NOISE_GATE_OFF,
+          (true, true) => NOISE_GATE_AUTO_LOOKAHEAD,
+          (true, false) => NOISE_GATE_AUTO,
+        };
         state.update_shm_mic_controls(aec_enabled, ai_strength, gate);
       }
     });
@@ -571,9 +707,43 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
   });
 }
 
-/// Measured added latency of a model (see the denoiser's latency test).
-fn latency_text(m: DenoiseModel) -> String {
-  trf("{} ms latency", &[&format!("{:.0}", AiVoiceIsolator::latency_ms(m))])
+const RNNOISE_ABOUT: &str = "RNNoise: light classic model (nnnoiseless), ~0.1 % CPU.\n\
+  Voice: stays natural, the model itself never cuts it.\n\
+  Keyboard: removed the least (~12-15 dB); loud typing stays audible and can keep the gate open.\n\
+  Pick it for a quiet room or a weak CPU.";
+const DEEPFILTER_ABOUT: &str = "DeepFilterNet 3: best open-source quality, full-band 48 kHz, ~1 % CPU.\n\
+  Keyboard: removed well (~20-30 dB).\n\
+  Voice: a very quiet voice under loud typing can lose some soft syllables.\n\
+  Switching during a call loads the model (~0.2 s gap).";
+const DPDFNET_ABOUT: &str =
+  "DPDFNet: strongest keyboard removal (~47-50 dB); the gate almost never lets keys through.\n\
+  Voice: best on quiet speech; very loud typing right over a word can thin it out.\n\
+  About 3x the CPU of DeepFilterNet 3. Switching during a call loads the model (~0.1 s gap).";
+
+/// Delay the mic gets with this model: its own (measured, see the denoiser's latency test)
+/// plus the gate lookahead when word-onset protection is on.
+fn total_latency_ms(m: DenoiseModel, ahead: bool) -> f32 {
+  AiVoiceIsolator::latency_ms(m) + if ahead { AiVoiceIsolator::lookahead_ms() } else { 0.0 }
+}
+
+fn ms_text(ms: f32) -> String {
+  trf("{} ms", &[&format!("{ms:.0}")])
+}
+
+fn latency_text(m: DenoiseModel, ahead: bool) -> String {
+  trf("{} ms latency", &[&format!("{:.0}", total_latency_ms(m, ahead))])
+}
+
+fn latency_breakdown(m: DenoiseModel, ahead: bool) -> String {
+  let model = ms_text(AiVoiceIsolator::latency_ms(m));
+  if ahead {
+    trf(
+      "Expected latency: {} = {} model + {} word-onset protection.",
+      &[&ms_text(total_latency_ms(m, true)), &model, &ms_text(AiVoiceIsolator::lookahead_ms())],
+    )
+  } else {
+    trf("Expected latency: {}.", &[&model])
+  }
 }
 
 fn model_name(m: DenoiseModel) -> String {
@@ -607,7 +777,7 @@ fn eq_section(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn mic_controls(state: &AppState) -> (bool, f32, i32) {
-  state.shm_header().map_or((true, 0.75, -45), |h| {
+  state.shm_header().map_or((true, 0.75, NOISE_GATE_AUTO_LOOKAHEAD), |h| {
     (
       h.aec_enabled.load(Ordering::Relaxed),
       h.ai_voice_strength_permille.load(Ordering::Relaxed) as f32 / 1000.0,

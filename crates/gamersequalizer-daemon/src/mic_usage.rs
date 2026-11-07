@@ -2,6 +2,9 @@
 //! indicator does it: every app that opened a mic has a key under ConsentStore\microphone, and
 //! `LastUsedTimeStop == 0` (with a start time) means its capture stream is still open, even
 //! while the mic is silent. Covers every microphone and works without our APO.
+//!
+//! Also: "an app records, but the microphone is muted / at 0 % / gone" (`silenced`), the
+//! classic "I talked for a minute and nobody heard me". The tray and the window warn about it.
 
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
@@ -12,6 +15,42 @@ use windows::Win32::System::Registry::{
 const MIC_STORE: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
 /// Desktop (non-Store) apps live one level deeper, one key per exe path with `\` written as `#`.
 const NON_PACKAGED: &str = "NonPackaged";
+
+/// Windows volume at or below this is "off" (the slider at 0 or 1 %).
+const SILENT_LEVEL: f32 = 0.015;
+
+/// Why apps that record get no voice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Silenced {
+  Muted,
+  ZeroVolume,
+  /// No active microphone at all (disabled in Windows or unplugged).
+  NoMicrophone,
+}
+
+/// Apps recording from the mic in use (`mic_id`: Windows default capture endpoint) while it
+/// is muted, at 0 % or missing. None while nobody records or the mic is fine.
+pub fn check_silenced(mic_id: Option<&str>) -> Option<(Vec<String>, Silenced)> {
+  let apps = recording_apps();
+  if apps.is_empty() {
+    return None;
+  }
+  let level = mic_id.and_then(crate::win_audio::chatmix::get_endpoint_volume);
+  silenced(mic_id.is_some(), level).map(|why| (apps, why))
+}
+
+/// Verdict for a recording in progress. `level`: (volume 0..1, muted); None = could not read
+/// it (device busy, COM error): no verdict rather than a false alarm.
+pub fn silenced(mic_present: bool, level: Option<(f32, bool)>) -> Option<Silenced> {
+  if !mic_present {
+    return Some(Silenced::NoMicrophone);
+  }
+  match level? {
+    (_, true) => Some(Silenced::Muted),
+    (volume, false) if volume <= SILENT_LEVEL => Some(Silenced::ZeroVolume),
+    _ => None,
+  }
+}
 
 /// True when some app other than this one keeps a microphone open.
 pub fn microphone_in_use() -> bool {
@@ -114,6 +153,15 @@ fn subkey_names(key: HKEY) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn recording_into_a_muted_or_missing_mic_is_flagged() {
+    assert_eq!(silenced(true, Some((0.8, true))), Some(Silenced::Muted));
+    assert_eq!(silenced(true, Some((0.0, false))), Some(Silenced::ZeroVolume));
+    assert_eq!(silenced(false, None), Some(Silenced::NoMicrophone));
+    assert_eq!(silenced(true, Some((0.5, false))), None);
+    assert_eq!(silenced(true, None), None, "unreadable level: no false alarm");
+  }
 
   #[test]
   fn display_names_are_short() {

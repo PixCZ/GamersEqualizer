@@ -17,6 +17,7 @@ use gamersequalizer_common::shm::{AecState, StereoFrame, APO_SHM_NAME};
 use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
 
 use super::aec_delay_cache;
+use super::console_owner::ConsoleOwner;
 use super::dsp_watch::DspWatch;
 use super::loopback::resolve_default_capture_id;
 
@@ -27,6 +28,11 @@ const SYNC_INTERVAL: Duration = Duration::from_millis(100);
 const KEY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// Save again only if the confirmed delay moved by more than 1 ms.
 const DELAY_SAVE_MIN_CHANGE: usize = 48;
+/// Voice leveler: save the learned level when it moved by 0.5 dB, at most every 10 s.
+const LEVEL_SAVE_MIN_CHANGE_X10: i32 = 5;
+const LEVEL_SAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// After "Learn again", the APO still reports the old level for a moment: don't save it back.
+const LEVEL_RESET_QUIET: Duration = Duration::from_secs(2);
 
 pub struct ApoLink {
   shm: Option<SharedMemoryClient>,
@@ -38,7 +44,21 @@ pub struct ApoLink {
   cache_key: Option<String>,
   last_key_check: Option<Instant>,
   saved_delay: Option<usize>,
+  /// Bumped on every reference output switch (`aec_reference_seq`); the APO then drops the
+  /// old device's delay lock. `reference_switch_pending`: bump once the new key is loaded.
+  reference_seq: u32,
+  reference_switch_pending: bool,
+  /// Default microphone (key of the voice level cache) and its remembered level.
+  capture_id: Option<String>,
+  level_cache_path: PathBuf,
+  saved_level: Option<i32>,
+  last_level_save: Option<Instant>,
+  level_reset_seen: Option<u32>,
+  level_reset_at: Option<Instant>,
   watch: DspWatch,
+  console: ConsoleOwner,
+  /// Last sync drove the APO; false = the next one must copy every EQ (we take over).
+  driving: bool,
 }
 
 impl Default for ApoLink {
@@ -59,13 +79,25 @@ impl ApoLink {
       cache_key: None,
       last_key_check: None,
       saved_delay: None,
+      reference_seq: 0,
+      reference_switch_pending: false,
+      capture_id: None,
+      level_cache_path: aec_delay_cache::leveler_path(),
+      saved_level: None,
+      last_level_save: None,
+      level_reset_seen: None,
+      level_reset_at: None,
       watch: DspWatch::default(),
+      console: ConsoleOwner::default(),
+      driving: false,
     }
   }
 
   /// The output the reference is captured from (part of the cache key).
   pub fn set_render_device(&mut self, render_id: Option<String>) {
     if render_id != self.render_id {
+      // The first device isn't a switch: a delay the APO already locked may well be for it.
+      self.reference_switch_pending |= self.render_id.is_some();
       self.render_id = render_id;
       self.last_key_check = None;
     }
@@ -73,12 +105,18 @@ impl ApoLink {
 
   /// Same frames the daemon's own ring got.
   pub fn push_reference(&mut self, frames: &[StereoFrame], qpc_first_hns: u64) {
+    if !self.driving {
+      return;
+    }
     if let Some(shm) = self.shm.as_mut() {
       shm.ring_buffer().push_frames_timed(frames, qpc_first_hns);
     }
   }
 
   pub fn set_tap_active(&self, active: bool) {
+    if !self.driving {
+      return;
+    }
     if let Some(shm) = self.shm.as_ref() {
       shm.layout().header.tap_active.store(active, Ordering::Relaxed);
     }
@@ -95,7 +133,12 @@ impl ApoLink {
       return;
     }
     self.last_sync = Instant::now();
-    self.sync(local, tap_active);
+    if self.console.is_owner() {
+      self.sync(local, tap_active);
+    } else {
+      // Another user at the console: our settings must not reach the APO (it serves them).
+      self.driving = false;
+    }
     // After mirroring: the local mapping now holds the APO's or the bridge's telemetry.
     self.watch.check(&local.layout().header);
   }
@@ -114,7 +157,10 @@ impl ApoLink {
       return;
     };
     let (apo_h, local_h) = (&apo.layout().header, &local.layout().header);
-    apo_h.copy_controls_from(local_h);
+    apo_h.copy_controls_from(local_h, !self.driving);
+    // The APO processes only while this changes; stopping (exit, crash, user switch) = pass-through.
+    apo_h.owner_beat.fetch_add(1, Ordering::Release);
+    self.driving = true;
     apo_h.tap_active.store(tap_active, Ordering::Relaxed);
     // The output APO may run without the mic APO: its heartbeat is mirrored every tick.
     local_h.copy_output_telemetry_from(apo_h);
@@ -127,13 +173,53 @@ impl ApoLink {
     }
 
     self.sync_delay_cache();
+    self.sync_level_cache(local);
+  }
+
+  /// Voice leveler: hand the level remembered for this mic to the APO, save what it learns, and
+  /// forget it on "Learn again". Shortcut: APO path only (the in-process bridge starts fresh).
+  fn sync_level_cache(&mut self, local: &SharedMemoryClient) {
+    let reset_seq = local.layout().header.mic_leveler_reset_seq.load(Ordering::Relaxed);
+    if self.level_reset_seen.is_some_and(|s| s != reset_seq) {
+      if let Some(mic) = self.capture_id.as_deref() {
+        info!("[ApoLink] voice leveler: learning again for this mic");
+        aec_delay_cache::forget_level(&self.level_cache_path, mic);
+      }
+      self.saved_level = None;
+      self.level_reset_at = Some(Instant::now());
+    }
+    self.level_reset_seen = Some(reset_seq);
+
+    let Some(apo) = self.shm.as_ref() else {
+      return;
+    };
+    let h = &apo.layout().header;
+    h.mic_leveler_saved_level_db_x10.store(self.saved_level.unwrap_or(0), Ordering::Relaxed);
+
+    let level = h.mic_leveler_level_db_x10.load(Ordering::Relaxed);
+    let quiet = self.level_reset_at.is_some_and(|t| t.elapsed() < LEVEL_RESET_QUIET);
+    let due = self.last_level_save.is_none_or(|t| t.elapsed() >= LEVEL_SAVE_INTERVAL);
+    let moved = self.saved_level.is_none_or(|s| (s - level).abs() >= LEVEL_SAVE_MIN_CHANGE_X10);
+    if let (Some(mic), true) = (self.capture_id.as_deref(), level != 0 && !quiet && due && moved) {
+      aec_delay_cache::save_level(&self.level_cache_path, mic, level);
+      self.saved_level = Some(level);
+      self.last_level_save = Some(Instant::now());
+    }
   }
 
   /// Hand the remembered delay to the APO; save a delay the APO measured itself.
   fn sync_delay_cache(&mut self) {
     if self.last_key_check.is_none_or(|t| t.elapsed() >= KEY_CHECK_INTERVAL) {
       self.last_key_check = Some(Instant::now());
-      let key = match (resolve_default_capture_id(), self.render_id.as_deref()) {
+      let capture = resolve_default_capture_id();
+      if capture != self.capture_id {
+        self.saved_level = capture.as_deref().and_then(|m| aec_delay_cache::load_level(&self.level_cache_path, m));
+        if let Some(l) = self.saved_level {
+          info!("[ApoLink] remembered voice level for this mic: {:.1} dBFS", l as f32 / 10.0);
+        }
+        self.capture_id = capture.clone();
+      }
+      let key = match (capture, self.render_id.as_deref()) {
         (Some(capture), Some(render)) => Some(aec_delay_cache::key(&capture, render)),
         _ => None,
       };
@@ -150,7 +236,18 @@ impl ApoLink {
     };
     let h = &apo.layout().header;
     h.aec_cached_delay_samples.store(self.saved_delay.unwrap_or(0) as u32, Ordering::Relaxed);
+    // After the cached delay (the key was reloaded on the switch), so the APO reads both together.
+    if std::mem::take(&mut self.reference_switch_pending) {
+      self.reference_seq = self.reference_seq.wrapping_add(1);
+      info!("[ApoLink] reference output switched: the APO measures the echo delay again");
+    }
+    h.aec_reference_seq.store(self.reference_seq, Ordering::Release);
 
+    // Until the APO has handled the switch, its delay is the old output's: don't save it under
+    // the new key. Acquire first, so the delay read below is at least as new as this seq.
+    if h.aec_reference_seq_seen.load(Ordering::Acquire) != self.reference_seq {
+      return;
+    }
     let locked = AecState::from_u32(h.aec_state.load(Ordering::Relaxed)) == AecState::Locked;
     let delay_us = h.aec_delay_us.load(Ordering::Relaxed);
     if !locked || delay_us == 0 || h.aec_delay_from_cache.load(Ordering::Relaxed) {

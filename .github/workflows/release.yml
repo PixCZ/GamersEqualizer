@@ -1,0 +1,61 @@
+# Builds the Windows app on GitHub's runners.
+# - Manual run (Actions tab -> Release -> Run workflow): tests, builds, uploads the zip as a
+#   workflow artifact (kept 14 days).
+# - Pushing a tag v* (git tag v0.1.0 && git push origin v0.1.0): the same, plus a GitHub Release
+#   with the zip attached.
+# Not code-signed yet: Windows SmartScreen warns on first start of the downloaded exe.
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release on tags
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Build app (dist profile)
+        run: cargo build --profile dist -p gamersequalizer
+
+      - name: Build microphone APO
+        run: cargo build --profile apo -p gamersequalizer-apo
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $dir = "GamersEqualizer-$version-x64"
+          New-Item -ItemType Directory -Force "$dir/scripts" | Out-Null
+          # Layout the app expects: the APO DLL next to the exe, install scripts in scripts/.
+          Copy-Item target/dist/gamersequalizer.exe $dir
+          Copy-Item target/apo/gamersequalizer_apo.dll $dir
+          Copy-Item scripts/apo-install.ps1, scripts/apo-uninstall.ps1 "$dir/scripts"
+          Compress-Archive -Path "$dir/*" -DestinationPath "$dir.zip"
+          "ZIP=$dir.zip" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP }}
+          path: ${{ env.ZIP }}
+          retention-days: 14
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP }}
+          generate_release_notes: true

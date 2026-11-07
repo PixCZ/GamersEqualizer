@@ -25,6 +25,8 @@ pub enum ThemePref {
 pub struct UiPrefs {
   pub language: LanguagePref,
   pub theme: ThemePref,
+  /// The first-run setup card was answered (set up or "Not now"); it no longer opens by itself.
+  pub setup_done: bool,
   #[serde(skip)]
   path: PathBuf,
 }
