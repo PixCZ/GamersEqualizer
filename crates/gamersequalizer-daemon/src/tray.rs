@@ -243,7 +243,7 @@ pub fn focus_window() -> bool {
 pub fn close_window() {
   if let Some(hwnd) = find_window() {
     unsafe {
-      let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+      let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
     }
   }
 }

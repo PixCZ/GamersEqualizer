@@ -855,3 +855,25 @@ Upstream `deep_filter` pins tract `^0.21.4`, and the mic crate had to pin `=0.21
   - model load 72-87 ms (docs: ~200 ms on 0.21)
 - APO DLL 59.4 MB -> 47.1 MB (one tract instead of two).
 - Not done: not heard live, and the APO is not installed with it yet.
+
+## Milestone 32: Dependency upgrades (2026-11-08)
+
+Every outdated direct dependency was moved to its current major version, and the unused ones were dropped.
+
+| Crate                        | Before      | After       | What changed in our code                                                  |
+| ---------------------------- | ----------- | ----------- | ------------------------------------------------------------------------- |
+| windows / windows-core       | 0.58        | 0.62        | `BOOL` in `windows::core`, `PROPERTYKEY` in `Foundation`, `Option` params |
+| eframe / egui                | 0.29        | 0.37        | `App::ui`, `Panel`, `CornerRadius`, integer margins and shadows           |
+| egui_plot                    | 0.29        | 0.38        | items take `(name, data)`, new label formatter                            |
+| wgpu                         | 22          | 30          | backend choice via `WgpuSetupCreateNew`, async adapter list               |
+| tray-icon / muda             | 0.19 / 0.15 | 0.26 / 0.21 | none                                                                      |
+| rubato (APO)                 | 0.14        | 5           | new API; the sinc delay is now skipped by hand (see below)                |
+| window-vibrancy, directories | 0.5, 5      | removed     | were not used                                                             |
+
+- **rubato 5 no longer withholds the filter delay** at the start of the stream. Without a fix the
+  8 kHz rate bridge added 13.4 ms; `rate_bridge.rs` now drops `output_delay()` samples after each
+  reset, and the latency test passes again.
+- **DX12 probe**: wgpu 30 returns the adapter list as a future. On native it is ready on the first
+  poll, so it is polled once with a no-op waker (no async runtime pulled in).
+- The `deep_filter` fork loses its rubato resampling (unused).
+- npm (CodeGraph only) was already up to date.

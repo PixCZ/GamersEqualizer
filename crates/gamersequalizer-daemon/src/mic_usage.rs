@@ -142,7 +142,7 @@ fn read_qword(parent: HKEY, subkey: &HSTRING, value: &str) -> Option<u64> {
 
 fn open_key(parent: HKEY, path: &HSTRING) -> Option<HKEY> {
   let mut key = HKEY::default();
-  let res = unsafe { RegOpenKeyExW(parent, PCWSTR(path.as_ptr()), 0, KEY_READ, &mut key) };
+  let res = unsafe { RegOpenKeyExW(parent, PCWSTR(path.as_ptr()), Some(0), KEY_READ, &mut key) };
   (res == ERROR_SUCCESS).then_some(key)
 }
 
@@ -158,7 +158,7 @@ fn subkey_names(key: HKEY) -> Vec<String> {
   let mut buf = [0u16; 256];
   for index in 0.. {
     let mut len = buf.len() as u32;
-    let res = unsafe { RegEnumKeyExW(key, index, PWSTR(buf.as_mut_ptr()), &mut len, None, PWSTR::null(), None, None) };
+    let res = unsafe { RegEnumKeyExW(key, index, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) };
     if res != ERROR_SUCCESS {
       break; // ERROR_NO_MORE_ITEMS, or a key we can't read: stop either way.
     }

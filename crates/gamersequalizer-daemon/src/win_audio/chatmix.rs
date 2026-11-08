@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::thread::LocalKey;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
   eCapture, eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
@@ -842,7 +842,7 @@ pub fn set_endpoint_volume(device_id: &str, level: f32) {
 pub fn set_endpoint_mute(device_id: &str, muted: bool) {
   // SAFETY: COM call on a live interface.
   with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe {
-    v.SetMute(BOOL::from(muted), std::ptr::null())
+    v.SetMute(muted, std::ptr::null())
   });
 }
 
@@ -877,7 +877,7 @@ pub fn set_system_master_mute(muted: bool) {
     if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
       if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
         if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMute(BOOL::from(muted), std::ptr::null());
+          let _ = endpoint_vol.SetMute(muted, std::ptr::null());
         }
       }
     }
@@ -930,7 +930,7 @@ pub fn set_system_mic_mute(muted: bool) {
     if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
       if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
         if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMute(BOOL::from(muted), std::ptr::null());
+          let _ = endpoint_vol.SetMute(muted, std::ptr::null());
         }
       }
     }

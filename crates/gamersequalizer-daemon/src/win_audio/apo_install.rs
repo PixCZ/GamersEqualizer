@@ -312,13 +312,13 @@ fn hklm_subkeys(key: &str) -> Vec<String> {
   let mut out = Vec::new();
   // SAFETY: the handle is closed below; the name buffer is a local array of the size passed.
   unsafe {
-    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
       return out;
     }
     for index in 0..MAX_SUBKEYS {
       let mut name = [0u16; 256];
       let mut len = name.len() as u32;
-      if RegEnumKeyExW(hkey, index, PWSTR(name.as_mut_ptr()), &mut len, None, PWSTR::null(), None, None)
+      if RegEnumKeyExW(hkey, index, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None)
         != ERROR_SUCCESS
       {
         break;
@@ -335,7 +335,7 @@ fn hklm_key_exists(key: &str) -> bool {
   let mut hkey = HKEY::default();
   // SAFETY: NUL-terminated key name owned by this frame; the handle is closed right away.
   unsafe {
-    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
       return false;
     }
     let _ = RegCloseKey(hkey);

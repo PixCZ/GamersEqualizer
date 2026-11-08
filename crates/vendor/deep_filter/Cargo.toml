@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-transforms = ["dep:thiserror", "dep:ndarray", "dep:rubato"]
+transforms = ["dep:thiserror", "dep:ndarray"]
 logging = ["dep:log", "dep:crossbeam-channel"]
 timings = []
 default-model = []
@@ -40,7 +40,6 @@ realfft = "3.1"
 itertools = "0.12"
 num-complex = { version = "0.4", features = ["serde"] }
 log = { version = "0.4", features = ["std"], optional = true }
-rubato = { version = "0.14", optional = true }
 thiserror = { version = "1.0", optional = true }
 anyhow = { version = "1.0", optional = true, features = ["backtrace"] }
 ndarray = { version = "0.17", optional = true }

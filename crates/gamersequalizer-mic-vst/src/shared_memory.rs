@@ -1,7 +1,8 @@
 use gamersequalizer_common::shm::{ShmLayout, ShmRingBuffer, SHM_MAGIC, SHM_NAME};
 use std::ptr::NonNull;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, LocalFree, BOOL, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::System::Memory::{
@@ -118,7 +119,7 @@ pub(crate) fn create_mapping(name: &str, sddl: Option<&str>, size: usize) -> Res
       PCWSTR(wide_name.as_ptr()),
     );
     if !descriptor.0.is_null() {
-      let _ = LocalFree(HLOCAL(descriptor.0));
+      let _ = LocalFree(Some(HLOCAL(descriptor.0)));
     }
     result.map_err(|e| format!("CreateFileMappingW({name}) failed: {e}"))
   }

@@ -408,7 +408,10 @@ fn run_gui_mode() {
       viewport = viewport.with_position([g.x, g.y]);
     }
   }
-  let wgpu_options = egui_wgpu::WgpuConfiguration { supported_backends: wgpu_backends(), ..Default::default() };
+  let mut wgpu_setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+  wgpu_setup.instance_descriptor.backends = wgpu_backends();
+  let wgpu_options =
+    egui_wgpu::WgpuConfiguration { wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(wgpu_setup), ..Default::default() };
   let native_options = eframe::NativeOptions { viewport, wgpu_options, ..Default::default() };
 
   let app = GamersEqualizerApp::new(state, win_audio, window);
@@ -449,17 +452,25 @@ pub(crate) fn ensure_daemon_running() {
 }
 
 /// Graphics backend for the window: DX12 when the machine has a DX12 GPU, else wgpu's usual
-/// Vulkan/GL. Not Vulkan first: on some drivers wgpu 22 gets "Suboptimal present" every frame,
+/// Vulkan/GL. Not Vulkan first: on some drivers wgpu 22 got "Suboptimal present" every frame,
 /// rebuilds the swapchain each time and floods the log. Not DX12 only: wgpu picks one backend
 /// up front and the window can't be recreated if it fails, so DX12 is used only when present.
 /// `WGPU_BACKEND=vulkan|dx12|gl` still overrides the choice.
 fn wgpu_backends() -> wgpu::Backends {
-  if let Some(from_env) = wgpu::util::backend_bits_from_env() {
+  if let Some(from_env) = wgpu::Backends::from_env() {
     return from_env;
   }
-  let probe = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::DX12, ..Default::default() });
-  let has_dx12_gpu =
-    probe.enumerate_adapters(wgpu::Backends::DX12).iter().any(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
+  let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+  desc.backends = wgpu::Backends::DX12;
+  let probe = wgpu::Instance::new(desc);
+  // Native enumeration finishes inside the first poll (the future exists for WebGPU), so one
+  // poll with a no-op waker is enough; a pending result counts as "no DX12 GPU".
+  let mut adapters = std::pin::pin!(probe.enumerate_adapters(wgpu::Backends::DX12));
+  let adapters = match std::future::Future::poll(adapters.as_mut(), &mut std::task::Context::from_waker(std::task::Waker::noop())) {
+    std::task::Poll::Ready(list) => list,
+    std::task::Poll::Pending => Vec::new(),
+  };
+  let has_dx12_gpu = adapters.iter().any(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
   if has_dx12_gpu {
     info!("[GamersEqualizer] graphics: DX12");
     wgpu::Backends::DX12

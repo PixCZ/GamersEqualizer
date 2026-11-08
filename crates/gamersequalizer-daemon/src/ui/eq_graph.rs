@@ -55,7 +55,7 @@ pub fn band_editor(
   background: &[Curve],
   height: f32,
 ) -> bool {
-  let sel_id = egui::Id::new(id).with("selected");
+  let sel_id = egui::Id::unique(id).with("selected");
   let mut selected: Option<usize> =
     ui.data(|d| d.get_temp::<Option<usize>>(sel_id)).flatten().filter(|&i| i < bands.len());
 
@@ -101,7 +101,7 @@ fn graph(
   };
 
   // --- Input (before drawing, so the frame shows the new state). ---
-  let drag_id = egui::Id::new(id).with("dragging");
+  let drag_id = egui::Id::unique(id).with("dragging");
   let pointer = resp.interact_pointer_pos().or(resp.hover_pos());
   let hovered = pointer.and_then(|p| nearest_dot(&axes, bands, p));
 
@@ -148,10 +148,7 @@ fn graph(
     if let Some(band) = bands.get_mut(i).filter(|b| wheel != 0.0 && !b.is_cut()) {
       // Wheel up = wider = lower Q. Eaten, so the page doesn't scroll at the same time.
       band.q = (band.q / WHEEL_Q_PER_POINT.powf(wheel)).clamp(0.1, 30.0);
-      ui.input_mut(|inp| {
-        inp.smooth_scroll_delta = Vec2::ZERO;
-        inp.raw_scroll_delta = Vec2::ZERO;
-      });
+      ui.input_mut(|inp| inp.smooth_scroll_delta = Vec2::ZERO);
       *selected = Some(i);
       changed = true;
     }
@@ -234,7 +231,7 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
 fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, remove: &mut bool) -> bool {
   let mut changed = false;
   let c = theme::adapt(ui, dot_color(i, band));
-  theme::inset_frame(ui).inner_margin(egui::Margin::same(12.0)).show(ui, |ui| {
+  theme::inset_frame(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
     ui.set_width(ui.available_width());
     ui.horizontal_wrapped(|ui| {
       ui.label(theme::strong(format!("● {}", trf("Filter {}", &[&(i + 1)])), 14.0).color(c));
@@ -286,7 +283,7 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
           };
           let fits = stages <= room;
           let r = ui
-            .add_enabled(fits, egui::SelectableLabel::new(band.slope_db == slope, label))
+            .add_enabled(fits, egui::Button::selectable(band.slope_db == slope, label))
             .on_disabled_hover_text(tr("No room left: remove a filter first."));
           if r.clicked() && band.slope_db != slope {
             band.slope_db = slope;

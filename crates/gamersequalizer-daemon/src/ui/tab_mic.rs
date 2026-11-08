@@ -258,7 +258,7 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
 /// Shows whether the raw mic clipped recently (DSP counter: full-scale samples and flat tops).
 /// The counter is cumulative; the time of the last increase lives in egui's memory.
 fn clipping_status(ui: &mut Ui, clips: u32) {
-  let id = egui::Id::new("mic_clip_seen");
+  let id = egui::Id::unique("mic_clip_seen");
   let now = ui.input(|i| i.time);
   let (seen, last_at) = ui.ctx().data(|d| d.get_temp::<(u32, Option<f64>)>(id)).unwrap_or((clips, None));
   // A smaller counter = the DSP restarted (new stream): no new clipping.
@@ -467,13 +467,16 @@ fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
     .x_axis_formatter(|v, _| format!("{:.0} ms", v.value))
     // The curve is peak-to-average ratio / full scale: label it as the ratio.
     .y_axis_formatter(|v, _| format!("{:.0}", v.value * FULL_SCALE_PEAK_RATIO as f64))
-    .label_formatter(|_, p| format!("{:.1} ms\n{:.1}x", p.x, p.y * FULL_SCALE_PEAK_RATIO as f64))
+    .label_formatter(|pos| {
+      let p = super::eq_editor::hover_point(pos);
+      Some(format!("{:.1} ms\n{:.1}x", p.x, p.y * FULL_SCALE_PEAK_RATIO as f64))
+    })
     .show(ui, |pu| {
       let threshold = (MIN_PEAK_RATIO / FULL_SCALE_PEAK_RATIO) as f64;
-      pu.hline(HLine::new(threshold).stroke(Stroke::new(1.0_f32, threshold_color)).name(tr("acceptance threshold")));
-      pu.line(Line::new(pts).stroke(Stroke::new(1.5_f32, line)).name("|corr|"));
+      pu.hline(HLine::new(tr("acceptance threshold"), threshold).stroke(Stroke::new(1.0_f32, threshold_color)));
+      pu.line(Line::new("|corr|", pts).stroke(Stroke::new(1.5_f32, line)));
       if let Some(d) = t.delay_ms {
-        pu.vline(VLine::new(d as f64).stroke(Stroke::new(1.2_f32, mark)).name(tr("locked delay")));
+        pu.vline(VLine::new(tr("locked delay"), d as f64).stroke(Stroke::new(1.2_f32, mark)));
       }
     });
 }
@@ -491,8 +494,8 @@ fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
     .x_axis_formatter(|v, _| format!("{:.0} s", v.value))
     .legend(Legend::default())
     .show(ui, |pu| {
-      pu.line(Line::new(erle).stroke(Stroke::new(1.5_f32, a)).name("ERLE dB"));
-      pu.line(Line::new(delay).stroke(Stroke::new(1.5_f32, b)).name(tr("delay ms")));
+      pu.line(Line::new("ERLE dB", erle).stroke(Stroke::new(1.5_f32, a)));
+      pu.line(Line::new(tr("delay ms"), delay).stroke(Stroke::new(1.5_f32, b)));
     });
 }
 

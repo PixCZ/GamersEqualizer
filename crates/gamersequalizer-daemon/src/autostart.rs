@@ -14,7 +14,7 @@ const RUN_VALUE_NAME: PCWSTR = w!("GamersEqualizer");
 pub fn is_autostart_enabled() -> bool {
   unsafe {
     let mut hkey = Default::default();
-    if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_SUBKEY, 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+    if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_SUBKEY, Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
       return false;
     }
 
@@ -40,7 +40,7 @@ pub fn is_autostart_enabled() -> bool {
 pub fn set_autostart(enable: bool) -> Result<(), String> {
   unsafe {
     let mut hkey = Default::default();
-    let status = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_SUBKEY, 0, KEY_WRITE, &mut hkey);
+    let status = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_SUBKEY, Some(0), KEY_WRITE, &mut hkey);
     if status != ERROR_SUCCESS {
       return Err(format!("Failed to open Run registry key: {:?}", status));
     }
@@ -52,7 +52,7 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
       let wide_cmd: Vec<u16> = cmd_str.encode_utf16().chain(std::iter::once(0)).collect();
       let bytes = std::slice::from_raw_parts(wide_cmd.as_ptr() as *const u8, wide_cmd.len() * 2);
 
-      let set_res = RegSetValueExW(hkey, RUN_VALUE_NAME, 0, REG_SZ, Some(bytes));
+      let set_res = RegSetValueExW(hkey, RUN_VALUE_NAME, Some(0), REG_SZ, Some(bytes));
 
       if set_res == ERROR_SUCCESS {
         info!("[GamersEqualizer] Windows autostart enabled: {}", cmd_str);

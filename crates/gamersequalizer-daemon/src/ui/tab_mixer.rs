@@ -3,7 +3,7 @@ use super::theme::{self, icons, Icon};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::app_channels::{self, AppChannel};
 use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
-use egui::{Color32, RichText, Rounding, Sense, Ui, Vec2};
+use egui::{Color32, RichText, CornerRadius, Sense, Ui, Vec2};
 use gamersequalizer_common::streams::StreamBus;
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -101,7 +101,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
   let fader_h = (room - (wanted_list - APPS_LIST_HEIGHT)).clamp(FADER_MIN, FADER_MAX);
   let list_h = wanted_list.min(APPS_LIST_HEIGHT + (room - fader_h).max(0.0));
   let mut moved: AppMove = None;
-  let tallest_id = egui::Id::new("mixer_tallest_footer");
+  let tallest_id = egui::Id::unique("mixer_tallest_footer");
   let footers = FooterSync { tallest: ui.data(|d| d.get_temp(tallest_id)).unwrap_or(0.0), tallest_now: Cell::new(0.0) };
 
   theme::page_header(
@@ -397,11 +397,11 @@ fn render_strip(
 ) {
   let p = theme::palette(ui);
   let color = theme::adapt(ui, strip.color);
-  egui::Frame::none()
+  egui::Frame::NONE
     .fill(p.card)
-    .rounding(Rounding::same(theme::CARD_RADIUS))
+    .corner_radius(CornerRadius::same(theme::CARD_RADIUS))
     .stroke(egui::Stroke::new(1.0_f32, p.card_stroke))
-    .inner_margin(egui::Margin::same(12.0))
+    .inner_margin(egui::Margin::same(12))
     .show(ui, |ui| {
       ui.set_width(ui.available_width());
       // 1. Channel title
@@ -467,7 +467,7 @@ fn render_strip(
 
       // 4. Apps box
       // ui.columns lays out justified, which would stretch wrapped labels word by word.
-      let footer_id = ui.id().with(("strip_footer", strip.title));
+      let footer_id = ui.scope_id().with(("strip_footer", strip.title));
       let own_footer: f32 = ui.data(|d| d.get_temp(footer_id)).unwrap_or(strip.footers.tallest);
       let list_h = strip.list_h + (strip.footers.tallest - own_footer).max(0.0);
       ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -498,7 +498,7 @@ fn peak_meter(ui: &mut Ui, peak: f32, height: f32) {
   let (rect, _resp) = ui.allocate_exact_size(Vec2::new(6.0, height), Sense::hover());
   let p = theme::palette(ui);
   let painter = ui.painter();
-  painter.rect_filled(rect, Rounding::same(3.0), p.inset);
+  painter.rect_filled(rect, CornerRadius::same(3), p.inset);
   let level = peak.clamp(0.0, 1.0);
   if level > 0.005 {
     let fill_h = rect.height() * level;
@@ -510,7 +510,7 @@ fn peak_meter(ui: &mut Ui, peak: f32, height: f32) {
     } else {
       Color32::from_rgb(46, 204, 113)
     };
-    painter.rect_filled(fill_rect, Rounding::same(3.0), color);
+    painter.rect_filled(fill_rect, CornerRadius::same(3), color);
   }
 }
 
@@ -623,23 +623,23 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
   let pin = if app.pinned { "📌 " } else { "" };
   let room = max_chars.saturating_sub(pin.chars().count() + suffix.chars().count()).max(4);
   let text = format!("{pin}{}{suffix}", super::truncate_chars(&app.exe, room));
-  let chip = egui::Frame::none()
+  let chip = egui::Frame::NONE
     .fill(color.gamma_multiply(0.18))
     .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.7)))
-    .rounding(Rounding::same(10.0))
-    .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+    .corner_radius(CornerRadius::same(10))
+    .inner_margin(egui::Margin::symmetric(7, 2))
     .show(ui, |ui| {
       // Full line width: the chips stack into a tidy column and are easy to grab.
       ui.set_width(ui.available_width());
       ui.add(egui::Label::new(RichText::new(text).small()).wrap_mode(egui::TextWrapMode::Extend).selectable(false))
     });
-  let response = ui.interact(chip.response.rect, ui.id().with(("mixer_app_chip", &app.exe)), Sense::click_and_drag());
+  let response = ui.interact(chip.response.rect, ui.scope_id().with(("mixer_app_chip", &app.exe)), Sense::click_and_drag());
   response.dnd_set_drag_payload(app.exe.clone());
   if response.dragged() {
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     // Drag ghost next to the pointer.
     if let Some(pos) = ui.ctx().pointer_interact_pos() {
-      let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("mixer_app_drag"));
+      let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("mixer_app_drag"));
       ui.ctx().layer_painter(layer).text(
         pos + Vec2::new(12.0, 4.0),
         egui::Align2::LEFT_TOP,
@@ -659,7 +659,7 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
   response.on_hover_text(hover).context_menu(|ui| {
     if ui.add_enabled(app.pinned, egui::Button::new(tr("Back to automatic channel"))).clicked() {
       *moved = Some((app.exe.clone(), None));
-      ui.close_menu();
+      ui.close();
     }
   });
 }

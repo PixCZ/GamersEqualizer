@@ -4,14 +4,14 @@ use super::theme;
 use crate::dsp_apo::{evaluate_bands_response, generate_log_frequencies};
 use crate::i18n::{tr, trf};
 use egui::{Color32, Stroke, Ui};
-use egui_plot::{HLine, Line, Plot, PlotPoints};
+use egui_plot::{HLine, HoverPosition, Line, Plot, PlotPoint, PlotPoints};
 use gamersequalizer_common::profile::BiquadBand;
 
 pub use super::eq_graph::band_editor;
 
 /// Plot height that follows the window: `fraction` of its height, within [min, max].
 pub fn plot_height(ui: &Ui, fraction: f32, min: f32, max: f32) -> f32 {
-  (ui.ctx().screen_rect().height() * fraction).clamp(min, max)
+  (ui.ctx().content_rect().height() * fraction).clamp(min, max)
 }
 
 /// One curve of `curves_plot`: (legend name, gains in dB per frequency, color, line width).
@@ -49,21 +49,30 @@ pub fn curves_plot(ui: &mut Ui, id: &str, freqs: &[f32], curves: &[Curve], pream
       }
     })
     .y_axis_formatter(|val, _range| format!("{:.0} dB", val.value))
-    .label_formatter(|_, p| format!("{:.0} Hz\n{:+.1} dB", 10f64.powf(p.x), p.y))
+    .label_formatter(|pos| {
+      let p = hover_point(pos);
+      Some(format!("{:.0} Hz\n{:+.1} dB", 10f64.powf(p.x), p.y))
+    })
     .show(ui, |plot_ui| {
-      plot_ui.hline(HLine::new(0.0).stroke(Stroke::new(1.0_f32, zero_line)));
+      plot_ui.hline(HLine::new("", 0.0).stroke(Stroke::new(1.0_f32, zero_line)));
       if let Some(preamp) = preamp_db.filter(|p| *p != 0.0) {
         plot_ui.hline(
-          HLine::new(preamp as f64)
-            .stroke(Stroke::new(1.0_f32, preamp_color))
-            .name(trf("Auto preamp {} dB", &[&format!("{preamp:.1}")])),
+          HLine::new(trf("Auto preamp {} dB", &[&format!("{preamp:.1}")]), preamp as f64)
+            .stroke(Stroke::new(1.0_f32, preamp_color)),
         );
       }
       for &(name, gains, color, width) in &curves {
         let pts: PlotPoints = freqs.iter().zip(gains).map(|(&f, &g)| [(f as f64).log10(), g as f64]).collect();
-        plot_ui.line(Line::new(pts).stroke(Stroke::new(width, color)).name(name));
+        plot_ui.line(Line::new(name, pts).stroke(Stroke::new(width, color)));
       }
     });
+}
+
+/// Plot position under the cursor, whether or not it is near a data point.
+pub fn hover_point(pos: &HoverPosition<'_>) -> PlotPoint {
+  match *pos {
+    HoverPosition::NearDataPoint { position, .. } | HoverPosition::Elsewhere { position } => position,
+  }
 }
 
 /// Searchable profile combo. Returns Some(choice) when the user picked something;

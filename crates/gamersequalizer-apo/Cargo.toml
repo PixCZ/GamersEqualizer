@@ -17,7 +17,7 @@ windows-core = { workspace = true }
 gamersequalizer-common = { path = "../gamersequalizer-common" }
 gamersequalizer-mic-vst = { path = "../gamersequalizer-mic-vst" }
 # Already in the build through deep_filter; resamples the mic chain at non-48 kHz rates.
-rubato = "0.14"
+rubato = "5"
 
 [lints]
 workspace = true

@@ -154,13 +154,13 @@ fn registry_subkeys(key: &str) -> Vec<String> {
   let mut out = Vec::new();
   // SAFETY: key handle is closed below; buffers are locals sized as passed.
   unsafe {
-    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), 0, KEY_READ, &mut hkey) != ERROR_SUCCESS {
+    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
       return out;
     }
     for index in 0..MAX_REG_SUBKEYS {
       let mut name = [0u16; 256];
       let mut len = name.len() as u32;
-      let rc = RegEnumKeyExW(hkey, index, PWSTR(name.as_mut_ptr()), &mut len, None, PWSTR::null(), None, None);
+      let rc = RegEnumKeyExW(hkey, index, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None);
       if rc != ERROR_SUCCESS {
         break;
       }
@@ -235,7 +235,7 @@ fn version_info_names(full_path: &str) -> Vec<String> {
       return out;
     }
     let mut block = vec![0u8; size as usize];
-    if GetFileVersionInfoW(PCWSTR(path_w.as_ptr()), 0, size, block.as_mut_ptr().cast()).is_err() {
+    if GetFileVersionInfoW(PCWSTR(path_w.as_ptr()), None, size, block.as_mut_ptr().cast()).is_err() {
       return out;
     }
     // First language/codepage pair of the translation table.

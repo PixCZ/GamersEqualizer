@@ -9,7 +9,7 @@ use windows::Win32::Media::Audio::{
   IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ};
-use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
+use windows::Win32::Foundation::PROPERTYKEY;
 
 use super::policy_config::IPolicyConfig;
 

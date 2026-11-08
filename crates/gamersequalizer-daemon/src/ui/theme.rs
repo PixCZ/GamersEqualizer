@@ -8,16 +8,16 @@
 //! systems.
 
 use egui::{
-  Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Frame, Margin, Response, RichText, Rounding, Sense,
+  Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Frame, Margin, Response, RichText, CornerRadius, Sense,
   Shadow, Stroke, TextStyle, TextWrapMode, Theme, Ui, Vec2, Visuals, Widget, WidgetText,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const FONT_DIR: &str = r"C:\Windows\Fonts";
 /// Fluent radii: controls, cards and flyouts.
-pub const CONTROL_RADIUS: f32 = 5.0;
-pub const CARD_RADIUS: f32 = 8.0;
-pub const CARD_PADDING: f32 = 16.0;
+pub const CONTROL_RADIUS: u8 = 5;
+pub const CARD_RADIUS: u8 = 8;
+pub const CARD_PADDING: i8 = 16;
 /// Gap between cards on a page.
 pub const CARD_GAP: f32 = 12.0;
 /// Brand accent (orange), tuned per theme for contrast.
@@ -225,10 +225,10 @@ pub fn page_header(ui: &mut Ui, ic: Icon, color: Color32, title: &str, subtitle:
 /// Rounded card filling the width; the main grouping element of every page.
 pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
   let p = palette(ui);
-  let r = Frame::none()
+  let r = Frame::NONE
     .fill(p.card)
     .stroke(Stroke::new(1.0_f32, p.card_stroke))
-    .rounding(Rounding::same(CARD_RADIUS))
+    .corner_radius(CornerRadius::same(CARD_RADIUS))
     .inner_margin(Margin::same(CARD_PADDING))
     .show(ui, |ui| {
       ui.set_width(ui.available_width());
@@ -241,7 +241,7 @@ pub fn card<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// Recessed area inside a card (lists, meters).
 pub fn inset_frame(ui: &Ui) -> Frame {
-  Frame::none().fill(palette(ui).inset).rounding(Rounding::same(CONTROL_RADIUS)).inner_margin(Margin::same(8.0))
+  Frame::NONE.fill(palette(ui).inset).corner_radius(CornerRadius::same(CONTROL_RADIUS)).inner_margin(Margin::same(8))
 }
 
 /// Card heading (Fluent "Subtitle"-ish, 18 px semibold) with an optional colored icon.
@@ -273,11 +273,11 @@ pub fn info_bar<R>(ui: &mut Ui, severity: Severity, add_contents: impl FnOnce(&m
   };
   let color = severity_color(ui, severity);
   let p = palette(ui);
-  Frame::none()
+  Frame::NONE
     .fill(fill)
     .stroke(Stroke::new(1.0_f32, p.card_stroke))
-    .rounding(Rounding::same(CONTROL_RADIUS))
-    .inner_margin(Margin::symmetric(14.0, 10.0))
+    .corner_radius(CornerRadius::same(CONTROL_RADIUS))
+    .inner_margin(Margin::symmetric(14, 10))
     .show(ui, |ui| {
       ui.set_width(ui.available_width());
       ui.horizontal_top(|ui| {
@@ -332,7 +332,7 @@ pub fn meter_with(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: 
       let track = egui::Rect::from_center_size(rect.center(), Vec2::new(rect.width(), 6.0));
       let painter = ui.painter();
       painter.rect_filled(track, 3.0, p.inset);
-      painter.rect_stroke(track, 3.0, Stroke::new(1.0_f32, p.grid));
+      painter.rect_stroke(track, 3.0, Stroke::new(1.0_f32, p.grid), egui::StrokeKind::Middle);
       let f = fraction.clamp(0.0, 1.0);
       if f > 0.0 {
         let mut filled = track;
@@ -370,7 +370,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
     *on = !*on;
     response.mark_changed();
   }
-  response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, ""));
+  response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, ""));
   if ui.is_rect_visible(rect) {
     let p = palette(ui);
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
@@ -384,7 +384,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
       (fill, Stroke::new(1.0_f32, p.text_secondary), p.text_secondary)
     };
     let painter = ui.painter();
-    painter.rect(rect, radius, fill, stroke);
+    painter.rect(rect, radius, fill, stroke, egui::StrokeKind::Middle);
     let knob_r = if hovered { 7.0 } else { 6.0 };
     let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
     painter.circle_filled(egui::pos2(x, rect.center().y), knob_r, knob);
@@ -429,7 +429,7 @@ pub fn nav_item(ui: &mut Ui, selected: bool, ic: Icon, label: &str) -> Response 
       painter.rect_filled(pill, 1.5, p.accent);
     }
     let label_font = FontId::proportional(14.0);
-    let icon_pos = egui::pos2(rect.left() + 16.0, rect.center().y + icon_drop(ui.fonts(|f| f.row_height(&label_font))));
+    let icon_pos = egui::pos2(rect.left() + 16.0, rect.center().y + icon_drop(ui.ctx().fonts_mut(|f| f.row_height(&label_font))));
     if ICON_FONT.load(Ordering::Relaxed) {
       painter.text(
         icon_pos,
@@ -488,7 +488,7 @@ fn icon_text(ui: &mut Ui, ic: Icon, size: f32, color: Color32, text: WidgetText,
 /// Icon before multi-line content (top aligned), centered on the content's first Body line.
 fn leading_icon(ui: &mut Ui, ic: Icon, size: f32, color: Color32) {
   let line = ui.text_style_height(&TextStyle::Body);
-  let glyph = ui.fonts(|f| f.row_height(&FontId::new(size, FontFamily::Name("icons".into()))));
+  let glyph = ui.ctx().fonts_mut(|f| f.row_height(&FontId::new(size, FontFamily::Name("icons".into()))));
   let offset = if ICON_FONT.load(Ordering::Relaxed) { (line - glyph) / 2.0 + icon_drop(line) } else { 0.0 };
   ui.vertical(|ui| {
     ui.add_space(offset.max(0.0));
@@ -513,7 +513,7 @@ fn fonts() -> FontDefinitions {
       let path = std::path::Path::new(FONT_DIR).join(file);
       match std::fs::read(&path) {
         Ok(bytes) => {
-          fonts.font_data.insert(name.to_string(), FontData::from_owned(bytes));
+          fonts.font_data.insert(name.to_string(), std::sync::Arc::new(FontData::from_owned(bytes)));
           return true;
         }
         Err(e) => log::debug!("[Theme] font {} not available: {e}", path.display()),
@@ -568,8 +568,8 @@ fn style(p: &Palette) -> egui::Style {
   s.item_spacing = Vec2::new(8.0, 8.0);
   s.button_padding = Vec2::new(12.0, 5.0);
   s.interact_size = Vec2::new(40.0, 30.0);
-  s.menu_margin = Margin::same(6.0);
-  s.window_margin = Margin::same(20.0);
+  s.menu_margin = Margin::same(6);
+  s.window_margin = Margin::same(20);
   s.indent = 22.0;
   s.slider_width = 200.0;
   s.slider_rail_height = 4.0;
@@ -607,18 +607,18 @@ fn visuals(p: &Palette) -> Visuals {
       Color32::from_rgb(252, 252, 252),
     )
   };
-  let control_rounding = Rounding::same(CONTROL_RADIUS);
+  let control_rounding = CornerRadius::same(CONTROL_RADIUS);
 
   v.panel_fill = bg;
   v.window_fill = popup;
   v.window_stroke = Stroke::new(1.0_f32, p.card_stroke);
-  v.window_rounding = Rounding::same(CARD_RADIUS);
-  v.menu_rounding = Rounding::same(CARD_RADIUS);
+  v.window_corner_radius = CornerRadius::same(CARD_RADIUS);
+  v.menu_corner_radius = CornerRadius::same(CARD_RADIUS);
   let shadow_alpha = if p.dark { 110 } else { 40 };
   v.window_shadow =
-    Shadow { offset: Vec2::new(0.0, 8.0), blur: 24.0, spread: 0.0, color: Color32::from_black_alpha(shadow_alpha) };
+    Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
   v.popup_shadow =
-    Shadow { offset: Vec2::new(0.0, 4.0), blur: 14.0, spread: 0.0, color: Color32::from_black_alpha(shadow_alpha) };
+    Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
   v.extreme_bg_color = if p.dark { Color32::from_rgb(29, 29, 29) } else { Color32::WHITE };
   v.faint_bg_color = if p.dark { Color32::from_rgb(38, 38, 38) } else { Color32::from_rgb(246, 246, 246) };
   v.code_bg_color = v.faint_bg_color;
@@ -637,34 +637,34 @@ fn visuals(p: &Palette) -> Visuals {
   w.noninteractive.weak_bg_fill = p.card;
   w.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.grid);
   w.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
-  w.noninteractive.rounding = Rounding::same(CARD_RADIUS);
+  w.noninteractive.corner_radius = CornerRadius::same(CARD_RADIUS);
 
   w.inactive.bg_fill = if p.dark { Color32::from_rgb(80, 80, 80) } else { Color32::from_rgb(200, 200, 200) };
   w.inactive.weak_bg_fill = control;
   w.inactive.bg_stroke = Stroke::new(1.0_f32, control_stroke);
   w.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
-  w.inactive.rounding = control_rounding;
+  w.inactive.corner_radius = control_rounding;
   w.inactive.expansion = 0.0;
 
   w.hovered.bg_fill = if p.dark { Color32::from_rgb(95, 95, 95) } else { Color32::from_rgb(185, 185, 185) };
   w.hovered.weak_bg_fill = control_hover;
   w.hovered.bg_stroke = Stroke::new(1.0_f32, control_stroke);
   w.hovered.fg_stroke = Stroke::new(1.0_f32, p.text);
-  w.hovered.rounding = control_rounding;
+  w.hovered.corner_radius = control_rounding;
   w.hovered.expansion = 0.0;
 
   w.active.bg_fill = p.accent;
   w.active.weak_bg_fill = control_press;
   w.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
   w.active.fg_stroke = Stroke::new(1.0_f32, p.text_secondary);
-  w.active.rounding = control_rounding;
+  w.active.corner_radius = control_rounding;
   w.active.expansion = 0.0;
 
   w.open.bg_fill = control_press;
   w.open.weak_bg_fill = control_press;
   w.open.bg_stroke = Stroke::new(1.0_f32, control_stroke);
   w.open.fg_stroke = Stroke::new(1.0_f32, p.text);
-  w.open.rounding = control_rounding;
+  w.open.corner_radius = control_rounding;
   w.open.expansion = 0.0;
   v
 }

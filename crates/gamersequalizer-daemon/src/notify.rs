@@ -50,12 +50,12 @@ fn register() -> Result<(), String> {
   // SAFETY: the key is closed below; `name` outlives the call and is passed with its byte length.
   unsafe {
     let rc =
-      RegCreateKeyExW(HKEY_CURRENT_USER, AUMID_KEY, 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None);
+      RegCreateKeyExW(HKEY_CURRENT_USER, AUMID_KEY, Some(0), None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None);
     if rc != ERROR_SUCCESS {
       return Err(format!("could not register for notifications: {rc:?}"));
     }
     let bytes = std::slice::from_raw_parts(name.as_ptr().cast::<u8>(), name.len() * 2);
-    let rc = RegSetValueExW(key, w!("DisplayName"), 0, REG_SZ, Some(bytes));
+    let rc = RegSetValueExW(key, w!("DisplayName"), Some(0), REG_SZ, Some(bytes));
     let _ = RegCloseKey(key);
     if rc != ERROR_SUCCESS {
       return Err(format!("could not register for notifications: {rc:?}"));

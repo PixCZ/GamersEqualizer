@@ -34,7 +34,8 @@ impl GamersEqualizerApp {
 }
 
 impl eframe::App for GamersEqualizerApp {
-  fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+  fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    let ctx = &ui.ctx().clone();
     if !self.applied_mica {
       self.applied_mica = true;
     }
@@ -140,12 +141,12 @@ impl eframe::App for GamersEqualizerApp {
 
     // Windows 11 Settings layout: slim top bar, navigation on the left, page on the right.
     // Mica-like flat chrome: no separator lines, the panels share the window background.
-    let bg = ctx.style().visuals.panel_fill;
-    let chrome = egui::Frame::none().fill(bg);
-    egui::TopBottomPanel::top("top_bar")
+    let bg = ctx.global_style().visuals.panel_fill;
+    let chrome = egui::Frame::NONE.fill(bg);
+    egui::Panel::top("top_bar")
       .show_separator_line(false)
-      .frame(chrome.inner_margin(egui::Margin::symmetric(8.0, 10.0)))
-      .show(ctx, |ui| {
+      .frame(chrome.inner_margin(egui::Margin::symmetric(8, 10)))
+      .show(ui, |ui| {
         render_top_bar(ui, &mut self.state);
       });
     // Setup problems are shown right away on every tab, not hidden in the Mic tab.
@@ -155,10 +156,10 @@ impl eframe::App for GamersEqualizerApp {
     let setup = super::setup::visible(&self.state);
     let problems = super::apo_banner::has_problems(&self.state);
     if mic_warning || setup || problems {
-      egui::TopBottomPanel::top("health_bar")
+      egui::Panel::top("health_bar")
         .show_separator_line(false)
-        .frame(chrome.inner_margin(egui::Margin { left: 16.0, right: 16.0, top: 0.0, bottom: 4.0 }))
-        .show(ctx, |ui| {
+        .frame(chrome.inner_margin(egui::Margin { left: 16, right: 16, top: 0, bottom: 4 }))
+        .show(ui, |ui| {
           // Most urgent first: someone is talking into a muted mic right now.
           if mic_warning {
             super::apo_banner::render_mic_warning(ui, &mut self.state);
@@ -171,16 +172,16 @@ impl eframe::App for GamersEqualizerApp {
           }
         });
     }
-    egui::SidePanel::left("nav")
+    egui::Panel::left("nav")
       .resizable(false)
-      .exact_width(NAV_WIDTH)
+      .exact_size(NAV_WIDTH)
       .show_separator_line(false)
-      .frame(chrome.inner_margin(egui::Margin { left: 8.0, right: 8.0, top: 4.0, bottom: 8.0 }))
-      .show(ctx, |ui| {
+      .frame(chrome.inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 8 }))
+      .show(ui, |ui| {
         render_nav(ui, &mut self.state);
       });
-    let page = chrome.inner_margin(egui::Margin { left: 24.0, right: 24.0, top: 8.0, bottom: 8.0 });
-    egui::CentralPanel::default().frame(page).show(ctx, |ui| {
+    let page = chrome.inner_margin(egui::Margin { left: 24, right: 24, top: 8, bottom: 8 });
+    egui::CentralPanel::default().frame(page).show(ui, |ui| {
       match self.state.active_tab {
         // The mixer strips fill the window height (it scrolls itself); so does the mic page.
         ActiveTab::Mixer => render_tab_mixer(ui, &mut self.state, &mut self.win_audio),

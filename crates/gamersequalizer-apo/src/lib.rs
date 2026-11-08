@@ -58,9 +58,9 @@ use gamersequalizer_common::shm::{OwnerWatch, ShmHeader, APO_SHM_NAME, REF_SAMPL
 use gamersequalizer_common::streams::{StreamBus, StreamInfo};
 use gamersequalizer_mic_vst::{GamersEqualizerPlugin, SharedMemoryClient};
 use rate_bridge::RateBridge;
-use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Result, GUID, HRESULT};
+use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, BOOL, GUID, HRESULT};
 use windows::Win32::Foundation::{
-  BOOL, CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER,
+  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER,
   S_FALSE, S_OK,
 };
 use windows::Win32::Media::Audio::Apo::{
@@ -330,7 +330,8 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
 // ---------------------------------------------------------------------------------------
 
 impl IClassFactory_Impl for GainApoFactory_Impl {
-  fn CreateInstance(&self, outer: Option<&IUnknown>, riid: *const GUID, object: *mut *mut c_void) -> Result<()> {
+  fn CreateInstance(&self, outer: Ref<'_, IUnknown>, riid: *const GUID, object: *mut *mut c_void) -> Result<()> {
+    let outer = outer.as_ref();
     if object.is_null() || riid.is_null() {
       return Err(E_POINTER.into());
     }

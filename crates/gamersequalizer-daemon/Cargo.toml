@@ -19,13 +19,11 @@ eframe = { workspace = true }
 egui = { workspace = true }
 wgpu = { workspace = true }
 egui_plot = { workspace = true }
-window-vibrancy = { workspace = true }
 tray-icon = { workspace = true }
 muda = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 thiserror = { workspace = true }
-directories = { workspace = true }
 # Already in the tree via env_logger; local-time formatting of the APO build stamp.
 jiff = "0.2"
 

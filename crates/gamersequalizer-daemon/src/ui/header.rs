@@ -50,7 +50,7 @@ pub fn render_top_bar(ui: &mut Ui, state: &mut AppState) {
   // The bar moves the window like a title bar: drag to move, double-click to maximize.
   // Registered before the widgets, so the switch and status pill keep their own clicks;
   // labels don't select text here, or the app name would swallow the drag.
-  let bar = ui.interact(ui.max_rect(), ui.id().with("window_drag"), egui::Sense::click_and_drag());
+  let bar = ui.interact(ui.max_rect(), ui.scope_id().with("window_drag"), egui::Sense::click_and_drag());
   ui.style_mut().interaction.selectable_labels = false;
   if bar.drag_started_by(egui::PointerButton::Primary) {
     ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);

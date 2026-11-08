@@ -1,7 +1,5 @@
-use std::mem::MaybeUninit;
 
 use ndarray::{prelude::*, Slice};
-use rubato::{FftFixedInOut, Resampler};
 use thiserror::Error;
 
 use crate::*;
@@ -14,8 +12,6 @@ pub enum TransformError {
     DfError(String),
     #[error("Ndarray Shape Error")]
     NdarrayShapeError(#[from] ndarray::ShapeError),
-    #[error("Resample Error")]
-    ResampleError(#[from] rubato::ResampleError),
 }
 
 pub(crate) fn biquad_norm_inplace<'a, I>(xs: I, mem: &mut [f32; 2], b: &[f32; 2], a: &[f32; 2])
@@ -360,80 +356,6 @@ pub fn unit_norm(
     Ok(state)
 }
 
-/// Low pass by resampling the data to `f_cut_off*2`.
-pub(crate) fn low_pass_resample(
-    x: ArrayView2<f32>,
-    f_cut_off: usize,
-    sr: usize,
-) -> Result<Array2<f32>> {
-    let orig_len = x.len_of(Axis(1));
-    let x = resample(x, sr, f_cut_off * 2, None)?;
-    let mut x = resample(x.view(), f_cut_off * 2, sr, None)?;
-    x.slice_axis_inplace(Axis(1), Slice::from(0..orig_len));
-    Ok(x)
-}
-/// Resample using a synchronous resample from rubato
-pub fn resample(
-    x: ArrayView2<f32>,
-    sr: usize,
-    new_sr: usize,
-    chunk_size: Option<usize>,
-) -> Result<Array2<f32>> {
-    let channels = x.len_of(Axis(0));
-    let len = x.len_of(Axis(1));
-    let out_len = (len as f32 * new_sr as f32 / sr as f32).ceil() as usize;
-    let chunk_size = chunk_size.unwrap_or(2048);
-    let mut resampler = FftFixedInOut::<f32>::new(sr, new_sr, chunk_size, channels)
-        .expect("Could not initialize resampler");
-    let chunk_size = resampler.input_frames_max();
-    // One extra to get the remaining resampler state buffer
-    let num_chunks = (len as f32 / chunk_size as f32).ceil() as usize + 1;
-    let chunk_size_out = resampler.output_frames_max();
-    let mut out = Array2::uninit((channels, chunk_size_out * num_chunks));
-    let mut inbuf = resampler.input_buffer_allocate(true);
-    let mut outbuf = resampler.output_buffer_allocate(true);
-    let mut out_chunk_iter = out.axis_chunks_iter_mut(Axis(1), chunk_size_out);
-    for chunk in x.axis_chunks_iter(Axis(1), chunk_size) {
-        for (chunk_ch, buf_ch) in chunk.axis_iter(Axis(0)).zip(inbuf.iter_mut()) {
-            if chunk_ch.len() == chunk_size {
-                chunk_ch.assign_to(buf_ch);
-            } else {
-                chunk_ch.assign_to(&mut buf_ch[..chunk_ch.len()]);
-                for b in buf_ch[chunk_ch.len()..].iter_mut() {
-                    *b = 0. // Zero pad
-                }
-            }
-        }
-        resampler.process_into_buffer(&inbuf, &mut outbuf, None)?;
-        for (res_ch, mut out_ch) in
-            outbuf.iter().zip(out_chunk_iter.next().unwrap().axis_iter_mut(Axis(0)))
-        {
-            debug_assert_eq!(res_ch.len(), out_ch.len());
-            for (&x, y) in res_ch.iter().zip(out_ch.iter_mut()) {
-                *y = MaybeUninit::new(x);
-            }
-        }
-    }
-    // Another round with zeros to get remaining state buffer
-    for in_ch in inbuf.iter_mut() {
-        in_ch.fill(0.)
-    }
-    resampler.process_into_buffer(&inbuf, &mut outbuf, None)?;
-    for (res_ch, mut out_ch) in
-        outbuf.iter().zip(out_chunk_iter.next().unwrap().axis_iter_mut(Axis(0)))
-    {
-        debug_assert_eq!(res_ch.len(), out_ch.len());
-        for (&x, y) in res_ch.iter().zip(out_ch.iter_mut()) {
-            *y = MaybeUninit::new(x);
-        }
-    }
-    let mut out = unsafe { out.assume_init() };
-    out.slice_axis_inplace(
-        Axis(1),
-        Slice::from(chunk_size_out / 2..chunk_size_out / 2 + out_len),
-    );
-    Ok(out)
-}
 
 /// Bandwidth extension via spectral translation.
 /// That is, copy spectrum from lower frequencies into higher frequencies.

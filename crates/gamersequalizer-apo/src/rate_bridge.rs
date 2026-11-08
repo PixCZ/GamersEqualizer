@@ -1,7 +1,7 @@
 //! Runs the 48 kHz-only mic chain on a stream at another rate (44.1 kHz USB mics, 16/8 kHz
 //! Bluetooth headsets, 96/192 kHz interfaces): device rate -> 48 kHz -> chain -> device rate.
 //!
-//! Both directions use rubato's streaming sinc resampler (already linked through DeepFilterNet),
+//! Both directions use rubato's streaming sinc resampler (asynchronous, fixed input),
 //! fed in fixed 2 ms chunks through small FIFOs, so the engine's block size can be anything.
 //! The output FIFO starts primed with the worst-case shortfall, so every block gets exactly its
 //! own length back. Added latency: ~4 ms of chunking plus the sinc filters (~1 ms).
@@ -9,8 +9,9 @@
 //! Real-time safe in steady state: all buffers are preallocated for blocks up to
 //! `PREALLOC_FRAMES`; a larger engine block grows them once (allocation in the audio thread).
 
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
-  calculate_cutoff, ResampleError, ResamplerConstructionError, Resampler, SincFixedIn, SincInterpolationParameters,
+  Async, FixedAsync, ResampleError, Resampler, ResamplerConstructionError, SincInterpolationParameters,
   SincInterpolationType, WindowFunction,
 };
 
@@ -56,8 +57,12 @@ pub struct RateBridge {
 
 /// One resampler with its input FIFO and output scratch.
 struct Stage {
-  resampler: SincFixedIn<f32>,
+  resampler: Async<f32>,
   chunk: usize,
+  /// Output frames still to drop: the sinc filter's delay, once after a start or reset.
+  /// (rubato < 1 withheld it itself; 5 puts it at the front of the output, which added up to
+  /// 4 ms at 8 kHz.)
+  skip: usize,
   fifo: Vec<f32>,
   scratch: Vec<f32>,
 }
@@ -102,6 +107,7 @@ impl RateBridge {
     for stage in [&mut self.up, &mut self.down] {
       stage.resampler.reset();
       stage.fifo.clear();
+      stage.skip = stage.resampler.output_delay();
     }
     self.out_fifo.clear();
     self.out_fifo.resize(self.prime, 0.0);
@@ -155,23 +161,34 @@ impl Stage {
   fn new(rate_in: u32, rate_out: u32) -> Result<Self, ResamplerConstructionError> {
     let params = SincInterpolationParameters {
       sinc_len: SINC_LEN,
-      f_cutoff: calculate_cutoff(SINC_LEN, WINDOW),
+      f_cutoff: None, // rubato picks it from SINC_LEN and WINDOW (calculate_cutoff)
       oversampling_factor: OVERSAMPLING,
       interpolation: SincInterpolationType::Linear,
       window: WINDOW,
     };
     let chunk = (rate_in / 1000 * CHUNK_MS).max(1) as usize;
-    let resampler = SincFixedIn::new(rate_out as f64 / rate_in as f64, 1.0, params, chunk, 1)?;
+    let resampler = Async::new_sinc(rate_out as f64 / rate_in as f64, 1.0, &params, chunk, 1, FixedAsync::Input)?;
     let scratch = vec![0.0; resampler.output_frames_max()];
-    Ok(Self { resampler, chunk, fifo: Vec::with_capacity(chunk + PREALLOC_FRAMES), scratch })
+    let skip = resampler.output_delay();
+    Ok(Self { resampler, chunk, skip, fifo: Vec::with_capacity(chunk + PREALLOC_FRAMES), scratch })
   }
 
   /// Resamples every full chunk in `fifo` and appends the result to `out`.
   fn drain_into(&mut self, out: &mut Vec<f32>) -> Result<(), ResampleError> {
     let mut consumed = 0;
     while let Some(chunk) = self.fifo.get(consumed..consumed + self.chunk) {
-      let (_, produced) = self.resampler.process_into_buffer(&[chunk], &mut [self.scratch.as_mut_slice()], None)?;
-      out.extend_from_slice(self.scratch.get(..produced).unwrap_or(&[]));
+      // Mono: interleaved = a plain slice. The sizes always fit (`chunk` is exactly `self.chunk`
+      // frames, scratch holds `output_frames_max`), so the adapters can't fail; if they did, stop.
+      let frames_out = self.scratch.len();
+      let (Ok(input), Ok(mut output)) =
+        (InterleavedSlice::new(chunk, 1, self.chunk), InterleavedSlice::new_mut(&mut self.scratch, 1, frames_out))
+      else {
+        break;
+      };
+      let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
+      let dropped = self.skip.min(produced);
+      self.skip -= dropped;
+      out.extend_from_slice(self.scratch.get(dropped..produced).unwrap_or(&[]));
       consumed += self.chunk;
     }
     self.fifo.drain(..consumed);

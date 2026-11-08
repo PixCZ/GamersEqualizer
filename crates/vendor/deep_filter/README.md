@@ -16,7 +16,7 @@ Keeping both meant two tract versions in the APO DLL, and DFN3 on the slower one
 
 ## Changes against upstream
 
-- Only `lib.rs`, `transforms.rs`, `logging.rs` and `tract.rs` are kept. Dataset, training, C API,
+- Only `lib.rs`, `transforms.rs` (without the rubato resampling), `logging.rs` and `tract.rs` are kept. Dataset, training, C API,
   WASM, binaries and the upstream tests are left out. The features are reduced to `tract` and
   `default-model`.
 - `tract.rs` is ported to tract 0.23 (API renames only, see the git history of this file).

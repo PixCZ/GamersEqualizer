@@ -184,7 +184,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     }
   });
   let max_offset = (out.content_size.y - out.inner_rect.height()).max(0.0);
-  view.at_end = out.state.offset.y >= max_offset - BOTTOM_SLACK;
+  view.at_end = out.state.unclamped_offset().y >= max_offset - BOTTOM_SLACK;
 }
 
 fn open_folder() {
