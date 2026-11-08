@@ -44,6 +44,11 @@ pub struct LogView {
   jump_to_end: bool,
   /// The view showed the last line last frame (egui then keeps following it).
   at_end: bool,
+  /// Indices into `lines` that pass the filters; recomputed only after a reload or a filter
+  /// change (filtering ~2000 lines with a lowercase copy each, every frame, was ~66k
+  /// allocations a second).
+  shown: Vec<usize>,
+  shown_stale: bool,
 }
 
 impl Default for LogView {
@@ -58,6 +63,8 @@ impl Default for LogView {
       search: String::new(),
       jump_to_end: true,
       at_end: true,
+      shown: Vec::new(),
+      shown_stale: true,
     }
   }
 }
@@ -70,6 +77,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
       Ok(lines) => {
         view.lines = lines;
         view.error = None;
+        view.shown_stale = true;
       }
       Err(e) => view.error = Some(e.to_string()),
     }
@@ -131,16 +139,23 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     view.jump_to_end = true;
   }
 
-  let search = view.search.to_lowercase();
-  let (_, tags) = TOPICS.get(view.topic).copied().unwrap_or(("All", &[]));
-  let shown: Vec<&LogLine> = view
-    .lines
-    .iter()
-    .filter(|l| l.level <= view.level)
-    .filter(|l| view.libraries || l.own)
-    .filter(|l| tags.is_empty() || tags.iter().any(|t| l.text.contains(t)))
-    .filter(|l| search.is_empty() || l.text.to_lowercase().contains(&search))
-    .collect();
+  if filters_changed || view.shown_stale {
+    view.shown_stale = false;
+    let search = view.search.to_lowercase();
+    let (_, tags) = TOPICS.get(view.topic).copied().unwrap_or(("All", &[]));
+    let (level, libraries) = (view.level, view.libraries);
+    view.shown = view
+      .lines
+      .iter()
+      .enumerate()
+      .filter(|(_, l)| l.level <= level)
+      .filter(|(_, l)| libraries || l.own)
+      .filter(|(_, l)| tags.is_empty() || tags.iter().any(|t| l.text.contains(t)))
+      .filter(|(_, l)| search.is_empty() || l.text.to_lowercase().contains(&search))
+      .map(|(i, _)| i)
+      .collect();
+  }
+  let shown: Vec<&LogLine> = view.shown.iter().filter_map(|&i| view.lines.get(i)).collect();
 
   ui.separator();
   let row_height = ui.text_style_height(&egui::TextStyle::Monospace);

@@ -110,10 +110,7 @@ pub fn save_user_preset(storage: &ProfileStorage, profile: &ParametricProfile) -
   p.vad_type = VadType::Mic;
   p.is_custom = true;
   let json = serde_json::to_string_pretty(&p).map_err(io::Error::other)?;
-  let path = user_file(storage, &p.name);
-  let tmp = path.with_extension("json.tmp");
-  std::fs::write(&tmp, json)?;
-  std::fs::rename(&tmp, &path)
+  crate::output_eq::settings::write_atomic(&user_file(storage, &p.name), &json)
 }
 
 pub fn delete_user_preset(storage: &ProfileStorage, name: &str) -> io::Result<()> {

@@ -9,7 +9,7 @@ use std::sync::atomic::Ordering;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{
-  MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS,
+  MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS,
 };
 
 pub struct DebugCaptureMap {
@@ -44,7 +44,7 @@ impl DebugCaptureMap {
     let name = wide(DEBUG_CAPTURE_NAME);
     // SAFETY: NUL-terminated name owned by this frame; the mapping has the layout's size.
     unsafe {
-      let handle = OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, PCWSTR(name.as_ptr()))
+      let handle = OpenFileMappingW((FILE_MAP_READ | FILE_MAP_WRITE).0, false, PCWSTR(name.as_ptr()))
         .map_err(|e| format!("OpenFileMappingW({DEBUG_CAPTURE_NAME}) failed: {e}"))?;
       let map = Self::map(handle)?;
       if map.header().magic.load(Ordering::Acquire) != DEBUG_CAPTURE_MAGIC {
@@ -82,7 +82,7 @@ impl DebugCaptureMap {
 
   /// Takes ownership of `handle` (closed on failure).
   unsafe fn map(handle: HANDLE) -> Result<Self, String> {
-    let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, DebugCaptureLayout::total_size_bytes());
+    let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, DebugCaptureLayout::total_size_bytes());
     let Some(ptr) = NonNull::new(view.Value as *mut DebugCaptureLayout) else {
       let _ = CloseHandle(handle);
       return Err("MapViewOfFile returned null pointer".to_string());

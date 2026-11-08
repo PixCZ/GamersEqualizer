@@ -25,6 +25,7 @@ const MIC_COLOR: Color32 = Color32::from_rgb(247, 127, 0);
 /// How often the mic strip re-reads which apps are recording (a registry walk; the page
 /// repaints every frame).
 const RECORDING_REFRESH: Duration = Duration::from_secs(1);
+const SESSIONS_REFRESH: Duration = Duration::from_millis(500);
 
 /// One app (all its processes) in a channel's apps box.
 struct AppItem {
@@ -81,7 +82,7 @@ pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAu
 }
 
 fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem, page_h: f32) {
-  let sessions = win_audio.chatmix.list_active_sessions();
+  let sessions = sessions_cached(&win_audio.chatmix);
 
   let game_apps = apps_on(&sessions, AudioBus::Game);
   let chat_apps = apps_on(&sessions, AudioBus::Chat);
@@ -523,6 +524,20 @@ pub(super) fn recording_apps_cached() -> Vec<String> {
       *cache = Some((Instant::now(), crate::mic_usage::recording_apps()));
     }
     cache.as_ref().map(|(_, apps)| apps.clone()).unwrap_or_default()
+  })
+}
+
+/// App sessions, re-enumerated at most every `SESSIONS_REFRESH` (UI thread only): a full pass
+/// opens every process with a session, too much for every frame.
+fn sessions_cached(chatmix: &crate::win_audio::ChatMixController) -> Vec<AudioSessionInfo> {
+  thread_local! {
+    static CACHE: RefCell<Option<(Instant, Vec<AudioSessionInfo>)>> = const { RefCell::new(None) };
+  }
+  CACHE.with_borrow_mut(|cache| {
+    if cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= SESSIONS_REFRESH) {
+      *cache = Some((Instant::now(), chatmix.list_active_sessions()));
+    }
+    cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default()
   })
 }
 

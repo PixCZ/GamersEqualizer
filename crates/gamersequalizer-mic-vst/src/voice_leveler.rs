@@ -43,8 +43,10 @@ const SETTLED_FRAMES: u32 = 300;
 const FOREIGN_DB: f32 = 12.0;
 /// Per-sample smoothing of the applied gain (~100 ms), so the fast first second doesn't zip.
 const GAIN_COEF: f32 = 1.0 / (48.0 * 100.0);
-/// Voice flags waiting for their audio to reach the leveler (blocks within the denoiser's lead).
-const QUEUE_CAPACITY: usize = 64;
+/// Bound on voice flags waiting for their audio to reach the leveler. They expire by time
+/// (`voice_at`); 64 was too few for small host blocks (1 ms blocks x ~70 ms lead dropped flags
+/// still due, so speech frames counted as non-speech).
+const QUEUE_CAPACITY: usize = 1024;
 
 pub struct VoiceLeveler {
   /// Learned speech level without the input gain, linear power; valid once `frames > 0`.
@@ -125,7 +127,8 @@ impl VoiceLeveler {
 
   /// Learned speech level without the input gain (dBFS), once there is one worth remembering.
   pub fn level_db(&self) -> Option<f32> {
-    (self.frames >= MIN_FRAMES).then(|| 10.0 * self.level_pow.max(1e-12).log10())
+    // `max` hides a NaN as 1e-12 (-120 dB), which the service would save as the mic's level.
+    (self.frames >= MIN_FRAMES && self.level_pow.is_finite()).then(|| 10.0 * self.level_pow.max(1e-12).log10())
   }
 
   /// Speech heard so far (ms, wraps): how long the user talked, for the automatic input gain.
@@ -136,6 +139,8 @@ impl VoiceLeveler {
   /// Gain applied to the mic before this chain (Windows mic volume), dB. The learned level stays;
   /// the applied gain follows at once (within the ~100 ms smoothing).
   pub fn set_input_gain_db(&mut self, gain_db: f32) {
+    // Windows mic volumes span about -96..+30 dB; anything beyond is garbage from the mapping.
+    let gain_db = gain_db.clamp(-60.0, 60.0);
     if gain_db.is_finite() && gain_db != self.input_gain_db {
       self.input_gain_db = gain_db;
       self.input_pow = 10f32.powf(gain_db / 10.0);
@@ -169,7 +174,11 @@ impl VoiceLeveler {
   /// `lead`: how many samples that audio reaches this point later (denoiser latency + lookahead).
   pub fn process(&mut self, samples: &mut [f32], voice: bool, lead: usize) {
     let len = samples.len() as u64;
-    if self.pending.len() == QUEUE_CAPACITY {
+    // Expired: played, and before the frame in progress (whose middle `voice_at` asks about).
+    while self.pending.front().is_some_and(|&(_, end, _)| end + FRAME as u64 <= self.pos) {
+      self.pending.pop_front();
+    }
+    if self.pending.len() >= QUEUE_CAPACITY {
       self.pending.pop_front();
     }
     let start = self.pos + lead as u64;
@@ -200,7 +209,8 @@ impl VoiceLeveler {
   }
 
   fn learn(&mut self, pow: f32, voice: bool) {
-    if !voice || pow <= 1e-12 {
+    // `!(pow > 1e-12)` also rejects NaN, which `pow <= 1e-12` let through.
+    if !voice || !(pow > 1e-12 && pow.is_finite()) {
       return;
     }
     let pow = pow / self.input_pow;
@@ -257,6 +267,31 @@ mod tests {
     let out = run(&mut lv, &tone(3.0, -38.0), true);
     let last = &out[2 * SR..];
     assert!((rms_db(last) - DEFAULT_TARGET_DB).abs() < 0.5, "{:.1} dBFS", rms_db(last));
+  }
+
+  /// A NaN frame must not become the learned level (it read as -120 dB, +24 dB gain, and the
+  /// service saved it for every later stream).
+  #[test]
+  fn a_nan_frame_teaches_nothing() {
+    let mut lv = VoiceLeveler::new();
+    run(&mut lv, &tone(2.0, -30.0), true);
+    let learned = lv.level_db();
+    let mut bad = vec![f32::NAN; FRAME];
+    lv.process(&mut bad, true, 0);
+    assert_eq!(lv.level_db(), learned);
+    lv.set_input_gain_db(f32::INFINITY);
+    assert!(lv.gain_db().is_finite());
+  }
+
+  /// Regression: 1 ms host blocks with a 70 ms denoiser lead. The 64-entry queue dropped every
+  /// voice flag before its audio arrived, so the leveler never learned.
+  #[test]
+  fn small_blocks_with_a_long_lead_still_learn() {
+    let mut lv = VoiceLeveler::new();
+    let mut x = tone(3.0, -38.0);
+    x.chunks_mut(SR / 1000).for_each(|b| lv.process(b, true, 70 * SR / 1000));
+    assert!(lv.level_db().is_some(), "nothing learned");
+    assert!((rms_db(&x[2 * SR..]) - DEFAULT_TARGET_DB).abs() < 1.0, "{:.1} dBFS", rms_db(&x[2 * SR..]));
   }
 
   #[test]

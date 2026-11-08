@@ -221,6 +221,14 @@ impl AcousticEchoCanceller {
     }
   }
 
+  /// Drop buffered audio (partial input frame, queued output), keep the learned echo path:
+  /// for a gap in the stream, where `reset` would throw away seconds of adaptation.
+  pub fn flush(&mut self) {
+    self.in_len = 0;
+    self.out_queue.clear();
+    self.buffered = false; // re-adds its frame of latency on the next unaligned block
+  }
+
   pub fn erle_db(&self) -> f32 {
     self.erle_db
   }
@@ -268,6 +276,15 @@ impl AcousticEchoCanceller {
     (self.pey, self.pyy, self.leak, self.sum_adapt, self.adapted) = (0.0, 0.0, MIN_LEAK, 0.0, false);
     (self.davg1, self.davg2, self.dvar1, self.dvar2) = (0.0, 0.0, 0.0, 0.0);
     (self.mic_smooth, self.out_smooth) = (0.0, 0.0);
+    // Adaptation statistics: one NaN here stays forever (each update reads the old value).
+    self.err_power_avg.fill(0.0);
+    self.echo_power_avg.fill(0.0);
+    // The pre-/de-emphasis memories are audio state; keep them (no click) unless broken.
+    for m in [&mut self.mem_x, &mut self.mem_d, &mut self.mem_e] {
+      if !m.is_finite() {
+        *m = 0.0;
+      }
+    }
   }
 
   fn process_frame(&mut self) {
@@ -420,7 +437,9 @@ impl AcousticEchoCanceller {
     let broken = !(see.is_finite() && sff.is_finite() && syy.is_finite());
     if broken || (self.out_smooth > HARM_RATIO * self.mic_smooth && self.mic_smooth > tiny) {
       self.restart_adaptation();
-      self.e_fg.copy_from_slice(&self.d_frame);
+      for (e, &d) in self.e_fg.iter_mut().zip(&self.d_frame) {
+        *e = if d.is_finite() { d } else { 0.0 };
+      }
     }
 
     // De-emphasis and output.
@@ -508,6 +527,29 @@ fn ifft(c2r: &dyn ComplexToReal<f32>, spec: &mut [Complex32], out: &mut [f32], s
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// One NaN block from the driver must not leave the canceller emitting NaN for good.
+  #[test]
+  fn test_recovers_after_a_nan_block() {
+    let mut aec = AcousticEchoCanceller::new(256);
+    let speaker = noise(3 * 48_000, 5);
+    let echo: Vec<f32> = (0..speaker.len()).map(|n| delayed(&speaker, n, 40) * 0.4).collect();
+    let mut mic = echo.clone();
+    mic[48_000..48_480].fill(f32::NAN);
+    let (out, _) = run(&mut aec, &speaker, &mic, 480);
+    assert!(out[2 * 48_000..].iter().all(|s| s.is_finite()), "AEC stuck at NaN");
+  }
+
+  /// After a gap (`flush`), the first block out is the new input, not audio queued before it.
+  #[test]
+  fn test_flush_drops_audio_from_before_the_gap() {
+    let mut aec = AcousticEchoCanceller::new(256);
+    let loud = noise(4800, 3);
+    run(&mut aec, &vec![0.0; loud.len()], &loud, 100); // unaligned blocks: output queued
+    aec.flush();
+    let (out, _) = run(&mut aec, &[0.0; 480], &[0.0; 480], 480);
+    assert!(energy_db(&out) < -100.0, "old audio replayed: {:.1} dB", energy_db(&out));
+  }
 
   /// Regression (debug capture 2026-11-07): speech-like reference, echo at room-noise level.
   /// The NLMS before the MDF made the output louder than the raw mic (4 dB here, 15 dB live).

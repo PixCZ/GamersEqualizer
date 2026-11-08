@@ -62,6 +62,11 @@ pub struct GamersEqualizerPlugin {
   cached_delay_seen: u32,
   /// Last `aec_reference_seq` seen: when it changes, the speaker output was switched.
   reference_seq_seen: u32,
+  /// The chain did not run on the last block(s) (master bypass, or the APO passed through):
+  /// the AEC and denoiser FIFOs hold audio from before, which would play first on resume.
+  paused: bool,
+  /// `aec.process_block` did not run on the last block (no reference): same, for the AEC alone.
+  aec_idle: bool,
   block_counter: u32,
   ref_rms: f32,
   mic_rms: f32,
@@ -128,6 +133,8 @@ impl GamersEqualizerPlugin {
       aec_state: AecState::Disabled,
       cached_delay_seen: 0,
       reference_seq_seen: 0,
+      paused: false,
+      aec_idle: false,
       block_counter: 0,
       ref_rms: 0.0,
       mic_rms: 0.0,
@@ -219,9 +226,16 @@ impl GamersEqualizerPlugin {
     }
   }
 
+  /// The host is skipping the chain for a while (passes the mic through): the next processed
+  /// block starts with empty buffers instead of ~10-30 ms of audio from before the pause.
+  pub fn pause(&mut self) {
+    self.paused = true;
+  }
+
   fn mic_process(&mut self, mic_in: &[f32], outputs: &mut [&mut [f32]], mic_qpc_hns: Option<u64>) {
     // Master switch "everything off": the raw microphone, no AEC/denoise/EQ/boost.
     if self.shm_header().is_some_and(|h| h.master_bypass.load(Ordering::Relaxed)) {
+      self.paused = true;
       for out in outputs.iter_mut() {
         let n = out.len().min(mic_in.len());
         if let (Some(o), Some(s)) = (out.get_mut(..n), mic_in.get(..n)) {
@@ -229,6 +243,10 @@ impl GamersEqualizerPlugin {
         }
       }
       return;
+    }
+    if std::mem::take(&mut self.paused) {
+      self.aec.flush();
+      self.ai_denoiser.reset();
     }
     let started = std::time::Instant::now();
     let frames = mic_in.len();
@@ -238,8 +256,13 @@ impl GamersEqualizerPlugin {
     if self.ref_buffer.len() < frames {
       self.ref_buffer.resize(frames, 0.0);
     }
+    // Trust boundary: a driver glitch can deliver NaN/inf, and one non-finite sample would
+    // stay in the AEC / leveler state for the rest of the stream. +-4 (12 dBFS) is far beyond
+    // any real converter and keeps the float math finite.
     if let Some(dst) = self.mic_mono_temp.get_mut(..frames) {
-      dst.copy_from_slice(mic_in);
+      for (d, &s) in dst.iter_mut().zip(mic_in) {
+        *d = if s.is_finite() { s.clamp(-4.0, 4.0) } else { 0.0 };
+      }
     }
     #[cfg(feature = "debug-capture")]
     let capturing = self.capture_input(mic_in, mic_qpc_hns);
@@ -434,7 +457,9 @@ impl GamersEqualizerPlugin {
   }
 
   fn run_aec(&mut self, frames: usize, mic_in: &[f32], mic_qpc_hns: Option<u64>) -> AecState {
-    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, .. } = self;
+    // Assume it won't run; set back below when it does.
+    let was_idle = std::mem::replace(&mut self.aec_idle, true);
+    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, aec_idle, .. } = self;
     let Some(shm) = shm_client.as_mut() else {
       return AecState::NoReference;
     };
@@ -477,7 +502,11 @@ impl GamersEqualizerPlugin {
     *ref_rms = smooth_rms(*ref_rms, refs);
 
     // Runs even when silent: it doesn't adapt then, but keeps its history continuous.
+    if was_idle {
+      aec.flush(); // the reference was gone: its queued output is from before the gap
+    }
     aec.process_block(refs, mic);
+    *aec_idle = false;
 
     if stale || *ref_rms < REF_SILENT_RMS {
       AecState::ReferenceSilent

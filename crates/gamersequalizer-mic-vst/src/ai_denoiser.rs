@@ -420,6 +420,12 @@ impl AiVoiceIsolator {
     let heavy = active.is_heavy();
     let latency = latency_samples(active);
     let activity = heavy && self.note_activity(samples);
+    // Speech again while handing a pause to RNNoise, before RNNoise is heard at all: stay with
+    // the heavy model (finishing the handover put the word's onset through RNNoise, and the
+    // wake-up takeover after it cost another model latency).
+    if self.takeover.is_some_and(|t| t.to_sleep && t.done < t.fade_at) && (self.heard_voice || activity) {
+      self.takeover = None;
+    }
     if heavy && self.takeover.is_none() {
       if !self.asleep && self.quiet_samples >= self.sleep_after {
         self.start_takeover(true, latency);
@@ -571,7 +577,13 @@ impl AiVoiceIsolator {
 
   fn select(&mut self, model: DenoiseModel) {
     if model != self.selected {
-      self.overloaded = false; // picking a model again = try it again
+      // Picking a model again = try it again, a load that failed included.
+      self.overloaded = false;
+      match model {
+        DenoiseModel::DeepFilterNet => self.df_error = None,
+        DenoiseModel::DpdfNet => self.dpdf_error = None,
+        _ => {}
+      }
     }
     self.selected = model;
   }
@@ -732,7 +744,7 @@ impl RnNoiseEngine {
   /// speech, so a fresh one at every pause woke the heavy model again (gate open 6-7 % on keys).
   fn restart(&mut self) {
     self.input_fifo.clear();
-    self.output_fifo = primed_fifo(FRAME_SIZE);
+    reprime_fifo(&mut self.output_fifo, FRAME_SIZE);
     self.prev_dry = [0.0; FRAME_SIZE];
   }
 }
@@ -783,7 +795,7 @@ impl DeepFilterEngine {
 
   fn reset(&mut self) {
     self.input_fifo.clear();
-    self.output_fifo = primed_fifo(self.hop);
+    reprime_fifo(&mut self.output_fifo, self.hop);
   }
 }
 
@@ -913,6 +925,12 @@ pub(crate) fn primed_fifo(frame: usize) -> Vec<f32> {
   let mut fifo = Vec::with_capacity(frame * 4);
   fifo.resize(frame, 0.0);
   fifo
+}
+
+/// `primed_fifo` again, reusing the allocation (for resets on the real-time thread).
+pub(crate) fn reprime_fifo(fifo: &mut Vec<f32>, frame: usize) {
+  fifo.clear();
+  fifo.resize(frame, 0.0);
 }
 
 /// Move processed samples out; the primed frame guarantees enough are available.

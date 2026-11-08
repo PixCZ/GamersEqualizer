@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const SETTINGS_FILE: &str = "output_eq.json";
@@ -42,6 +43,10 @@ pub struct OutputEqSettings {
   pub media_profile: Option<String>,
   /// Version of the built-in genre profiles already written to `profiles/game` (0 = none).
   pub builtin_game_presets: u32,
+  /// The SteelSeries Sonar database was imported (or checked) once. Without it the import ran
+  /// on every start whenever no game profile had launcher ids (old Sonar DB, or the user kept
+  /// only the genre presets), overwriting the user's edits of same-named profiles.
+  pub imported_sonar: bool,
 }
 
 impl Default for OutputEqSettings {
@@ -63,6 +68,7 @@ impl Default for OutputEqSettings {
       media_enabled: true,
       media_profile: None,
       builtin_game_presets: 0,
+      imported_sonar: false,
     }
   }
 }
@@ -74,6 +80,7 @@ impl OutputEqSettings {
     };
     serde_json::from_str(&text).unwrap_or_else(|e| {
       log::warn!("[OutputEq] {} is corrupt ({e}), using defaults", path.display());
+      keep_corrupt(path);
       Self::default()
     })
   }
@@ -84,13 +91,39 @@ impl OutputEqSettings {
   }
 }
 
+/// The one way every settings / profile / cache file is written: a crash or power cut leaves
+/// the old file or the new one, never a half or empty one.
+/// - `sync_all` before `rename`: NTFS may keep the rename but not the data after a power cut.
+/// - The temp name carries the process id: the window and the service write some of the same
+///   files (`health.json`, `output_eq.json`), and a shared temp name mixed their bytes.
 pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
   if let Some(dir) = path.parent() {
     std::fs::create_dir_all(dir)?;
   }
-  let tmp: PathBuf = path.with_extension("json.tmp");
-  std::fs::write(&tmp, content)?;
-  std::fs::rename(&tmp, path)
+  let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+  tmp_name.push(format!(".{}.tmp", std::process::id()));
+  let tmp: PathBuf = path.with_file_name(tmp_name);
+  let written = (|| {
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
+  })();
+  if written.is_err() {
+    let _ = std::fs::remove_file(&tmp);
+  }
+  written
+}
+
+/// A file that failed to parse is kept as `<name>.corrupt` (the last one) before defaults
+/// replace it on the next save, so the user's data can still be recovered by hand.
+pub fn keep_corrupt(path: &Path) {
+  let mut name = path.file_name().unwrap_or_default().to_os_string();
+  name.push(".corrupt");
+  if let Err(e) = std::fs::rename(path, path.with_file_name(name)) {
+    log::warn!("[Settings] could not keep the corrupt {}: {e}", path.display());
+  }
 }
 
 #[cfg(test)]

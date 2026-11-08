@@ -10,7 +10,7 @@
     app uses this so the user approves one administrator prompt and audio restarts only once.
 
 .DESCRIPTION
-  - Backs up each endpoint's FxProperties key (reg export) to %ProgramData%\GamersEqualizer\apo-backup.
+  - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup.
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
   - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
   - APPENDS our CLSIDs to each endpoint's composite effect lists (EFX / SFX). Existing
@@ -42,6 +42,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 trap {
+  # A trap runs before `finally`; if the user closes this window at the prompt below, the
+  # `finally` that restarts audio never runs. Start it here first (no-op when it is running).
+  Start-Service Audiosrv -ErrorAction SilentlyContinue
   if ($FromApp) {
     Write-Host "`nInstall failed: $_" -ForegroundColor Red
     Read-Host 'Press Enter to close'
@@ -67,9 +70,13 @@ $ApoInterfaces = @(
 
 # Built with the unwinding `apo` profile (root Cargo.toml), not `release`.
 if (-not $SourceDll) { $SourceDll = Join-Path $PSScriptRoot '..\target\apo\gamersequalizer_apo.dll' }
-$InstallDir = Join-Path $env:ProgramFiles 'GamersEqualizer\apo'
+# Known-folder lookup, not $env:ProgramFiles: the user can override that variable in
+# HKCU\Environment and this elevated process inherits it (DLL for audiodg in a user folder).
+# Backups live here too: under ProgramData any user can pre-create our folder (or a junction).
+$ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEqualizer'
+$InstallDir = Join-Path $ProgramDir 'apo'
 $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
-$BackupDir = Join-Path $env:ProgramData 'GamersEqualizer\apo-backup'
+$BackupDir = Join-Path $ProgramDir 'apo-backup'
 
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'

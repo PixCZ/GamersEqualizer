@@ -15,7 +15,7 @@ use std::process::Command;
 
 use log::{info, warn};
 
-use crate::win_audio::apo_install;
+use crate::win_audio::apo_install::{self, ps_quote};
 
 const DATA_DIRS: [&str; 2] = ["GamersEqualizer", "OpenSonar"];
 /// No console window for the helper.
@@ -56,7 +56,7 @@ fn spawn_data_cleanup() -> Result<(), String> {
     .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
     .ok_or("could not determine the app's process name")?;
   let script = cleanup_script(&exe_stem, &dirs);
-  Command::new("powershell.exe")
+  Command::new(apo_install::powershell_exe()?)
     .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
     .creation_flags(CREATE_NO_WINDOW)
     .spawn()
@@ -76,11 +76,6 @@ fn cleanup_script(exe_stem: &str, dirs: &[PathBuf]) -> String {
     ps_quote(exe_stem),
     quoted.join(", ")
   )
-}
-
-/// PowerShell single-quoted literal: nothing inside is expanded, `'` is doubled.
-fn ps_quote(s: &str) -> String {
-  format!("'{}'", s.replace('\'', "''"))
 }
 
 #[cfg(test)]

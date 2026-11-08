@@ -24,7 +24,8 @@ use log::{error, info};
 use windows::core::Interface;
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
 use windows::Win32::Media::Audio::{
-  eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
+  eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+  MMDeviceEnumerator,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -213,6 +214,11 @@ impl Router {
       let mut seen = HashSet::new();
       for i in 0..list.GetCount().map_err(|e| format!("session count: {e}"))? {
         let Ok(control) = list.GetSession(i) else { continue };
+        // Windows keeps a session for every app that ever played on this output; only the
+        // playing ones can be paired, and metering the rest 200x a second was wasted RPCs.
+        if control.GetState().ok() != Some(AudioSessionStateActive) {
+          continue;
+        }
         let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
         let Ok(raw_key) = control2.GetSessionInstanceIdentifier() else { continue };
         let key = raw_key.to_string().unwrap_or_default();

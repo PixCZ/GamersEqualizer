@@ -38,11 +38,16 @@ struct Stage {
 }
 
 impl BiquadCoefficients {
-  /// Calculate biquad coefficients using RBJ Audio-EQ-Cookbook formulas
+  /// Calculate biquad coefficients using RBJ Audio-EQ-Cookbook formulas. Total: any input
+  /// (profiles from disk, a bogus stream rate) gives finite coefficients, never a panic
+  /// (`clamp` panics when min > max) and never NaN (which `process_strided` can't recover from,
+  /// it only resets the state).
   pub fn from_band(band: &BiquadBand, sample_rate: f32) -> Self {
-    let f0 = band.frequency.clamp(20.0, sample_rate * 0.499);
-    let q = band.q.clamp(0.1, 30.0);
-    let gain_db = band.gain_db;
+    let sample_rate = if sample_rate.is_finite() && sample_rate >= 8000.0 { sample_rate } else { 48_000.0 };
+    let f0 = if band.frequency.is_finite() { band.frequency.max(20.0).min(sample_rate * 0.499) } else { 1000.0 };
+    let q = if band.q.is_finite() { band.q.clamp(0.1, 30.0) } else { std::f32::consts::FRAC_1_SQRT_2 };
+    // +-60 dB is far past any real EQ setting; above ~770 dB a shelf overflows f32.
+    let gain_db = if band.gain_db.is_finite() { band.gain_db.clamp(-60.0, 60.0) } else { 0.0 };
 
     let w0 = 2.0 * PI * f0 / sample_rate;
     let cos_w0 = w0.cos();
@@ -109,7 +114,13 @@ impl BiquadCoefficients {
       }
     };
 
-    Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a0: 1.0, a1: a1 / a0, a2: a2 / a0 }
+    let c = Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a0: 1.0, a1: a1 / a0, a2: a2 / a0 };
+    if [c.b0, c.b1, c.b2, c.a1, c.a2].iter().all(|v| v.is_finite()) {
+      c
+    } else {
+      // Pass-through rather than a filter that turns every later block into NaN.
+      Self { b0: 1.0, b1: 0.0, b2: 0.0, a0: 1.0, a1: 0.0, a2: 0.0 }
+    }
   }
 
   /// Complex frequency response magnitude in decibels at frequency f
@@ -168,6 +179,14 @@ impl BiquadCascade {
     self.stages.is_empty()
   }
 
+  /// Forget the filter memory (coefficients stay): for audio that does not continue the
+  /// samples processed last (resume after a pause).
+  pub fn reset_state(&mut self) {
+    for stage in self.stages.iter_mut() {
+      (stage.z1, stage.z2) = (0.0, 0.0);
+    }
+  }
+
   pub fn process(&mut self, samples: &mut [f32]) {
     self.process_strided(samples, 1, 0);
   }
@@ -198,6 +217,20 @@ impl BiquadCascade {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn bogus_rates_and_gains_give_finite_coefficients_without_panicking() {
+    let types = [FilterType::Peaking, FilterType::LowShelf, FilterType::HighShelf, FilterType::LowPass];
+    for rate in [0.0, f32::NAN, 22.0, -48_000.0, 48_000.0] {
+      for gain_db in [f32::INFINITY, f32::NAN, f32::MAX, 800.0, -800.0, 6.0] {
+        for (filter_type, frequency) in types.iter().copied().zip([f32::NAN, 1e9, 0.0, 1000.0]) {
+          let band = BiquadBand { enabled: true, filter_type, frequency, gain_db, q: f32::NAN, slope_db: 12 };
+          let c = BiquadCoefficients::from_band(&band, rate);
+          assert!([c.b0, c.b1, c.b2, c.a1, c.a2].iter().all(|v| v.is_finite()), "{band:?} @ {rate}");
+        }
+      }
+    }
+  }
 
   #[test]
   fn test_peaking_filter_gain() {

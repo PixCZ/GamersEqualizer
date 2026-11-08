@@ -5,7 +5,7 @@ use windows::Win32::Foundation::{CloseHandle, LocalFree, BOOL, HANDLE, HLOCAL, I
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::System::Memory::{
-  CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+  CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, PAGE_READWRITE,
 };
 
 pub struct SharedMemoryClient {
@@ -44,7 +44,7 @@ impl SharedMemoryClient {
     let wide_name = wide(name);
     // SAFETY: NUL-terminated name owned by this frame.
     unsafe {
-      let handle = OpenFileMappingW(FILE_MAP_ALL_ACCESS.0, false, PCWSTR(wide_name.as_ptr()))
+      let handle = OpenFileMappingW((FILE_MAP_READ | FILE_MAP_WRITE).0, false, PCWSTR(wide_name.as_ptr()))
         .map_err(|e| format!("OpenFileMappingW({name}) failed: {e}"))?;
       let client = Self::map(handle)?;
       if client.layout().header.magic != SHM_MAGIC {
@@ -72,7 +72,7 @@ impl SharedMemoryClient {
       return Err("file mapping handle is invalid".to_string());
     }
     let size = ShmLayout::total_size_bytes();
-    let view = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size);
+    let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
     let Some(mapped_ptr) = NonNull::new(view.Value as *mut ShmLayout) else {
       let _ = CloseHandle(handle);
       return Err("MapViewOfFile returned null pointer".to_string());

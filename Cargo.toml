@@ -13,6 +13,8 @@ windows = { version = "0.58", features = [
     "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Authorization",
+    # SHA-256 of the elevated scripts (`apo_install.rs`).
+    "Win32_Security_Cryptography",
     "Win32_System_Performance",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
@@ -86,3 +88,22 @@ debug-assertions = false
 [profile.apo]
 inherits = "release"
 panic = "unwind"
+
+# The no-panic rules from `.claude/rules/code-style.md`, enforced (they held only by discipline).
+# Not `unsafe_code = "deny"`: the app is Win32 / COM / APO FFI throughout; each `unsafe` block
+# carries a SAFETY comment instead. Tests may unwrap/expect/panic/index (`clippy.toml`).
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "warn"
+await_holding_lock = "deny"
+let_underscore_future = "deny"
+clone_on_copy = "deny"
+needless_return = "deny"
+redundant_field_names = "deny"

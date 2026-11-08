@@ -9,7 +9,8 @@
   restarts the Windows Audio service.
   -RestoreBackup <file.reg> additionally re-imports an FxProperties backup made by apo-install.ps1
   (byte-for-byte original state of that endpoint).
-  -RemoveBackups also deletes those backups (%ProgramData%\GamersEqualizer); the app's
+  -RemoveBackups also deletes those backups (%ProgramFiles%\GamersEqualizer\apo-backup, and
+  the .reg files older versions left in %ProgramData%\GamersEqualizer); the app's
   "Uninstall from Windows" button passes it.
 #>
 param(
@@ -21,6 +22,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 trap {
+  # A trap runs before `finally`; if the user closes this window at the prompt below, the
+  # `finally` that restarts audio never runs. Start it here first (no-op when it is running).
+  Start-Service Audiosrv -ErrorAction SilentlyContinue
   if ($FromApp) {
     Write-Host "`nUninstall failed: $_" -ForegroundColor Red
     Read-Host 'Press Enter to close'
@@ -31,9 +35,13 @@ trap {
 
 # Mic chain, output EQ and stream EQ (all in the same DLL).
 $Clsids = @('{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}', '{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}', '{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}')
-$ProgramDir = Join-Path $env:ProgramFiles 'GamersEqualizer'
+# Known folders, not $env:ProgramFiles / $env:ProgramData (user-overridable, inherited here).
+$ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEqualizer'
 $InstallDir = Join-Path $ProgramDir 'apo'
-$BackupRoot = Join-Path $env:ProgramData 'GamersEqualizer'
+$BackupDir = Join-Path $ProgramDir 'apo-backup'
+# Older versions backed up here. Any user can create this folder (or a junction to a system
+# folder), so it is never deleted recursively: only our .reg files, and not through a link.
+$LegacyBackupRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'GamersEqualizer'
 $MmDevices = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 
 # FxProperties grants Administrators only SetValue + read; the registry provider asks for more
@@ -60,7 +68,10 @@ try {
       $fx = Get-ItemProperty $fxKey
       foreach ($prop in $fx.PSObject.Properties) {
         if ($prop.Name -notlike '{*') { continue }
-        $rest = @(@($prop.Value) | Where-Object { $Clsids -notcontains $_.ToLower() })
+        # Drivers (Realtek, ...) also keep REG_DWORD / REG_BINARY values here: only string lists
+        # can hold our CLSIDs. `-notcontains` already ignores case.
+        if ($prop.Value -isnot [string] -and $prop.Value -isnot [string[]]) { continue }
+        $rest = @(@($prop.Value) | Where-Object { $Clsids -notcontains $_ })
         if ($rest.Count -eq @($prop.Value).Count) { continue }
         # An empty list deletes the value.
         Set-FxValue "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$($ep.PSChildName)\FxProperties" $prop.Name ([string[]]$rest)
@@ -82,11 +93,23 @@ try {
     if (Test-Path $key) { Remove-Item $key -Recurse -Force }
   }
   if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
-  if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
-  if ($RemoveBackups -and (Test-Path $BackupRoot)) {
-    Remove-Item $BackupRoot -Recurse -Force
-    Write-Host "Removed backups in $BackupRoot"
+  if ($RemoveBackups) {
+    if (Test-Path $BackupDir) {
+      Remove-Item $BackupDir -Recurse -Force
+      Write-Host "Removed backups in $BackupDir"
+    }
+    $legacy = Get-Item $LegacyBackupRoot -Force -ErrorAction SilentlyContinue
+    if ($legacy -and -not ($legacy.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      $legacyDir = Get-Item (Join-Path $LegacyBackupRoot 'apo-backup') -Force -ErrorAction SilentlyContinue
+      if ($legacyDir -and -not ($legacyDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Get-ChildItem $legacyDir.FullName -File -Force -Filter '*-FxProperties-*.reg' | Remove-Item -Force
+        if (-not (Get-ChildItem $legacyDir.FullName -Force)) { Remove-Item $legacyDir.FullName -Force }
+      }
+      if (-not (Get-ChildItem $LegacyBackupRoot -Force)) { Remove-Item $LegacyBackupRoot -Force }
+      Write-Host "Removed old backups in $LegacyBackupRoot"
+    }
   }
+  if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
 }
 finally {
   Start-Service Audiosrv

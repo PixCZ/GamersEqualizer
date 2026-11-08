@@ -1,6 +1,8 @@
 use log::{info, warn};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use windows::core::{implement, PCWSTR};
 use windows::Win32::Media::Audio::{
   eCapture, eConsole, eRender, EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
@@ -10,6 +12,11 @@ use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, 
 use windows::Win32::UI::Shell::PropertiesSystem::PROPERTYKEY;
 
 use super::policy_config::IPolicyConfig;
+
+/// More reverts than this within `REVERT_WINDOW` = another program enforces its own default
+/// (SteelSeries GG, another user's lock): give up instead of switching back and forth forever.
+const MAX_REVERTS: usize = 5;
+const REVERT_WINDOW: Duration = Duration::from_secs(10);
 
 pub const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY =
   PROPERTYKEY { fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14 };
@@ -27,6 +34,8 @@ pub struct EndpointLockState {
   pub hijack_counter: AtomicU32,
   pub current_default_device_id: Mutex<Option<String>>,
   pub device_changed_flag: AtomicBool,
+  /// The console default left the locked output; `EndpointLockManager::enforce_lock` reverts it.
+  pub revert_pending: AtomicBool,
 }
 
 impl EndpointLockState {
@@ -37,6 +46,7 @@ impl EndpointLockState {
       hijack_counter: AtomicU32::new(0),
       current_default_device_id: Mutex::new(None),
       device_changed_flag: AtomicBool::new(false),
+      revert_pending: AtomicBool::new(false),
     }
   }
 }
@@ -71,7 +81,7 @@ impl IMMNotificationClient_Impl for EndpointNotificationHandler_Impl {
   fn OnDefaultDeviceChanged(
     &self,
     flow: EDataFlow,
-    _role: ERole,
+    role: ERole,
     pwstrdefaultdeviceid: &PCWSTR,
   ) -> windows::core::Result<()> {
     if flow != eRender {
@@ -98,30 +108,16 @@ impl IMMNotificationClient_Impl for EndpointNotificationHandler_Impl {
       self.state.device_changed_flag.store(true, Ordering::SeqCst);
     }
 
-    if self.state.lock_enabled.load(Ordering::Relaxed) {
-      let locked_opt = {
-        let guard = match self.state.locked_device_id.lock() {
-          Ok(g) => g,
-          Err(poisoned) => poisoned.into_inner(),
-        };
-        guard.clone()
+    // Only the console (main) default is locked: one notification per role arrives, and the
+    // user's own chat device choice changes only the communications role. No MMDevice calls
+    // here (re-entrance inside the notification, Microsoft says don't): just flag it.
+    if role == eConsole && self.state.lock_enabled.load(Ordering::Relaxed) {
+      let locked = match self.state.locked_device_id.lock() {
+        Ok(g) => g.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
       };
-
-      if let Some(locked_id) = locked_opt {
-        if !current_id.is_empty() && current_id != locked_id {
-          let count = self.state.hijack_counter.fetch_add(1, Ordering::SeqCst) + 1;
-          warn!(
-            "[EndpointLock] Audio output changed to: {}. Reverting to locked: {} (Attempt #{})",
-            current_id, locked_id, count
-          );
-
-          // Force back to locked endpoint
-          if let Ok(policy) = IPolicyConfig::new() {
-            let wide: Vec<u16> = locked_id.encode_utf16().chain(std::iter::once(0)).collect();
-            let pcwstr = PCWSTR(wide.as_ptr());
-            let _ = policy.set_default_endpoint_all_roles(pcwstr);
-          }
-        }
+      if locked.is_some_and(|id| !current_id.is_empty() && current_id != id) {
+        self.state.revert_pending.store(true, Ordering::SeqCst);
       }
     }
 
@@ -137,6 +133,8 @@ pub struct EndpointLockManager {
   state: Arc<EndpointLockState>,
   enumerator: IMMDeviceEnumerator,
   client: IMMNotificationClient,
+  /// When the lock last reverted the default (rate limit).
+  reverts: Mutex<VecDeque<Instant>>,
 }
 
 impl EndpointLockManager {
@@ -147,7 +145,63 @@ impl EndpointLockManager {
       let client: IMMNotificationClient = EndpointNotificationHandler::new(Arc::clone(&state)).into();
       enumerator.RegisterEndpointNotificationCallback(&client)?;
 
-      Ok(Self { state, enumerator, client })
+      Ok(Self { state, enumerator, client, reverts: Mutex::new(VecDeque::new()) })
+    }
+  }
+
+  /// Puts the locked output back as the default when a notification flagged that it moved.
+  /// Call from a regular tick, never from the notification itself. A locked device that is
+  /// unplugged or disabled is skipped (the flag stays, so it is enforced again once it is back:
+  /// plugging it in fires the notification). Too many reverts in a row turn the lock off.
+  pub fn enforce_lock(&self) {
+    if !self.state.lock_enabled.load(Ordering::Relaxed) || !self.state.revert_pending.load(Ordering::SeqCst) {
+      return;
+    }
+    let locked = match self.state.locked_device_id.lock() {
+      Ok(g) => g.clone(),
+      Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    let Some(locked_id) = locked else { return };
+    if !self.is_active(&locked_id) {
+      return;
+    }
+    if self.get_default_output_id().as_deref() == Some(locked_id.as_str()) {
+      self.state.revert_pending.store(false, Ordering::SeqCst);
+      return;
+    }
+    let now = Instant::now();
+    let fighting = match self.reverts.lock() {
+      Ok(mut reverts) => {
+        while reverts.front().is_some_and(|t| now.duration_since(*t) > REVERT_WINDOW) {
+          reverts.pop_front();
+        }
+        reverts.push_back(now);
+        reverts.len() > MAX_REVERTS
+      }
+      Err(_) => false,
+    };
+    self.state.revert_pending.store(false, Ordering::SeqCst);
+    if fighting {
+      warn!("[EndpointLock] another program keeps changing the default output; turning the lock off");
+      self.unlock();
+      return;
+    }
+    let count = self.state.hijack_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    warn!("[EndpointLock] default output left the locked {locked_id}; reverting (#{count})");
+    if let Err(e) = self.set_as_default_device(&locked_id) {
+      warn!("[EndpointLock] could not revert to {locked_id}: {e}");
+    }
+  }
+
+  fn is_active(&self, device_id: &str) -> bool {
+    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: NUL-terminated id owned by this frame.
+    unsafe {
+      self
+        .enumerator
+        .GetDevice(PCWSTR(wide.as_ptr()))
+        .and_then(|d| d.GetState())
+        .is_ok_and(|s| s == DEVICE_STATE_ACTIVE)
     }
   }
 

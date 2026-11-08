@@ -19,6 +19,11 @@ Když se exe vůbec nespustí
 - Zapnuté "Inteligentní řízení aplikací" (Smart App Control) nepodepsané programy blokuje
   úplně. Pozor: když ho vypneš, zpátky zapnout jde jen přeinstalací Windows.
 
+Víc uživatelů na jednom PC
+--------------------------
+Testovací verze počítá s jedním přihlášeným uživatelem. Při přepínání uživatelů nebo
+přes Vzdálenou plochu si přihlášení uživatelé sdílejí nastavení zvukových efektů.
+
 Odinstalace
 -----------
 V aplikaci Nastavení > "Odinstalovat z Windows" (odebere efekty ze zvukových zařízení,

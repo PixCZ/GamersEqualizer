@@ -1,7 +1,7 @@
 use crate::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
 use crate::profile::{expand_slopes, BiquadBand, FilterType};
 use crate::streams::{StreamTable, STREAM_EQ_BUSES};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Name carries the layout version: a process still running an older build keeps its own
@@ -56,6 +56,15 @@ pub struct ShmStreamEq {
   pub band_count: AtomicU32,
   pub preamp_db_bits: AtomicU32,
   pub bands: [ShmEqBand; MAX_STREAM_EQ_BANDS],
+}
+
+/// Source EQ versions a mirror (`ShmHeader::copy_controls_from`) copied last. Lives in the
+/// copying process, not in shared memory; `default()` = nothing copied yet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopiedEqVersions {
+  mic: Option<u32>,
+  out: Option<u32>,
+  streams: [Option<u32>; STREAM_EQ_BUSES],
 }
 
 /// What the echo canceller is doing right now (shown in the UI).
@@ -500,9 +509,12 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(MIC_LEVELER_DEFAULT_TARGET_DB_X10, Ordering::Relaxed);
   }
 
-  /// GUI -> DSP settings, for mirroring the daemon's mapping into the APO's. `all` also copies
-  /// the EQs whose version number happens to match (a new owner: the numbers are another daemon's).
-  pub fn copy_controls_from(&self, src: &ShmHeader, all: bool) {
+  /// GUI -> DSP settings, for mirroring the daemon's mapping into the APO's. An EQ is copied
+  /// when its source version differs from the one `seen` remembers (a new owner starts from
+  /// `CopiedEqVersions::default()`: copies everything). The destination keeps its own counters
+  /// (each write bumps them), so the APO always sees a change: storing the source's number
+  /// could land on exactly the version the APO had cached from the previous owner.
+  pub fn copy_controls_from(&self, src: &ShmHeader, seen: &mut CopiedEqVersions) {
     let r = Ordering::Relaxed;
     self.aec_enabled.store(src.aec_enabled.load(r), r);
     self.ai_voice_strength_permille.store(src.ai_voice_strength_permille.load(r), r);
@@ -515,23 +527,24 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);
     self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
     self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
+    // Version first, bands after: a write in between is copied now and again next time.
     let version = src.mic_eq_version.load(Ordering::Acquire);
-    if all || version != self.mic_eq_version.load(Ordering::Acquire) {
+    if seen.mic != Some(version) {
       self.write_mic_eq(&src.read_mic_eq());
-      self.mic_eq_version.store(version, Ordering::Release);
+      seen.mic = Some(version);
     }
     let version = src.out_eq_version.load(Ordering::Acquire);
-    if all || version != self.out_eq_version.load(Ordering::Acquire) {
+    if seen.out != Some(version) {
       let (bands, preamp) = src.read_out_eq();
       self.write_out_eq(&bands, preamp);
-      self.out_eq_version.store(version, Ordering::Release);
+      seen.out = Some(version);
     }
-    for (dst, src) in self.stream_eq.iter().zip(&src.stream_eq) {
+    for ((dst, src), seen) in self.stream_eq.iter().zip(&src.stream_eq).zip(&mut seen.streams) {
       let version = src.version.load(Ordering::Acquire);
-      if all || version != dst.version.load(Ordering::Acquire) {
+      if *seen != Some(version) {
         let (bands, preamp) = src.read();
         dst.write(&bands, preamp);
-        dst.version.store(version, Ordering::Release);
+        *seen = Some(version);
       }
     }
   }
@@ -571,12 +584,12 @@ impl ShmHeader {
   }
 
   pub fn write_active_game(&self, game: Option<&ActiveGame>) {
-    self.active_game_seq.fetch_add(1, Ordering::AcqRel);
     let empty = ActiveGame::default();
     let game = game.unwrap_or(&empty);
-    write_text(&self.active_game_profile, &game.profile);
-    write_text(&self.active_game_label, &game.label);
-    self.active_game_seq.fetch_add(1, Ordering::AcqRel);
+    seq_write(&self.active_game_seq, || {
+      write_text(&self.active_game_profile, &game.profile);
+      write_text(&self.active_game_label, &game.label);
+    });
   }
 
   /// None = no game active. Retries while a writer is mid-update.
@@ -589,7 +602,9 @@ impl ShmHeader {
       }
       let game =
         ActiveGame { profile: read_text(&self.active_game_profile), label: read_text(&self.active_game_label) };
-      if self.active_game_seq.load(Ordering::Acquire) == s1 {
+      // The text loads are relaxed: keep them before the second seq load (ARM64).
+      fence(Ordering::Acquire);
+      if self.active_game_seq.load(Ordering::Relaxed) == s1 {
         return (!game.label.is_empty()).then_some(game);
       }
     }
@@ -771,6 +786,18 @@ fn read_bands(slots: &[ShmEqBand], count: usize) -> Vec<BiquadBand> {
 }
 
 /// NUL-terminated UTF-16, truncated to the slot count minus one.
+/// Seqlock write (one writer): the counter is odd while `write` runs. It starts from the next
+/// odd value whatever the counter holds, so a writer that died between the two steps (process
+/// killed, `panic = "abort"`) does not leave it odd for the life of the mapping, where every
+/// reader would give up forever.
+fn seq_write(seq: &AtomicU32, write: impl FnOnce()) {
+  let odd = seq.load(Ordering::Relaxed) | 1;
+  seq.store(odd, Ordering::Relaxed);
+  fence(Ordering::Release);
+  write();
+  seq.store(odd.wrapping_add(1), Ordering::Release);
+}
+
 fn write_text(slots: &[AtomicU16], text: &str) {
   let room = slots.len().saturating_sub(1);
   let units = text.encode_utf16().take(room).chain(std::iter::repeat(0));
@@ -837,11 +864,11 @@ impl<'a> ShmRingBuffer<'a> {
 
     let end_t = qpc_first_hns + (frames.len() as u64 * HNS_PER_SEC as u64) / REF_SAMPLE_RATE as u64;
     let header = &self.layout.header;
-    header.ref_seq.fetch_add(1, Ordering::AcqRel);
-    header.write_frame_index.store(write_pos, Ordering::Release);
-    header.ref_snap_index.store(write_pos, Ordering::Release);
-    header.ref_snap_qpc_hns.store(end_t, Ordering::Release);
-    header.ref_seq.fetch_add(1, Ordering::AcqRel);
+    seq_write(&header.ref_seq, || {
+      header.write_frame_index.store(write_pos, Ordering::Release);
+      header.ref_snap_index.store(write_pos, Ordering::Release);
+      header.ref_snap_qpc_hns.store(end_t, Ordering::Release);
+    });
   }
 
   /// Read mono reference frames starting at ring index `start`. Frames that are not in
@@ -1001,7 +1028,7 @@ mod tests {
     assert_eq!(src.read_out_eq(), (bands.clone(), -3.5));
 
     let dst = ShmHeader::default();
-    dst.copy_controls_from(&src, false);
+    dst.copy_controls_from(&src, &mut CopiedEqVersions::default());
     assert_eq!(dst.read_out_eq(), (bands, -3.5));
     assert!(dst.master_bypass.load(Ordering::Relaxed));
   }
@@ -1011,10 +1038,14 @@ mod tests {
     let (src, dst) = (ShmHeader::default(), ShmHeader::default());
     let band = BiquadBand { gain_db: -4.0, frequency: 2500.0, ..BiquadBand::default() };
     src.stream_eq[1].write(std::slice::from_ref(&band), -1.5);
-    dst.copy_controls_from(&src, false);
+    let mut seen = CopiedEqVersions::default();
+    dst.copy_controls_from(&src, &mut seen);
     assert_eq!(dst.stream_eq[1].read(), (vec![band], -1.5));
     assert_eq!(dst.stream_eq[0].read(), (vec![], 0.0));
-    assert_eq!(dst.stream_eq[1].version.load(Ordering::Relaxed), src.stream_eq[1].version.load(Ordering::Relaxed));
+    // Unchanged source: nothing is written again (the APO keeps its coefficients).
+    let v = dst.stream_eq[1].version.load(Ordering::Relaxed);
+    dst.copy_controls_from(&src, &mut seen);
+    assert_eq!(dst.stream_eq[1].version.load(Ordering::Relaxed), v);
   }
 
   #[test]
@@ -1039,10 +1070,11 @@ mod tests {
     let band = BiquadBand { gain_db: 3.0, ..BiquadBand::default() };
     src.write_mic_eq(std::slice::from_ref(&band));
     dst.write_mic_eq(&[]); // another daemon's EQ, same version number
-    dst.copy_controls_from(&src, false);
-    assert_eq!(dst.read_mic_eq(), vec![]);
-    dst.copy_controls_from(&src, true);
+    let apo_cached = dst.mic_eq_version.load(Ordering::Relaxed);
+    dst.copy_controls_from(&src, &mut CopiedEqVersions::default());
     assert_eq!(dst.read_mic_eq(), vec![band]);
+    // The APO re-reads only on a version it has not seen: it must change.
+    assert_ne!(dst.mic_eq_version.load(Ordering::Relaxed), apo_cached);
   }
 
   #[test]
@@ -1057,6 +1089,17 @@ mod tests {
     h.stream_eq[0].write(&[], 0.0);
     h.stream_eq[1].write(&[BiquadBand::default()], 0.0);
     assert!(h.stream_eq_active());
+  }
+
+  #[test]
+  fn a_seqlock_left_odd_by_a_dead_writer_recovers_on_the_next_write() {
+    let h = ShmHeader::default();
+    h.active_game_seq.store(7, Ordering::Relaxed); // writer killed mid-update
+    assert_eq!(h.read_active_game(), None);
+    let game = ActiveGame { profile: "p".into(), label: "l".into() };
+    h.write_active_game(Some(&game));
+    assert_eq!(h.read_active_game(), Some(game));
+    assert_eq!(h.active_game_seq.load(Ordering::Relaxed) & 1, 0);
   }
 
   #[test]

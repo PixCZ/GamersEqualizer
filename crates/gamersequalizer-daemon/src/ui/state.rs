@@ -529,6 +529,7 @@ fn load_mic_profile(storage: &ProfileStorage) -> Option<ParametricProfile> {
     }
     Err(e) => {
       log::warn!("[MicEQ] {} is corrupt ({}), using defaults", path.display(), e);
+      crate::output_eq::settings::keep_corrupt(&path);
       None
     }
   }
@@ -541,9 +542,7 @@ fn save_mic_profile(storage: &ProfileStorage, profile: &ParametricProfile) {
       std::fs::create_dir_all(dir)?;
     }
     let json = serde_json::to_string_pretty(profile).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json)?;
-    std::fs::rename(&tmp, &path)
+    crate::output_eq::settings::write_atomic(&path, &json)
   })();
   if let Err(e) = result {
     log::warn!("[MicEQ] could not save {}: {}", path.display(), e);

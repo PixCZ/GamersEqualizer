@@ -86,9 +86,12 @@ pub const CLSID_OUTPUT_EQ_APO: GUID = GUID::from_u128(0x6b0f3c1e_8f2a_4d7b_9a51_
 /// Stream probe. Must match `$Clsid` (Render, -Slot SFX) in `scripts/apo-install.ps1`.
 pub const CLSID_STREAM_APO: GUID = GUID::from_u128(0x3c9a5e21_7d4f_4b8e_a1c6_5f2e8d9b0a47);
 
-/// Global mapping DACL: full access for SYSTEM, LOCAL SERVICE (audiodg), Administrators and
-/// interactively logged-on users (the daemon).
-const APO_SHM_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;;GA;;;IU)";
+/// Global mapping DACL: full access for SYSTEM, LOCAL SERVICE (audiodg) and Administrators;
+/// interactively logged-on users (the daemon) only map read/write (`0x6` =
+/// SECTION_MAP_WRITE | SECTION_MAP_READ), so they cannot rewrite the DACL and lock audiodg out.
+/// Known limit: every interactive user on the PC still shares one mapping (not supported for
+/// several users at once, see CTI-ME); per-user mappings would be the upgrade.
+const APO_SHM_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;;0x6;;;IU)";
 
 const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 const MAX_CHANNELS: u32 = 32;
@@ -186,6 +189,13 @@ struct OutputProcessor {
   active: bool,
   owner: OwnerWatch,
   failed: bool,
+  /// Share of the processed signal, 0..1. Losing the owner (service hung, resume from sleep)
+  /// or a bypass toggle fades over `STREAM_FADE_SECONDS` instead of jumping (a -6 dB preamp
+  /// switching to 0 dB at once, the limiter dropping out mid-peak).
+  wet: f32,
+  fade_step: f32,
+  /// Processed copy of the block while fading.
+  scratch: Vec<f32>,
 }
 
 /// The mic DSP chain plus its scratch buffers.
@@ -201,6 +211,9 @@ struct MicProcessor {
   owner: OwnerWatch,
   /// Pass through unless a daemon owns the mapping. Only tests turn it off (no daemon there).
   follow_owner: bool,
+  /// The chain ran on the previous block. After a pass-through stretch the bridge FIFOs hold
+  /// audio from before it.
+  was_live: bool,
   timing: CallTiming,
 }
 
@@ -435,7 +448,10 @@ unsafe extern "system" fn inner_add_ref(this: *mut c_void) -> u32 {
 unsafe extern "system" fn inner_release(this: *mut c_void) -> u32 {
   let left = object::<OFF_INNER>(this).refs.fetch_sub(1, Ordering::AcqRel).wrapping_sub(1);
   if left == 0 {
-    drop(Box::from_raw((this as *mut u8).sub(OFF_INNER) as *mut ApoObject));
+    let obj = Box::from_raw((this as *mut u8).sub(OFF_INNER) as *mut ApoObject);
+    // Windows may release a still-locked APO (device removed): this drops the processor, and
+    // a panic in a DSP destructor must not unwind out of `extern "system"` (kills audiodg).
+    let _ = catch_unwind(AssertUnwindSafe(move || drop(obj)));
   }
   left
 }
@@ -594,7 +610,9 @@ unsafe extern "system" fn cfg_lock_for_process(
     }
   };
   if let Ok(mut slot) = st.processor.lock() {
-    *slot = processor;
+    // Replacing drops a previous processor: keep a destructor panic inside this DLL.
+    let old = std::mem::replace(&mut *slot, processor);
+    let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
   }
   st.locked.store(true, Ordering::Release);
   S_OK
@@ -804,6 +822,10 @@ impl OutputProcessor {
       active: false,
       owner: OwnerWatch::default(),
       failed: false,
+      wet: 0.0,
+      fade_step: 1.0 / (STREAM_FADE_SECONDS * sample_rate.max(1.0)),
+      // ~85 ms of stereo at 48 kHz; grows only if the engine sends longer blocks.
+      scratch: Vec::with_capacity(8192),
     }))
     .ok()
   }
@@ -828,22 +850,49 @@ impl OutputProcessor {
     h.out_apo_sample_rate.store(self.sample_rate as u32, Ordering::Relaxed);
     h.out_apo_channels.store(channels as u32, Ordering::Relaxed);
     // Nobody's settings to apply (app not running for the user at the console): untouched.
-    if !self.owner.live(h, Instant::now()) || h.master_bypass.load(Ordering::Relaxed) {
-      return;
-    }
-    let version = h.out_eq_version.load(Ordering::Acquire);
-    if self.version != Some(version) {
-      self.version = Some(version);
-      let (bands, preamp_db) = h.read_out_eq();
-      for cascade in self.cascades.iter_mut() {
-        cascade.set_bands(&bands, self.sample_rate);
+    let enabled = self.owner.live(h, Instant::now()) && !h.master_bypass.load(Ordering::Relaxed);
+    if enabled {
+      let version = h.out_eq_version.load(Ordering::Acquire);
+      if self.version != Some(version) {
+        self.version = Some(version);
+        let (bands, preamp_db) = h.read_out_eq();
+        for cascade in self.cascades.iter_mut() {
+          cascade.set_bands(&bands, self.sample_rate);
+        }
+        self.preamp_gain = 10f32.powf(preamp_db / 20.0);
+        self.active = self.cascades.first().is_some_and(|c| !c.is_empty()) || preamp_db != 0.0;
       }
-      self.preamp_gain = 10f32.powf(preamp_db / 20.0);
-      self.active = self.cascades.first().is_some_and(|c| !c.is_empty()) || preamp_db != 0.0;
     }
-    if !self.active {
+    let goal = if enabled && self.active { 1.0 } else { 0.0 };
+    if self.wet <= 0.0 && goal <= 0.0 {
       return;
     }
+    if self.wet <= 0.0 {
+      // Fading in after a pass-through stretch: the filter memory is from back then.
+      self.cascades.iter_mut().for_each(BiquadCascade::reset_state);
+    }
+    if self.wet >= 1.0 && goal >= 1.0 {
+      self.run_eq_in_place(buf, channels);
+      return;
+    }
+    if self.scratch.len() < buf.len() {
+      self.scratch.resize(buf.len(), 0.0);
+    }
+    let mut scratch = std::mem::take(&mut self.scratch);
+    if let Some(wet_buf) = scratch.get_mut(..buf.len()) {
+      wet_buf.copy_from_slice(buf);
+      self.run_eq_in_place(wet_buf, channels);
+      for (dry_frame, wet_frame) in buf.chunks_exact_mut(channels).zip(wet_buf.chunks_exact(channels)) {
+        self.wet = if goal > self.wet { (self.wet + self.fade_step).min(1.0) } else { (self.wet - self.fade_step).max(0.0) };
+        for (d, w) in dry_frame.iter_mut().zip(wet_frame) {
+          *d += self.wet * (w - *d);
+        }
+      }
+    }
+    self.scratch = scratch;
+  }
+
+  fn run_eq_in_place(&mut self, buf: &mut [f32], channels: usize) {
     if self.preamp_gain != 1.0 {
       buf.iter_mut().for_each(|s| *s *= self.preamp_gain);
     }
@@ -881,6 +930,7 @@ impl MicProcessor {
         clock: MicClock::new(rate),
         owner: OwnerWatch::default(),
         follow_owner: true,
+        was_live: false,
         timing: CallTiming::default(),
       }
     }))
@@ -902,9 +952,17 @@ impl MicProcessor {
     let now = Instant::now();
     self.timing.note(now, frames, self.clock.rate, self.plugin.shm_header());
     // Nobody's settings to apply (app not running for the user at the console): the raw mic.
-    let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, .. } = self;
+    let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, .. } = self;
     if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, now)) {
+      if std::mem::replace(was_live, false) {
+        plugin.pause();
+      }
       return;
+    }
+    if !std::mem::replace(was_live, true) {
+      if let Some(bridge) = bridge.as_mut() {
+        bridge.reset();
+      }
     }
     let (Some(input), Some(output)) = (mono_in.get_mut(..frames), mono_out.get_mut(..frames)) else {
       return;
@@ -1255,8 +1313,13 @@ mod tests {
     assert!((gain_db - 6.0).abs() < 0.3, "expected ~+6 dB, got {gain_db}");
     assert!(buf.as_chunks::<2>().0.iter().all(|[l, r]| l == r));
 
-    // Master switch off: untouched.
+    // Master switch off: fades out over STREAM_FADE_SECONDS (no jump), then untouched.
     h.master_bypass.store(true, Ordering::Relaxed);
+    let fade = 2 * (STREAM_FADE_SECONDS * 48_000.0) as usize + 2;
+    let mut buf = sine(0.1);
+    processor.process(&mut buf, 2);
+    assert_ne!(buf[..fade], sine(0.1)[..fade]);
+    assert_eq!(buf[fade..], sine(0.1)[fade..]);
     let mut buf = sine(0.1);
     processor.process(&mut buf, 2);
     assert_eq!(buf, sine(0.1));

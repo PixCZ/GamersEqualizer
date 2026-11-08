@@ -48,6 +48,8 @@ pub struct RateBridge {
   out_fifo: Vec<f32>,
   /// Cap on what stays in `out_fifo` after a block (2x the prime); excess = drift, dropped.
   out_limit: usize,
+  /// Silence `out_fifo` starts with (the pipeline latency).
+  prime: usize,
   /// Blocks that came back partly silent because the pipeline was short (should stay 0).
   underruns: u64,
 }
@@ -89,8 +91,20 @@ impl RateBridge {
       chain_out: Vec::with_capacity(2 * PREALLOC_FRAMES),
       out_fifo,
       out_limit: 2 * prime,
+      prime,
       underruns: 0,
     })
+  }
+
+  /// Back to the state of `new` without allocating: after a pause the FIFOs hold audio from
+  /// before it (~5 ms that would play first, out of place).
+  pub fn reset(&mut self) {
+    for stage in [&mut self.up, &mut self.down] {
+      stage.resampler.reset();
+      stage.fifo.clear();
+    }
+    self.out_fifo.clear();
+    self.out_fifo.resize(self.prime, 0.0);
   }
 
   /// Replaces `block` (device rate, mono) with the chain's output for it, delayed by the

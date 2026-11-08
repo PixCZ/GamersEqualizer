@@ -39,7 +39,6 @@ const DETACHED_PROCESS: u32 = 0x00000008;
 /// that was most of the daemon's CPU. Volume changes are picked up within 250 ms; channel
 /// sliders apply at once, a newly started app gets its channel volume within 1 s.
 const VOLUME_SYNC_INTERVAL: Duration = Duration::from_millis(250);
-const SESSION_MIX_INTERVAL: Duration = Duration::from_secs(1);
 /// Window / taskbar icon resolution (Windows scales it down for the title bar).
 const WINDOW_ICON_SIZE: u32 = 64;
 
@@ -139,8 +138,6 @@ fn run_background_daemon() {
 
   let mut last_volume_sync: Option<Instant> = None;
   let mut last_output_check: Option<Instant> = None;
-  let mut last_session_mix: Option<Instant> = None;
-  let mut last_mix_inputs = None;
   // Windows mic volume as the leveler's input gain, stepped at the extremes only.
   let mut mic_gain = win_audio::mic_gain::MicGainLink::default();
   // Debug lines for every leveler change and its reason (written only with "save debug" on).
@@ -189,7 +186,10 @@ fn run_background_daemon() {
       } else {
         last_default_mic.clone()
       };
-      if cur_mic_ver != last_mic_version || default_mic != last_default_mic {
+      // A device came or went: the picked mic may have been unplugged (the default does not
+      // change when it was not the default) or plugged back in.
+      let devices_changed = win_audio.endpoint_lock.poll_device_changed();
+      if cur_mic_ver != last_mic_version || default_mic != last_default_mic || devices_changed {
         last_mic_version = cur_mic_ver;
         last_default_mic = default_mic;
         let captures = win_audio.endpoint_lock.enumerate_capture_devices();
@@ -274,17 +274,9 @@ fn run_background_daemon() {
 
       win_audio.chatmix.balance = bal;
 
-      // Apply to active WASAPI application sessions (does NOT override Windows master hardware endpoint)
-      let mix_inputs = Some((
-        (g_vol, c_vol, med_vol, bal),
-        (g_mute, c_mute, med_mute),
-        (win_audio.chatmix.master_volume, win_audio.chatmix.master_muted),
-      ));
-      if mix_inputs != last_mix_inputs || last_session_mix.is_none_or(|t| t.elapsed() >= SESSION_MIX_INTERVAL) {
-        last_mix_inputs = mix_inputs;
-        last_session_mix = Some(Instant::now());
-        win_audio.chatmix.apply_session_mix();
-      }
+      // Per-app session volumes: fallback mode only, throttled, never against the user's
+      // own mixer changes (`apply_session_mix`).
+      win_audio.chatmix.apply_session_mix();
     }
 
     // Game detection: the daemon is the owner (decides and publishes the active game).
@@ -338,12 +330,23 @@ fn run_gui_mode() {
   let storage = ProfileStorage::default_storage();
   win_audio::app_channels::init(storage.base_dir());
 
-  // Import once; again if the profiles predate launcher ids (needed for game detection).
+  // Import once: also when the profiles predate launcher ids (needed for game detection),
+  // which is the one time it overwrites same-named profiles. Then never again.
   let default_db = Path::new(DEFAULT_SONAR_DB_PATH);
-  let games = storage.load_profiles_for_vad(gamersequalizer_common::profile::VadType::Game);
-  if default_db.exists() && games.iter().all(|p| p.game_ids.is_empty()) {
-    if let Err(e) = import_sonar_db(default_db, &storage) {
-      log::warn!("[Sonar] import failed: {e}");
+  let eq_settings_path = storage.base_dir().join(output_eq::settings::SETTINGS_FILE);
+  let mut eq_settings = output_eq::settings::OutputEqSettings::load_or_default(&eq_settings_path);
+  if !eq_settings.imported_sonar && default_db.exists() {
+    let games = storage.load_profiles_for_vad(gamersequalizer_common::profile::VadType::Game);
+    let done = if games.iter().all(|p| p.game_ids.is_empty()) {
+      import_sonar_db(default_db, &storage).map_err(|e| log::warn!("[Sonar] import failed: {e}")).is_ok()
+    } else {
+      true // imported by an older version already
+    };
+    if done {
+      eq_settings.imported_sonar = true;
+      if let Err(e) = eq_settings.save(&eq_settings_path) {
+        log::warn!("[Sonar] could not save {}: {e}", eq_settings_path.display());
+      }
     }
   }
 
@@ -380,15 +383,10 @@ fn run_gui_mode() {
   // Update SHM with live channel volumes
   state.sync_mixer_to_shm(&win_audio.chatmix);
 
-  // If background daemon is not running, run mic stream directly in GUI process
-  let daemon_running = state.is_daemon_active();
-  if !daemon_running {
-    let initial_mic_id =
-      win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
-    win_audio.mic_stream.set_input_device(initial_mic_id);
-    win_audio.mic_stream.set_reference_device(win_audio.chatmix.master_device_id.clone());
-    win_audio.mic_stream.start();
-  }
+  // The mic bridge, the echo reference loopback and the APO link run only in the background
+  // service (started above, restarted by the window's watchdog). The window used to start its
+  // own when the service was not up within 150 ms of a cold start, and never stopped it: two
+  // bridges on one virtual mic, two APO owners mixing echo reference frames.
 
   // Last size/position/maximized state; the default fits a 1366x768 laptop and everything
   // scrolls / reflows when the window is made smaller.

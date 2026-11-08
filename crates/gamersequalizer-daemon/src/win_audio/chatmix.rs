@@ -1,14 +1,16 @@
 use super::app_channels::{self, AppChannel};
 use super::endpoint_lock::{get_endpoint_info, AudioEndpointInfo};
-use std::collections::HashSet;
-use std::time::Instant;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::thread::LocalKey;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
   eCapture, eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
   ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
 use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_core::Interface;
@@ -16,6 +18,11 @@ use windows_core::Interface;
 /// `QueryHardwareSupport` bit: the device applies the volume itself (endpointvolume.h; the
 /// windows crate doesn't export it).
 const ENDPOINT_HARDWARE_SUPPORT_VOLUME: u32 = 0x1;
+/// Session volumes are re-checked this often for new sessions (an app that starts playing);
+/// a channel change applies at once.
+const SESSION_MIX_INTERVAL: Duration = Duration::from_secs(1);
+/// Volume steps smaller than this are "the same" (rounding of the permille values).
+const VOLUME_EPSILON: f32 = 0.005;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioBus {
@@ -175,6 +182,15 @@ pub struct ChatMixController {
   media_executables: HashSet<String>,
   assigned_game_executables: HashSet<String>,
   current_game_exe: Option<String>,
+
+  /// Off in the window while the background service runs: one process owns session volumes.
+  pub sessions_enabled: bool,
+  /// Per session (instance id): the volume this process last set. A session is only touched
+  /// again when its channel's target moves away from that, so a level the user picks in the
+  /// Windows mixer stays until they move our channel slider.
+  session_set: HashMap<String, f32>,
+  last_session_targets: Option<(f32, f32, f32)>,
+  last_session_pass: Option<Instant>,
 }
 
 impl ChatMixController {
@@ -222,6 +238,10 @@ impl ChatMixController {
       media_executables,
       assigned_game_executables: HashSet::new(),
       current_game_exe: None,
+      sessions_enabled: true,
+      session_set: HashMap::new(),
+      last_session_targets: None,
+      last_session_pass: None,
     }
   }
 
@@ -590,32 +610,62 @@ impl ChatMixController {
       self.last_applied_mic_muted = self.mic_muted;
     }
 
-    // 6. Only sync individual application process volumes via WASAPI sessions
-    // if there are NO dedicated channel endpoints (fallback mode) and ChatMix balance is active!
-    // Never overwrite application process volumes on launch or when dedicated endpoints are used.
-    if self.game_device_id.is_none() && self.chat_device_id.is_none() && self.balance.abs() > 0.02 {
-      self.apply_session_mix();
-    }
+    // 6. Per-app session volumes (fallback mode without dedicated channel endpoints).
+    self.apply_session_mix();
   }
 
-  /// Sync individual application process volumes via WASAPI sessions
-  pub fn apply_session_mix(&self) {
+  /// Channel volumes as per-app session volumes, only in fallback mode: with dedicated channel
+  /// endpoints (Sonar-like) the endpoint carries the level and a session volume would multiply
+  /// it (Game 50 % playing at 25 %). Throttled: a full pass when a target changed, else at most
+  /// once per `SESSION_MIX_INTERVAL` (picks up new sessions).
+  ///
+  /// Never fights the user: a session is set only when it has no level from us yet and its
+  /// target is not neutral (100 %), or when its target moved since we last set it.
+  pub fn apply_session_mix(&mut self) {
+    if !self.sessions_enabled || self.game_device_id.is_some() || self.chat_device_id.is_some() {
+      return;
+    }
     let (game_vol, chat_vol) = self.get_multipliers();
-    let media_vol = self.get_media_volume();
+    let targets = (game_vol, chat_vol, self.get_media_volume());
+    let changed = self.last_session_targets != Some(targets);
+    if !changed && self.last_session_pass.is_some_and(|t| t.elapsed() < SESSION_MIX_INTERVAL) {
+      return;
+    }
+    self.last_session_targets = Some(targets);
+    self.last_session_pass = Some(Instant::now());
 
+    let mut seen = HashMap::with_capacity(self.session_set.len());
+    // SAFETY: COM calls on interfaces enumerated just now.
     unsafe {
-      let sessions = self.enumerate_active_sessions_raw();
-      for (session_vol, bus) in sessions {
-        let target_vol = match bus {
-          AudioBus::Game => game_vol,
-          AudioBus::Chat => chat_vol,
-          AudioBus::Media => media_vol,
-          AudioBus::Master => 1.0, // Master volume is handled at the hardware endpoint level
-          AudioBus::Mic => 1.0,
+      for (key, session_vol, bus) in self.enumerate_active_sessions_raw() {
+        let target = match bus {
+          AudioBus::Game => targets.0,
+          AudioBus::Chat => targets.1,
+          AudioBus::Media => targets.2,
+          // Master is the hardware endpoint; never touched per app.
+          AudioBus::Master | AudioBus::Mic => continue,
         };
-        let _ = session_vol.SetMasterVolume(target_vol, std::ptr::null());
+        match session_action(self.session_set.get(&key).copied(), target) {
+          SessionAction::Keep(last) => {
+            if let Some(last) = last {
+              seen.insert(key, last);
+            }
+          }
+          SessionAction::Set => {
+            let current = session_vol.GetMasterVolume().unwrap_or(-1.0);
+            if (current - target).abs() > VOLUME_EPSILON {
+              if let Err(e) = session_vol.SetMasterVolume(target, std::ptr::null()) {
+                log::debug!("[ChatMix] SetMasterVolume failed: {e}");
+                continue;
+              }
+            }
+            seen.insert(key, target);
+          }
+        }
       }
     }
+    // Sessions that ended are forgotten; a reopened app is a new session.
+    self.session_set = seen;
   }
 
   pub fn list_active_sessions(&self) -> Vec<AudioSessionInfo> {
@@ -658,7 +708,8 @@ impl ChatMixController {
     result
   }
 
-  unsafe fn enumerate_active_sessions_raw(&self) -> Vec<(ISimpleAudioVolume, AudioBus)> {
+  /// (session instance id, volume control, channel) of every app session on every device.
+  unsafe fn enumerate_active_sessions_raw(&self) -> Vec<(String, ISimpleAudioVolume, AudioBus)> {
     let mut list = Vec::new();
     for manager in get_all_session_managers() {
       if let Ok(enumerator) = manager.GetSessionEnumerator() {
@@ -673,8 +724,9 @@ impl ChatMixController {
                     continue;
                   }
                   let bus = self.classify_exe(&exe_name);
+                  let key = session_instance_id(&control2).unwrap_or_else(|| format!("pid:{pid}:{i}"));
                   if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
-                    list.push((vol_ctl, bus));
+                    list.push((key, vol_ctl, bus));
                   }
                 }
               }
@@ -687,60 +739,111 @@ impl ChatMixController {
   }
 }
 
-pub fn get_endpoint_volume(device_id: &str) -> Option<(f32, bool)> {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
-    let endpoint_vol: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
-    let level = endpoint_vol.GetMasterVolumeLevelScalar().ok()?;
-    let muted = endpoint_vol.GetMute().ok()?;
-    Some((level, muted.as_bool()))
+#[derive(Debug, PartialEq)]
+enum SessionAction {
+  /// Leave the session alone; remember the level we set before (if any).
+  Keep(Option<f32>),
+  Set,
+}
+
+/// `last`: the level this process set on the session before (None: never touched it).
+fn session_action(last: Option<f32>, target: f32) -> SessionAction {
+  match last {
+    Some(l) if (l - target).abs() <= VOLUME_EPSILON => SessionAction::Keep(Some(l)),
+    Some(_) => SessionAction::Set,
+    // Neutral channel: the app keeps the level Windows / the user gave it.
+    None if (target - 1.0).abs() <= VOLUME_EPSILON => SessionAction::Keep(None),
+    None => SessionAction::Set,
   }
+}
+
+unsafe fn session_instance_id(control: &IAudioSessionControl2) -> Option<String> {
+  let p = control.GetSessionInstanceIdentifier().ok()?;
+  let id = p.to_string().ok();
+  CoTaskMemFree(Some(p.0 as *const _));
+  id
+}
+
+thread_local! {
+  /// Activated endpoint interfaces per device id. Creating the enumerator, looking the device
+  /// up and activating it for every read was ~200 RPCs per second into the audio service from
+  /// the window alone. Per thread: COM objects stay in the apartment that made them. An entry
+  /// is dropped on any error (device removed, audio service restarted) and made fresh next time.
+  static ENDPOINT_VOLUMES: RefCell<HashMap<String, IAudioEndpointVolume>> = RefCell::new(HashMap::new());
+  static ENDPOINT_METERS: RefCell<HashMap<String, IAudioMeterInformation>> = RefCell::new(HashMap::new());
+}
+
+/// Bound for the caches (a PC has a handful of endpoints; ids of unplugged ones pile up).
+const MAX_CACHED_ENDPOINTS: usize = 64;
+
+/// Runs `f` on the cached `I` of `device_id`, activating it first if needed.
+fn with_endpoint<I: Interface + Clone, T>(
+  cache: &'static LocalKey<RefCell<HashMap<String, I>>>,
+  device_id: &str,
+  f: impl FnOnce(&I) -> windows::core::Result<T>,
+) -> Option<T> {
+  let cached = cache.with_borrow(|c| c.get(device_id).cloned());
+  let iface = match cached {
+    Some(i) => i,
+    None => {
+      // SAFETY: plain COM activation; the interface is reference counted.
+      let i = unsafe { activate_endpoint::<I>(device_id)? };
+      cache.with_borrow_mut(|c| {
+        if c.len() >= MAX_CACHED_ENDPOINTS {
+          c.clear();
+        }
+        c.insert(device_id.to_string(), i.clone());
+      });
+      i
+    }
+  };
+  match f(&iface) {
+    Ok(v) => Some(v),
+    Err(_) => {
+      cache.with_borrow_mut(|c| c.remove(device_id));
+      None
+    }
+  }
+}
+
+unsafe fn activate_endpoint<I: Interface>(device_id: &str) -> Option<I> {
+  let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+  let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+  let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+  let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
+  device.Activate::<I>(CLSCTX_ALL, None).ok()
+}
+
+pub fn get_endpoint_volume(device_id: &str) -> Option<(f32, bool)> {
+  // SAFETY: COM calls on a live interface.
+  with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe {
+    Ok((v.GetMasterVolumeLevelScalar()?, v.GetMute()?.as_bool()))
+  })
 }
 
 /// Windows mic/speaker volume of an endpoint in dB (the gain it applies), and whether the device
 /// does it in hardware (only then does a lower volume prevent the converter from clipping).
 pub fn get_endpoint_volume_db(device_id: &str) -> Option<(f32, bool)> {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
-    let endpoint_vol: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
-    let db = endpoint_vol.GetMasterVolumeLevel().ok()?;
-    let hardware = endpoint_vol.QueryHardwareSupport().is_ok_and(|mask| mask & ENDPOINT_HARDWARE_SUPPORT_VOLUME != 0);
-    Some((db, hardware))
-  }
+  // SAFETY: COM calls on a live interface.
+  with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe {
+    let db = v.GetMasterVolumeLevel()?;
+    let hardware = v.QueryHardwareSupport().is_ok_and(|mask| mask & ENDPOINT_HARDWARE_SUPPORT_VOLUME != 0);
+    Ok((db, hardware))
+  })
 }
 
 pub fn set_endpoint_volume(device_id: &str, level: f32) {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-      if let Ok(device) = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())) {
-        if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null());
-        }
-      }
-    }
-  }
+  // SAFETY: COM call on a live interface.
+  with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe {
+    v.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null())
+  });
 }
 
 pub fn set_endpoint_mute(device_id: &str, muted: bool) {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-      if let Ok(device) = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())) {
-        if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMute(BOOL::from(muted), std::ptr::null());
-        }
-      }
-    }
-  }
+  // SAFETY: COM call on a live interface.
+  with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe {
+    v.SetMute(BOOL::from(muted), std::ptr::null())
+  });
 }
 
 pub fn get_system_master_volume() -> Option<(f32, bool)> {
@@ -804,14 +907,8 @@ pub fn get_system_mic_peak() -> Option<f32> {
 }
 
 pub fn get_endpoint_peak(device_id: &str) -> Option<f32> {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
-    let meter: IAudioMeterInformation = device.Activate(CLSCTX_ALL, None).ok()?;
-    meter.GetPeakValue().ok()
-  }
+  // SAFETY: COM call on a live interface.
+  with_endpoint(&ENDPOINT_METERS, device_id, |m: &IAudioMeterInformation| unsafe { m.GetPeakValue() })
 }
 
 pub fn set_system_mic_volume(level: f32) {
@@ -915,6 +1012,18 @@ pub fn physical_endpoint_id(devices: &[AudioEndpointInfo], default_id: Option<&s
 mod tests {
   use super::*;
   use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+  #[test]
+  fn session_volume_is_left_to_the_user_unless_our_target_moves() {
+    // Never touched, neutral channel: the app keeps what the user set in the Windows mixer.
+    assert_eq!(session_action(None, 1.0), SessionAction::Keep(None));
+    // Never touched, channel lowered: set it.
+    assert_eq!(session_action(None, 0.5), SessionAction::Set);
+    // Set before, target unchanged: a later change by the user is not undone.
+    assert_eq!(session_action(Some(0.5), 0.5), SessionAction::Keep(Some(0.5)));
+    // Our target moved (also back to 100 %): apply it.
+    assert_eq!(session_action(Some(0.5), 1.0), SessionAction::Set);
+  }
 
   #[test]
   fn test_system_volume_query() {

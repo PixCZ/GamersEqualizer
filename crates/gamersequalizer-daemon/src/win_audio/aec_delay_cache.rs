@@ -65,15 +65,9 @@ fn update<T: Serialize + DeserializeOwned>(path: &Path, key: &str, value: T) {
 }
 
 fn write_map<T: Serialize>(path: &Path, map: &BTreeMap<String, T>) {
-  let result = (|| -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-      fs::create_dir_all(dir)?;
-    }
-    let json = serde_json::to_string_pretty(map).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, path)
-  })();
+  let result = serde_json::to_string_pretty(map)
+    .map_err(std::io::Error::other)
+    .and_then(|json| crate::output_eq::settings::write_atomic(path, &json));
   if let Err(e) = result {
     warn!("[Cache] could not save {}: {}", path.display(), e);
   }

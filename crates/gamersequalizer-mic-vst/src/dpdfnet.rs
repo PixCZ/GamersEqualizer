@@ -97,8 +97,9 @@ impl DpdfEngine {
     self.in_buf.clear();
     self.in_buf.resize(WIN - HOP, 0.0);
     self.overlap.fill(0.0);
-    self.dry = VecDeque::from(vec![0.0; LOOKAHEAD_HOPS * HOP]);
-    self.output_fifo = crate::ai_denoiser::primed_fifo(HOP);
+    self.dry.clear();
+    self.dry.resize(LOOKAHEAD_HOPS * HOP, 0.0);
+    crate::ai_denoiser::reprime_fifo(&mut self.output_fifo, HOP);
   }
 
   fn try_load() -> TractResult<Self> {

@@ -57,9 +57,28 @@ pub fn microphone_in_use() -> bool {
   !recording_apps().is_empty()
 }
 
+/// A scan this young is reused: the tray and the health check both ask twice a second, and the
+/// scan walks every key under ConsentStore (which only grows, one per old Discord version).
+const SCAN_MAX_AGE: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Apps other than this one that keep a microphone open right now, as short display names
 /// (`Discord.exe`, `WindowsSoundRecorder`), sorted, without duplicates.
 pub fn recording_apps() -> Vec<String> {
+  use std::sync::Mutex;
+  use std::time::Instant;
+  static LAST: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+  let Ok(mut last) = LAST.lock() else { return scan_recording_apps() };
+  if let Some((at, apps)) = last.as_ref() {
+    if at.elapsed() < SCAN_MAX_AGE {
+      return apps.clone();
+    }
+  }
+  let apps = scan_recording_apps();
+  *last = Some((Instant::now(), apps.clone()));
+  apps
+}
+
+fn scan_recording_apps() -> Vec<String> {
   // Our own mic bridge opens the mic too; it is not "another app recording".
   let own = std::env::current_exe().ok().map(|p| p.to_string_lossy().replace('\\', "#").to_lowercase());
   let is_own = |name: &str| own.as_deref() == Some(name.to_lowercase().as_str());

@@ -110,6 +110,7 @@ impl Store {
     self.overrides = match std::fs::read_to_string(&path) {
       Ok(text) => parse(&text).unwrap_or_else(|e| {
         log::warn!("[AppChannels] {} is corrupt ({e}), ignoring it", path.display());
+        crate::output_eq::settings::keep_corrupt(&path);
         BTreeMap::new()
       }),
       Err(_) => BTreeMap::new(),

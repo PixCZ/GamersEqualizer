@@ -37,3 +37,6 @@ ndarray = "0.15"
 [dev-dependencies]
 # Reads the WAV fixtures in test_data/denoise (already in the lock file via other crates).
 hound = "3.5"
+
+[lints]
+workspace = true

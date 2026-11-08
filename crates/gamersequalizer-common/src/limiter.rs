@@ -7,6 +7,11 @@
 pub const LIMITER_KNEE: f32 = 0.95;
 
 pub fn soft_limit(x: f32) -> f32 {
+  // The last stage before the output: never let NaN (`signum` keeps it) or inf
+  // (`inf / inf`) through.
+  if !x.is_finite() {
+    return 0.0;
+  }
   let abs = x.abs();
   if abs <= LIMITER_KNEE {
     x
@@ -55,6 +60,15 @@ impl PeakLimiter {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn soft_limit_never_passes_nan_or_inf() {
+    for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+      assert_eq!(soft_limit(x), 0.0, "{x}");
+    }
+    assert_eq!(soft_limit(0.5), 0.5);
+    assert!(soft_limit(3.0) <= 1.0);
+  }
 
   #[test]
   fn peak_limiter_keeps_peaks_under_full_scale_and_recovers() {

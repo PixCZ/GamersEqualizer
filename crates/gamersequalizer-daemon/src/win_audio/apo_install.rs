@@ -9,13 +9,17 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
   RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_MULTI_SZ,
   RRF_RT_REG_SZ,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Shell::{
+  SHGetKnownFolderPath, ShellExecuteW, FOLDERID_ProgramFiles, FOLDERID_System, KF_FLAG_DEFAULT,
+};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 /// Must match CLSID_GAIN_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
@@ -113,13 +117,8 @@ pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
   }
   let endpoints = endpoint_args(targets)?;
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
-  let script = write_script(SCRIPT_NAME, SCRIPT)?;
-  let params = format!(
-    "-NoProfile -ExecutionPolicy Bypass -File \"{}\" -Endpoint {endpoints} -SourceDll \"{}\" -FromApp",
-    script.display(),
-    dll.display()
-  );
-  run_elevated(&params, "installer")
+  let args = format!("-Endpoint {} -SourceDll {} -FromApp", ps_quote(&endpoints), ps_quote(&dll.to_string_lossy()));
+  run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer")
 }
 
 /// `Capture:{guid},Render:{guid}` (one PowerShell array argument, no spaces).
@@ -158,20 +157,102 @@ pub fn is_registered() -> bool {
 /// Starts the uninstall script elevated (UAC prompt): removes every APO class from every
 /// endpoint, the COM registration, the DLL and the install backups. Returns once launched.
 pub fn launch_uninstall() -> Result<(), String> {
-  let script = write_script(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT)?;
-  let params = format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\" -RemoveBackups -FromApp", script.display());
-  run_elevated(&params, "uninstaller")
+  run_script_elevated(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT, "-RemoveBackups -FromApp", "uninstaller")
 }
 
-fn run_elevated(params: &str, what: &str) -> Result<(), String> {
+/// `System32\WindowsPowerShell\v1.0\powershell.exe` from the known folder, never a bare
+/// `powershell.exe` (searched in the current / exe folder first) or `%SystemRoot%`
+/// (user-overridable).
+pub(crate) fn powershell_exe() -> Result<PathBuf, String> {
+  let system = known_folder(&FOLDERID_System).ok_or("System32 folder not found")?;
+  Ok(system.join("WindowsPowerShell").join("v1.0").join("powershell.exe"))
+}
+
+/// Runs a built-in script elevated with `args` (PowerShell syntax, already quoted).
+/// The script is too long for the command line (`-EncodedCommand` ~33k chars, limit 32k), so
+/// it goes to a user-writable file; the elevated side reads it once into memory and runs that
+/// text only if its SHA-256 matches the one computed from `content` here. A same-user process
+/// that swaps the file in between gets a refusal, not code running as admin. The bootstrap
+/// itself travels in the command line. Module autoload is pinned to the system folder (the
+/// user's Documents module folder would otherwise come first and could shadow cmdlets).
+fn run_script_elevated(name: &str, content: &str, args: &str, what: &str) -> Result<(), String> {
+  let path = write_script(name, content)?;
+  let hash = sha256_hex(content.as_bytes())?;
+  let bootstrap = elevated_bootstrap(&path.to_string_lossy(), &hash, args);
+  let params = format!("-NoProfile -ExecutionPolicy Bypass -EncodedCommand {}", encode_command(&bootstrap));
+  let exe = powershell_exe()?;
+  let exe_w: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
   let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
   // SAFETY: NUL-terminated strings owned by this frame.
-  let result =
-    unsafe { ShellExecuteW(None, w!("runas"), w!("powershell.exe"), PCWSTR(params_w.as_ptr()), None, SW_SHOWNORMAL) };
+  let result = unsafe {
+    ShellExecuteW(None, w!("runas"), PCWSTR(exe_w.as_ptr()), PCWSTR(params_w.as_ptr()), None, SW_SHOWNORMAL)
+  };
   if result.0 as isize > SHELL_EXECUTE_OK {
     Ok(())
   } else {
     Err(format!("could not start the {what} (cancelled UAC prompt? code {})", result.0 as isize))
+  }
+}
+
+/// PowerShell run by `-EncodedCommand`: check the script file's hash, then run its text.
+fn elevated_bootstrap(script_path: &str, sha256_hex: &str, args: &str) -> String {
+  let path = ps_quote(script_path);
+  [
+    "$env:PSModulePath = [IO.Path]::Combine([Environment]::GetFolderPath('System'), 'WindowsPowerShell\\v1.0\\Modules')"
+      .to_string(),
+    format!("$c = [IO.File]::ReadAllText({path})"),
+    "$h = -join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($c)) | ForEach-Object { $_.ToString('x2') })".to_string(),
+    format!(
+      "if ($h -ne '{sha256_hex}') {{ Write-Host 'The script was changed after the app wrote it; not running it.' -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 1 }}"
+    ),
+    format!("& ([scriptblock]::Create($c)) {args}"),
+  ]
+  .join("\n")
+}
+
+/// `-EncodedCommand` takes base64 of UTF-16LE.
+fn encode_command(script: &str) -> String {
+  let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+  base64(&bytes)
+}
+
+fn base64(bytes: &[u8]) -> String {
+  const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+  for chunk in bytes.chunks(3) {
+    let at = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+    let n = (at(0) << 16) | (at(1) << 8) | at(2);
+    for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
+      // `n >> shift & 63` is always < 64.
+      let symbol = ALPHABET.get(((n >> shift) & 63) as usize).copied().unwrap_or(b'=');
+      out.push(if i <= chunk.len() { char::from(symbol) } else { '=' });
+    }
+  }
+  out
+}
+
+fn sha256_hex(data: &[u8]) -> Result<String, String> {
+  let mut digest = [0u8; 32];
+  // SAFETY: the SHA-256 pseudo-handle (Windows 10+) needs no open/close; buffers are local.
+  let status = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, data, &mut digest) };
+  if status.is_err() {
+    return Err(format!("SHA-256 failed (0x{:08x})", status.0));
+  }
+  Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// PowerShell single-quoted literal: nothing inside is expanded, `'` is doubled.
+pub(crate) fn ps_quote(s: &str) -> String {
+  format!("'{}'", s.replace('\'', "''"))
+}
+
+fn known_folder(id: &GUID) -> Option<PathBuf> {
+  // SAFETY: on success the shell allocates the string; it is copied, then freed once.
+  unsafe {
+    let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
+    let path = p.to_string();
+    CoTaskMemFree(Some(p.0 as *const _));
+    path.ok().map(PathBuf::from)
   }
 }
 
@@ -192,23 +273,28 @@ impl Flow {
   }
 }
 
+/// Known folder, not `%ProgramFiles%` (the user can override that variable).
 fn installed_dll() -> Option<PathBuf> {
-  let path = PathBuf::from(std::env::var_os("ProgramFiles")?).join("GamersEqualizer").join("apo").join(DLL_NAME);
+  let path = known_folder(&FOLDERID_ProgramFiles)?.join("GamersEqualizer").join("apo").join(DLL_NAME);
   path.is_file().then_some(path)
 }
 
-/// The dev tree's `target/apo` build first: `target/release` may hold a stale DLL from a
-/// plain `--release` build, which is not the unwinding `apo` profile (that once installed the
-/// old gain-only prototype). Then next to the exe (distribution).
+/// In the dev tree (`target/<profile>/`, `Cargo.toml` next to `target`) the `target/apo` build
+/// first: `target/release` may hold a stale DLL from a plain `--release` build, which is not
+/// the unwinding `apo` profile. Otherwise only next to the exe (distribution): a portable exe
+/// in `Downloads\x\` must not pick up whatever sits in `Downloads\apo\`.
 fn bundled_dll() -> Option<PathBuf> {
   let dir = exe_dir()?;
-  [dir.join("..").join("apo").join(DLL_NAME), dir.join(DLL_NAME)].into_iter().find(|p| p.is_file())
+  let in_dev_tree = dir.parent().is_some_and(|target| {
+    target.file_name().is_some_and(|n| n.eq_ignore_ascii_case("target"))
+      && target.parent().is_some_and(|root| root.join("Cargo.toml").is_file())
+  });
+  let dev = in_dev_tree.then(|| dir.join("..").join("apo").join(DLL_NAME));
+  dev.into_iter().chain([dir.join(DLL_NAME)]).find(|p| p.is_file())
 }
 
 /// Writes a built-in script fresh before every run, so an old or edited copy is never used.
-/// Known limit: the folder is user-writable and the script then runs elevated; a process of
-/// this same user could swap it in between. That user can already replace the portable exe,
-/// so this adds no new hole. Move to Program Files when there is a real installer.
+/// The folder is user-writable; `run_script_elevated` checks the hash before running it.
 fn write_script(name: &str, content: &str) -> Result<PathBuf, String> {
   let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
   let dir = PathBuf::from(base).join("GamersEqualizer").join("scripts");
@@ -332,6 +418,58 @@ mod tests {
     assert!(err.contains("unexpected"), "{err}");
     let err = launch_install_many(&[(Flow::Capture, "{a}"), (Flow::Render, "")]).unwrap_err();
     assert!(err.contains("unexpected"), "{err}");
+  }
+
+  #[test]
+  fn base64_matches_known_vectors() {
+    assert_eq!(base64(b""), "");
+    assert_eq!(base64(b"f"), "Zg==");
+    assert_eq!(base64(b"fo"), "Zm8=");
+    assert_eq!(base64(b"foo"), "Zm9v");
+    assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+  }
+
+  #[test]
+  fn sha256_matches_known_vector() {
+    assert_eq!(sha256_hex(b"abc").unwrap(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  }
+
+  #[test]
+  fn bootstrap_quotes_the_path_and_fits_the_command_line() {
+    let b = elevated_bootstrap(r"C:\Users\o'neil\x.ps1", "ab", "-FromApp");
+    assert!(b.contains(r"'C:\Users\o''neil\x.ps1'"), "{b}");
+    assert!(encode_command(&b).len() < 4096);
+  }
+
+  #[test]
+  fn scripts_have_no_bom_so_the_elevated_hash_matches() {
+    // `ReadAllText` drops a BOM, `include_str!` keeps it: the hashes would never match.
+    assert!(!SCRIPT.starts_with('\u{feff}') && !UNINSTALL_SCRIPT.starts_with('\u{feff}'));
+  }
+
+  /// Runs the bootstrap (not elevated) on a tiny script: unchanged runs with the arguments,
+  /// changed is refused.
+  #[test]
+  fn bootstrap_runs_only_an_unchanged_script() {
+    let dir = std::env::temp_dir().join(format!("ge-bootstrap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("s.ps1");
+    let content = "param([string]$Endpoint, [switch]$FromApp)\r\n\"ran $Endpoint $FromApp\"\r\n";
+    let run = |file_text: &str| {
+      std::fs::write(&path, file_text).unwrap();
+      let hash = sha256_hex(content.as_bytes()).unwrap();
+      let args = format!("-Endpoint {} -FromApp", ps_quote("Capture:{a-1},Render:{b-2}"));
+      let b = elevated_bootstrap(&path.to_string_lossy(), &hash, &args);
+      std::process::Command::new(powershell_exe().unwrap())
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encode_command(&b)])
+        .output()
+        .unwrap()
+    };
+    let ok = run(content);
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("ran Capture:{a-1},Render:{b-2} True"), "{ok:?}");
+    let swapped = run(&content.replace("ran", "evil"));
+    assert!(!swapped.status.success() && !String::from_utf8_lossy(&swapped.stdout).contains("evil"), "{swapped:?}");
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

@@ -2,7 +2,7 @@ use log::{info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -36,6 +36,9 @@ const RENDER_TARGET_MS: u32 = 20;
 
 const RETRY_MIN: Duration = Duration::from_millis(500);
 const RETRY_MAX: Duration = Duration::from_secs(5);
+/// A stream that ran this long before failing was healthy: retry fast again (resume from sleep,
+/// replug), not with the backoff left over from boot.
+const HEALTHY_RUN: Duration = Duration::from_secs(10);
 
 /// Check for a newly confirmed echo delay to persist this often (blocks of ~10 ms).
 const DELAY_SAVE_CHECK_BLOCKS: u32 = 500;
@@ -141,6 +144,7 @@ impl MicStreamWorker {
           let cur_ref_id = ref_id_lock.lock().ok().and_then(|g| g.clone());
           let wanted = DeviceSelection { input: &in_id_lock, output: &out_id_lock, reference: Some(&ref_id_lock) };
 
+          let started = Instant::now();
           match run_bridge_stream(&running, &wanted, cur_in_id.as_deref(), cur_out_id.as_deref(), cur_ref_id.as_deref())
           {
             Ok(()) => {
@@ -148,6 +152,9 @@ impl MicStreamWorker {
               backoff = RETRY_MIN;
             }
             Err(e) => {
+              if started.elapsed() >= HEALTHY_RUN {
+                backoff = RETRY_MIN;
+              }
               // Log each distinct failure once (e.g. "no virtual mic") instead of 2x per second.
               if last_error.as_deref() != Some(e.as_str()) {
                 if e == NO_VIRTUAL_MIC {
@@ -390,7 +397,7 @@ fn run_bridge_stream(
     let mut blocks_since_save_check: u32 = 0;
 
     // Pre-fill the cushion so the first packets don't underrun the sink.
-    write_silence(&render_client, target_padding);
+    write_silence(&render_client, target_padding).map_err(|e| format!("render prefill: {e}"))?;
 
     capture_audio_client.Start().map_err(|e| format!("capture_audio_client.Start failed: {}", e))?;
     render_audio_client.Start().map_err(|e| format!("render_audio_client.Start failed: {}", e))?;
@@ -424,7 +431,10 @@ fn run_bridge_stream(
 
       let wait_res = WaitForSingleObject(res.cap_event, 20);
       if wait_res.0 != 0 {
-        // Timeout or error; continue checking running flag
+        // Timeout: an invalidated stream (sleep, unplug, audio service restart) often stops
+        // signaling, so GetBuffer would never report it. Probe both clients; an error reopens.
+        capture_audio_client.GetCurrentPadding().map_err(|e| format!("capture GetCurrentPadding: {e}"))?;
+        render_audio_client.GetCurrentPadding().map_err(|e| format!("render GetCurrentPadding: {e}"))?;
         continue;
       }
 
@@ -483,19 +493,22 @@ fn run_bridge_stream(
         let _ = capture_client.ReleaseBuffer(num_frames_read);
 
         // Render to virtual mic sink, keeping the queued cushion between target and max.
-        if render_audio_client.GetCurrentPadding().unwrap_or(0) == 0 {
+        // Errors (sink reset: Sonar / VB-Cable restart) reopen, else the mic stays silent.
+        let render_err = |e: windows::core::Error| format!("render: {e}");
+        if render_audio_client.GetCurrentPadding().map_err(render_err)? == 0 {
           // Sink ran dry (mic clock slower than sink): restore the cushion.
           underruns += 1;
-          write_silence(&render_client, target_padding);
+          write_silence(&render_client, target_padding).map_err(render_err)?;
         }
-        let padding = render_audio_client.GetCurrentPadding().unwrap_or(0);
+        let padding = render_audio_client.GetCurrentPadding().map_err(render_err)?;
         // Mic clock faster than sink: trim instead of letting latency grow without bound.
         // Shortcut: drops samples (rare tick on drift); upgrade to adaptive resampling.
         let frames_to_write = (frames as u32).min(max_padding.saturating_sub(padding));
         trimmed_frames += (frames as u64).saturating_sub(frames_to_write as u64);
 
         if frames_to_write > 0 {
-          if let Ok(p_rnd_dst) = render_client.GetBuffer(frames_to_write) {
+          {
+            let p_rnd_dst = render_client.GetBuffer(frames_to_write).map_err(render_err)?;
             let write_frames = frames_to_write as usize;
             let src = &out_mono_buf[..write_frames];
             let rch = rnd.channels;
@@ -510,7 +523,7 @@ fn run_bridge_stream(
                 frame.fill((sample.clamp(-1.0, 1.0) * 32767.0) as i16);
               }
             }
-            let _ = render_client.ReleaseBuffer(frames_to_write, 0);
+            render_client.ReleaseBuffer(frames_to_write, 0).map_err(render_err)?;
           }
         }
       }
@@ -574,14 +587,13 @@ pub(crate) unsafe fn init_client_48k_float(
 }
 
 /// Queue `frames` of silence into the render sink.
-unsafe fn write_silence(render_client: &IAudioRenderClient, frames: u32) {
+unsafe fn write_silence(render_client: &IAudioRenderClient, frames: u32) -> windows::core::Result<()> {
   if frames == 0 {
-    return;
+    return Ok(());
   }
-  if render_client.GetBuffer(frames).is_ok() {
-    // AUDCLNT_BUFFERFLAGS_SILENT: WASAPI treats the buffer as zeros.
-    let _ = render_client.ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32);
-  }
+  render_client.GetBuffer(frames)?;
+  // AUDCLNT_BUFFERFLAGS_SILENT: WASAPI treats the buffer as zeros.
+  render_client.ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)
 }
 
 unsafe fn is_float_format(p_fmt: *const WAVEFORMATEX) -> bool {

@@ -10,6 +10,13 @@ use std::time::{Duration, Instant};
 
 /// How often the window checks that the background service still runs (one mutex open).
 const DAEMON_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// Windows volumes / mic peak are read this often, not every frame (each read is an RPC into
+/// the audio service). 10 Hz keeps the meters moving.
+const SYSTEM_SYNC_INTERVAL: Duration = Duration::from_millis(100);
+/// Frame interval while visible (meters), and while minimized (nothing to show; the game
+/// detection and the watchdog still run).
+const FRAME_INTERVAL: Duration = Duration::from_millis(30);
+const MINIMIZED_FRAME_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct GamersEqualizerApp {
   pub state: AppState,
@@ -17,11 +24,12 @@ pub struct GamersEqualizerApp {
   applied_mica: bool,
   window: super::window_state::WindowTracker,
   daemon_checked_at: Instant,
+  synced_at: Option<Instant>,
 }
 
 impl GamersEqualizerApp {
   pub fn new(state: AppState, win_audio: WinAudioSystem, window: super::window_state::WindowTracker) -> Self {
-    Self { state, win_audio, applied_mica: false, window, daemon_checked_at: Instant::now() }
+    Self { state, win_audio, applied_mica: false, window, daemon_checked_at: Instant::now(), synced_at: None }
   }
 }
 
@@ -44,8 +52,13 @@ impl eframe::App for GamersEqualizerApp {
       let auto = h.mic_auto_gain_permille.load(std::sync::atomic::Ordering::Relaxed);
       self.win_audio.chatmix.mic_hw_auto = (auto > 0).then(|| auto as f32 / 1000.0);
     }
-    if self.win_audio.chatmix.sync_from_system() {
-      self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
+    let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+    let sync_due = !minimized && self.synced_at.is_none_or(|t| t.elapsed() >= SYSTEM_SYNC_INTERVAL);
+    if sync_due {
+      self.synced_at = Some(Instant::now());
+      if self.win_audio.chatmix.sync_from_system() {
+        self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
+      }
     }
 
     // 2. Game detection: the daemon decides when it runs; this window follows it.
@@ -75,9 +88,12 @@ impl eframe::App for GamersEqualizerApp {
     }
 
     // 3. Refresh endpoints and track Windows system default device changes in real time
+    self.win_audio.endpoint_lock.enforce_lock();
     let dev_changed = self.win_audio.endpoint_lock.poll_device_changed();
-    let current_sys_default = self.win_audio.endpoint_lock.get_default_output_id();
-    let current_sys_comms = self.win_audio.endpoint_lock.get_default_communications_id();
+    // The defaults are two more RPCs: read them with the volume sync, or when a device changed.
+    let poll = sync_due || dev_changed || self.state.endpoints.is_empty();
+    let current_sys_default = if poll { self.win_audio.endpoint_lock.get_default_output_id() } else { None };
+    let current_sys_comms = if poll { self.win_audio.endpoint_lock.get_default_communications_id() } else { None };
     let is_locked = self.win_audio.endpoint_lock.is_locked();
 
     if self.state.endpoints.is_empty()
@@ -182,13 +198,16 @@ impl eframe::App for GamersEqualizerApp {
       }
     });
 
-    // 4. Apply volume adjustments to live Windows audio sessions/endpoints & sync SHM
+    // 4. Apply volume adjustments to live Windows audio sessions/endpoints & sync SHM.
+    // Per-app session volumes belong to the background service while it runs.
+    self.win_audio.chatmix.sessions_enabled = !self.state.is_daemon_active();
     self.win_audio.chatmix.apply_mix();
     self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
     self.state.save_audio_settings_if_changed(ctx.input(|i| i.pointer.any_down()));
 
-    // Request continuous repaint while window is visible for smooth meters
-    ctx.request_repaint_after(std::time::Duration::from_millis(30));
+    // Continuous repaint for smooth meters while visible; minimized (or behind a fullscreen
+    // game, which minimizes it) a slow tick is enough.
+    ctx.request_repaint_after(if minimized { MINIMIZED_FRAME_INTERVAL } else { FRAME_INTERVAL });
     self.window.observe(ctx);
   }
 

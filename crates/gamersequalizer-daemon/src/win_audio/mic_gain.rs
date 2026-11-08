@@ -38,7 +38,8 @@ const COOLDOWN_CLIP: Duration = Duration::from_secs(3);
 #[derive(Debug, Clone, Copy)]
 pub struct MicGainInput {
   pub now: Instant,
-  /// DSP counters (cumulative, wrapping): clipped raw samples, ms of speech.
+  /// DSP counters (cumulative): clipped raw samples, ms of speech. A new APO instance (audio
+  /// restart, resume, replug, an app reopening the mic) starts them at 0 again.
   pub clips: u32,
   pub speech_ms: u32,
   /// Gain the leveler applies now (dB).
@@ -74,7 +75,14 @@ impl AutoInputGain {
   /// last tick): the DSP learns the new gain a moment later, which nobody hears between words.
   pub fn tick(&mut self, i: MicGainInput) -> Option<f32> {
     let (clips, speech) = match self.last.replace((i.clips, i.speech_ms)) {
-      Some((c, s)) => (i.clips.wrapping_sub(c), i.speech_ms.wrapping_sub(s)),
+      // Counters went back: a new DSP instance, not ~4e9 clips. Start over from these values.
+      // (A real u32 wrap would need 49 days of speech; it just costs one restart too.)
+      Some((c, s)) if i.clips < c || i.speech_ms < s => {
+        self.reset();
+        self.last = Some((i.clips, i.speech_ms));
+        return None;
+      }
+      Some((c, s)) => (i.clips - c, i.speech_ms - s),
       None => return None,
     };
     let (start, sum) = match self.clip_window {
@@ -207,6 +215,25 @@ mod tests {
       0
     } else {
       250
+    }
+  }
+
+  #[test]
+  fn counters_restarting_from_zero_are_not_a_clip_burst() {
+    let mut g = AutoInputGain::default();
+    let t0 = Instant::now();
+    let input = |n: u32, clips: u32, speech_ms: u32| MicGainInput {
+      now: t0 + TICK * n,
+      clips,
+      speech_ms,
+      leveler_gain_db: 0.0,
+      level: 0.8,
+      changed_at: None,
+    };
+    assert_eq!(g.tick(input(0, 120, 90_000)), None);
+    // New APO instance after resume: counters back near 0, then a pause (no speech).
+    for n in 1..40 {
+      assert_eq!(g.tick(input(n, 3, 0)), None, "tick {n}");
     }
   }
 

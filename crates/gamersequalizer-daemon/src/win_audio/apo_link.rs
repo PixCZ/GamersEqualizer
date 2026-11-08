@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use gamersequalizer_common::shm::{AecState, StereoFrame, APO_SHM_NAME};
+use gamersequalizer_common::shm::{AecState, CopiedEqVersions, StereoFrame, APO_SHM_NAME};
 use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
 
 use super::aec_delay_cache;
@@ -59,6 +59,8 @@ pub struct ApoLink {
   console: ConsoleOwner,
   /// Last sync drove the APO; false = the next one must copy every EQ (we take over).
   driving: bool,
+  /// Source EQ versions last mirrored into the APO mapping.
+  copied_eqs: CopiedEqVersions,
 }
 
 impl Default for ApoLink {
@@ -90,6 +92,7 @@ impl ApoLink {
       watch: DspWatch::default(),
       console: ConsoleOwner::default(),
       driving: false,
+      copied_eqs: CopiedEqVersions::default(),
     }
   }
 
@@ -157,7 +160,11 @@ impl ApoLink {
       return;
     };
     let (apo_h, local_h) = (&apo.layout().header, &local.layout().header);
-    apo_h.copy_controls_from(local_h, !self.driving);
+    if !self.driving {
+      // A new owner: the APO holds another daemon's EQs, copy all of them.
+      self.copied_eqs = CopiedEqVersions::default();
+    }
+    apo_h.copy_controls_from(local_h, &mut self.copied_eqs);
     // The APO processes only while this changes; stopping (exit, crash, user switch) = pass-through.
     apo_h.owner_beat.fetch_add(1, Ordering::Release);
     self.driving = true;

@@ -37,6 +37,7 @@ impl UiPrefs {
     let mut prefs = match std::fs::read_to_string(&path) {
       Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
         log::warn!("[Prefs] {} is corrupt ({e}), using defaults", path.display());
+        crate::output_eq::settings::keep_corrupt(&path);
         Self::default()
       }),
       Err(_) => Self::default(),

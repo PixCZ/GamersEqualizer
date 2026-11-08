@@ -67,6 +67,12 @@ pub struct HeadphonesUi {
   candidate: Option<Candidate>,
   downloads: DownloadsScan,
   downloads_checked: Option<Instant>,
+  /// First existing AutoEQ folder (`autoeq::candidate_dirs`), re-checked with the downloads:
+  /// each check is several `is_dir` calls, and a configured network folder that is offline
+  /// froze the UI for seconds when it ran every frame.
+  autoeq_found: Option<PathBuf>,
+  /// Search results for the query they were computed for (cleared when the index changes).
+  search_hits: Option<(String, Vec<AutoEqEntry>)>,
   folder_text: String,
   query: String,
   entries: Vec<AutoEqEntry>,
@@ -314,7 +320,7 @@ fn step_zip_download(ui: &mut Ui, state: &mut AppState) {
   numbered(ui, 2, tr("Click the green \"Code\" button, then \"Download ZIP\". It is large; let it finish."));
   numbered(ui, 3, tr("In Downloads right-click \"AutoEq-master.zip\" > \"Extract All...\" > Extract."));
   refresh_downloads(ui, state);
-  let found = autoeq::candidate_dirs(state.output_eq.settings.autoeq_dir.as_deref()).into_iter().next();
+  let found = state.headphones_ui.autoeq_found.clone();
   match (&found, &state.headphones_ui.downloads.autoeq_zip) {
     (Some(dir), _) => {
       theme::status_line(ui, Severity::Success, &trf("Extracted database found: {}", &[&dir.display()]));
@@ -381,7 +387,12 @@ fn step_pick(ui: &mut Ui, state: &mut AppState) {
   theme::inset_frame(ui).show(ui, |ui| {
     ui.set_width(ui.available_width());
     egui::ScrollArea::vertical().id_salt("autoeq_results").max_height(200.0).show(ui, |ui| {
-      let results = autoeq::search(&state.headphones_ui.entries, &state.headphones_ui.query);
+      let ui_state = &mut state.headphones_ui;
+      if ui_state.search_hits.as_ref().is_none_or(|(q, _)| *q != ui_state.query) {
+        let hits = autoeq::search(&ui_state.entries, &ui_state.query).into_iter().cloned().collect();
+        ui_state.search_hits = Some((ui_state.query.clone(), hits));
+      }
+      let results: Vec<&AutoEqEntry> = ui_state.search_hits.iter().flat_map(|(_, hits)| hits).collect();
       if results.is_empty() {
         ui.label(theme::caption(tr(
           "No model matches; try fewer words (\"HD 600\" instead of \"Sennheiser HD 600 Open\").",
@@ -547,6 +558,8 @@ fn refresh_downloads(ui: &mut Ui, state: &mut AppState) {
   if ui_state.downloads_checked.is_none_or(|t| t.elapsed() >= DOWNLOADS_RECHECK) {
     ui_state.downloads_checked = Some(Instant::now());
     ui_state.downloads = autoeq::downloads_dir().map(|d| autoeq::scan_downloads(&d)).unwrap_or_default();
+    ui_state.autoeq_found =
+      autoeq::candidate_dirs(state.output_eq.settings.autoeq_dir.as_deref()).into_iter().next();
   }
   ui.ctx().request_repaint_after(DOWNLOADS_RECHECK);
 }
@@ -634,6 +647,7 @@ fn poll_index(ui: &mut Ui, state: &mut AppState) {
     state.output_eq_do(|eq, shm| eq.save_settings(shm));
   }
   state.headphones_ui.entries = entries;
+  state.headphones_ui.search_hits = None;
 }
 
 /// Is the output APO installed on this output, and is it processing right now?

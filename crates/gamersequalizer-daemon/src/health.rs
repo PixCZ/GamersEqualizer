@@ -257,6 +257,7 @@ impl HealthMemory {
     match std::fs::read_to_string(&path) {
       Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
         warn!("[Health] {} is corrupt ({e}), starting fresh", path.display());
+        crate::output_eq::settings::keep_corrupt(&path);
         Self::default()
       }),
       Err(_) => Self::default(),
