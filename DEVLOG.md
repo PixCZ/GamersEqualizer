@@ -881,3 +881,34 @@ Every outdated direct dependency was moved to its current major version, and the
   default features (nnnoiseless's CLI pulled clap/hound/dasp; we format log lines ourselves), unused
   `thiserror` (common, daemon) and `env_logger`/`realfft` (mic crate) dropped, the `deep_filter` fork
   moved to thiserror 2 and itertools 0.15 (no second copies of them any more).
+
+## Milestone 33: Follow-ups to the code review fixes (c17f31f) (2026-11-08)
+
+Six items left open after `c17f31f`, each with a regression test.
+
+- **Pause flush allocates nothing.** `pause()` rebuilt the denoiser (`reset()`: two RNNoise
+  detector states plus the denoiser state, each with its weights) on the audio thread, and the low
+  cut with a new `Vec`. `AiVoiceIsolator::flush()` now drops the FIFOs, delay lines, gate and
+  detector timing and keeps the loaded models. RNNoise's own memory (input high-pass, window
+  overlap, 1728-sample pitch buffer) is pushed out by 10 silent frames (~0.2 ms, once per pause):
+  output after the flush stays under -80 dBFS. DPDFNet's `reset()` now writes `init_state` into
+  its existing state tensor instead of building a new one, so the flush resets it cold without
+  allocating (with only its buffers restarted, its state replayed old audio at -44 dBFS).
+  DeepFilterNet's state sits in tract tensors inside the fork, so after a flush its first model
+  latency of output (all from before the pause) is silenced instead. `reset()` stays for
+  strength 0 -> on and model changes.
+- **Channel outputs bound after start.** `bind_endpoints` ran only at service start, so Sonar or
+  VB-Cable started later never got its Game/Chat/Media endpoint, and `apply_session_mix` kept
+  setting per-app volumes on top of the channel levels. On a device change the service now
+  re-resolves only those three ids (`bind_channel_endpoints`); mic choice and Master stay, a newly
+  bound channel takes its endpoint's level and mute (also in shared memory for the window).
+- **Delay estimator gets the sanitized mic.** It was fed the raw input: one NaN sample turned a
+  whole 1 s window into "no echo". It now reads `mic_mono_temp` (NaN-free, clamped to +-4).
+- **Leveler input gain** clamped to -100..+60 dB instead of -60..+60 (Windows mic volume reaches
+  about -96 dB).
+- **AEC off -> on** no longer replays the samples AEC3 had queued before: the disabled branch marks
+  it idle, so re-enabling flushes.
+- **Retry a failed model.** Picking the selected model again sent nothing (the window only writes
+  a changed model id). New `denoise_retry_seq` in shared memory (layout v15), bumped by clicking
+  the running model; the DSP clears its load error / overload and starts a load. The load-failed
+  note now says "Pick {} again to retry", as the overload note already did (it did not work either).

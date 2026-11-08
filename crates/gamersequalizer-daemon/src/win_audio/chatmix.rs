@@ -268,7 +268,22 @@ impl ChatMixController {
 
   /// Detect and bind specific endpoints for Master, Game, Chat, Media
   pub fn bind_endpoints(&mut self, devices: &[AudioEndpointInfo], default_id: Option<&str>) {
-    // 1. Identify virtual channel endpoints
+    // 1. Identify virtual channel endpoints (levels read when they changed, else here)
+    if !self.bind_channel_endpoints(devices) {
+      self.read_channel_levels();
+    }
+
+    // 2. Identify physical Master endpoint
+    self.master_device_id = physical_endpoint_id(devices, default_id);
+    self.read_bound_levels();
+  }
+
+  /// Only the Game / Chat / Media outputs (Sonar, VB-Cable), also for devices that appear or go
+  /// after start: the mic choice and Master stay. True if one changed; the bound channels then
+  /// take their endpoint's level. With one bound, `apply_session_mix` stops setting per-app
+  /// volumes.
+  pub fn bind_channel_endpoints(&mut self, devices: &[AudioEndpointInfo]) -> bool {
+    let before = (self.game_device_id.clone(), self.chat_device_id.clone(), self.media_device_id.clone());
     self.game_device_id = devices
       .iter()
       .find(|d| {
@@ -292,10 +307,15 @@ impl ChatMixController {
         is_virtual_endpoint(&n) && n.contains("media")
       })
       .map(|d| d.id.clone());
+    let changed = before != (self.game_device_id.clone(), self.chat_device_id.clone(), self.media_device_id.clone());
+    if changed {
+      self.read_channel_levels();
+    }
+    changed
+  }
 
-    // 2. Identify physical Master endpoint
-    self.master_device_id = physical_endpoint_id(devices, default_id);
-
+  /// Master level, and the mic to use with its level.
+  fn read_bound_levels(&mut self) {
     // Initialize channel volumes directly from the resolved endpoints
     if let Some(ref id) = self.master_device_id {
       if let Some((v, m)) = get_endpoint_volume(id) {
@@ -311,6 +331,19 @@ impl ChatMixController {
       self.last_applied_master_muted = m;
     }
 
+    self.mic_device_id = Self::find_physical_microphone();
+    let mic_vol_opt =
+      if let Some(ref id) = self.mic_device_id { get_endpoint_volume(id) } else { get_system_mic_volume() };
+    if let Some((v, m)) = mic_vol_opt {
+      self.mic_volume = v;
+      self.mic_muted = m;
+      self.last_applied_mic_vol = v;
+      self.last_applied_mic_muted = m;
+    }
+  }
+
+  /// Game / Chat / Media levels from their own endpoints, where bound.
+  fn read_channel_levels(&mut self) {
     if let Some(ref id) = self.game_device_id {
       if let Some((v, m)) = get_endpoint_volume(id) {
         self.game_volume = v;
@@ -336,16 +369,6 @@ impl ChatMixController {
         self.last_applied_media_vol = v;
         self.last_applied_media_muted = m;
       }
-    }
-
-    self.mic_device_id = Self::find_physical_microphone();
-    let mic_vol_opt =
-      if let Some(ref id) = self.mic_device_id { get_endpoint_volume(id) } else { get_system_mic_volume() };
-    if let Some((v, m)) = mic_vol_opt {
-      self.mic_volume = v;
-      self.mic_muted = m;
-      self.last_applied_mic_vol = v;
-      self.last_applied_mic_muted = m;
     }
   }
 
@@ -1094,5 +1117,24 @@ mod tests {
     assert_eq!(physical_endpoint_id(&outs, Some("usb")).as_deref(), Some("usb"), "gaming headset is not virtual");
     assert!(is_virtual_endpoint("steelseries sonar - gaming"));
     assert!(!is_virtual_endpoint("headphones (logitech g gaming headset)"));
+  }
+
+  /// Regression: channel outputs were bound only at service start, so Sonar started later got
+  /// per-app volumes on top of its own channel levels (Game 50 % playing at 25 %).
+  #[test]
+  fn channel_output_bound_late_stops_per_app_volumes() {
+    let dev = |id: &str, name: &str| AudioEndpointInfo { id: id.into(), name: name.into(), is_default: false };
+    let mut mix = ChatMixController::new();
+    mix.mic_device_id = Some("mic".into());
+    let (master, mic_volume) = (mix.master_device_id.clone(), mix.mic_volume);
+    assert!(!mix.bind_channel_endpoints(&[dev("phones", "Headphones")]));
+    let sonar = [dev("phones", "Headphones"), dev("game", "SteelSeries Sonar - Gaming")];
+    assert!(mix.bind_channel_endpoints(&sonar));
+    assert_eq!(mix.game_device_id.as_deref(), Some("game"));
+    assert!(!mix.bind_channel_endpoints(&sonar), "unchanged devices: nothing to report");
+    assert_eq!((mix.master_device_id.clone(), mix.mic_device_id.as_deref(), mix.mic_volume), (master, Some("mic"), mic_volume));
+    // The guard returns before any session pass (which would stamp `last_session_pass`).
+    mix.apply_session_mix();
+    assert!(mix.last_session_pass.is_none());
   }
 }

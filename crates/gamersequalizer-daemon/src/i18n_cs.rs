@@ -449,7 +449,7 @@ pub static CS: &[(&str, &str)] = &[
   ("No app is using the microphone now. {} starts with the next call/recording.", "Mikrofon teď žádná aplikace nepoužívá. {} se spustí s dalším hovorem/nahráváním."),
   ("Switching... running: {}", "Přepínám... běží: {}"),
   ("Limited: {} was too slow for real time on this CPU, {} runs instead. Pick {} again to retry.", "Omezeno: {} byl na tomto CPU pro reálný čas příliš pomalý, místo něj běží {}. Pro nový pokus znovu vyberte {}."),
-  ("{} could not be loaded by the audio engine, {} runs instead.", "Zvukové jádro nedokázalo načíst {}, místo něj běží {}."),
+  ("{} could not be loaded by the audio engine, {} runs instead. Pick {} again to retry.", "Zvukové jádro nedokázalo načíst {}, místo něj běží {}. Pro nový pokus znovu vyberte {}."),
   ("Limited ({}), running: {}", "Omezeno ({}), běží: {}"),
   ("{} could not be loaded by the audio engine, still on {}.", "Zvukové jádro nedokázalo načíst {}, stále běží {}."),
   ("{} % (peak {} %)", "{} % (špička {} %)"),

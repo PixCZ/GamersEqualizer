@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v14";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v15";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v14";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v15";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 14;
+pub const SHM_VERSION: u32 = 15;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -268,6 +268,11 @@ pub struct ShmHeader {
   pub mic_latency_aec_us: AtomicU32,
   pub mic_latency_denoise_us: AtomicU32,
   pub mic_latency_lookahead_us: AtomicU32,
+
+  // --- v15: try the noise model again (GUI -> DSP) ---
+  /// Bumped when the user picks the selected model again: one that failed to load or was too
+  /// slow gets another try (`denoise_model` alone can't say "again").
+  pub denoise_retry_seq: AtomicU32,
 }
 
 /// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
@@ -470,6 +475,7 @@ impl Default for ShmHeader {
       mic_latency_aec_us: AtomicU32::new(0),
       mic_latency_denoise_us: AtomicU32::new(0),
       mic_latency_lookahead_us: AtomicU32::new(0),
+      denoise_retry_seq: AtomicU32::new(0),
     };
     h.init_defaults();
     h
@@ -534,6 +540,7 @@ impl ShmHeader {
     self.mic_volume_permille.store(src.mic_volume_permille.load(r), r);
     self.mic_muted.store(src.mic_muted.load(r), r);
     self.denoise_model.store(src.denoise_model.load(r), r);
+    self.denoise_retry_seq.store(src.denoise_retry_seq.load(r), r);
     self.master_bypass.store(src.master_bypass.load(r), r);
     self.mic_leveler_enabled.store(src.mic_leveler_enabled.load(r), r);
     self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);

@@ -58,6 +58,8 @@ pub struct GamersEqualizerPlugin {
   leveler: VoiceLeveler,
   /// Last "Learn again" sequence seen (None before the first block).
   leveler_reset_seen: Option<u32>,
+  /// `denoise_retry_seq` last block (None = not read yet: the first value is no request).
+  denoise_retry_seen: Option<u32>,
   /// After "Learn again" in this stream, the saved level is stale until the daemon clears it.
   leveler_seed_blocked: bool,
   /// Settings before the leveler (they change the speech level it sees), last block.
@@ -141,6 +143,7 @@ impl GamersEqualizerPlugin {
       ai_denoiser: AiVoiceIsolator::new(),
       leveler: VoiceLeveler::new(),
       leveler_reset_seen: None,
+      denoise_retry_seen: None,
       leveler_seed_blocked: false,
       leveler_inputs: None,
       eq: BiquadCascade::default(),
@@ -266,11 +269,12 @@ impl GamersEqualizerPlugin {
       }
       return;
     }
+    // Real-time thread: only flushes that allocate nothing (a rebuilt denoiser or filter would).
     if std::mem::take(&mut self.paused) {
       self.aec.flush();
-      self.ai_denoiser.reset();
+      self.ai_denoiser.flush();
       self.latency_meter.reset();
-      self.pre_high_pass = pre_high_pass();
+      self.pre_high_pass.reset_state();
       self.limiter = PeakLimiter::new(48_000.0);
     }
     let started = std::time::Instant::now();
@@ -299,6 +303,7 @@ impl GamersEqualizerPlugin {
     let mut gate_db = NOISE_GATE_AUTO_LOOKAHEAD as f32; // the default until settings are read
     let mut mic_permille = 1000u32;
     let mut model = DenoiseModel::RnNoise;
+    let mut denoise_retry_seq = 0;
     let mut eq_version = None;
     let mut cached_delay = 0u32;
     let mut reference_seq = self.reference_seq_seen;
@@ -322,6 +327,7 @@ impl GamersEqualizerPlugin {
         mic_permille = p;
       }
       model = DenoiseModel::from_u32(header.denoise_model.load(Ordering::Relaxed));
+      denoise_retry_seq = header.denoise_retry_seq.load(Ordering::Relaxed);
       eq_version = Some(header.mic_eq_version.load(Ordering::Acquire));
     }
     #[cfg(test)]
@@ -356,6 +362,10 @@ impl GamersEqualizerPlugin {
     if model != self.ai_denoiser.selected_model() {
       self.ai_denoiser.request_model(model);
     }
+    if self.denoise_retry_seen.is_some_and(|s| s != denoise_retry_seq) {
+      self.ai_denoiser.retry();
+    }
+    self.denoise_retry_seen = Some(denoise_retry_seq);
     let model_before = self.ai_denoiser.active_model();
     if eq_version.is_some() && eq_version != self.eq_version {
       self.eq_version = eq_version;
@@ -369,7 +379,12 @@ impl GamersEqualizerPlugin {
 
     // Stage 1: Classical DSP Acoustic Echo Cancellation (NO AI)
     self.aec_ref_offset = None;
-    self.aec_state = if aec_enabled { self.run_aec(frames, mic_in, mic_qpc_hns) } else { AecState::Disabled };
+    self.aec_state = if aec_enabled {
+      self.run_aec(frames, mic_qpc_hns)
+    } else {
+      self.aec_idle = true; // switched back on: flush what it queued before
+      AecState::Disabled
+    };
 
     let Some(mic) = self.mic_mono_temp.get_mut(..frames) else {
       return;
@@ -498,7 +513,7 @@ impl GamersEqualizerPlugin {
     }
   }
 
-  fn run_aec(&mut self, frames: usize, mic_in: &[f32], mic_qpc_hns: Option<u64>) -> AecState {
+  fn run_aec(&mut self, frames: usize, mic_qpc_hns: Option<u64>) -> AecState {
     // Assume it won't run; set back below when it does.
     let was_idle = std::mem::replace(&mut self.aec_idle, true);
     let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, aec_idle, .. } = self;
@@ -515,8 +530,9 @@ impl GamersEqualizerPlugin {
     let ref_now = header.ref_index_at(t);
     let stale = header.ref_age_hns(t).is_none_or(|age| age > REF_STALE_HNS);
 
-    // Measure on the raw microphone (before cancellation removes the echo).
-    if delay_estimator.push_mic(mic_in, ref_now) {
+    // Measure on the microphone before cancellation removes the echo: `mic_mono_temp`, not
+    // `mic_in`, is NaN-free and clamped (one NaN would poison the correlation window).
+    if delay_estimator.push_mic(mic_mono_temp.get(..frames).unwrap_or_default(), ref_now) {
       let (outcome, change) = delay_estimator.finish_window(|start, out| ring.read_frames_from(start, out));
       if change == LockChange::Changed {
         log::info!(
@@ -794,8 +810,7 @@ fn pre_high_pass() -> BiquadCascade {
   hp
 }
 
-/// Delay the echo canceller adds right now (0 while it doesn't run). `aec_idle` keeps its last
-/// value while the AEC is switched off, hence the state check.
+/// Delay the echo canceller adds right now (0 while it doesn't run, idle or switched off).
 fn aec_latency_samples(aec_idle: bool, aec_state: AecState, aec: &EchoCanceller3) -> usize {
   if !aec_idle && aec_state != AecState::Disabled {
     aec.latency_samples()
@@ -957,5 +972,89 @@ mod tests {
     assert!(!window(&mut load, 0.95, true));
     assert!(!window(&mut load, 0.95, true));
     assert!(window(&mut load, 0.95, true));
+  }
+
+  /// Regression: the delay estimator got the raw input, so one NaN sample made a whole 1 s
+  /// window read as "no echo" instead of measuring the echo in it.
+  #[test]
+  fn test_nan_in_the_mic_does_not_spoil_the_delay_window() {
+    const ECHO_DELAY: usize = 2_000;
+    let reference = noise(120_000, 1);
+    let mut p = plugin_with_reference("nan_delay", &reference);
+    let mut out = vec![0.0f32; BLOCK];
+    let mut k = 0;
+    while p.delay_estimator.last_outcome().is_none() {
+      assert!(k < 200, "no measurement window finished");
+      let t = block_hns(k);
+      let start = ref_position(&p, t, reference.len());
+      let mut mic: Vec<f32> =
+        (0..BLOCK).map(|i| 0.3 * (start + i).checked_sub(ECHO_DELAY).map_or(0.0, |j| reference[j])).collect();
+      if k == 3 {
+        mic[100] = f32::NAN;
+      }
+      p.process_timed(&[&mic], &mut [&mut out], Some(t));
+      k += 1;
+    }
+    let outcome = p.delay_estimator.last_outcome();
+    assert!(matches!(outcome, Some(WindowOutcome::Estimate { .. })), "{outcome:?}");
+    assert!(p.delay_estimator.corr_curve().iter().all(|v| v.is_finite()));
+  }
+
+  /// Regression: AEC off -> on replayed the samples AEC3 had queued before it was switched off.
+  #[test]
+  fn test_aec_switched_back_on_drops_audio_queued_before() {
+    let mut p = plugin_with_reference("aec_idle", &noise(120_000, 2));
+    p.shm_header().expect("mapping").aec_cached_delay_samples.store(960, Ordering::Relaxed); // AEC runs at once
+    let (loud, mut out) = (noise(BLOCK, 3), vec![0.0f32; BLOCK]);
+    for k in 0..20 {
+      p.process_timed(&[&loud], &mut [&mut out], Some(block_hns(k)));
+    }
+    assert!(!p.aec_idle, "the AEC ran ({:?})", p.aec_state);
+    p.shm_header().expect("mapping").aec_enabled.store(false, Ordering::Relaxed);
+    p.process_timed(&[&loud], &mut [&mut out], Some(block_hns(20)));
+    p.shm_header().expect("mapping").aec_enabled.store(true, Ordering::Relaxed);
+    // The AEC stage alone (later stages keep their own history): silence in, silence out.
+    p.mic_mono_temp[..BLOCK].fill(0.0);
+    p.run_aec(BLOCK, Some(block_hns(21)));
+    assert!(p.mic_mono_temp[..BLOCK].iter().all(|&s| s == 0.0), "samples from before the switch came out");
+  }
+
+  /// Blocks that don't line up with AEC3's 480-sample frames, so it queues output.
+  const BLOCK: usize = 441;
+  const T0_HNS: u64 = 10_000_000_000;
+
+  /// Plugin on a private mapping whose loopback reference played `reference` from `T0_HNS`;
+  /// RNNoise, 100 % volume.
+  fn plugin_with_reference(tag: &str, reference: &[f32]) -> GamersEqualizerPlugin {
+    let name = format!("Local\\GamersEqualizer_test_{tag}_{}", std::process::id());
+    let mut shm = SharedMemoryClient::create_named(&name, None).expect("test mapping");
+    let frames: Vec<StereoFrame> = reference.iter().map(|&s| StereoFrame { left: s, right: s }).collect();
+    shm.ring_buffer().push_frames_timed(&frames, T0_HNS);
+    shm.layout().header.tap_active.store(true, Ordering::Relaxed); // the loopback writer's flag
+    let mut p = GamersEqualizerPlugin::with_shm(48_000.0, Some(shm));
+    p.test_overrides = Some((DenoiseModel::RnNoise, 1000));
+    p
+  }
+
+  /// QPC time of mic block `k`, from 0.5 s into the reference.
+  fn block_hns(k: usize) -> u64 {
+    T0_HNS + 5_000_000 + (k * BLOCK) as u64 * 10_000_000 / 48_000
+  }
+
+  /// Position in the reference (`len` samples, all written) that played at `t`.
+  fn ref_position(p: &GamersEqualizerPlugin, t: u64, len: usize) -> usize {
+    let h = p.shm_header().expect("test mapping");
+    let first = h.ref_snap_index.load(Ordering::Relaxed).wrapping_sub(len as u32);
+    h.ref_index_at(t).expect("reference").wrapping_sub(first) as usize
+  }
+
+  fn noise(len: usize, seed: u32) -> Vec<f32> {
+    let mut x = seed;
+    (0..len)
+      .map(|_| {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.5
+      })
+      .collect()
   }
 }

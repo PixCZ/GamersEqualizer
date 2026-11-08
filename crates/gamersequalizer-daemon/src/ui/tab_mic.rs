@@ -525,8 +525,14 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
         (DenoiseModel::DpdfNet, tr(DPDFNET_ABOUT)),
       ] {
         let label = format!("{} · {}", model_name(model), ms_text(total_latency_ms(model, ahead)));
-        ui.selectable_value(&mut choice, Some(model), label)
-          .on_hover_text(format!("{about}\n\n{}", latency_breakdown(model, ahead)));
+        let clicked = ui
+          .selectable_value(&mut choice, Some(model), label)
+          .on_hover_text(format!("{about}\n\n{}", latency_breakdown(model, ahead)))
+          .clicked();
+        // The running pick clicked again: retry it (a failed load, or too slow before).
+        if clicked && current == Some(model) {
+          state.retry_denoise_model();
+        }
       }
       if choice != current {
         match choice {
@@ -562,8 +568,8 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
             &[&model_name(selected), &model_name(running), &model_name(selected)],
           ),
           DenoiseLimit::LoadFailed => trf(
-            "{} could not be loaded by the audio engine, {} runs instead.",
-            &[&model_name(selected), &model_name(running)],
+            "{} could not be loaded by the audio engine, {} runs instead. Pick {} again to retry.",
+            &[&model_name(selected), &model_name(running), &model_name(selected)],
           ),
           other => trf("Limited ({}), running: {}", &[&format!("{other:?}"), &model_name(running)]),
         },

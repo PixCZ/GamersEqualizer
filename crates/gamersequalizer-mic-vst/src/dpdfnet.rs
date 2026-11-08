@@ -86,8 +86,22 @@ impl DpdfEngine {
     crate::ai_denoiser::drain_fifo(&mut self.output_fifo, samples);
   }
 
+  /// Cold start: the recurrent state back to `init_state`, written into the current tensor (no
+  /// allocation, so a pause flush can use it), and fresh buffers.
   pub fn reset(&mut self) {
-    self.state = tensor1(&self.init_state);
+    let cleared = match self.state.try_as_plain_ram_mut() {
+      Ok(mut ram) => match ram.as_slice_mut::<f32>() {
+        Ok(s) if s.len() == self.init_state.len() => {
+          s.copy_from_slice(&self.init_state);
+          true
+        }
+        _ => false,
+      },
+      Err(_) => false,
+    };
+    if !cleared {
+      self.state = tensor1(&self.init_state); // not a plain f32 state of that size: rebuild it
+    }
     self.restart();
   }
 

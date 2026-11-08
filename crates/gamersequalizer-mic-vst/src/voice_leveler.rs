@@ -141,7 +141,7 @@ impl VoiceLeveler {
   /// the applied gain follows at once (within the ~100 ms smoothing).
   pub fn set_input_gain_db(&mut self, gain_db: f32) {
     // Windows mic volumes span about -96..+30 dB; anything beyond is garbage from the mapping.
-    let gain_db = gain_db.clamp(-60.0, 60.0);
+    let gain_db = gain_db.clamp(-100.0, 60.0);
     if gain_db.is_finite() && gain_db != self.input_gain_db {
       self.input_gain_db = gain_db;
       self.input_pow = 10f32.powf(gain_db / 10.0);
@@ -412,6 +412,12 @@ mod tests {
     assert!((rms_db(&out[SR / 2..]) - DEFAULT_TARGET_DB).abs() < 0.3, "{:.1} dBFS", rms_db(&out[SR / 2..]));
     assert!((lv.level_db().unwrap() - learned).abs() < 0.1, "the level without the gain stays");
     assert_eq!(lv.speech_ms(), 11_000);
+    // Regression: clamped at -60 dB, a mic volume near the bottom (Windows reaches ~-96 dB) was
+    // taken as up to 36 dB louder than it is.
+    lv.set_input_gain_db(-90.0);
+    assert_eq!(lv.input_gain_db, -90.0);
+    lv.set_input_gain_db(-500.0);
+    assert_eq!(lv.input_gain_db, -100.0);
   }
 
   #[test]

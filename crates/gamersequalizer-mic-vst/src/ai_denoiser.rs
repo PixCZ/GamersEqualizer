@@ -113,6 +113,10 @@ const GATE_CLOSE_COEF: f32 = 1.0 / (48.0 * 50.0);
 /// works) + the model's own delay. Measured in `test_measured_latency_matches_constants`.
 /// RNNoise: 480 priming + 480 overlap-add window.
 const RNNOISE_LATENCY_SAMPLES: usize = 2 * FRAME_SIZE;
+/// Silent frames that push old audio out of RNNoise on a flush: its pitch buffer (1728 samples)
+/// needs 4, its input high-pass (pole 0.998, ~500-sample time constant) 10 to fade under -80 dB.
+/// About 0.2 ms of CPU, once per pause.
+const RNNOISE_FLUSH_FRAMES: usize = 10;
 /// DeepFilterNet 3: 480 priming + (fft 960 - hop 480) STFT overlap + 2 lookahead frames * 480.
 const DF_LATENCY_SAMPLES: usize = 4 * 480;
 /// DPDFNet: 480 priming + 480 STFT overlap + 4 lookahead hops (2880 = 60 ms).
@@ -174,6 +178,9 @@ pub struct AiVoiceIsolator {
   spare: Vec<f32>,
   /// Heavy model being loaded on the loader thread (one at a time).
   loading: Option<(DenoiseModel, Receiver<HandOver>)>,
+  /// Heavy-model output samples still to silence after a `flush`: its recurrent state and
+  /// lookahead frames hold the audio from before (one model latency of it).
+  mute_left: usize,
 }
 
 /// The heavy model and the RNNoise stand-in hand over without a gap: from the start both get
@@ -309,6 +316,7 @@ impl AiVoiceIsolator {
       bypassed: false,
       heard_voice: false,
       loading: None,
+      mute_left: 0,
     }
   }
 
@@ -479,7 +487,7 @@ impl AiVoiceIsolator {
       self.spare.resize(n, 0.0); // only for a block over the preallocated 85 ms
     }
 
-    let Self { vad, vad_out, in_net, out_net, rnnoise, deepfilter, dpdfnet, sleep_delay, spare, .. } = self;
+    let Self { vad, vad_out, in_net, out_net, rnnoise, deepfilter, dpdfnet, sleep_delay, spare, mute_left, .. } = self;
     let (mut voice, mut voice_out) = (false, false);
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
     // RNNoise's own voice probability while it denoises alone, else one RNNoise pass of its own.
@@ -500,6 +508,9 @@ impl AiVoiceIsolator {
         (DenoiseModel::DpdfNet, _, Some(dp)) => dp.process(samples, atten_lim(strength)),
         _ => {}
       }
+      let muted = (*mute_left).min(n);
+      samples.iter_mut().take(muted).for_each(|s| *s = 0.0);
+      *mute_left -= muted;
     }
     if rnnoise_on {
       let buf: &mut [f32] = match stand_in {
@@ -552,13 +563,40 @@ impl AiVoiceIsolator {
     self.gate.process(samples, hold);
   }
 
+  /// Cold start: fresh network states. Allocates: only on user actions (denoiser switched back
+  /// on, model change), never on a pause (`flush`).
   pub fn reset(&mut self) {
     self.reset_engines();
+    self.in_net = VoiceNet::new();
+    self.out_net = VoiceNet::new();
+    self.mute_left = 0;
+    self.reset_timing();
+  }
+
+  /// `reset` for the real-time thread (the host paused the chain): drops all audio buffered from
+  /// before, keeps the loaded models and their network states, allocates nothing.
+  pub fn flush(&mut self) {
+    (self.asleep, self.takeover, self.quiet_samples) = (false, None, 0);
+    self.sleep_delay.clear();
+    self.rnnoise.flush();
+    if let Some(df) = self.deepfilter.as_mut() {
+      df.reset();
+    }
+    if let Some(dp) = self.dpdfnet.as_mut() {
+      dp.reset(); // cold: its state holds spectra from before the pause, beyond its latency
+    }
+    // DeepFilterNet's state lives in tract tensors inside the fork (clearing them allocates):
+    // its first latency of output, all from before the pause, is silenced instead.
+    self.mute_left = if self.active.is_heavy() { latency_samples(self.active) } else { 0 };
+    self.in_net.fifo.clear();
+    self.out_net.fifo.clear();
+    self.reset_timing();
+  }
+
+  fn reset_timing(&mut self) {
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceHysteresis::new();
     self.vad_out = VoiceHysteresis::new_output();
-    self.in_net = VoiceNet::new();
-    self.out_net = VoiceNet::new();
     self.delay.clear();
     self.bypassed = false;
   }
@@ -616,14 +654,25 @@ impl AiVoiceIsolator {
   fn select(&mut self, model: DenoiseModel) {
     if model != self.selected {
       // Picking a model again = try it again, a load that failed included.
-      self.overloaded = false;
-      match model {
-        DenoiseModel::DeepFilterNet => self.df_error = None,
-        DenoiseModel::DpdfNet => self.dpdf_error = None,
-        _ => {}
-      }
+      self.selected = model;
+      self.forget_failure();
     }
-    self.selected = model;
+  }
+
+  /// The user picked the selected model again (`denoise_retry_seq`): one that failed to load or
+  /// was too slow gets another try. Never blocks, like `request_model`.
+  pub fn retry(&mut self) {
+    self.forget_failure();
+    self.start_load();
+  }
+
+  fn forget_failure(&mut self) {
+    self.overloaded = false;
+    match self.selected {
+      DenoiseModel::DeepFilterNet => self.df_error = None,
+      DenoiseModel::DpdfNet => self.dpdf_error = None,
+      _ => {}
+    }
   }
 
   /// Loader for the selected heavy model, if it is neither loaded nor known to fail.
@@ -781,6 +830,17 @@ impl RnNoiseEngine {
 
   fn reset(&mut self) {
     self.denoiser = DenoiseState::new();
+    self.restart();
+  }
+
+  /// `restart`, and the audio the network still holds (input filter, window overlap, pitch
+  /// history) pushed out by silence, without a new state (`DenoiseState::new` and even a clone
+  /// allocate). The recurrent state stays about as warm as it was.
+  fn flush(&mut self) {
+    let (silence, mut out) = ([0.0f32; FRAME_SIZE], [0.0f32; FRAME_SIZE]);
+    for _ in 0..RNNOISE_FLUSH_FRAMES {
+      self.denoiser.process_frame(&mut out, &silence);
+    }
     self.restart();
   }
 
@@ -1171,6 +1231,62 @@ pub(crate) mod tests {
     isolator.process_samples(&mut block);
     assert_eq!(isolator.active_model(), DenoiseModel::DeepFilterNet);
     assert_eq!(isolator.limit(), DenoiseLimit::None);
+  }
+
+  /// Regression: picking the selected model again after a failed load changed nothing (the
+  /// error was only cleared when the model id changed).
+  #[test]
+  fn test_retry_loads_a_model_that_failed_before() {
+    let mut isolator = AiVoiceIsolator::new();
+    isolator.select(DenoiseModel::DeepFilterNet);
+    isolator.store(load_failed(DenoiseModel::DeepFilterNet, "test".into()));
+    assert_eq!(isolator.limit(), DenoiseLimit::LoadFailed);
+    isolator.request_model(DenoiseModel::DeepFilterNet); // the per-block settings sync
+    assert!(isolator.loading.is_none(), "a known failure is not retried every block");
+
+    isolator.retry();
+    assert!(isolator.loading.is_some(), "retry starts a load");
+    assert_eq!(isolator.limit(), DenoiseLimit::None);
+  }
+
+  /// Regression: `pause()` rebuilt the RNNoise states on the audio thread (allocating). The
+  /// flush must still drop everything from before the pause (DPDFNet's recurrent state holds
+  /// 4 hops of it) and keep a loaded model.
+  #[test]
+  fn test_flush_drops_audio_from_before_and_keeps_the_model() {
+    let (clean, _) = speech_over_keyboard(-20.0, 0.0);
+    for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+      let mut isolator = AiVoiceIsolator::new();
+      isolator.set_gate_threshold_db(GATE_OFF_DB - 1.0); // gate off: everything left would be heard
+      isolator.set_model(model);
+      // Mid-speech: the loudest point to be cut off at.
+      let mut speech = clean.clone();
+      let mut loud_blocks = 0;
+      for b in speech.chunks_mut(480) {
+        loud_blocks += usize::from(rms(b) > 0.03);
+        isolator.process_samples(b);
+        if loud_blocks >= 30 {
+          break;
+        }
+      }
+      assert_eq!(isolator.active_model(), model, "load error: {:?} {:?}", isolator.df_error, isolator.dpdf_error);
+      let engine = (
+        isolator.deepfilter.as_deref().map(|e| e as *const DeepFilterEngine),
+        isolator.dpdfnet.as_deref().map(|e| e as *const DpdfEngine),
+      );
+      isolator.flush();
+      let mut silence = vec![0.0f32; 48_000];
+      silence.chunks_mut(441).for_each(|b| isolator.process_samples(b));
+      let peak = silence.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+      assert!(peak < 1e-4, "{model:?}: audio from before the flush, peak {:.1} dBFS", db(peak));
+      let after = (
+        isolator.deepfilter.as_deref().map(|e| e as *const DeepFilterEngine),
+        isolator.dpdfnet.as_deref().map(|e| e as *const DpdfEngine),
+      );
+      assert_eq!(after, engine, "{model:?}: same engine, not reloaded");
+      assert!(isolator.loading.is_none());
+      assert_eq!(isolator.active_model(), model);
+    }
   }
 
   #[test]

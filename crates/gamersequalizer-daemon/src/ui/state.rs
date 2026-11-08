@@ -398,6 +398,14 @@ impl AppState {
     self.denoise_switched_at = Some(std::time::Instant::now());
   }
 
+  /// The selected model picked again: the mic DSP tries it once more (failed load, overload).
+  pub fn retry_denoise_model(&mut self) {
+    if let Some(h) = self.shm_header() {
+      h.denoise_retry_seq.fetch_add(1, Ordering::Relaxed);
+    }
+    self.denoise_switched_at = Some(std::time::Instant::now());
+  }
+
   /// A mic DSP (APO or bridge) published telemetry within the last 2 s. Call once per frame
   /// or more; repeated calls in one frame see the same seq and change nothing.
   pub fn mic_dsp_live(&mut self) -> bool {

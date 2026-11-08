@@ -189,6 +189,26 @@ fn run_background_daemon() {
       // A device came or went: the picked mic may have been unplugged (the default does not
       // change when it was not the default) or plugged back in.
       let devices_changed = win_audio.endpoint_lock.poll_device_changed();
+      // Sonar / VB-Cable installed or started after the service: their channel outputs take
+      // over from per-app volumes (and give them back when they go).
+      if devices_changed {
+        let devices = win_audio.endpoint_lock.enumerate_playback_devices();
+        let mix = &mut win_audio.chatmix;
+        if mix.bind_channel_endpoints(&devices) {
+          info!(
+            "[GamersEqualizer] channel outputs now game {:?}, chat {:?}, media {:?}",
+            mix.game_device_id, mix.chat_device_id, mix.media_device_id
+          );
+          // A newly bound channel shows its endpoint's level, not the per-app one it had.
+          let permille = |v: f32| (v * 1000.0).round() as u32;
+          header.game_volume_permille.store(permille(mix.game_volume), Ordering::Relaxed);
+          header.game_muted.store(mix.game_muted, Ordering::Relaxed);
+          header.chat_volume_permille.store(permille(mix.chat_volume), Ordering::Relaxed);
+          header.chat_muted.store(mix.chat_muted, Ordering::Relaxed);
+          header.media_volume_permille.store(permille(mix.media_volume), Ordering::Relaxed);
+          header.media_muted.store(mix.media_muted, Ordering::Relaxed);
+        }
+      }
       if cur_mic_ver != last_mic_version || default_mic != last_default_mic || devices_changed {
         last_mic_version = cur_mic_ver;
         last_default_mic = default_mic;
