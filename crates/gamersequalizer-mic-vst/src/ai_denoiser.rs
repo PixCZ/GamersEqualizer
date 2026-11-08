@@ -19,7 +19,8 @@ const DF_MIN_ATTEN_DB: f32 = 6.0;
 const DF_MAX_ATTEN_DB: f32 = 60.0;
 /// Below this local SNR DeepFilterNet treats a frame as noise only and zeroes it. Upstream's
 /// -10 dB dropped 16-26 % of soft syllables under loud mechanical keys; -20 dB drops 3-8 %
-/// with the same key suppression (`test_deepfilter_keeps_soft_speech_over_keyboard`).
+/// with the same key suppression (`test_deepfilter_keeps_soft_speech_over_keyboard`). The model's
+/// LSNR output never goes below -15 dB (`lsnr_min` in its config), so -20 turns zeroing off.
 const DF_MIN_DB_THRESH: f32 = -20.0;
 /// Above this local SNR DeepFilterNet leaves a frame untouched. Upstream's 30 dB let its ERB
 /// mask duck clean unvoiced speech (s, f, breath) by 10-15 dB in frames it rated 20-29 dB:
@@ -109,6 +110,20 @@ const FLOOR_MIN_DB: f32 = -100.0;
 /// Per-sample smoothing of the gate gain: ~1 ms to open, ~50 ms to close (no clicks).
 const GATE_OPEN_COEF: f32 = 1.0 / 48.0;
 const GATE_CLOSE_COEF: f32 = 1.0 / (48.0 * 50.0);
+/// Click rescue (DeepFilterNet only, see `ClickRescue`): DFN3 output this far under RNNoise's
+/// output of the same moment, while speech was heard, counts as a voice DFN3 cut.
+const RESCUE_RATIO_DB: f32 = 6.0;
+/// Speech heard on DFN3's own output arms the rescue this long (+ the 30 ms crossfade out); keys
+/// within it come through next to words. Measured with an earlier raw-input arming (`click_report`,
+/// private voice, clicks at -3 dBFS peak): frames lost > 15 dB 3.4 % at 50 ms, 3.1 % at 100,
+/// 2.4 % at 200 ms, but 200 ms let 14 dB more clicks into short pauses.
+const RESCUE_HOLD_SAMPLES: usize = 48 * 100;
+/// Voice probability on DFN3's output that arms it (0.3 / 0.5 / 0.7 measured alike).
+const RESCUE_VOICE_PROB: f32 = 0.5;
+/// Energy envelopes (~5 ms); crossfade in (~2 ms), out (~30 ms).
+const RESCUE_ENV_COEF: f32 = 1.0 / (48.0 * 5.0);
+const RESCUE_IN_COEF: f32 = 1.0 / (48.0 * 2.0);
+const RESCUE_OUT_COEF: f32 = 1.0 / (48.0 * 30.0);
 /// Added latency, 48 kHz samples. Both = output FIFO priming (one frame, so any block size
 /// works) + the model's own delay. Measured in `test_measured_latency_matches_constants`.
 /// RNNoise: 480 priming + 480 overlap-add window.
@@ -151,6 +166,9 @@ pub struct AiVoiceIsolator {
   /// Tests only: lookahead length instead of the model's (`lookahead_sweep`).
   #[cfg(test)]
   lookahead_override: Option<usize>,
+  /// Tests only: DFN3 without `ClickRescue`, for comparison.
+  #[cfg(test)]
+  no_rescue: bool,
   delay: DelayLine,
   bypassed: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
@@ -161,6 +179,8 @@ pub struct AiVoiceIsolator {
   asleep: bool,
   /// Both run while one takes over from the other (see `Takeover`).
   takeover: Option<Takeover>,
+  /// DeepFilterNet only: RNNoise runs next to it and fills in where DFN3 cut a voice (clicks).
+  rescue: ClickRescue,
   /// Input samples since the input detector last heard speech or saw activity.
   quiet_samples: usize,
   /// Quietest block per 100 ms segment, the last `FLOOR_SEGMENTS` (dBFS; +inf = no data yet).
@@ -275,6 +295,30 @@ struct NoiseGate {
   floor: f32,
 }
 
+/// DeepFilterNet 3 rates a frame with a loud click in it (a mouse button next to the mic) as
+/// noise and cuts the voice in it with the click: speech at -30 dBFS, clicks hammered at -3 dBFS
+/// peak lost > 15 dB in 16 % of the frames with a click (`click_report`; DPDFNet 2 %, RNNoise 0).
+/// No DFN3 setting avoids it (its zero-mask threshold is below the model's -15 dB LSNR floor,
+/// and a lower attenuation limit only halves it and every pause gets noisier). With the rescue:
+/// 5.8 % (gate auto); a raw take of the developer typing while talking (`keyboard_call_report`):
+/// speech frames cut 8.0 -> 1.4 % (DPDFNet 3.3 %), pauses unchanged. So RNNoise, aligned
+/// to DFN3's latency, runs next to it, and while speech is heard the output crossfades to RNNoise
+/// where DFN3 is far under RNNoise. "Speech heard" comes from a voice detector on DFN3's own
+/// output: the keys are gone there and the voice stays in most frames, so the hold covers the
+/// frames it cut. The raw-input detector would not do: loud keys alone scored two speech frames
+/// in a row there and pauses lost 28 dB of key suppression. Cost: two RNNoise passes (~0.5 % of a
+/// core); in rescued frames the click comes through as RNNoise leaves it (voice over keys).
+struct ClickRescue {
+  /// Voice detector on DFN3's output (before the rescue).
+  net: VoiceNet,
+  hold_left: usize,
+  /// Energy envelopes of the DFN3 output and RNNoise's.
+  env_dfn: f32,
+  env_rnn: f32,
+  /// RNNoise's share of the output.
+  mix: f32,
+}
+
 impl Default for AiVoiceIsolator {
   fn default() -> Self {
     Self::new()
@@ -300,6 +344,7 @@ impl AiVoiceIsolator {
       out_net: VoiceNet::new(),
       asleep: false,
       takeover: None,
+      rescue: ClickRescue::new(),
       quiet_samples: 0,
       floor_segments: [f32::INFINITY; FLOOR_SEGMENTS],
       floor_pos: 0,
@@ -312,6 +357,8 @@ impl AiVoiceIsolator {
       lookahead: false,
       #[cfg(test)]
       lookahead_override: None,
+      #[cfg(test)]
+      no_rescue: false,
       delay: DelayLine::new(),
       bypassed: false,
       heard_voice: false,
@@ -409,12 +456,20 @@ impl AiVoiceIsolator {
 
   /// Model latency + gate lookahead (0 while bypassed). The same while a heavy model sleeps.
   pub fn output_lead_samples(&self) -> usize {
-    if self.bypassed { 0 } else { latency_samples(self.active) + self.delay.len() }
+    if self.bypassed {
+      0
+    } else {
+      latency_samples(self.active) + self.delay.len()
+    }
   }
 
   /// Gate lookahead in the output right now (0 while the gate or the lookahead is off).
   pub fn lookahead_now_samples(&self) -> usize {
-    if self.bypassed { 0 } else { self.delay.len() }
+    if self.bypassed {
+      0
+    } else {
+      self.delay.len()
+    }
   }
 
   /// Lookahead for the model producing the output (keyed like its latency).
@@ -481,13 +536,24 @@ impl AiVoiceIsolator {
     }
     let takeover = self.takeover;
     let heavy_on = heavy && (!self.asleep || takeover.is_some());
-    let rnnoise_on = !heavy_on || takeover.is_some();
+    #[cfg(test)]
+    let rescue_off = self.no_rescue;
+    #[cfg(not(test))]
+    let rescue_off = false;
+    let rescue_on = heavy_on && takeover.is_none() && active == DenoiseModel::DeepFilterNet && !rescue_off;
+    let rnnoise_on = !heavy_on || takeover.is_some() || rescue_on;
+    if rescue_on {
+      // No-op unless the length changed (model switch): aligns RNNoise with DFN3's output.
+      self.sleep_delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
+    }
     let n = samples.len();
     if heavy_on && rnnoise_on && self.spare.len() < n {
       self.spare.resize(n, 0.0); // only for a block over the preallocated 85 ms
     }
 
-    let Self { vad, vad_out, in_net, out_net, rnnoise, deepfilter, dpdfnet, sleep_delay, spare, mute_left, .. } = self;
+    let Self {
+      vad, vad_out, in_net, out_net, rnnoise, deepfilter, dpdfnet, sleep_delay, spare, mute_left, rescue, ..
+    } = self;
     let (mut voice, mut voice_out) = (false, false);
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
     // RNNoise's own voice probability while it denoises alone, else one RNNoise pass of its own.
@@ -533,6 +599,11 @@ impl AiVoiceIsolator {
         let (old, new) = if t.to_sleep { (*out, stand) } else { (stand, *out) };
         *out = old + (new - old) * w;
       }
+    }
+    if let (true, Some(stand)) = (rescue_on, spare.get(..n)) {
+      rescue.process(samples, stand);
+    } else {
+      rescue.reset();
     }
     // The output detector, in step with the output (its hold needs no latency on top). Not while
     // a heavy model sleeps: it would hear the keys RNNoise leaves in (DFN3, loud typing: gate
@@ -697,7 +768,8 @@ impl AiVoiceIsolator {
     };
     let (tx, rx) = mpsc::channel();
     // Receiver gone (stream ended) = the send fails and the engine is dropped on this thread.
-    let spawned = std::thread::Builder::new().name("denoise-model-load".into()).spawn(move || tx.send(HandOver(load())));
+    let spawned =
+      std::thread::Builder::new().name("denoise-model-load".into()).spawn(move || tx.send(HandOver(load())));
     match spawned {
       Ok(_) => self.loading = Some((model, rx)),
       Err(e) => self.store(load_failed(model, format!("could not start the loader thread: {e}"))),
@@ -1015,6 +1087,42 @@ impl NoiseGate {
   }
 }
 
+impl ClickRescue {
+  fn new() -> Self {
+    Self { net: VoiceNet::new(), hold_left: 0, env_dfn: 0.0, env_rnn: 0.0, mix: 0.0 }
+  }
+
+  /// `out`: DFN3 output, in place; `rnn`: RNNoise's output of the same samples.
+  fn process(&mut self, out: &mut [f32], rnn: &[f32]) {
+    let ratio = 10f32.powf(RESCUE_RATIO_DB / 10.0);
+    let mut heard = false;
+    self.net.process(out, |p| heard |= p > RESCUE_VOICE_PROB);
+    if heard {
+      self.hold_left = out.len() + RESCUE_HOLD_SAMPLES;
+    }
+    for (d, &r) in out.iter_mut().zip(rnn) {
+      self.hold_left = self.hold_left.saturating_sub(1);
+      self.env_dfn += (*d * *d - self.env_dfn) * RESCUE_ENV_COEF;
+      self.env_rnn += (r * r - self.env_rnn) * RESCUE_ENV_COEF;
+      let cut = self.hold_left > 0 && self.env_rnn > self.env_dfn * ratio;
+      let (target, coef) = if cut { (1.0, RESCUE_IN_COEF) } else { (0.0, RESCUE_OUT_COEF) };
+      self.mix += (target - self.mix) * coef;
+      if !(self.mix.is_finite() && self.env_dfn.is_finite() && self.env_rnn.is_finite()) {
+        self.reset(); // a NaN must not stick
+        continue;
+      }
+      *d += (r - *d) * self.mix;
+    }
+  }
+
+  /// Idle again (rescue off: RNNoise standing in, another model). No allocation; the detector
+  /// keeps its network state (like `flush`), only its buffered audio goes.
+  fn reset(&mut self) {
+    self.net.fifo.clear();
+    (self.hold_left, self.env_dfn, self.env_rnn, self.mix) = (0, 0.0, 0.0, 0.0);
+  }
+}
+
 fn lookahead_samples(model: DenoiseModel) -> usize {
   match model {
     DenoiseModel::RnNoise | DenoiseModel::Unknown(_) => RNNOISE_LOOKAHEAD_SAMPLES,
@@ -1177,7 +1285,12 @@ pub(crate) mod tests {
       let frame_db = |x: &[f32]| 10.0 * (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32 + 1e-20).log10();
       for (i, (o, r)) in out.chunks(480).zip(reference.chunks(480)).enumerate() {
         if frame_db(r) > -50.0 {
-          assert!(frame_db(o) > frame_db(r) - 12.0, "{model:?} block {i}: {:.1} dB vs {:.1} dB", frame_db(o), frame_db(r));
+          assert!(
+            frame_db(o) > frame_db(r) - 12.0,
+            "{model:?} block {i}: {:.1} dB vs {:.1} dB",
+            frame_db(o),
+            frame_db(r)
+          );
         }
       }
     }
@@ -1298,7 +1411,10 @@ pub(crate) mod tests {
       for block in [441, 480, 96, 144] {
         let measured = measure_latency_samples(model, -80.0, block);
         let expected = (AiVoiceIsolator::latency_ms(model) * 48.0) as usize;
-        eprintln!("{model:?}, {block}-frame blocks: measured latency {measured} samples ({:.1} ms)", measured as f32 / 48.0);
+        eprintln!(
+          "{model:?}, {block}-frame blocks: measured latency {measured} samples ({:.1} ms)",
+          measured as f32 / 48.0
+        );
         // Even at minimal strength the heavy models still output ~half wet signal; DPDFNet's
         // filtering shifts that half's phase by a few samples.
         let tolerance = if model == DenoiseModel::DpdfNet { 4 } else { 2 };
@@ -1434,7 +1550,9 @@ pub(crate) mod tests {
     let q = run_quality(DenoiseModel::DeepFilterNet, GATE_OFF_DB - 1.0, &clean, &mixed);
     eprintln!("DFN, loud keys: {q:?}");
     assert!(q.dropouts < 0.01 && q.soft_dropouts < 0.10, "{q:?}");
-    assert!(q.noise_suppression_db > 35.0, "{q:?}");
+    // Keys 10 dB over the voice: next to words `ClickRescue` lets them through with the voice it
+    // fills in (all pauses ~20 dB, measured 35+ without it); pauses away from speech stay clean.
+    assert!(q.far_suppression_db > 35.0 && q.noise_suppression_db > 15.0, "{q:?}");
   }
 
   #[test]
@@ -1583,7 +1701,13 @@ pub(crate) mod tests {
     soft_dropouts: f32,
     /// How much quieter the output is than the input in speech pauses (keyboard only), dB.
     noise_suppression_db: f32,
+    /// Same, only pauses at least `FAR_PAUSE_FRAMES` from speech: the gaps right next to words
+    /// get keys through where DFN3's `ClickRescue` fills in a cut voice.
+    far_suppression_db: f32,
   }
+
+  /// 150 ms: the rescue's hold (100 ms), crossfade out (30 ms) and its detector's frame.
+  const FAR_PAUSE_FRAMES: usize = 15;
 
   /// Clean speech at `speech_rms_db` dBFS and the same speech with mechanical keyboard and
   /// mouse clicks mixed in at `snr_db`. Both at 48 kHz.
@@ -1637,16 +1761,23 @@ pub(crate) mod tests {
     let delayed = &out[latency..];
     let clean_db = db(rms(clean));
     let (mut loud, mut lost, mut soft, mut soft_lost) = (0usize, 0usize, 0usize, 0usize);
-    let (mut pause_in, mut pause_out) = (0.0f32, 0.0f32);
-    for ((c, m), o) in clean
+    let (mut pause_in, mut pause_out, mut far_in, mut far_out) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let near_speech: Vec<bool> = clean.as_chunks::<FRAME>().0.iter().map(|c| db(rms(c)) >= clean_db - 40.0).collect();
+    for (i, ((c, m), o)) in clean
       .as_chunks::<FRAME>()
       .0
       .iter()
       .zip(mixed.as_chunks::<FRAME>().0)
       .zip(delayed.as_chunks::<FRAME>().0)
+      .enumerate()
       .skip(WARMUP_FRAMES)
     {
       let c_db = db(rms(c));
+      let window = i.saturating_sub(FAR_PAUSE_FRAMES)..(i + FAR_PAUSE_FRAMES + 1).min(near_speech.len());
+      if c_db < clean_db - 40.0 && !near_speech.get(window).unwrap_or_default().iter().any(|&s| s) {
+        far_in += m.iter().map(|x| x * x).sum::<f32>();
+        far_out += o.iter().map(|x| x * x).sum::<f32>();
+      }
       let is_lost = db(rms(o)) - c_db < -15.0;
       if c_db >= clean_db {
         loud += 1;
@@ -1663,6 +1794,7 @@ pub(crate) mod tests {
       dropouts: lost as f32 / loud.max(1) as f32,
       soft_dropouts: soft_lost as f32 / soft.max(1) as f32,
       noise_suppression_db: 10.0 * (pause_in.max(1e-12) / pause_out.max(1e-12)).log10(),
+      far_suppression_db: 10.0 * (far_in.max(1e-12) / far_out.max(1e-12)).log10(),
     }
   }
 
@@ -1781,6 +1913,249 @@ pub(crate) mod tests {
     }
   }
 
+  #[test]
+  fn test_deepfilter_keeps_speech_under_hammered_mouse_clicks() {
+    // Regression: a mouse button hammered next to the mic (peaks -3 dBFS over a -30 dBFS voice)
+    // made DFN3 cut the voice with each click: > 15 dB lost in 16 % of the frames with a click
+    // (private voice), 5.5 % here. `ClickRescue` fills those in from RNNoise: 5.8 % / 1.4 %.
+    let (clean, clicks, mixed) = speech_with_clicks("speech_clean.wav", -3.0);
+    let with = run_clicks(DenoiseModel::DeepFilterNet, 0.75, GATE_AUTO_LOOKAHEAD, false, &clean, &clicks, &mixed);
+    let without = run_clicks(DenoiseModel::DeepFilterNet, 0.75, GATE_AUTO_LOOKAHEAD, true, &clean, &clicks, &mixed);
+    eprintln!("DFN3 hammered clicks: rescue {with:?}, without {without:?}");
+    assert!(with.lost15 < 0.06 && with.lost15 < without.lost15 / 2.0, "{with:?} vs {without:?}");
+    assert!(with.quality.soft_dropouts <= without.quality.soft_dropouts, "{with:?} vs {without:?}");
+    // Pauses away from speech stay as clean: the rescue is armed only by a voice in DFN3's output.
+    assert!(with.quality.far_suppression_db > without.quality.far_suppression_db - 3.0, "{with:?} vs {without:?}");
+  }
+
+  /// Mouse clicks right next to the mic over speech, per model / strength / gate: soft% / loud%
+  /// lost [pause suppression dB], and the speech frames with a click (click within 10 dB of the
+  /// voice there): mean dB under the clean speech, shares lost > 6 / > 15 dB. Private voice
+  /// when present. DFN3 also without `ClickRescue`.
+  /// `cargo test -p gamersequalizer-mic-vst --release click_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "report, slow"]
+  fn click_report() {
+    const SPEECH: &str = "../private/speech.wav";
+    let speech = if std::path::Path::new(FIXTURES).join(SPEECH).exists() { SPEECH } else { "speech_clean.wav" };
+    eprintln!("speech: {speech}");
+    for peak_db in [-20.0f32, -10.0, -3.0] {
+      let (clean, clicks, mixed) = speech_with_clicks(speech, peak_db);
+      for (model, strength, no_rescue) in [
+        (DenoiseModel::DeepFilterNet, 0.75, false),
+        (DenoiseModel::DeepFilterNet, 0.75, true),
+        (DenoiseModel::DeepFilterNet, 0.25, true),
+        (DenoiseModel::DpdfNet, 0.75, false),
+        (DenoiseModel::RnNoise, 0.75, false),
+      ] {
+        for gate in [GATE_OFF_DB - 1.0, GATE_AUTO_LOOKAHEAD] {
+          let c = run_clicks(model, strength, gate, no_rescue, &clean, &clicks, &mixed);
+          eprintln!(
+            "clicks {peak_db:>5} dBFS, {model:<13?}{} strength {strength:.2} gate {:<4} | {:4.1} / {:3.1} [{:4.1}] | clicks: {:4.1} dB, >6 {:4.1} %, >15 {:4.1} %",
+            if no_rescue { " no rescue" } else { "          " },
+            if gate > GATE_OFF_DB { "auto" } else { "off" },
+            c.quality.soft_dropouts * 100.0,
+            c.quality.dropouts * 100.0,
+            c.quality.noise_suppression_db,
+            c.mean_loss_db,
+            c.lost6 * 100.0,
+            c.lost15 * 100.0
+          );
+        }
+      }
+    }
+  }
+
+  /// A raw take of speech with keys hammered into it (git-ignored `test_data/private/keyboard_call.wav`,
+  /// no clean reference). Per model (gate auto + lookahead, default strength) writes the processed take
+  /// to `test_data/private/out/` for listening and counts speech frames DFN3 cut: 10 ms frames where
+  /// RNNoise (which keeps a voice under keys) is speech-loud and the model's output > 10 dB under it.
+  /// `cargo test -p gamersequalizer-mic-vst --release keyboard_call_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn keyboard_call_report() {
+    const TAKE: &str = "../private/keyboard_call.wav";
+    if !std::path::Path::new(FIXTURES).join(TAKE).exists() {
+      eprintln!("skipped: put keyboard_call.wav into test_data/private/");
+      return;
+    }
+    let input = read_wav_48k(TAKE);
+    let out_dir = std::path::Path::new(FIXTURES).join("../private/out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let process = |model: DenoiseModel, no_rescue: bool| {
+      let mut isolator = AiVoiceIsolator::new();
+      isolator.set_model(model);
+      isolator.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+      isolator.no_rescue = no_rescue;
+      let mut out = input.clone();
+      for block in out.chunks_mut(480) {
+        isolator.process_samples(block);
+      }
+      out.drain(..latency_samples(model) + lookahead_samples(model)); // aligned with the input
+      out
+    };
+    let reference = process(DenoiseModel::RnNoise, false);
+    let ref_db: Vec<f32> = reference.as_chunks::<480>().0.iter().map(|f| db(rms(f))).collect();
+    let loud = ref_db.iter().copied().fold(f32::MIN, f32::max);
+    for (name, model, no_rescue) in [
+      ("dfn3_rescue", DenoiseModel::DeepFilterNet, false),
+      ("dfn3_no_rescue", DenoiseModel::DeepFilterNet, true),
+      ("dpdfnet", DenoiseModel::DpdfNet, false),
+      ("rnnoise", DenoiseModel::RnNoise, false),
+    ] {
+      let out = process(model, no_rescue);
+      let (mut speech, mut cut) = (0usize, 0usize);
+      for (f, &r) in out.as_chunks::<480>().0.iter().zip(&ref_db).skip(100) {
+        if r > loud - 25.0 {
+          speech += 1;
+          cut += (db(rms(f)) < r - 10.0) as usize;
+        }
+      }
+      let quiet: Vec<f32> =
+        out.as_chunks::<480>().0.iter().zip(&ref_db).filter(|(_, &r)| r < loud - 40.0).map(|(f, _)| rms(f)).collect();
+      eprintln!(
+        "{name:<15} speech frames cut > 10 dB under RNNoise: {:4.1} % of {speech}; quiet frames {:5.1} dBFS",
+        cut as f32 * 100.0 / speech.max(1) as f32,
+        db((quiet.iter().map(|x| x * x).sum::<f32>() / quiet.len().max(1) as f32).sqrt())
+      );
+      let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 48_000,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+      };
+      let mut w = hound::WavWriter::create(out_dir.join(format!("keyboard_call_{name}.wav")), spec).unwrap();
+      out.iter().for_each(|&s| w.write_sample(s).unwrap());
+      w.finalize().unwrap();
+    }
+  }
+
+  /// Default strength candidates per model (gate auto + lookahead): soft% / loud% lost
+  /// [pause suppression dB, far pauses dB] on the keyboard mixes (private when present) and
+  /// hammered clicks at -3 dBFS (+ frames lost > 15 dB under the clicks).
+  /// `cargo test -p gamersequalizer-mic-vst --release strength_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "report, slow"]
+  fn strength_report() {
+    const SPEECH: &str = "../private/speech.wav";
+    const KEYS: [&str; 1] = ["../private/keys.wav"];
+    let private = [SPEECH, KEYS[0]].iter().all(|f| std::path::Path::new(FIXTURES).join(f).exists());
+    let (speech, keys): (&str, &[&str]) = if private { (SPEECH, &KEYS) } else { ("speech_clean.wav", &KEYBOARD_CLIPS) };
+    eprintln!("{} recordings; mixes voice/SNR -20/0, -45/0, -30/-10 dB, then clicks -3 dBFS", if private { "private" } else { "shared" });
+    let mixes: Vec<_> = [(-20.0f32, 0.0f32), (-45.0, 0.0), (-30.0, -10.0)].iter().map(|&(l, s)| mix(speech, keys, Some(100.0), l, s)).collect();
+    let (cc, ck, cm) = speech_with_clicks(speech, -3.0);
+    for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
+      for strength in [0.75f32, 0.9, 1.0] {
+        let cells: Vec<String> = mixes
+          .iter()
+          .map(|(clean, mixed)| {
+            let mut iso = AiVoiceIsolator::new();
+            iso.set_model(model);
+            iso.set_strength(strength);
+            iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+            let mut out = mixed.clone();
+            for b in out.chunks_mut(480) {
+              iso.process_samples(b);
+            }
+            let q = measure(clean, mixed, &out, latency_samples(model) + lookahead_samples(model));
+            format!("{:4.1} / {:3.1} [{:4.1} {:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db, q.far_suppression_db)
+          })
+          .collect();
+        let c = run_clicks(model, strength, GATE_AUTO_LOOKAHEAD, false, &cc, &ck, &cm);
+        eprintln!(
+          "{model:<13?} {strength:.2} | {} | clicks {:4.1} / {:3.1} [{:4.1} {:4.1}] >15 {:4.1} %",
+          cells.join(" | "),
+          c.quality.soft_dropouts * 100.0,
+          c.quality.dropouts * 100.0,
+          c.quality.noise_suppression_db,
+          c.quality.far_suppression_db,
+          c.lost15 * 100.0
+        );
+      }
+    }
+  }
+
+  #[derive(Debug)]
+  struct ClickQuality {
+    quality: Quality,
+    /// Speech frames with a click: mean dB under the clean speech, shares more than 6 / 15 dB under.
+    mean_loss_db: f32,
+    lost6: f32,
+    lost15: f32,
+  }
+
+  /// `speech` (high-passed, -30 dBFS) and ESC-50 mouse clicks hammered: each click (40 ms from
+  /// its onset) every 120 ms, peaks at `peak_db` dBFS. Returns (clean, clicks, mixed).
+  fn speech_with_clicks(speech: &str, peak_db: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let raw: Vec<f32> = ["1-118206-A-31.wav", "1-18655-A-31.wav"].iter().flat_map(|f| read_wav_48k(f)).collect();
+    let max = raw.iter().fold(0.0f32, |m, s| m.max(s.abs())).max(1e-9);
+    let mut clicks = Vec::new();
+    let mut i = 0;
+    while let Some(&s) = raw.get(i) {
+      if s.abs() > max * 0.3 {
+        let start = i.saturating_sub(48);
+        clicks.extend_from_slice(raw.get(start..(start + 48 * 40).min(raw.len())).unwrap_or_default());
+        clicks.resize(clicks.len() + 48 * 80, 0.0);
+        i = start + 48 * 60;
+      } else {
+        i += 1;
+      }
+    }
+    let (clean, _) = mix(speech, &KEYBOARD_CLIPS, Some(100.0), -30.0, 0.0);
+    while clicks.len() < clean.len() {
+      clicks.extend_from_within(..);
+    }
+    clicks.truncate(clean.len());
+    let gain = 10f32.powf(peak_db / 20.0) / max;
+    clicks.iter_mut().for_each(|s| *s *= gain);
+    let mixed = clean.iter().zip(&clicks).map(|(s, n)| s + n).collect();
+    (clean, clicks, mixed)
+  }
+
+  fn run_clicks(
+    model: DenoiseModel,
+    strength: f32,
+    gate_db: f32,
+    no_rescue: bool,
+    clean: &[f32],
+    clicks: &[f32],
+    mixed: &[f32],
+  ) -> ClickQuality {
+    let mut isolator = AiVoiceIsolator::new();
+    isolator.set_model(model);
+    isolator.set_strength(strength);
+    isolator.set_gate_threshold_db(gate_db);
+    isolator.no_rescue = no_rescue;
+    let mut out = mixed.to_vec();
+    for block in out.chunks_mut(480) {
+      isolator.process_samples(block);
+    }
+    let lookahead = if gate_db >= GATE_LOOKAHEAD_DB { lookahead_samples(model) } else { 0 };
+    let latency = latency_samples(model) + lookahead;
+    let quality = measure(clean, mixed, &out, latency);
+    let clean_db = db(rms(clean));
+    let (mut n, mut sum, mut lost6, mut lost15) = (0usize, 0.0f32, 0usize, 0usize);
+    for ((c, k), o) in clean
+      .as_chunks::<480>()
+      .0
+      .iter()
+      .zip(clicks.as_chunks::<480>().0)
+      .zip(out.get(latency..).unwrap_or_default().as_chunks::<480>().0)
+      .skip(50)
+    {
+      let c_db = db(rms(c));
+      if c_db >= clean_db - 15.0 && db(rms(k)) > c_db - 10.0 {
+        let loss = c_db - db(rms(o));
+        n += 1;
+        sum += loss.max(0.0);
+        lost6 += (loss > 6.0) as usize;
+        lost15 += (loss > 15.0) as usize;
+      }
+    }
+    let n = n.max(1) as f32;
+    ClickQuality { quality, mean_loss_db: sum / n, lost6: lost6 as f32 / n, lost15: lost15 as f32 / n }
+  }
+
   /// Gate lookahead per model: soft% / loud% lost [pause suppression dB] per mix and the share
   /// of keys-only audio the gate lets through, for 0-30 ms. Private recordings when present,
   /// else the shared fixtures. Picks the `*_LOOKAHEAD_SAMPLES` constants.
@@ -1792,8 +2167,14 @@ pub(crate) mod tests {
     const KEYS: [&str; 1] = ["../private/keys.wav"];
     let private = [SPEECH, KEYS[0]].iter().all(|f| std::path::Path::new(FIXTURES).join(f).exists());
     let (speech, keys): (&str, &[&str]) = if private { (SPEECH, &KEYS) } else { ("speech_clean.wav", &KEYBOARD_CLIPS) };
-    eprintln!("{} recordings; mixes: voice -20/SNR 0, -45/0, -30/-10 dB; keys only -20 dBFS", if private { "private" } else { "shared" });
-    let mixes: Vec<_> = [(-20.0f32, 0.0f32), (-45.0, 0.0), (-30.0, -10.0)].iter().map(|&(l, s)| mix(speech, keys, Some(100.0), l, s)).collect();
+    eprintln!(
+      "{} recordings; mixes: voice -20/SNR 0, -45/0, -30/-10 dB; keys only -20 dBFS",
+      if private { "private" } else { "shared" }
+    );
+    let mixes: Vec<_> = [(-20.0f32, 0.0f32), (-45.0, 0.0), (-30.0, -10.0)]
+      .iter()
+      .map(|&(l, s)| mix(speech, keys, Some(100.0), l, s))
+      .collect();
     let keys_only = noise_only(keys, -20.0);
     for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise] {
       let ungated = run(model, GATE_OFF_DB - 1.0, &keys_only);
@@ -1848,8 +2229,12 @@ pub(crate) mod tests {
 
     let mut st = DenoiseState::new();
     let mut scratch = [0.0f32; FRAME_SIZE];
-    let probs: Vec<f32> =
-      input.as_chunks::<FRAME_SIZE>().0.iter().map(|f| st.process_frame(&mut scratch, &f.map(|s| s * I16_SCALE))).collect();
+    let probs: Vec<f32> = input
+      .as_chunks::<FRAME_SIZE>()
+      .0
+      .iter()
+      .map(|f| st.process_frame(&mut scratch, &f.map(|s| s * I16_SCALE)))
+      .collect();
 
     // Per model: (ungated, gated), both aligned with the input.
     let mut outs = Vec::new();
@@ -1863,7 +2248,12 @@ pub(crate) mod tests {
       let gated = gated[lat + lookahead_samples(model)..].to_vec();
       eprintln!("{model:?}: CPU {:.1} % of one core (denoiser + input detector, no gate)", cpu * 100.0);
       for (name, sig) in [("nogate", &ungated), ("gate", &gated)] {
-        let spec = hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let spec = hound::WavSpec {
+          channels: 1,
+          sample_rate: 48_000,
+          bits_per_sample: 32,
+          sample_format: hound::SampleFormat::Float,
+        };
         let mut w = hound::WavWriter::create(out_dir.join(format!("{model:?}_{name}.wav")), spec).unwrap();
         sig.iter().for_each(|s| w.write_sample(*s).unwrap());
         w.finalize().unwrap();
@@ -1876,7 +2266,14 @@ pub(crate) mod tests {
     let open = |g: &[f32], u: &[f32], s: usize| {
       let range = s * SEC..(s + 1) * SEC;
       let (g, u) = (g.get(range.clone()).unwrap_or_default(), u.get(range).unwrap_or_default());
-      let f: Vec<bool> = g.as_chunks::<480>().0.iter().zip(u.as_chunks::<480>().0).filter(|(_, u)| rms(*u) > 1e-6).map(|(g, u)| db(rms(g)) > db(rms(u)) - 6.0).collect();
+      let f: Vec<bool> = g
+        .as_chunks::<480>()
+        .0
+        .iter()
+        .zip(u.as_chunks::<480>().0)
+        .filter(|(_, u)| rms(*u) > 1e-6)
+        .map(|(g, u)| db(rms(g)) > db(rms(u)) - 6.0)
+        .collect();
       f.iter().filter(|&&o| o).count() as f32 / f.len().max(1) as f32 * 100.0
     };
     let voice_share = |s: usize| {
@@ -1885,18 +2282,27 @@ pub(crate) mod tests {
     };
     eprintln!("\n  s   in dB  vad>0.5%  | per model: no gate dB / gate dB / gate open %   (DFN3 | DPDFNet | RNNoise)");
     for s in 0..secs {
-      let cols: Vec<String> = outs
-        .iter()
-        .map(|(u, g)| format!("{:6.1} {:6.1} {:5.1}", sec_db(u, s), sec_db(g, s), open(g, u, s)))
-        .collect();
+      let cols: Vec<String> =
+        outs.iter().map(|(u, g)| format!("{:6.1} {:6.1} {:5.1}", sec_db(u, s), sec_db(g, s), open(g, u, s))).collect();
       eprintln!("{s:4} {:6.1} {:7.1}    | {}", sec_db(&input, s), voice_share(s), cols.join(" | "));
     }
 
     // Seconds with clear speech (raw detector > 0.5 on >= 30 % of frames) vs none (0 %).
     let speech: Vec<usize> = (0..secs).filter(|&s| voice_share(s) >= 30.0).collect();
     let quiet: Vec<usize> = (0..secs).filter(|&s| voice_share(s) == 0.0).collect();
-    eprintln!("\nspeech seconds {}, no-speech seconds {}, other {}", speech.len(), quiet.len(), secs - speech.len() - quiet.len());
-    let energy = |x: &[f32], set: &[usize]| set.iter().map(|&s| x.get(s * SEC..(s + 1) * SEC).unwrap_or_default().iter().map(|v| v * v).sum::<f32>()).sum::<f32>().max(1e-12);
+    eprintln!(
+      "\nspeech seconds {}, no-speech seconds {}, other {}",
+      speech.len(),
+      quiet.len(),
+      secs - speech.len() - quiet.len()
+    );
+    let energy = |x: &[f32], set: &[usize]| {
+      set
+        .iter()
+        .map(|&s| x.get(s * SEC..(s + 1) * SEC).unwrap_or_default().iter().map(|v| v * v).sum::<f32>())
+        .sum::<f32>()
+        .max(1e-12)
+    };
     for (model, (u, g)) in models.iter().zip(&outs) {
       // Voice frames (raw detector > 0.5) where the gate was closed (gated > 6 dB under ungated).
       let (mut vf, mut cut) = (0usize, 0usize);
@@ -1936,7 +2342,7 @@ pub(crate) mod tests {
     let signals = [read_wav_48k(SCENARIO), read_wav_48k(KEYS)];
     let keys_len = signals[1].len();
     let s = |a: usize, b: usize| a * HALF_SEC..b * HALF_SEC; // in half seconds
-    // (name, signal index, samples) -- 10 ms frame ranges are derived from these.
+                                                             // (name, signal index, samples) -- 10 ms frame ranges are derived from these.
     let segments: [(&str, usize, std::ops::Range<usize>); 9] = [
       ("room 1-18 s", 0, s(2, 36)),
       ("whisper 20-24 s", 0, s(40, 48)),
@@ -1953,7 +2359,11 @@ pub(crate) mod tests {
       let g = 10f32.powf(gain_db / 20.0) * I16_SCALE;
       let mut st = DenoiseState::new();
       let mut scratch = [0.0f32; FRAME_SIZE];
-      x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| st.process_frame(&mut scratch, &f.map(|s| (s * g).clamp(-32768.0, 32767.0)))).collect()
+      x.as_chunks::<FRAME_SIZE>()
+        .0
+        .iter()
+        .map(|f| st.process_frame(&mut scratch, &f.map(|s| (s * g).clamp(-32768.0, 32767.0))))
+        .collect()
     };
     let frame_db = |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| db(rms(f))).collect() };
     let pct = |v: &[f32], p: f32| -> f32 {
@@ -1964,10 +2374,20 @@ pub(crate) mod tests {
     let share = |v: &[bool]| v.iter().filter(|&&b| b).count() as f32 / v.len().max(1) as f32 * 100.0;
     let prob_stats = |v: &[f32]| {
       let over = |t: f32| v.iter().filter(|&&p| p > t).count() as f32 / v.len().max(1) as f32 * 100.0;
-      format!("p50 {:.2} p90 {:.2} max {:.2} | >0.05 {:4.1}% >0.3 {:4.1}% >0.5 {:4.1}%", pct(v, 0.5), pct(v, 0.9), pct(v, 1.0), over(0.05), over(0.3), over(0.5))
+      format!(
+        "p50 {:.2} p90 {:.2} max {:.2} | >0.05 {:4.1}% >0.3 {:4.1}% >0.5 {:4.1}%",
+        pct(v, 0.5),
+        pct(v, 0.9),
+        pct(v, 1.0),
+        over(0.05),
+        over(0.3),
+        over(0.5)
+      )
     };
     // Clamped: model outputs are shorter than the input by their latency.
-    let slice = |v: &[f32], r: std::ops::Range<usize>| v.get(r.start.min(v.len())..r.end.min(v.len())).unwrap_or_default().to_vec();
+    let slice = |v: &[f32], r: std::ops::Range<usize>| {
+      v.get(r.start.min(v.len())..r.end.min(v.len())).unwrap_or_default().to_vec()
+    };
 
     eprintln!("== RNNoise voice probability on the raw input, gain applied only to the detector");
     for gain in [0.0f32, 12.0, 24.0] {
@@ -1981,9 +2401,16 @@ pub(crate) mod tests {
     let models = [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet, DenoiseModel::RnNoise];
     let outs: Vec<Vec<Vec<f32>>> = models
       .iter()
-      .map(|&m| signals.iter().map(|s| run(m, GATE_OFF_DB - 1.0, s).get(latency_samples(m)..).unwrap_or_default().to_vec()).collect())
+      .map(|&m| {
+        signals
+          .iter()
+          .map(|s| run(m, GATE_OFF_DB - 1.0, s).get(latency_samples(m)..).unwrap_or_default().to_vec())
+          .collect()
+      })
       .collect();
-    eprintln!("\n== Output detector (RNNoise probability on the ungated model output) and output level per 10 ms frame");
+    eprintln!(
+      "\n== Output detector (RNNoise probability on the ungated model output) and output level per 10 ms frame"
+    );
     for (m, out) in models.iter().zip(&outs) {
       let p: Vec<Vec<f32>> = out.iter().map(|s| probs(s, 0.0)).collect();
       let l: Vec<Vec<f32>> = out.iter().map(|s| frame_db(s)).collect();
@@ -2017,13 +2444,18 @@ pub(crate) mod tests {
           .collect()
       })
       .collect();
-    eprintln!("\n== DFN3 lsnr (dB); min over the whole file: {:.1}", lsnr.iter().flatten().copied().fold(f32::MAX, f32::min));
+    eprintln!(
+      "\n== DFN3 lsnr (dB); min over the whole file: {:.1}",
+      lsnr.iter().flatten().copied().fold(f32::MAX, f32::min)
+    );
     let runs = |v: &[bool], n: u32| -> Vec<bool> {
       let mut c = 0u32;
-      v.iter().map(|&b| {
-        c = if b { c + 1 } else { 0 };
-        c >= n
-      }).collect()
+      v.iter()
+        .map(|&b| {
+          c = if b { c + 1 } else { 0 };
+          c >= n
+        })
+        .collect()
     };
     for (name, i, r) in &segments {
       let v = slice(&lsnr[*i], frames(r));
@@ -2042,7 +2474,9 @@ pub(crate) mod tests {
     }
 
     // Idea N2: DFN3 output energy over a tracked floor (rises 2 dB/s, falls at once, >= -75 dBFS).
-    eprintln!("\n== N2 key: share of frames the DFN3 output energy key would open (open dB over floor x frames in a row)");
+    eprintln!(
+      "\n== N2 key: share of frames the DFN3 output energy key would open (open dB over floor x frames in a row)"
+    );
     let n2 = |x: &[f32], open_db: f32, min_frames: u32| -> Vec<bool> {
       let mut floor = -75.0f32;
       let above: Vec<bool> = frame_db(x)
@@ -2058,13 +2492,16 @@ pub(crate) mod tests {
     let held = |k: &[bool]| -> Vec<bool> {
       let hold = (GATE_HOLD_SAMPLES / FRAME_SIZE) as u32;
       let mut left = 0u32;
-      k.iter().map(|&b| {
-        left = if b { hold } else { left.saturating_sub(1) };
-        left > 0
-      }).collect()
+      k.iter()
+        .map(|&b| {
+          left = if b { hold } else { left.saturating_sub(1) };
+          left > 0
+        })
+        .collect()
     };
     let configs = [(12.0f32, 5u32), (9.0, 5), (15.0, 5), (12.0, 10)];
-    let keyed: Vec<Vec<Vec<bool>>> = configs.iter().map(|&(o, n)| outs[0].iter().map(|s| n2(s, o, n)).collect()).collect();
+    let keyed: Vec<Vec<Vec<bool>>> =
+      configs.iter().map(|&(o, n)| outs[0].iter().map(|s| n2(s, o, n)).collect()).collect();
     for (label, with_hold) in [("raw", false), ("+200 ms hold", true)] {
       eprintln!("  -- {label}");
       for (name, i, r) in &segments {
@@ -2074,7 +2511,10 @@ pub(crate) mod tests {
           .map(|((o, n), k)| {
             let k = if with_hold { held(&k[*i]) } else { k[*i].clone() };
             let f = frames(r);
-            format!("{o:2}dB x{n:2}: {:5.1}%", share(k.get(f.start.min(k.len())..f.end.min(k.len())).unwrap_or_default()))
+            format!(
+              "{o:2}dB x{n:2}: {:5.1}%",
+              share(k.get(f.start.min(k.len())..f.end.min(k.len())).unwrap_or_default())
+            )
           })
           .collect();
         eprintln!("  {name:<20} {}", cols.join(" | "));
@@ -2098,7 +2538,9 @@ pub(crate) mod tests {
       return;
     }
     let lat = latency_samples(DenoiseModel::DeepFilterNet);
-    let dfn = |x: &[f32]| -> Vec<f32> { run(DenoiseModel::DeepFilterNet, GATE_OFF_DB - 1.0, x).get(lat..).unwrap_or_default().to_vec() };
+    let dfn = |x: &[f32]| -> Vec<f32> {
+      run(DenoiseModel::DeepFilterNet, GATE_OFF_DB - 1.0, x).get(lat..).unwrap_or_default().to_vec()
+    };
     let inputs = [read_wav_48k(SCENARIO), read_wav_48k(KEYS)];
     let outs: Vec<Vec<f32>> = inputs.iter().map(|x| dfn(x)).collect();
     let s = |a: usize, b: usize| a * HALF_SEC / FRAME_SIZE..b * HALF_SEC / FRAME_SIZE; // frames
@@ -2113,7 +2555,8 @@ pub(crate) mod tests {
       ("keys.wav", 1, 0..keys_frames),
     ];
     let frame_db = |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| db(rms(f))).collect() };
-    let frame_e = |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| f.iter().map(|v| v * v).sum()).collect() };
+    let frame_e =
+      |x: &[f32]| -> Vec<f32> { x.as_chunks::<FRAME_SIZE>().0.iter().map(|f| f.iter().map(|v| v * v).sum()).collect() };
     let pct = |v: &[f32], p: f32| -> f32 {
       let mut s = v.to_vec();
       s.sort_by(f32::total_cmp);
@@ -2125,7 +2568,13 @@ pub(crate) mod tests {
     for (name, x) in [("raw input", &inputs[0]), ("DFN3 output", &outs[0])] {
       let l = frame_db(x);
       let l = l.get(room.clone()).unwrap_or_default();
-      eprintln!("room {name:<12} per 10 ms: p10 {:6.1} p50 {:6.1} p90 {:6.1} p99 {:6.1} dBFS", pct(l, 0.1), pct(l, 0.5), pct(l, 0.9), pct(l, 0.99));
+      eprintln!(
+        "room {name:<12} per 10 ms: p10 {:6.1} p50 {:6.1} p90 {:6.1} p99 {:6.1} dBFS",
+        pct(l, 0.1),
+        pct(l, 0.5),
+        pct(l, 0.9),
+        pct(l, 0.99)
+      );
     }
 
     // The key: floor from raw input or from the output, level from the output.
@@ -2164,12 +2613,16 @@ pub(crate) mod tests {
     };
     let energies: Vec<Vec<f32>> = outs.iter().map(|o| frame_e(o)).collect();
     eprintln!("\n== Sweep. Speech columns: loss vs no gate (0 best). Noise columns: noise let through (0 = gate shut, 12 = open)");
-    eprintln!("  floor  open forgive hold | {}", segments.iter().map(|(n, _, _)| format!("{n:>8}")).collect::<Vec<_>>().join(" "));
+    eprintln!(
+      "  floor  open forgive hold | {}",
+      segments.iter().map(|(n, _, _)| format!("{n:>8}")).collect::<Vec<_>>().join(" ")
+    );
     for from_input in [false, true] {
       for open_db in [6.0f32, 9.0, 12.0] {
         for forgive in [false, true] {
           for hold_ms in [0u32, 50, 100, 200] {
-            let keyed: Vec<Vec<bool>> = inputs.iter().zip(&outs).map(|(i, o)| key(i, o, from_input, open_db, forgive, hold_ms / 10)).collect();
+            let keyed: Vec<Vec<bool>> =
+              inputs.iter().zip(&outs).map(|(i, o)| key(i, o, from_input, open_db, forgive, hold_ms / 10)).collect();
             let cols: Vec<String> = segments
               .iter()
               .enumerate()
@@ -2178,7 +2631,12 @@ pub(crate) mod tests {
                 format!("{:8.1}", if n < 4 { l } else { l - GATE_FLOOR_DB })
               })
               .collect();
-            eprintln!("  {:<6} {open_db:4} {:<7} {hold_ms:4} | {}", if from_input { "input" } else { "output" }, forgive, cols.join(" "));
+            eprintln!(
+              "  {:<6} {open_db:4} {:<7} {hold_ms:4} | {}",
+              if from_input { "input" } else { "output" },
+              forgive,
+              cols.join(" ")
+            );
           }
         }
       }
@@ -2186,7 +2644,10 @@ pub(crate) mod tests {
 
     // Step 2: clean whisper (20-24 s + 26.5-31.5 s) under keys.wav, DFN3 without gate.
     let sc = &inputs[0];
-    let whisper: Vec<f32> = [40..48, 53..63].iter().flat_map(|r| sc.get(r.start * HALF_SEC..r.end * HALF_SEC).unwrap_or_default().iter().copied()).collect();
+    let whisper: Vec<f32> = [40..48, 53..63]
+      .iter()
+      .flat_map(|r| sc.get(r.start * HALF_SEC..r.end * HALF_SEC).unwrap_or_default().iter().copied())
+      .collect();
     let keys: Vec<f32> = inputs[1].iter().cycle().take(whisper.len()).copied().collect();
     eprintln!("\n== Whisper under keys.wav, DFN3 without gate (dropouts: frames > 15 dB under the clean whisper)");
     for snr in [None, Some(0.0f32), Some(-10.0)] {
@@ -2199,14 +2660,24 @@ pub(crate) mod tests {
       };
       let out = run(DenoiseModel::DeepFilterNet, GATE_OFF_DB - 1.0, &mixed);
       let q = measure(&whisper, &mixed, &out, lat);
-      eprintln!("  SNR {snr:?}: loud whisper lost {:4.1} %, soft {:4.1} %", q.dropouts * 100.0, q.soft_dropouts * 100.0);
+      eprintln!(
+        "  SNR {snr:?}: loud whisper lost {:4.1} %, soft {:4.1} %",
+        q.dropouts * 100.0,
+        q.soft_dropouts * 100.0
+      );
     }
 
     // What each model alone (no gate) keeps of the whisper sections, energy out / in, both after
     // the default EQ's 100 Hz low cut (breath pops and desk thumps are removed there anyway).
     let low_cut = |x: &[f32]| {
       let mut eq = BiquadCascade::default();
-      let band = BiquadBand { filter_type: FilterType::HighPass, frequency: 100.0, q: 0.707, slope_db: 48, ..BiquadBand::default() };
+      let band = BiquadBand {
+        filter_type: FilterType::HighPass,
+        frequency: 100.0,
+        q: 0.707,
+        slope_db: 48,
+        ..BiquadBand::default()
+      };
       eq.set_bands(&[band], 48_000.0);
       let mut y = x.to_vec();
       eq.process(&mut y);
@@ -2235,7 +2706,9 @@ pub(crate) mod tests {
     }
 
     // A "whisper mode" candidate: lower strength, no gate. Whisper kept vs noise removed.
-    eprintln!("\n== Strength sweep, no gate: whisper / quiet whisper / whisper+type kept, room / keys.wav removed (dB)");
+    eprintln!(
+      "\n== Strength sweep, no gate: whisper / quiet whisper / whisper+type kept, room / keys.wav removed (dB)"
+    );
     for model in [DenoiseModel::DeepFilterNet, DenoiseModel::RnNoise] {
       for strength in [0.25f32, 0.4, 0.5, 0.75] {
         let l = latency_samples(model);
@@ -2251,7 +2724,10 @@ pub(crate) mod tests {
         let e = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>().max(1e-12);
         let (o, ok) = (go(sc), go(&inputs[1]));
         let ratio = |a: usize, b: usize| {
-          10.0 * (e(o.get(a * HALF_SEC + l..b * HALF_SEC + l).unwrap_or_default()) / e(sc.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default())).log10()
+          10.0
+            * (e(o.get(a * HALF_SEC + l..b * HALF_SEC + l).unwrap_or_default())
+              / e(sc.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default()))
+            .log10()
         };
         let keys_removed = 10.0 * (e(&inputs[1]) / e(ok.get(l..).unwrap_or_default())).log10();
         eprintln!(
@@ -2303,8 +2779,7 @@ pub(crate) mod tests {
     eprintln!("DFN3 cpu: {:.2} % (0.75), {:.2} % (1.0) of a core", secs[0], secs[1]);
     match std::fs::read(&path) {
       Ok(bytes) => {
-        let reference: Vec<f32> =
-          bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
+        let reference: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(reference.len(), out.len());
         let max_diff = reference.iter().zip(&out).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         let err: Vec<f32> = reference.iter().zip(&out).map(|(a, b)| a - b).collect();
@@ -2329,7 +2804,9 @@ pub(crate) mod tests {
   fn echo_gate_report() {
     let base = std::path::Path::new(FIXTURES).join("../private");
     let Ok(dirs) = std::fs::read_dir(base.join("captures")) else { return eprintln!("no captures") };
-    eprintln!("capture          model          echo-only blocks: voice% gate% out dBFS | no far end: blocks voice% gate%");
+    eprintln!(
+      "capture          model          echo-only blocks: voice% gate% out dBFS | no far end: blocks voice% gate%"
+    );
     for dir in dirs.flatten().map(|d| d.path()) {
       let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
       let aec3_file = format!("../private/aec_ab/{name}_aec3.wav");
@@ -2460,7 +2937,12 @@ pub(crate) mod tests {
       let all: Vec<f32> = fc.iter().flatten().copied().collect();
       let voice = pc.iter().filter(|&&v| v > VOICE_PROB).count() * 2;
       let clicks = fc.iter().filter(|f| db(f.iter().fold(0.0f32, |m, s| m.max(s.abs()))) - db(rms(*f)) > 20.0).count();
-      eprintln!("{:5.1} {:6.1} dB voice {voice:3}% clicks {clicks:2} {}", i as f32 * 0.5, db(rms(&all)), "#".repeat(voice / 5));
+      eprintln!(
+        "{:5.1} {:6.1} dB voice {voice:3}% clicks {clicks:2} {}",
+        i as f32 * 0.5,
+        db(rms(&all)),
+        "#".repeat(voice / 5)
+      );
     }
   }
 
@@ -2556,5 +3038,4 @@ pub(crate) mod tests {
       eprintln!();
     }
   }
-
 }

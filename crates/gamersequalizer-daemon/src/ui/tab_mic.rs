@@ -501,7 +501,10 @@ fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
 
 /// At or below this strength the denoiser is bypassed (matches AiVoiceIsolator).
 const DENOISE_OFF_STRENGTH: f32 = 0.001;
-/// Strength restored when a model is picked again after "Off".
+/// Strength restored when a model is picked again after "Off". Not 100 % (`strength_report`,
+/// private voice, 2026-11-08): DFN3 and DPDFNet gain only ~1 dB in pauses (the gate covers them),
+/// DFN3 loses more voice under clicks (5.8 -> 7.1 %), and RNNoise (stand-in in pauses, the click
+/// rescue's source) loses 1.6 -> 12 % of soft syllables under loud keys.
 const DENOISE_DEFAULT_STRENGTH: f32 = 0.75;
 
 fn denoise_section(ui: &mut Ui, state: &mut AppState) {
@@ -592,7 +595,11 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
     egui::Grid::new("denoise_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
       ui.label(tr("Suppression strength:"));
       ui.spacing_mut().slider_width = BAR_WIDTH;
-      changed |= ui.add(egui::Slider::new(&mut ai_strength, 0.0..=1.0).show_value(true)).changed();
+      let slider = egui::Slider::new(&mut ai_strength, 0.0..=1.0)
+        .show_value(true)
+        .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
+        .custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0));
+      changed |= ui.add(slider).changed();
       ui.end_row();
 
       // Any old threshold value (e.g. -45) means "on": the gate is automatic now.
