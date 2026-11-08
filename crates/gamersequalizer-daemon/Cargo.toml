@@ -23,7 +23,6 @@ tray-icon = { workspace = true }
 muda = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-thiserror = { workspace = true }
 # Already in the tree via env_logger; local-time formatting of the APO build stamp.
 jiff = "0.2"
 

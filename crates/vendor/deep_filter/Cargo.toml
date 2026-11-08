@@ -37,10 +37,10 @@ tract = [
 [dependencies]
 rustfft = "6.1"
 realfft = "3.1"
-itertools = "0.12"
+itertools = "0.15"
 num-complex = { version = "0.4", features = ["serde"] }
 log = { version = "0.4", features = ["std"], optional = true }
-thiserror = { version = "1.0", optional = true }
+thiserror = { version = "2.0", optional = true }
 anyhow = { version = "1.0", optional = true, features = ["backtrace"] }
 ndarray = { version = "0.17", optional = true }
 crossbeam-channel = { version = "0.5", optional = true }

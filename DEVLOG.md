@@ -877,3 +877,7 @@ Every outdated direct dependency was moved to its current major version, and the
   poll, so it is polled once with a no-op waker (no async runtime pulled in).
 - The `deep_filter` fork loses its rubato resampling (unused).
 - npm (CodeGraph only) was already up to date.
+- **Dependency trim**: crates compiled on Windows 315 -> 276. `nnnoiseless` and `env_logger` without
+  default features (nnnoiseless's CLI pulled clap/hound/dasp; we format log lines ourselves), unused
+  `thiserror` (common, daemon) and `env_logger`/`realfft` (mic crate) dropped, the `deep_filter` fork
+  moved to thiserror 2 and itertools 0.15 (no second copies of them any more).

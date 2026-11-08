@@ -18,10 +18,7 @@ windows = { workspace = true }
 windows-core = { workspace = true }
 nnnoiseless = { workspace = true }
 log = { workspace = true }
-env_logger = { workspace = true }
 rustfft = "6.4"
-# Real-input FFT (delay estimator, DPDFNet STFT, latency meter; already in the tree via deep_filter).
-realfft = "3.5"
 # DeepFilterNet 3: our inference-only fork of upstream libDF (rev d375b2d) on tract 0.23, the
 # tract DPDFNet uses too (upstream pins tract 0.21). See crates/vendor/deep_filter/README.md.
 deep_filter = { path = "../vendor/deep_filter", features = ["tract", "default-model"] }
