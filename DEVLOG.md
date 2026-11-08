@@ -912,3 +912,84 @@ Six items left open after `c17f31f`, each with a regression test.
   a changed model id). New `denoise_retry_seq` in shared memory (layout v15), bumped by clicking
   the running model; the DSP clears its load error / overload and starts a load. The load-failed
   note now says "Pick {} again to retry", as the overload note already did (it did not work either).
+
+## Milestone 34: DeepFilterNet 3 click rescue, strength in percent (2026-11-08)
+
+**Report.** In a call, a friend heard pieces of the user's voice missing while the user hammered
+the mouse button next to the mic (Voice Recorder take 13: pauses digitally silent, dips to
+-86..-95 dBFS inside words). The user suspected the mic at 100 %.
+
+**Not the mic gain.** Log: Windows mic volume +1.6 dB, voice learned at -31 dBFS, no clip and no
+stalled DSP calls. The raw take the user recorded later (processing off, typing while talking,
+`test_data/private/keyboard_call.wav`) peaks at -22.8 dBFS with no clipped sample. Gain scales voice
+and click alike, so it cannot change how well they separate; a clip would distort ~1 ms, not remove
+20-100 ms.
+
+**Not the DFN3 zero-mask threshold either.** First guess was `DF_MIN_DB_THRESH`: frames under it
+get a zero mask. But the model's LSNR output is bounded to -15..35 dB (`lsnr_min = -15` in the
+DFN3 config inside `models/DeepFilterNet3_onnx.tar.gz`), so -20 never fires. The cut comes from
+the ERB mask itself: a loud click dominates the frame and DFN3 attenuates the voice with it.
+
+**Reproduced offline** (`click_report`): ESC-50 mouse clicks (class 31) as clean taps, 40 ms each,
+every 120 ms ("hammering"), peaks at -20/-10/-3 dBFS over the private voice at -30 dBFS. Sparse
+clicks at the clips' own spacing did not reproduce it (< 3 % lost); dense ones did. New metric:
+speech frames with a click within 10 dB of the voice, share lost > 6 / > 15 dB. At -3 dBFS, gate
+auto: DFN3 lost > 15 dB in 16.3 % of them (> 6 dB in 43.5 %), DPDFNet 2.0 %, RNNoise 0 %. The
+gate is not the cause (gate off: the same).
+
+**Why not a setting.** Strength (DFN3 attenuation limit) 0.25 brought it to 2.7 % but pause
+suppression fell 39 -> 19 dB. The user tried DPDFNet: no cuts, but "sounds like a blocked nose",
+so they wanted DFN3 fixed.
+
+**Fix: `ClickRescue` (DFN3 only).** RNNoise (which keeps the voice under clicks) runs next to DFN3
+on a copy of the input, delayed to DFN3's latency by the existing stand-in `sleep_delay`. Where
+DFN3's output is >= 6 dB under RNNoise's (5 ms energy envelopes) while speech is heard, the output
+crossfades to RNNoise (in ~2 ms, out ~30 ms). What arms it was the hard part, tried in order:
+1. Raw-input detector with hysteresis (`vad`): cuts gone, but the hysteresis stays on while
+   clicks go on; pause suppression on clicks 39 -> 7 dB.
+2. Raw RNNoise probability > 0.5, then 2 frames in a row: private voice fine, but the shared
+   keyboard mix (keys 10 dB over the voice) fell 35 -> 12 dB in pauses. Split by distance from
+   speech showed the leak even > 300 ms from any word: loud keys alone score speech frames on the
+   raw input.
+3. DFN3 dip under its own 50 ms level, RNNoise capped at it: pauses clean, but rescued only half
+   (16 -> 9 %), and capping at the output's level ducked the voice under clicks (> 6 dB 11 -> 33 %).
+4. **Kept:** a voice detector (`VoiceNet`, p > 0.5) on DFN3's own output, hold 100 ms. Keys are
+   gone there, the voice stays in most frames, so the hold covers the frames DFN3 cut. Threshold
+   0.3/0.5/0.7 measured alike; hold 50/100/200 ms traded voice against clicks in short pauses
+   (100 kept); a 10 ms crossfade out changed nothing.
+
+**Result.**
+
+| Measurement                                          | DFN3 before | DFN3 rescue | DPDFNet |
+| ---------------------------------------------------- | ----------- | ----------- | ------- |
+| Raw take (`keyboard_call_report`): speech frames cut | 8.0 %       | 1.4 %       | 3.3 %   |
+| Hammered clicks -3 dBFS, private: lost > 15 dB       | 16.3 %      | 5.8 %       | 2.0 %   |
+| Same, shared speech fixture                          | 5.5 %       | 1.4 %       | -       |
+| Shared mixes, pauses > 150 ms from speech            | 38-43 dB    | 38-43 dB    | -       |
+
+"Cut" in the raw take = 10 ms frame > 10 dB under RNNoise where RNNoise is within 25 dB of its
+loudest (no clean reference exists); quiet frames -79.3 -> -79.1 dBFS. Processed takes for
+listening go to `test_data/private/out/keyboard_call_*.wav`. The user installed the APO and
+confirmed it works in a call.
+
+**Trade-off (voice over keys).** Within the hold, keys next to words come through as RNNoise leaves
+them: the shared keyboard mix with keys 10 dB over the voice keeps 42.8 dB in far pauses but 20 dB
+over all pauses (35+ before). `test_deepfilter_keeps_soft_speech_over_keyboard` now asserts far
+pauses > 35 dB and all pauses > 15 dB; `measure` got `far_suppression_db` (pauses >= 15 frames from
+speech: hold + crossfade + detector frame). Cost: two extra RNNoise passes while DFN3 runs
+(~0.5 % of a core).
+
+**Strength stays 75 %, now shown in percent.** The user asked whether 100 % would be a better
+default. `strength_report` (private voice, gate auto + lookahead):
+- DFN3: pauses +1-2 dB, voice lost under clicks 5.8 -> 7.1 %.
+- DPDFNet: pauses ~+1 dB, clicks cleaner, voice the same (the only one that would gain).
+- RNNoise: pauses 14 -> 26-33 dB, but soft syllables under loud keys 1.6 -> 12 %. It stands in
+  for a sleeping heavy model and is the rescue's source, so it matters with DFN3 too.
+The gate already covers pauses, so the 46.5 dB limit vs unlimited barely matters for the heavy
+models. The slider shows "75 %" and accepts "90" or "90 %".
+
+**Open.** Not checked: how rescued frames sound (RNNoise's timbre for a few ms), a real mouse
+rather than ESC-50 clicks, a speech fixture with long pauses for the strength report (its far-pause
+column is empty on the private voice).
+
+Commit: `8dbfd74`.
