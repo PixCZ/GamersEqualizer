@@ -14,6 +14,16 @@ For a build that goes to testers. Needs the Rust MSVC toolchain on Windows; take
    .\scripts\package.ps1
    ```
 
+   Cargo reuses an up-to-date build: if nothing changed since the last `dist` build, this takes seconds
+   and packages that same (fully optimized) exe. To force a build from scratch, clean both profiles first:
+
+   ```powershell
+   cargo clean --profile dist
+   cargo clean --profile apo
+   ```
+
+   (`cargo clean` alone wipes all of `target`, including the dev build and the ZIPs in `target\package`.)
+
 3. The result is `target\package\GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>.zip`; the script prints
    its path, size and SHA256. Older ZIPs are kept.
 
