@@ -67,7 +67,8 @@ pub fn curves_plot(ui: &mut Ui, id: &str, freqs: &[f32], curves: &[Curve], pream
 }
 
 /// Searchable profile combo. Returns Some(choice) when the user picked something;
-/// choice None = the `none_label` entry.
+/// choice None = the `none_label` entry. Names are shown through `tr` (built-in profiles
+/// are translation keys, others pass through) but returned as stored.
 pub fn profile_picker(
   ui: &mut Ui,
   id: &str,
@@ -79,7 +80,7 @@ pub fn profile_picker(
 ) -> Option<Option<String>> {
   let mut picked = None;
   egui::ComboBox::from_id_salt(id)
-    .selected_text(super::truncate_chars(selected.unwrap_or(none_label), 34))
+    .selected_text(super::truncate_chars(selected.map_or(none_label, tr), 34))
     .width(width)
     .height(320.0)
     .show_ui(ui, |ui| {
@@ -88,8 +89,8 @@ pub fn profile_picker(
         picked = Some(None);
       }
       let needle = filter.to_lowercase();
-      for &name in names.iter().filter(|n| needle.is_empty() || n.to_lowercase().contains(&needle)) {
-        if ui.selectable_label(selected == Some(name), name).clicked() {
+      for &name in names.iter().filter(|n| needle.is_empty() || tr(n).to_lowercase().contains(&needle)) {
+        if ui.selectable_label(selected == Some(name), tr(name)).clicked() {
           picked = Some(Some(name.to_string()));
         }
       }

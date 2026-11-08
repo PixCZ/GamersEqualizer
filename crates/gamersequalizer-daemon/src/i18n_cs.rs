@@ -36,6 +36,7 @@ pub static CS: &[(&str, &str)] = &[
   ("The selected microphone", "Vybraný mikrofon"),
   ("Installer files were not found next to the app; reinstall the app.", "Soubory instalátoru nebyly nalezeny vedle aplikace; nainstalujte aplikaci znovu."),
   ("Why does this need administrator rights?", "Proč jsou potřeba práva správce?"),
+  ("{} is using the microphone right now (a call?). The install restarts Windows audio: the call loses the microphone and stays silent until you rejoin it or restart {}. Better finish the call first.", "{} právě používá mikrofon (hovor?). Instalace restartuje zvuk Windows: hovor ztratí mikrofon a zůstane v něm ticho, dokud se do něj znovu nepřipojíte nebo nerestartujete {}. Raději nejdřív dokončete hovor."),
   ("Continue – ask Windows", "Pokračovat – zeptat se Windows"),
   ("Not now", "Teď ne"),
   ("Make it the default", "Nastavit jako výchozí"),
@@ -194,6 +195,10 @@ pub static CS: &[(&str, &str)] = &[
   // --- game / chat / media ---
   ("Game EQ", "Herní EQ"),
   ("Import from Sonar DB", "Importovat z databáze Sonar"),
+  ("Genre: Shooter (footsteps)", "Žánr: Střílečka (kroky)"),
+  ("Genre: Competitive (max. clarity)", "Žánr: Kompetitivní (max. čitelnost)"),
+  ("Genre: Open world (immersion)", "Žánr: Otevřený svět (atmosféra)"),
+  ("Genre: Story and dialogue", "Žánr: Příběh a dialogy"),
   ("Game profiles on top of the headphone correction, switched by the game in the foreground.", "Herní profily nad korekcí sluchátek, přepínané podle hry v popředí."),
   ("Auto-detect game", "Automaticky rozpoznat hru"),
   ("Switch the profile when a game comes to the foreground; it stays until the game exits.", "Přepne profil, když se hra dostane do popředí; zůstane, dokud hra neskončí."),

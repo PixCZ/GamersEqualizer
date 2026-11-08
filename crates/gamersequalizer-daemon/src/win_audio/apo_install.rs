@@ -23,6 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 const MIC_APO_CLSID: &str = "{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}";
 const OUTPUT_APO_CLSID: &str = "{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}";
 const STREAM_APO_CLSID: &str = "{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}";
+const ALL_CLSIDS: [&str; 3] = [MIC_APO_CLSID, OUTPUT_APO_CLSID, STREAM_APO_CLSID];
 const DLL_NAME: &str = "gamersequalizer_apo.dll";
 /// The scripts are built into the exe, so a tester gets one exe + the DLL. Written out to
 /// `%LOCALAPPDATA%\GamersEqualizer\scripts` right before each elevated run.
@@ -137,16 +138,21 @@ fn endpoint_args(targets: &[(Flow, &str)]) -> Result<String, String> {
 /// Is this flow's APO in the effect lists of any endpoint (also unplugged ones)? Tells a new
 /// sound card the user's effect is missing on apart from "never wanted it there".
 pub fn installed_on_any(flow: Flow) -> bool {
-  let root = format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\{}", flow.as_str());
-  hklm_subkeys(&root).iter().any(|guid| endpoint_has_apo(flow, guid))
+  hklm_subkeys(&endpoints_root(flow)).iter().any(|guid| endpoint_has_apo(flow, guid))
 }
 
-/// Anything of ours left in the system: the installed DLL or a registered COM class.
+/// Anything of ours left in the system: the installed DLL, a registered COM class, or one of
+/// our CLSIDs in any endpoint's effect lists (also unplugged ones). The last one catches a
+/// half-done removal (DLL and classes gone, effect lists not), which would leave endpoints
+/// with an effect Windows can't load.
 pub fn is_registered() -> bool {
   installed_dll().is_some()
-    || [MIC_APO_CLSID, OUTPUT_APO_CLSID, STREAM_APO_CLSID]
-      .iter()
-      .any(|clsid| hklm_key_exists(&format!("SOFTWARE\\Classes\\CLSID\\{clsid}")))
+    || ALL_CLSIDS.iter().any(|clsid| hklm_key_exists(&format!("SOFTWARE\\Classes\\CLSID\\{clsid}")))
+    || [Flow::Capture, Flow::Render].into_iter().any(|flow| {
+      hklm_subkeys(&endpoints_root(flow))
+        .iter()
+        .any(|guid| endpoint_fx_lists(flow, guid).iter().any(|list| ALL_CLSIDS.iter().any(|c| list.contains(c))))
+    })
 }
 
 /// Starts the uninstall script elevated (UAC prompt): removes every APO class from every
@@ -272,12 +278,20 @@ pub(crate) fn endpoint_guid_of(capture_id: &str) -> Option<String> {
   (guid.starts_with('{') && guid.ends_with('}')).then(|| guid.to_string())
 }
 
+fn endpoints_root(flow: Flow) -> String {
+  format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\{}", flow.as_str())
+}
+
 fn endpoint_has_apo(flow: Flow, guid: &str) -> bool {
-  let key =
-    format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\{}\\{guid}\\FxProperties", flow.as_str());
-  let lists: Vec<String> =
-    FX_LIST_VALUES.iter().filter_map(|value| read_string_value(&key, value)).map(|l| l.to_ascii_lowercase()).collect();
+  let lists = endpoint_fx_lists(flow, guid);
   flow.clsids().iter().all(|clsid| lists.iter().any(|list| list.contains(clsid)))
+}
+
+/// The endpoint's composite effect lists, lowercased. Only these: the install script writes
+/// nothing else (a legacy value is copied into the composite list, never edited).
+fn endpoint_fx_lists(flow: Flow, guid: &str) -> Vec<String> {
+  let key = format!("{}\\{guid}\\FxProperties", endpoints_root(flow));
+  FX_LIST_VALUES.iter().filter_map(|value| read_string_value(&key, value)).map(|l| l.to_ascii_lowercase()).collect()
 }
 
 /// REG_SZ or REG_MULTI_SZ as one string (NULs become '\n').

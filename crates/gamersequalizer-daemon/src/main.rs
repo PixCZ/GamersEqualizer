@@ -93,6 +93,7 @@ fn run_background_daemon() {
   // Open or create shared memory for IPC
   let (shm_handle, shm_ptr) = ui::state::open_or_create_shm(storage.base_dir());
   let mut last_mic_version = 0;
+  let mut last_default_mic: Option<String> = None;
   let mut last_default_out: Option<String> = None;
   if let Some(ptr) = shm_ptr {
     let header = unsafe { &mut (*ptr.as_ptr()).header };
@@ -111,6 +112,7 @@ fn run_background_daemon() {
       win_audio.chatmix.mic_device_id = Some(id);
     }
     last_mic_version = header.mic_id_version.load(Ordering::Relaxed);
+    last_default_mic = win_audio.endpoint_lock.get_default_capture_id();
 
     header.master_volume_permille.store((win_audio.chatmix.master_volume * 1000.0).round() as u32, Ordering::Relaxed);
     header.master_muted.store(win_audio.chatmix.master_muted, Ordering::Relaxed);
@@ -178,15 +180,27 @@ fn run_background_daemon() {
         break;
       }
 
-      // Check for microphone input device change from UI
+      // The mic: the user's pick (from the window) while it is connected, else the Windows
+      // default. Re-resolved when the pick or the default changes; the default is polled with
+      // the output check below (one COM call per 250 ms).
       let cur_mic_ver = header.mic_id_version.load(Ordering::Relaxed);
-      if cur_mic_ver != last_mic_version {
+      let default_mic = if last_output_check.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL) {
+        win_audio.endpoint_lock.get_default_capture_id()
+      } else {
+        last_default_mic.clone()
+      };
+      if cur_mic_ver != last_mic_version || default_mic != last_default_mic {
         last_mic_version = cur_mic_ver;
-        if let Some(new_mic_id) = header.get_selected_mic_id() {
+        last_default_mic = default_mic;
+        let captures = win_audio.endpoint_lock.enumerate_capture_devices();
+        let picked = header.get_selected_mic_id().filter(|id| captures.iter().any(|d| &d.id == id));
+        let wanted = picked.or_else(win_audio::ChatMixController::find_physical_microphone);
+        if wanted.is_some() && wanted != win_audio.chatmix.mic_device_id {
+          info!("[GamersEqualizer] microphone now {:?}", wanted);
           let old = win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
           mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
-          win_audio.chatmix.mic_device_id = Some(new_mic_id.clone());
-          win_audio.mic_stream.set_input_device(Some(new_mic_id));
+          win_audio.chatmix.mic_device_id = wanted.clone();
+          win_audio.mic_stream.set_input_device(wanted);
         }
       }
 
@@ -199,7 +213,7 @@ fn run_background_daemon() {
         let default_out = win_audio.endpoint_lock.get_default_output_id();
         if default_out.is_some() && default_out != last_default_out {
           let devices = win_audio.endpoint_lock.enumerate_playback_devices();
-          let master = win_audio::chatmix::physical_master_id(&devices, default_out.as_deref());
+          let master = win_audio::chatmix::physical_endpoint_id(&devices, default_out.as_deref());
           if master != win_audio.chatmix.master_device_id {
             info!("[GamersEqualizer] default output changed: Master and echo reference now {:?}", master);
             win_audio.chatmix.master_device_id = master;

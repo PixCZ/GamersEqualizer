@@ -18,6 +18,7 @@
 
 pub mod autoeq;
 pub mod game_match;
+pub mod game_presets;
 pub mod launchers;
 pub mod settings;
 

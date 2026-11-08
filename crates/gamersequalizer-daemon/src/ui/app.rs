@@ -100,27 +100,20 @@ impl eframe::App for GamersEqualizerApp {
       if self.state.selected_chat_endpoint_id.is_none() {
         self.state.selected_chat_endpoint_id = self.win_audio.chatmix.chat_device_id.clone().or(current_sys_comms);
       }
-      // Keep the picked mic while it is connected (`bind_endpoints` just reset it to a guess).
+      // The mic the user picked while it is connected, else the Windows default that
+      // `bind_endpoints` resolved. Only a pick is saved: an unplugged pick comes back on replug,
+      // and a guess never sticks (it once kept a laptop mic after a USB headset became default).
       let picked = self
         .state
-        .selected_mic_endpoint_id
-        .clone()
+        .shm_header()
+        .and_then(|h| h.get_selected_mic_id())
         .filter(|id| self.state.capture_endpoints.iter().any(|d| &d.id == id));
-      if let Some(id) = picked {
-        self.win_audio.chatmix.mic_device_id = Some(id);
-      } else {
-        // Shortcut: an unplugged pick is replaced (and saved) for good, not restored on replug.
-        let mid = self
-          .win_audio
-          .chatmix
-          .mic_device_id
-          .clone()
-          .or_else(|| self.win_audio.endpoint_lock.get_default_capture_id());
-        self.state.selected_mic_endpoint_id = mid.clone();
-        if let Some(ref id) = mid {
-          self.state.set_shm_selected_mic(id);
-          self.win_audio.mic_stream.set_input_device(Some(id.clone()));
-        }
+      if let Some(ref id) = picked {
+        self.win_audio.chatmix.mic_device_id = Some(id.clone());
+      }
+      self.state.selected_mic_endpoint_id = picked;
+      if let Some(id) = self.win_audio.chatmix.mic_device_id.clone() {
+        self.win_audio.mic_stream.set_input_device(Some(id));
       }
       self.state.spatial_checked_at = None;
     }

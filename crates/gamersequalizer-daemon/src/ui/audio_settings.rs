@@ -34,6 +34,9 @@ pub struct AudioSettings {
   /// Mic level above Windows' 100 % (digital boost), 1000 = no boost. Below 100 % Windows owns it.
   pub mic_boost_permille: u32,
   pub mic_device_id: Option<String>,
+  /// `mic_device_id` is the user's own pick. Files from older builds lack it: there the id may be
+  /// a guess (the first mic in the list), so it is dropped once and the default mic is used.
+  pub mic_device_picked: bool,
   pub mic_leveler_enabled: bool,
   pub mic_leveler_target_db_x10: i32,
   /// Windows mic volume the automatic input gain set, and the volume the user/app wants
@@ -86,6 +89,8 @@ impl AudioSettings {
       balance_permille: h.chatmix_balance_permille.load(r),
       mic_boost_permille: h.mic_volume_permille.load(r).max(1000),
       mic_device_id: h.get_selected_mic_id(),
+      // Shared memory holds only picks (an empty id = follow the Windows default).
+      mic_device_picked: h.get_selected_mic_id().is_some(),
       mic_leveler_enabled: h.mic_leveler_enabled.load(r),
       mic_leveler_target_db_x10: h.mic_leveler_target_db_x10.load(r),
       mic_auto_gain_permille: h.mic_auto_gain_permille.load(r),
@@ -119,7 +124,7 @@ impl AudioSettings {
       h.mic_volume_permille.store(self.mic_auto_wish_permille, r);
       h.mic_auto_gain_permille.store(auto, r);
     }
-    if let Some(id) = &self.mic_device_id {
+    if let Some(id) = self.mic_device_id.as_ref().filter(|_| self.mic_device_picked) {
       h.set_selected_mic_id(id);
     }
   }
@@ -191,6 +196,12 @@ mod tests {
     lowered.mic_volume_permille.store(500, Ordering::Relaxed);
     AudioSettings::load_or_default(&dir).apply_to_header(&mut lowered);
     assert_eq!(lowered.mic_volume_permille.load(Ordering::Relaxed), 500);
+
+    // An older build saved a guessed mic without the flag: it is not taken as a pick.
+    std::fs::write(dir.join(FILE), r#"{ "mic_device_id": "{laptop-mic}" }"#).unwrap();
+    let mut old = ShmHeader::default();
+    AudioSettings::load_or_default(&dir).apply_to_header(&mut old);
+    assert_eq!(old.get_selected_mic_id(), None);
 
     std::fs::write(dir.join(FILE), "{ nope").unwrap();
     assert_eq!(AudioSettings::load_or_default(&dir), AudioSettings::default());

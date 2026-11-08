@@ -1,5 +1,5 @@
 use super::app_channels::{self, AppChannel};
-use super::endpoint_lock::AudioEndpointInfo;
+use super::endpoint_lock::{get_endpoint_info, AudioEndpointInfo};
 use std::collections::HashSet;
 use std::time::Instant;
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE};
@@ -225,37 +225,24 @@ impl ChatMixController {
     }
   }
 
+  /// The mic to work with: the Windows default, unless it is a virtual device (then the first
+  /// physical one). Not the first in the list: on a laptop that is often a different mic.
   pub fn find_physical_microphone() -> Option<String> {
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
       let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+      let default_id = enumerator
+        .GetDefaultAudioEndpoint(eCapture, eConsole)
+        .and_then(|d| d.GetId())
+        .ok()
+        .and_then(|id| id.to_string().ok());
       let collection = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE).ok()?;
       let count = collection.GetCount().ok()?;
-      for i in 0..count {
-        if let Ok(dev) = collection.Item(i) {
-          let store = dev.OpenPropertyStore(windows::Win32::System::Com::STGM_READ).ok();
-          let name = store
-            .and_then(|s| s.GetValue(&crate::win_audio::endpoint_lock::PKEY_DEVICE_FRIENDLY_NAME).ok())
-            .map(|v| v.to_string().to_lowercase())
-            .unwrap_or_default();
-          if !name.contains("sonar")
-            && !name.contains("virtual")
-            && !name.contains("cable")
-            && !name.contains("steam")
-            && !name.contains("oculus")
-          {
-            if let Ok(id) = dev.GetId() {
-              return Some(id.to_string().unwrap_or_default());
-            }
-          }
-        }
-      }
-      if let Ok(dev) = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
-        if let Ok(id) = dev.GetId() {
-          return Some(id.to_string().unwrap_or_default());
-        }
-      }
-      None
+      let devices: Vec<AudioEndpointInfo> = (0..count)
+        .filter_map(|i| collection.Item(i).ok())
+        .filter_map(|dev| get_endpoint_info(&dev, default_id.as_deref().unwrap_or_default()).ok())
+        .collect();
+      physical_endpoint_id(&devices, default_id.as_deref())
     }
   }
 
@@ -266,7 +253,7 @@ impl ChatMixController {
       .iter()
       .find(|d| {
         let n = d.name.to_lowercase();
-        n.contains("game") || n.contains("gaming")
+        is_virtual_endpoint(&n) && (n.contains("game") || n.contains("gaming"))
       })
       .map(|d| d.id.clone());
 
@@ -274,7 +261,7 @@ impl ChatMixController {
       .iter()
       .find(|d| {
         let n = d.name.to_lowercase();
-        n.contains("chat") || n.contains("cable input")
+        is_virtual_endpoint(&n) && (n.contains("chat") || n.contains("cable input"))
       })
       .map(|d| d.id.clone());
 
@@ -282,12 +269,12 @@ impl ChatMixController {
       .iter()
       .find(|d| {
         let n = d.name.to_lowercase();
-        n.contains("media")
+        is_virtual_endpoint(&n) && n.contains("media")
       })
       .map(|d| d.id.clone());
 
     // 2. Identify physical Master endpoint
-    self.master_device_id = physical_master_id(devices, default_id);
+    self.master_device_id = physical_endpoint_id(devices, default_id);
 
     // Initialize channel volumes directly from the resolved endpoints
     if let Some(ref id) = self.master_device_id {
@@ -584,20 +571,22 @@ impl ChatMixController {
       }
     }
 
-    // 5. MIC: Sync microphone volume to physical microphone and default capture endpoint
+    // 5. MIC: Sync microphone volume to the mic in use
     let target_hw_mic = self.mic_volume.min(1.0);
     if (target_hw_mic - self.last_applied_mic_vol).abs() > 0.005 {
-      if let Some(ref id) = self.mic_device_id {
-        set_endpoint_volume(id, target_hw_mic);
+      // Only the mic in use: writing the default capture device too copied one mic's volume
+      // onto another (laptop mic + USB headset).
+      match self.mic_device_id {
+        Some(ref id) => set_endpoint_volume(id, target_hw_mic),
+        None => set_system_mic_volume(target_hw_mic),
       }
-      set_system_mic_volume(target_hw_mic);
       self.last_applied_mic_vol = target_hw_mic;
     }
     if self.mic_muted != self.last_applied_mic_muted {
-      if let Some(ref id) = self.mic_device_id {
-        set_endpoint_mute(id, self.mic_muted);
+      match self.mic_device_id {
+        Some(ref id) => set_endpoint_mute(id, self.mic_muted),
+        None => set_system_mic_mute(self.mic_muted),
       }
-      set_system_mic_mute(self.mic_muted);
       self.last_applied_mic_muted = self.mic_muted;
     }
 
@@ -900,24 +889,24 @@ pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
   }
 }
 
+/// Endpoint names of virtual devices (Sonar channels, VB-Cable, VR runtimes). Heuristic by name:
+/// a physical device with "virtual"/"cable" in its name would be skipped. A gaming headset is
+/// physical, so "game" is not on the list (channel binding adds it on top).
+pub fn is_virtual_endpoint(name_lowercase: &str) -> bool {
+  ["sonar", "virtual", "cable", "vb-audio", "voicemeeter", "steam", "oculus"].iter().any(|v| name_lowercase.contains(v))
+}
 
-/// The physical output the Master channel controls and the echo reference is captured from:
-/// the Windows default output, or the first physical one when the default is a virtual device.
-pub fn physical_master_id(devices: &[AudioEndpointInfo], default_id: Option<&str>) -> Option<String> {
-  let virtual_name = |n: &str| n.contains("sonar") || n.contains("virtual") || n.contains("cable") || n.contains("game");
+/// The device to work with: the Windows default; only when that is virtual, the first physical one.
+pub fn physical_endpoint_id(devices: &[AudioEndpointInfo], default_id: Option<&str>) -> Option<String> {
   let default_is_virtual = default_id
     .and_then(|def_id| devices.iter().find(|d| d.id == def_id))
-    .is_some_and(|d| virtual_name(&d.name.to_lowercase()));
+    .is_some_and(|d| is_virtual_endpoint(&d.name.to_lowercase()));
   if !default_is_virtual {
     return default_id.map(|s| s.to_string());
   }
-  // Pick first physical output device (non-virtual, non-sonar, e.g. Realtek)
   devices
     .iter()
-    .find(|d| {
-      let n = d.name.to_lowercase();
-      !n.contains("sonar") && !n.contains("virtual") && !n.contains("cable") && !n.contains("steam") && !n.contains("oculus")
-    })
+    .find(|d| !is_virtual_endpoint(&d.name.to_lowercase()))
     .map(|d| d.id.clone())
     .or_else(|| default_id.map(|s| s.to_string()))
 }
@@ -973,10 +962,28 @@ mod tests {
   #[test]
   fn master_follows_a_physical_default_and_skips_a_virtual_one() {
     let dev = |id: &str, name: &str| AudioEndpointInfo { id: id.into(), name: name.into(), is_default: false };
-    let devices = [dev("cable", "CABLE Input (VB-Audio Virtual Cable)"), dev("phones", "Headphones"), dev("monitor", "LG Monitor")];
-    assert_eq!(physical_master_id(&devices, Some("monitor")).as_deref(), Some("monitor"));
-    assert_eq!(physical_master_id(&devices, Some("phones")).as_deref(), Some("phones"));
-    assert_eq!(physical_master_id(&devices, Some("cable")).as_deref(), Some("phones"), "virtual default: first physical");
-    assert_eq!(physical_master_id(&devices, None), None);
+    let devices =
+      [dev("cable", "CABLE Input (VB-Audio Virtual Cable)"), dev("phones", "Headphones"), dev("monitor", "LG Monitor")];
+    assert_eq!(physical_endpoint_id(&devices, Some("monitor")).as_deref(), Some("monitor"));
+    assert_eq!(physical_endpoint_id(&devices, Some("phones")).as_deref(), Some("phones"));
+    assert_eq!(
+      physical_endpoint_id(&devices, Some("cable")).as_deref(),
+      Some("phones"),
+      "virtual default: first physical"
+    );
+    assert_eq!(physical_endpoint_id(&devices, None), None);
+  }
+
+  /// Tester report: laptop mic first in the list, USB headset as the default. The headset wins.
+  #[test]
+  fn endpoint_is_the_default_not_the_first_and_a_gaming_headset_is_physical() {
+    let dev = |id: &str, name: &str| AudioEndpointInfo { id: id.into(), name: name.into(), is_default: false };
+    let mics =
+      [dev("array", "Microphone Array (Realtek(R) Audio)"), dev("usb", "Microphone (HyperX Cloud Gaming Headset)")];
+    assert_eq!(physical_endpoint_id(&mics, Some("usb")).as_deref(), Some("usb"));
+    let outs = [dev("speakers", "Speakers (Realtek(R) Audio)"), dev("usb", "Headphones (Logitech G Gaming Headset)")];
+    assert_eq!(physical_endpoint_id(&outs, Some("usb")).as_deref(), Some("usb"), "gaming headset is not virtual");
+    assert!(is_virtual_endpoint("steelseries sonar - gaming"));
+    assert!(!is_virtual_endpoint("headphones (logitech g gaming headset)"));
   }
 }

@@ -36,6 +36,9 @@ use std::time::{Duration, Instant, SystemTime};
 const FILE: &str = "health.json";
 /// Device enumeration + one spatial-audio activation + a few registry reads.
 const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+/// Windows switching to an output plugged in this recently is the user's choice (plugging in a
+/// headset), not an app changing it: it becomes the expected output. Covers 3 checks.
+const PLUGGED_IN_SWITCH: Duration = Duration::from_secs(15);
 /// A problem must show on this many checks in a row before the badge appears, so a device
 /// switch in progress (Windows hops through endpoints) does not flash it.
 const CONFIRM_CHECKS: u32 = 2;
@@ -58,11 +61,17 @@ pub struct HealthMemory {
   pub spatial_formats: BTreeMap<String, SpatialFormat>,
   /// Problems the user chose to ignore (`Issue::ignore_key`).
   pub ignored: BTreeSet<String>,
+  /// When each connected output was first seen in this run (not saved: after a restart all of
+  /// them count as old, so a switch made while the service was off is still flagged).
+  #[serde(skip)]
+  pub first_seen: HashMap<String, Instant>,
 }
 
 /// One look at the system, input of `evaluate`.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
+  /// When it was taken.
+  pub at: Instant,
   /// Active outputs.
   pub outputs: Vec<AudioEndpointInfo>,
   pub default_output: Option<String>,
@@ -292,9 +301,25 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
   let mut issues = Vec::new();
   let mut changed = false;
 
+  // Outputs present since the first check are old; one seen later was just plugged in. An
+  // unplugged one is forgotten, so plugging it in again counts as new.
+  let running = !memory.first_seen.is_empty();
+  memory.first_seen.retain(|id, _| snap.outputs.iter().any(|d| &d.id == id));
+  for d in &snap.outputs {
+    let at = if running { snap.at } else { snap.at.checked_sub(PLUGGED_IN_SWITCH).unwrap_or(snap.at) };
+    memory.first_seen.entry(d.id.clone()).or_insert(at);
+  }
+
   if let Some(current) = snap.default_output.as_deref() {
+    let just_plugged_in =
+      memory.first_seen.get(current).is_some_and(|&t| snap.at.saturating_duration_since(t) < PLUGGED_IN_SWITCH);
     match memory.expected_output.as_deref() {
       None => {
+        memory.expected_output = Some(current.to_string());
+        changed = true;
+      }
+      Some(expected) if expected != current && just_plugged_in => {
+        info!("[Health] default output is the device just plugged in, now expected: {current}");
         memory.expected_output = Some(current.to_string());
         changed = true;
       }
@@ -451,7 +476,8 @@ impl HealthMonitor {
     // The window rewrites the file when an output is picked there.
     let on_disk = mtime(&self.path);
     if on_disk != self.file_mtime {
-      self.memory = HealthMemory::load_or_default(self.dir());
+      let first_seen = std::mem::take(&mut self.memory.first_seen);
+      self.memory = HealthMemory { first_seen, ..HealthMemory::load_or_default(self.dir()) };
       self.file_mtime = on_disk;
     }
 
@@ -531,6 +557,7 @@ fn snapshot(win_audio: &WinAudioSystem) -> Snapshot {
   // Registry scan of all render endpoints: only when it can change the verdict.
   let out_anywhere = out_status == ApoStatus::NotOnThisMic && apo_install::installed_on_any(Flow::Render);
   Snapshot {
+    at: Instant::now(),
     outputs: endpoints.enumerate_playback_devices(),
     spatial: default_output.as_deref().map_or(SpatialAudioStatus::Unsupported, spatial_status),
     spatial_format: default_output.as_deref().and_then(active_format),
@@ -595,6 +622,24 @@ mod tests {
       Fix::SwitchOutput("hp".into()),
       "first action switches back to the expected output"
     );
+  }
+
+  /// Tester report: a USB headset plugged in, Windows switched to it, the tray kept warning.
+  #[test]
+  fn output_plugged_in_and_switched_to_becomes_expected() {
+    let mut memory = HealthMemory { expected_output: Some("hp".into()), ..Default::default() };
+    assert!(evaluate(&mut memory, &snap("hp", &["hp"])).0.is_empty());
+    let (issues, changed) = evaluate(&mut memory, &snap("usb", &["hp", "usb"]));
+    assert!(issues.is_empty() && changed);
+    assert_eq!(memory.expected_output.as_deref(), Some("usb"));
+    // An app moving the default to an output that was there all along is still flagged.
+    assert_eq!(evaluate(&mut memory, &snap("hp", &["hp", "usb"])).0.len(), 1);
+  }
+
+  #[test]
+  fn switch_found_at_start_is_flagged() {
+    let mut memory = HealthMemory { expected_output: Some("hp".into()), ..Default::default() };
+    assert_eq!(evaluate(&mut memory, &snap("usb", &["hp", "usb"])).0.len(), 1);
   }
 
   #[test]
@@ -742,6 +787,7 @@ mod tests {
 
   fn snap(default_output: &str, outputs: &[&str]) -> Snapshot {
     Snapshot {
+      at: Instant::now(),
       outputs: outputs.iter().map(|id| dev(id)).collect(),
       default_output: Some(default_output.into()),
       spatial: SpatialAudioStatus::Unsupported,

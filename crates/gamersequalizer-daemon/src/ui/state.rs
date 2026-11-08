@@ -201,6 +201,7 @@ impl AppState {
     let selected_mic_endpoint_id = shm.and_then(|h| h.get_selected_mic_id());
 
     let mic_profile = load_mic_profile(&storage).unwrap_or(mic_profile);
+    crate::output_eq::game_presets::seed_builtin_game_presets(&storage);
     let output_eq = OutputEq::new(storage.clone());
     let autostart_enabled = crate::autostart::is_autostart_enabled();
     let prefs = super::prefs::UiPrefs::load_or_default(storage.base_dir());

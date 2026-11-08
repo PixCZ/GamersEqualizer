@@ -158,6 +158,22 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
         ));
       });
     }
+    // The install restarts Windows audio: a call loses the mic and stays silent until it is
+    // rejoined (tester report: installed during a call, silent even after restarting this app).
+    let recording = super::tab_mixer::recording_apps_cached();
+    if admin && !recording.is_empty() {
+      ui.add_space(4.0);
+      let apps = crate::health::join_apps(&recording);
+      theme::status_line(
+        ui,
+        Severity::Warning,
+        &trf(
+          "{} is using the microphone right now (a call?). The install restarts Windows audio: the call loses \
+           the microphone and stays silent until you rejoin it or restart {}. Better finish the call first.",
+          &[&apps, &apps],
+        ),
+      );
+    }
     ui.add_space(4.0);
     ui.horizontal(|ui| {
       let label = if admin { tr("Continue – ask Windows") } else { tr("Apply") };

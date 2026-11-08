@@ -1,6 +1,7 @@
 use super::state::{AecTelemetry, AppState, DenoiseStatus};
 use super::theme::{self, icons, Severity};
 use crate::i18n::{tr, trf};
+use crate::win_audio::chatmix::{get_endpoint_volume, ChatMixController};
 use crate::win_audio::WinAudioSystem;
 use egui::{Color32, RichText, Stroke, Ui};
 use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, VLine};
@@ -54,6 +55,20 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
     eq_section(ui, state);
     leveler_section(ui, state);
   });
+}
+
+/// The user picks a mic (`Some`) or goes back to the Windows default (`None`). Only a pick is
+/// saved; without one, the app and the service follow the Windows default microphone.
+pub(super) fn pick_mic(state: &mut AppState, win_audio: &mut WinAudioSystem, pick: Option<String>) {
+  let mic = pick.clone().or_else(ChatMixController::find_physical_microphone);
+  state.selected_mic_endpoint_id = pick.clone();
+  state.set_shm_selected_mic(pick.as_deref().unwrap_or_default());
+  win_audio.chatmix.mic_device_id = mic.clone();
+  win_audio.mic_stream.set_input_device(mic.clone());
+  if let Some((v, m)) = mic.as_deref().and_then(get_endpoint_volume) {
+    win_audio.chatmix.mic_volume = v;
+    win_audio.chatmix.mic_muted = m;
+  }
 }
 
 fn leveler_section(ui: &mut Ui, state: &mut AppState) {
@@ -156,24 +171,20 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
         egui::ComboBox::from_id_salt("combo_tab_mic_device").selected_text(&current_name).width(320.0).show_ui(
           ui,
           |ui| {
+            if ui.selectable_label(current_id.is_none(), tr("Default microphone")).clicked() {
+              changed_mic = Some(None);
+            }
             for ep in &state.capture_endpoints {
               let is_sel = current_id.as_deref() == Some(&ep.id);
               if ui.selectable_label(is_sel, &ep.name).clicked() {
-                changed_mic = Some(ep.id.clone());
+                changed_mic = Some(Some(ep.id.clone()));
               }
             }
           },
         );
 
-        if let Some(new_id) = changed_mic {
-          state.selected_mic_endpoint_id = Some(new_id.clone());
-          win_audio.chatmix.mic_device_id = Some(new_id.clone());
-          win_audio.mic_stream.set_input_device(Some(new_id.clone()));
-          state.set_shm_selected_mic(&new_id);
-          if let Some((v, m)) = crate::win_audio::chatmix::get_endpoint_volume(&new_id) {
-            win_audio.chatmix.mic_volume = v;
-            win_audio.chatmix.mic_muted = m;
-          }
+        if let Some(pick) = changed_mic {
+          pick_mic(state, win_audio, pick);
         }
 
         if let Some(mid) = state.selected_mic_endpoint_id.clone() {

@@ -7,7 +7,7 @@ use super::theme::{self, icons, Severity};
 use crate::dsp_apo::generate_log_frequencies;
 use crate::i18n::{tk, tr, trf};
 use crate::output_eq::game_match::MatchMethod;
-use crate::sonar_importer::{import_sonar_db, DEFAULT_SONAR_DB_PATH};
+use crate::sonar_importer::{import_sonar_db, SonarDbReader, DEFAULT_SONAR_DB_PATH};
 use egui::{Color32, RichText, Ui};
 use gamersequalizer_common::biquad::MAX_OUT_EQ_BANDS;
 use gamersequalizer_common::streams::StreamBus;
@@ -33,11 +33,15 @@ pub fn render_tab_eq(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
 fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
   ui.horizontal(|ui| {
     theme::page_header(ui, icons::GAME, GAME_COLOR, tr("Game EQ"), None);
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-      if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(DEFAULT_SONAR_DB_PATH).clicked() {
-        reimport_sonar(state);
-      }
-    });
+    // Only offered when Sonar is installed (its DB exists). One file stat per frame, only on
+    // this tab; cache it if the tab ever repaints continuously.
+    if SonarDbReader::default_db_exists() {
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(DEFAULT_SONAR_DB_PATH).clicked() {
+          reimport_sonar(state);
+        }
+      });
+    }
   });
   ui.label(
     RichText::new(tr("Game profiles on top of the headphone correction, switched by the game in the foreground."))
@@ -153,7 +157,7 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
             state.output_eq_do(|eq, shm| eq.bind_exe(&exe, Some(choice.unwrap_or_default()), shm));
           }
         } else {
-          ui.label(RichText::new(current.unwrap_or(tr("none"))).strong());
+          ui.label(RichText::new(current.map_or(tr("none"), tr)).strong());
         }
         if ui
           .button(tr("Reset"))
@@ -204,9 +208,9 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
     for (i, app) in apps.iter().enumerate() {
       ui.label(RichText::new(&app.label).strong());
       let how = match app.matched.as_ref().map(|m| (m.method, m.profile.as_deref())) {
-        Some((MatchMethod::Binding, Some(p))) => trf("assigned: {}", &[&p]),
-        Some((MatchMethod::LauncherId, Some(p))) => trf("launcher id: {}", &[&p]),
-        Some((MatchMethod::Name, Some(p))) => trf("by name: {}", &[&p]),
+        Some((MatchMethod::Binding, Some(p))) => trf("assigned: {}", &[&tr(p)]),
+        Some((MatchMethod::LauncherId, Some(p))) => trf("launcher id: {}", &[&tr(p)]),
+        Some((MatchMethod::Name, Some(p))) => trf("by name: {}", &[&tr(p)]),
         Some((_, _)) => tr("game, no profile").to_string(),
         None => tr("not a game").to_string(),
       };
@@ -312,8 +316,8 @@ pub fn volume_and_delete_row(ui: &mut Ui, state: &mut AppState, layer: OutputLay
     Some((_, target)) => {
       theme::info_bar(ui, Severity::Warning, |ui| {
         let mut text =
-          trf("Delete \"{}\"? The file moves to profiles\\_deleted and can be restored from there.", &[&target]);
-        if layer != OutputLayer::Headphone {
+          trf("Delete \"{}\"? The file moves to profiles\\_deleted and can be restored from there.", &[&tr(&target)]);
+        if layer != OutputLayer::Headphone && SonarDbReader::default_db_exists() {
           text.push(' ');
           text.push_str(tr("\"Import from Sonar DB\" brings Sonar presets back."));
         }

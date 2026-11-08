@@ -101,8 +101,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
   let list_h = wanted_list.min(APPS_LIST_HEIGHT + (room - fader_h).max(0.0));
   let mut moved: AppMove = None;
   let tallest_id = egui::Id::new("mixer_tallest_footer");
-  let footers =
-    FooterSync { tallest: ui.data(|d| d.get_temp(tallest_id)).unwrap_or(0.0), tallest_now: Cell::new(0.0) };
+  let footers = FooterSync { tallest: ui.data(|d| d.get_temp(tallest_id)).unwrap_or(0.0), tallest_now: Cell::new(0.0) };
 
   theme::page_header(
     ui,
@@ -163,7 +162,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       title: tr("Game"),
       icon: icons::GAME,
       color: GAME_COLOR,
-      preset: state.output_eq.game_profile_name().unwrap_or(tr("No game profile")),
+      preset: state.output_eq.game_profile_name().map_or(tr("No game profile"), tr),
       max_vol: 1.0,
       fader_h,
       list_h,
@@ -309,25 +308,21 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
           .selected_text(RichText::new(fit(ui, &trf("In: {}", &[&current_mic_label]))).small())
           .width(ui.available_width() - 28.0)
           .show_ui(ui, |ui| {
+            if ui.selectable_label(selected_mic_ep.is_none(), tr("Default mic")).clicked() {
+              changed_mic_ep = Some(None);
+            }
             for ep in &capture_endpoints {
               let is_sel = selected_mic_ep.as_deref() == Some(&ep.id);
               if ui.selectable_label(is_sel, &ep.name).clicked() {
-                changed_mic_ep = Some(ep.id.clone());
+                changed_mic_ep = Some(Some(ep.id.clone()));
               }
             }
           });
       },
     );
 
-    if let Some(new_mic_id) = changed_mic_ep {
-      state.selected_mic_endpoint_id = Some(new_mic_id.clone());
-      win_audio.chatmix.mic_device_id = Some(new_mic_id.clone());
-      win_audio.mic_stream.set_input_device(Some(new_mic_id.clone()));
-      state.set_shm_selected_mic(&new_mic_id);
-      if let Some((v, m)) = crate::win_audio::chatmix::get_endpoint_volume(&new_mic_id) {
-        win_audio.chatmix.mic_volume = v;
-        win_audio.chatmix.mic_muted = m;
-      }
+    if let Some(pick) = changed_mic_ep {
+      super::tab_mic::pick_mic(state, win_audio, pick);
     }
   });
 
@@ -519,7 +514,7 @@ fn peak_meter(ui: &mut Ui, peak: f32, height: f32) {
 }
 
 /// Apps recording from a microphone, re-read at most every `RECORDING_REFRESH` (UI thread only).
-fn recording_apps_cached() -> Vec<String> {
+pub(super) fn recording_apps_cached() -> Vec<String> {
   thread_local! {
     static CACHE: RefCell<Option<(Instant, Vec<String>)>> = const { RefCell::new(None) };
   }

@@ -40,6 +40,8 @@ pub struct OutputEqSettings {
   /// Media channel (browsers, music players), same as chat.
   pub media_enabled: bool,
   pub media_profile: Option<String>,
+  /// Version of the built-in genre profiles already written to `profiles/game` (0 = none).
+  pub builtin_game_presets: u32,
 }
 
 impl Default for OutputEqSettings {
@@ -60,6 +62,7 @@ impl Default for OutputEqSettings {
       chat_profile: None,
       media_enabled: true,
       media_profile: None,
+      builtin_game_presets: 0,
     }
   }
 }

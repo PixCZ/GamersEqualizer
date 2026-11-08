@@ -310,7 +310,10 @@ impl Drop for EndpointLockManager {
   }
 }
 
-unsafe fn get_endpoint_info(device: &IMMDevice, default_id: &str) -> windows_core::Result<AudioEndpointInfo> {
+pub(crate) unsafe fn get_endpoint_info(
+  device: &IMMDevice,
+  default_id: &str,
+) -> windows_core::Result<AudioEndpointInfo> {
   let pwstr = device.GetId()?;
   let id = pwstr.to_string()?;
   windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
