@@ -179,7 +179,7 @@ impl CaptureWriter {
       h.blocks.store(0, Ordering::Relaxed);
       h.device_rate.store(self.device_rate, Ordering::Relaxed);
       h.writer_pid.store(std::process::id(), Ordering::Relaxed);
-      h.aec_pre_delay_samples.store(crate::aec::PRE_DELAY_SAMPLES as u32, Ordering::Relaxed);
+      h.aec_pre_delay_samples.store(crate::aec3::PRE_DELAY_SAMPLES as u32, Ordering::Relaxed);
       h.corr_max_delay_samples.store(crate::DelayEstimator::max_delay_samples() as u32, Ordering::Relaxed);
       h.start_qpc_hns.store(qpc_hns.unwrap_or(0), Ordering::Relaxed);
     }

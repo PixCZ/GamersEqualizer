@@ -1,11 +1,13 @@
-use crate::aec::{AcousticEchoCanceller, PRE_DELAY_SAMPLES};
+use crate::aec3::{EchoCanceller3, PRE_DELAY_SAMPLES};
+use crate::latency_meter::LatencyMeter;
 use crate::ai_denoiser::AiVoiceIsolator;
 use crate::clip_detector::ClipDetector;
 use crate::delay_estimator::{DelayEstimator, LockChange, WindowOutcome, FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
 use crate::shared_memory::SharedMemoryClient;
 use crate::voice_leveler::VoiceLeveler;
 use gamersequalizer_common::biquad::BiquadCascade;
-use gamersequalizer_common::limiter::soft_limit;
+use gamersequalizer_common::limiter::PeakLimiter;
+use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
   AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
   NOISE_GATE_AUTO_LOOKAHEAD,
@@ -29,7 +31,8 @@ const OVERLOAD_LATE_BLOCKS: u32 = 2;
 const OVERLOAD_AVG_LOAD: f32 = 0.9;
 /// Consecutive overloaded windows (~100 ms each) before a heavy model gives way to RNNoise.
 const OVERLOAD_WINDOWS_TO_FALL_BACK: u32 = 3;
-/// Soft limiter knee; transparent below.
+/// Fixed low cut before the denoiser: 2nd-order Butterworth, below any voice's fundamental.
+const PRE_HIGH_PASS_HZ: f32 = 70.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginMode {
@@ -42,7 +45,15 @@ pub struct GamersEqualizerPlugin {
   pub mode: PluginMode,
   shm_client: Option<SharedMemoryClient>,
   delay_estimator: DelayEstimator,
-  aec: AcousticEchoCanceller,
+  aec: EchoCanceller3,
+  /// Measures the delay the whole chain adds (raw input vs final output), for the UI/log.
+  latency_meter: LatencyMeter,
+  /// Sum of the stage latencies at the last block: a change (model, lookahead, AEC on/off)
+  /// throws the old measurement away.
+  latency_stages: usize,
+  /// Fixed low cut in front of the detectors and the denoiser (desk thumps, air conditioning);
+  /// the user EQ's low cut only comes after them.
+  pre_high_pass: BiquadCascade,
   ai_denoiser: AiVoiceIsolator,
   leveler: VoiceLeveler,
   /// Last "Learn again" sequence seen (None before the first block).
@@ -53,6 +64,8 @@ pub struct GamersEqualizerPlugin {
   leveler_inputs: Option<LevelerInputs>,
   eq: BiquadCascade,
   eq_version: Option<u32>,
+  /// Last stage: volume, then this (smooth gain on peaks instead of clipping them).
+  limiter: PeakLimiter,
   pub sample_rate: f32,
   ref_buffer: Vec<f32>,
   mic_mono_temp: Vec<f32>,
@@ -79,6 +92,9 @@ pub struct GamersEqualizerPlugin {
   aec_ref_offset: Option<u32>,
   #[cfg(feature = "debug-capture")]
   capture: Option<CaptureWriter>,
+  /// Tests without shared memory: (model, mic volume permille) instead of the defaults.
+  #[cfg(test)]
+  test_overrides: Option<(DenoiseModel, u32)>,
 }
 
 /// Everything before the leveler that changes the speech level it learns: when any of it changes,
@@ -118,7 +134,10 @@ impl GamersEqualizerPlugin {
       mode: PluginMode::Auto,
       shm_client,
       delay_estimator: DelayEstimator::new(),
-      aec: AcousticEchoCanceller::default_48k(),
+      aec: EchoCanceller3::new(),
+      latency_meter: LatencyMeter::new(),
+      latency_stages: 0,
+      pre_high_pass: pre_high_pass(),
       ai_denoiser: AiVoiceIsolator::new(),
       leveler: VoiceLeveler::new(),
       leveler_reset_seen: None,
@@ -126,6 +145,7 @@ impl GamersEqualizerPlugin {
       leveler_inputs: None,
       eq: BiquadCascade::default(),
       eq_version: None,
+      limiter: PeakLimiter::new(48_000.0),
       sample_rate,
       ref_buffer: vec![0.0; 2048],
       mic_mono_temp: vec![0.0; 2048],
@@ -145,6 +165,8 @@ impl GamersEqualizerPlugin {
       aec_ref_offset: None,
       #[cfg(feature = "debug-capture")]
       capture: None,
+      #[cfg(test)]
+      test_overrides: None,
     }
   }
 
@@ -247,6 +269,9 @@ impl GamersEqualizerPlugin {
     if std::mem::take(&mut self.paused) {
       self.aec.flush();
       self.ai_denoiser.reset();
+      self.latency_meter.reset();
+      self.pre_high_pass = pre_high_pass();
+      self.limiter = PeakLimiter::new(48_000.0);
     }
     let started = std::time::Instant::now();
     let frames = mic_in.len();
@@ -263,6 +288,7 @@ impl GamersEqualizerPlugin {
       for (d, &s) in dst.iter_mut().zip(mic_in) {
         *d = if s.is_finite() { s.clamp(-4.0, 4.0) } else { 0.0 };
       }
+      self.latency_meter.push_input(dst);
     }
     #[cfg(feature = "debug-capture")]
     let capturing = self.capture_input(mic_in, mic_qpc_hns);
@@ -297,6 +323,11 @@ impl GamersEqualizerPlugin {
       }
       model = DenoiseModel::from_u32(header.denoise_model.load(Ordering::Relaxed));
       eq_version = Some(header.mic_eq_version.load(Ordering::Acquire));
+    }
+    #[cfg(test)]
+    if let Some((m, p)) = self.test_overrides {
+      model = m;
+      mic_permille = p;
     }
 
     // Speaker output switched: the locked delay and the learned echo path are the old
@@ -352,7 +383,11 @@ impl GamersEqualizerPlugin {
       cap.stage(STAGE_AFTER_AEC, mic);
     }
 
-    // Stage 2: Neural noise suppression (RNNoise, DeepFilterNet or DPDFNet)
+    // Stage 2: fixed low cut, then neural noise suppression (RNNoise, DeepFilterNet or DPDFNet).
+    // The closed gate goes as far further down as the leveler lifts (last block's gain), so
+    // pauses don't get louder with a quiet mic.
+    self.pre_high_pass.process(mic);
+    self.ai_denoiser.set_gate_floor_extra_db(if leveler_on { self.leveler.gain_db() } else { 0.0 });
     self.ai_denoiser.process_samples(mic);
     #[cfg(feature = "debug-capture")]
     if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
@@ -403,13 +438,20 @@ impl GamersEqualizerPlugin {
       cap.stage(STAGE_AFTER_LEVELER, mic);
     }
 
-    // Stage 5: volume + soft limiter, always last so EQ boosts can't clip. With the leveler the
+    // Stage 5: volume + peak limiter, always last so EQ boosts can't clip. With the leveler the
     // mic volume (0..300 %) is how loud others hear you: 100 % = the target, 50 % = 6 dB under it
     // (the leveler took the Windows volume out of the input). Without it: only the boost > 100 %.
     let boost = if leveler_on || mic_permille > 1000 { mic_permille as f32 / 1000.0 } else { 1.0 };
     for sample in mic.iter_mut() {
-      *sample = soft_limit(*sample * boost);
+      *sample *= boost;
     }
+    self.limiter.process(mic, 1);
+    // Field by field: `mic` still borrows `mic_mono_temp`.
+    let stages = aec_latency_samples(self.aec_idle, self.aec_state, &self.aec) + self.ai_denoiser.output_lead_samples();
+    if stages != std::mem::replace(&mut self.latency_stages, stages) {
+      self.latency_meter.invalidate();
+    }
+    self.latency_meter.push_output(mic);
 
     self.out_rms = smooth_rms(self.out_rms, mic);
     #[cfg(feature = "debug-capture")]
@@ -533,6 +575,15 @@ impl GamersEqualizerPlugin {
     h.mic_leveler_level_db_x10.store(level_x10, Ordering::Relaxed);
     h.mic_input_clips.store(self.input_clips, Ordering::Relaxed);
     h.mic_speech_ms.store(self.leveler.speech_ms(), Ordering::Relaxed);
+    // Latency: measured end to end, plus what each stage holds right now (for the breakdown).
+    let us = |samples: usize| (samples as u64 * 1_000_000 / 48_000) as u32;
+    let measured = self.latency_meter.measured_samples().map_or(0, |s| us(s.round() as usize).max(1));
+    h.mic_latency_measured_us.store(measured, Ordering::Relaxed);
+    h.mic_latency_aec_us.store(us(aec_latency_samples(self.aec_idle, self.aec_state, &self.aec)), Ordering::Relaxed);
+    let lookahead = self.ai_denoiser.lookahead_now_samples();
+    let lead = self.ai_denoiser.output_lead_samples();
+    h.mic_latency_denoise_us.store(us(lead.saturating_sub(lookahead)), Ordering::Relaxed);
+    h.mic_latency_lookahead_us.store(us(lookahead), Ordering::Relaxed);
 
     let est = &self.delay_estimator;
     let to_us = |samples: f32| (samples / 48_000.0 * 1e6).round().max(0.0) as u32;
@@ -736,9 +787,27 @@ fn db_x10(rms: f32) -> i32 {
   (200.0 * rms.log10()).round() as i32
 }
 
+fn pre_high_pass() -> BiquadCascade {
+  let mut hp = BiquadCascade::default();
+  let band = BiquadBand { filter_type: FilterType::HighPass, frequency: PRE_HIGH_PASS_HZ, q: 0.707, slope_db: 12, ..BiquadBand::default() };
+  hp.set_bands(&[band], 48_000.0);
+  hp
+}
+
+/// Delay the echo canceller adds right now (0 while it doesn't run). `aec_idle` keeps its last
+/// value while the AEC is switched off, hence the state check.
+fn aec_latency_samples(aec_idle: bool, aec_state: AecState, aec: &EchoCanceller3) -> usize {
+  if !aec_idle && aec_state != AecState::Disabled {
+    aec.latency_samples()
+  } else {
+    0
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+  use gamersequalizer_common::limiter::soft_limit;
 
   #[test]
   fn test_digital_boost_saturation() {
@@ -752,6 +821,101 @@ mod tests {
     // 1.0 * 3.0 = 3.0 -> smoothly saturated without wrapping
     assert!(out[3] > 0.95 && out[3] <= 1.0);
     assert!(soft_limit(-3.0) < -0.95 && soft_limit(-3.0) >= -1.0);
+  }
+
+  /// The whole mic chain (no AEC reference, default mic EQ) on the private recordings, for
+  /// before/after comparisons of the stages after the denoiser. Per model and input level:
+  /// output level of voice / whisper / room sections (dBFS, power mean), samples at full scale
+  /// (>= 0.99, per mille), peak, leveler gain at the end; and keys.wav alone. Run:
+  /// `cargo test -p gamersequalizer-mic-vst --release chain_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn chain_report() {
+    use crate::ai_denoiser::tests::read_wav_48k;
+    const HALF_SEC: usize = 24_000;
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_data/private");
+    if ["whisper_scenario.wav", "keys.wav"].iter().any(|f| !std::path::Path::new(dir).join(f).exists()) {
+      return eprintln!("skipped: put whisper_scenario.wav and keys.wav into test_data/private/");
+    }
+    let scenario = read_wav_48k("../private/whisper_scenario.wav");
+    let keys = read_wav_48k("../private/keys.wav");
+    let peak = |x: &[f32]| x.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    let db = |p: f32| 10.0 * p.max(1e-12).log10();
+    let pow = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32;
+    // Default mic EQ of the app: low cut 100 Hz 48 dB/oct, high cut 9 kHz.
+    let bands = [
+      BiquadBand { filter_type: FilterType::HighPass, frequency: 100.0, q: 0.707, slope_db: 48, ..BiquadBand::default() },
+      BiquadBand { filter_type: FilterType::LowPass, frequency: 9_000.0, q: 0.707, slope_db: 12, ..BiquadBand::default() },
+    ];
+    // (output, leveler gain at the end, share of blocks the heavy model slept, whisper section only)
+    let run = |model: DenoiseModel, permille: u32, input: &[f32]| -> (Vec<f32>, f32, f32) {
+      let mut p = GamersEqualizerPlugin::with_shm(48_000.0, None);
+      p.test_overrides = Some((model, permille));
+      p.ai_denoiser.set_model(model);
+      p.eq.set_bands(&bands, 48_000.0);
+      let mut out = vec![0.0f32; input.len()];
+      let mut asleep = 0usize;
+      let whisper_blocks = 40 * HALF_SEC / 480..48 * HALF_SEC / 480;
+      for (n, (i, o)) in input.chunks(480).zip(out.chunks_mut(480)).enumerate() {
+        p.process(&[i], &mut [o]);
+        asleep += usize::from(whisper_blocks.contains(&n) && p.ai_denoiser.asleep());
+      }
+      let lead = p.ai_denoiser.output_lead_samples();
+      let slept = asleep as f32 * 100.0 / whisper_blocks.len() as f32;
+      (out.get(lead..).unwrap_or_default().to_vec(), p.leveler.gain_db(), slept)
+    };
+    let scale = |x: &[f32], g_db: f32| -> Vec<f32> { x.iter().map(|s| s * 10f32.powf(g_db / 20.0)).collect() };
+    // Desk rumble: 45 Hz at -30 dBFS, swelling at 0.3 Hz.
+    let rumble: Vec<f32> = scenario
+      .iter()
+      .enumerate()
+      .map(|(i, s)| {
+        let t = i as f32 / 48_000.0;
+        s + 0.0316 * (0.5 + 0.5 * (std::f32::consts::TAU * 0.3 * t).sin()) * (std::f32::consts::TAU * 45.0 * t).sin()
+      })
+      .collect();
+    let hot_db = db(0.89f32.powi(2) / peak(&scenario).max(1e-6).powi(2));
+    // A mic set far too hot: voice ~-10 dBFS, the converter clips the peaks.
+    let clipped_in: Vec<f32> = scale(&scenario, 20.0).iter().map(|s| s.clamp(-1.0, 1.0)).collect();
+    let variants: [(&str, Vec<f32>, u32); 8] = [
+      ("-24 dB", scale(&scenario, -24.0), 1000),
+      ("-12 dB", scale(&scenario, -12.0), 1000),
+      ("0 dB", scenario.clone(), 1000),
+      ("hot -1 dBFS pk", scale(&scenario, hot_db), 1000),
+      ("+20 dB clipped", clipped_in, 1000),
+      ("0 dB boost 200%", scenario.clone(), 2000),
+      ("0 dB boost 300%", scenario.clone(), 3000),
+      ("0 dB + rumble", rumble, 1000),
+    ];
+    // Pauses once the leveler has learned: 10th percentile of the 10 ms frame levels after 30 s
+    // (digital silence left out).
+    let pauses = |x: &[f32]| {
+      let mut l: Vec<f32> = x.get(60 * HALF_SEC..).unwrap_or_default().chunks(480).map(|f| db(pow(f))).filter(|l| *l > -119.0).collect();
+      l.sort_by(f32::total_cmp);
+      l.get(l.len() / 10).copied().unwrap_or(-120.0)
+    };
+    let sec = |x: &[f32], a: usize, b: usize| db(pow(x.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default()));
+    eprintln!("input {:+.1} dB = hot; sections dBFS: voice 45-49 s | voice 53-57 s | whisper 20-24 s | room 1-18 s", hot_db);
+    for model in [DenoiseModel::DeepFilterNet, DenoiseModel::RnNoise] {
+      for (name, input, permille) in &variants {
+        let (out, gain, slept) = run(model, *permille, input);
+        let full = out.iter().filter(|s| s.abs() >= 0.99).count() as f32 * 1000.0 / out.len().max(1) as f32;
+        eprintln!(
+          "{model:<13?} {name:<16} voice {:6.1} {:6.1} whisper {:6.1} room {:6.1} pauses {:6.1} | full scale {:6.2} permille, peak {:5.2} dBFS | leveler {:+5.1} dB | asleep in whisper {:3.0} %",
+          sec(&out, 90, 98),
+          sec(&out, 107, 115),
+          sec(&out, 40, 48),
+          sec(&out, 2, 36),
+          pauses(&out),
+          full,
+          20.0 * peak(&out).max(1e-6).log10(),
+          gain,
+          slept
+        );
+      }
+      let (out, _, _) = run(model, 1000, &keys);
+      eprintln!("{model:<13?} keys.wav alone: in {:6.1} dBFS, out {:6.1} dBFS", db(pow(&keys)), db(pow(&out)));
+    }
   }
 
   #[test]

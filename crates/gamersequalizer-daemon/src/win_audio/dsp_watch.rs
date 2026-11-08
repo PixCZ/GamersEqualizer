@@ -31,6 +31,8 @@ pub struct DspWatch {
   jitter_peak_us: u32,
   load_peak: u32,
   load_avg_max: u32,
+  /// Last logged measured chain latency (us).
+  latency_us: Option<u32>,
 }
 
 impl DspWatch {
@@ -57,6 +59,7 @@ impl DspWatch {
       self.active = None;
       self.limit = None;
       self.flush_overload(h);
+      self.latency_us = None;
       info!("[Mic] microphone processing stopped (no app uses the microphone)");
     }
     if !changed {
@@ -84,6 +87,8 @@ impl DspWatch {
       }
     }
 
+    self.log_latency(h);
+
     let total = h.mic_dsp_overruns.load(Ordering::Relaxed);
     // A new stream restarts the count at 0: only growth counts.
     let new_late = self.overruns.map_or(0, |prev| total.saturating_sub(prev));
@@ -103,6 +108,24 @@ impl DspWatch {
       self.flush_timing();
       self.last_report = Some(now);
     }
+  }
+
+  /// Measured chain latency, logged when it first appears and when it moves by 1 ms or more
+  /// (a setting changed it), with what each stage holds.
+  fn log_latency(&mut self, h: &ShmHeader) {
+    let us = h.mic_latency_measured_us.load(Ordering::Relaxed);
+    if us == 0 || self.latency_us.is_some_and(|prev| prev.abs_diff(us) < 1000) {
+      return;
+    }
+    self.latency_us = Some(us);
+    let ms = |v: u32| v as f32 / 1000.0;
+    info!(
+      "[Mic] measured latency {:.1} ms (echo cancellation {:.1}, noise suppression {:.1}, word-onset protection {:.1} ms)",
+      ms(us),
+      ms(h.mic_latency_aec_us.load(Ordering::Relaxed)),
+      ms(h.mic_latency_denoise_us.load(Ordering::Relaxed)),
+      ms(h.mic_latency_lookahead_us.load(Ordering::Relaxed))
+    );
   }
 
   /// Shortcut: call timing is measured in the APO only (not the in-process bridge).

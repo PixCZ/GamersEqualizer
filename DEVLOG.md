@@ -762,3 +762,96 @@ not Dolby Atmos being replaced by Windows Sonic (a Windows update, an expired Do
 - Known limit: Windows does not say who changed it, so a switch made by the user in Windows is flagged
   once too; "Keep" accepts it. Switching the format from the app is not done: no public API, only
   rewriting those properties as admin + restarting the audio service, undocumented.
+
+## Milestone 29: Mic chain tail: peak limiter, deeper leveler cut, gate floor follows the leveler, fixed low cut (2026-11-08)
+
+The cheap steps 4.1 and 4.5-4.7 of the 2026-11-08 chain analysis. Measured with the new
+`plugin::tests::chain_report`: the whole chain (no echo reference, the default mic EQ),
+`whisper_scenario.wav` at several input levels and boosts, plus `keys.wav` alone. Values are output dBFS.
+
+- **Peak limiter instead of the clipper (4.7).** The `soft_limit` curve reached 1.0 at an input of
+  1.003, so every peak above it was flattened. The mic chain now ends in the output EQ's `PeakLimiter`:
+  instant attack, 80 ms release, ceiling -0.26 dBFS. Full-scale samples went from 0.01-1.57 per mille
+  (boost 300 %: 1.21 DFN3, 1.57 RNNoise) to 0 in every case, with the peak at -0.27 dBFS.
+- **Leveler cut -6 -> -18 dB (4.6).** Mic far too hot (+20 dB, converter clipping): the leveler was
+  stuck at -6 dB and the voice came out at -18.8/-19.2 (target -24). Now the gain is -12 dB and the
+  voice comes out at -20.6/-23.7 (DFN3) and -21.4/-23.8 (RNNoise). The other cases did not change.
+- **Gate floor follows the leveler (4.5).** The closed gate goes as many dB below -12 dB as the
+  leveler boosts, at most 12 more (`set_gate_floor_extra_db`, last block's gain). Pauses after 30 s
+  (10th percentile of 10 ms frames), floor coupling off -> on: RNNoise input -12 dB -91.6 -> -103.6,
+  0 dB -92.4 -> -100.9, boost 300 % -82.8 -> -91.4. DFN3 0 dB -107.4 -> -113.4. A hot mic (leveler
+  at or below 0 dB) is unchanged.
+- **Fixed 70 Hz low cut before the detectors and the denoiser (4.1).** 2nd-order Butterworth. With a
+  45 Hz rumble at -30 dBFS added, the room section without voice went from -62.8 to -119.9 (DFN3) and
+  from -75.8 to -89.9 (RNNoise). Side effects in DFN3, which reacts to level and spectrum around its
+  thresholds:
+  - Whispering (which the gate never opens on) came out at -43.4 -> -32.8 at 0 dB and -38.8 -> -32.4
+    on the hot mic, but -50.8 -> -66.7 with the input 12 dB low.
+  - The room at +20 dB went from -117 to -84.
+  - RNNoise barely changes.
+- Not done: the number checks only use the developer's own recordings (`#[ignore]`). Not heard live
+  and not checked in the APO.
+
+## Milestone 30: AEC3 replaces the MDF, lookahead per model, latency meter; what was tried and dropped (2026-11-08)
+
+- **Echo canceller: WebRTC AEC3 via `sonora`** (pure Rust, BSD-3, `aec3.rs`). Our MDF had no
+  suppressor for the residual echo. On the 2026-11-07 debug captures AEC3 removed 10-25 dB more echo
+  while only the far end played, and took ~1.5 dB off the voice in double talk. It adds ~9 ms
+  (`AEC3_LATENCY_SAMPLES` = 430). Its own high-pass is off, so the mic's bass doesn't switch on and
+  off with the far end.
+- **The MDF is removed** (`aec.rs`). Nothing used it at runtime and it is not kept as a fallback.
+  Its scenarios now run against AEC3 in `aec3.rs`:
+  - reverberant echo: 28 dB removed
+  - weak echo under speech: never louder than the mic, -7.9 dB
+  - double talk: 54 dB of echo removed, voice -1.6 dB
+  - quiet voice under loud music: 37.5 dB removed, voice -1.3 dB
+  - echo path change: 38 dB before, 35 dB after
+
+  Double talk is measured by projecting the output on the echo and on the voice. Subtracting the
+  voice doesn't work, because the suppressor shapes the voice slightly. The echo sits at least
+  `PRE_DELAY_SAMPLES` behind the reference, as in the chain. With only 20 samples AEC3 stalled at
+  ~10 dB. `capture_export` (ignored) writes the captures through AEC3 to `test_data/private/aec_ab/`.
+- **Gate lookahead per model:** RNNoise 15 ms, DFN3 15 ms, DPDFNet 10 ms (was 30 ms for all;
+  `lookahead_sweep`). Together with AEC3 every model stays below its old total delay.
+- **`latency_meter.rs`:** GCC-PHAT between raw input and final output measures the delay the
+  chain really adds.
+- **Not done: `echo_only` gate mask.** Checked with the new `echo_gate_report` on the captures
+  after AEC3. In blocks with only echo (far end playing, AEC3 took at least 15 dB off) the input
+  detector heard speech in only 1-11 % of blocks, and the echo left after the denoiser was at
+  -55 to -66 dBFS. The gate was open in 15-35 % of those blocks, but that is mostly hold after the
+  user's own words. A mask would risk cutting a quiet voice over a loud game for little gain.
+- **Tried and dropped: RNNoise stronger (analysis 4.3, 4.4).** Rule: a few keys let through beat
+  one cut letter. Measured with `private_report` (auto + lookahead, own voice under own keys) and
+  ESC-50 keys alone:
+  - dry mix in dB, 6 dB down to 20 / 30 dB instead of linear: pauses 19 / 25 dB quieter instead of
+    12-14, but soft syllables lost 1.6-2.4 -> 2.6-4.3 / 3.8-5.9 %.
+  - output detector threshold for RNNoise 0.3 -> 0.5: gate open on keys 31 -> 18 % (-40 dBFS
+    15 -> 9 %), for +0.3-0.4 points of soft syllables. At 0.7 loud syllables started to go.
+
+  Both are back to the linear mix and 0.3. The numbers are kept in the code comment.
+- **DFN3 on tract 0.23: done, see milestone 31.**
+
+## Milestone 31: DeepFilterNet 3 on tract 0.23 (own fork), one tract in the DLL (2026-11-08)
+
+Upstream `deep_filter` pins tract `^0.21.4`, and the mic crate had to pin `=0.21.4` because newer
+0.21.x broke it. DPDFNet already ran on tract 0.23, so the APO DLL linked two tract versions.
+
+- **Fork in `crates/vendor/deep_filter`.** Upstream libDF at rev `d375b2d` (MIT OR Apache-2.0, licences
+  kept), inference only: `lib.rs`, `transforms.rs`, `logging.rs`, `tract.rs`, and the
+  DeepFilterNet 3 ONNX model (`models/`, embedded as before). Dataset, training, C API, WASM,
+  binaries and upstream tests are left out. It is excluded from the workspace, so it is not
+  linted as our code. Its README lists the changes.
+- **Port to tract 0.23.10 and ndarray 0.17:**
+  - API renames: `to_plain_array_view*`, `into_plain_array`, `spawn()` instead of
+    `SimpleState::new`, `symbols`, `with_outputs_by_name`.
+  - The ERB and complex feature buffers are now plain tensors, copied into the model inputs each
+    hop. Upstream wrote into the shared input value through a raw pointer.
+  - The mic crate drops its four 0.21.4 pins and moves to ndarray 0.17. `Cargo.lock` now has one
+    tract.
+- **Same output, less CPU.** Checked with the new `ai_denoiser::tests::dfn3_reference` (DFN3 alone on
+  speech over keys, strength 0.75 and 1.0) against a reference saved on 0.21:
+  - max difference 2.3e-7, signal to difference 132 dB (float rounding)
+  - CPU 2.97-3.07 % -> 1.95-2.21 % of a core
+  - model load 72-87 ms (docs: ~200 ms on 0.21)
+- APO DLL 59.4 MB -> 47.1 MB (one tract instead of two).
+- Not done: not heard live, and the APO is not installed with it yet.

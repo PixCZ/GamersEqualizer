@@ -23,9 +23,10 @@ pub const MAX_TARGET_DB: f32 = -12.0;
 const WARM_START_FRAMES: u32 = 100;
 /// Gain range. +24 dB lifts a quiet voice on a mic set 12 dB low (private recording: own voice
 /// ~-31 dBFS active level, so -12 dB needs ~+19); room noise between words stays under -80 dBFS
-/// with the gate on. The cut tames a hot mic before the limiter.
+/// with the gate on. The cut tames a hot mic before the limiter: -6 dB left a voice at -10 dBFS
+/// ~5 dB over the target (`plugin::chain_report`, "+20 dB clipped"); cutting never raises noise.
 const MAX_BOOST_DB: f32 = 24.0;
-const MAX_CUT_DB: f32 = -6.0;
+const MAX_CUT_DB: f32 = -18.0;
 /// Speech frames before any gain is applied: one syllable is no level yet.
 const MIN_FRAMES: u32 = 30;
 /// Running mean up to this many speech frames (30 s), then this fixed rate.

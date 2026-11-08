@@ -32,8 +32,6 @@ const AEC_ROW_HEIGHT: f32 = 20.0;
 const AEC_PLOT_HEIGHT: f32 = 120.0;
 /// Fixed y-axis label width ("0.05"), so the plot area doesn't resize when labels change.
 const AEC_Y_AXIS_WIDTH: f32 = 30.0;
-/// X range of the echo-path plot before the filter has any taps.
-const IMPULSE_MIN_WINDOW_MS: f32 = 10.0;
 /// Clipping this recent is shown as a warning.
 const CLIP_RECENT_SECS: f64 = 60.0;
 
@@ -47,6 +45,7 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
       Some(tr("Chain (Windows effect on the microphone, so every app gets it): echo cancellation → AI noise suppression → voice EQ → voice leveler → boost/limiter.")),
     );
     super::apo_banner::render_apo_status_line(ui, state);
+    latency_line(ui, state);
     ui.add_space(theme::CARD_GAP);
 
     input_section(ui, state, win_audio);
@@ -288,9 +287,7 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
       theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation (AEC)"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
-        "Speaker output is captured (WASAPI loopback) and subtracted from the mic by an adaptive NLMS filter. \
-         The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed \
-         after repeated confirmation.",
+        "Speaker output is captured (WASAPI loopback) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut on = aec_enabled;
@@ -302,30 +299,24 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
 
     let t = state.poll_aec_telemetry();
     let (status, severity) = aec_status_text(&t);
-    ui.horizontal_wrapped(|ui| {
-      theme::status_line(ui, severity, &status);
-      if t.double_talk {
-        theme::status_line(ui, Severity::Warning, tr("You are talking: echo filter on hold")).on_hover_text(tr(
-          "Your voice (or a loud noise) and the headphone sound reach the mic at the same time. \
-           Echo removal keeps running, but the filter stops adjusting itself for a moment, \
-           so it doesn't learn to remove your voice. Normal, nothing to fix.",
-        ));
-      }
-    });
+    theme::status_line(ui, severity, &status);
 
     if !aec_enabled {
       return;
     }
 
-    // Three columns: title, a 3-row grid (label | value), then the plot that belongs to them.
-    // Same rows, row height, label width and text styles everywhere, so they line up.
+    // Columns: title, a grid (label | value). Same rows, row height, label width and text
+    // styles everywhere, so they line up.
     ui.add_space(8.0);
     let p = theme::palette(ui);
     let gap = AEC_COLUMN_GAP + ui.spacing().item_spacing.x;
     let col_w = ((ui.available_width() - 2.0 * gap) / 3.0).max(200.0);
     let meter_w = (col_w - AEC_LABEL_WIDTH - AEC_VALUE_WIDTH).max(40.0);
     ui.horizontal_top(|ui| {
-      aec_column(ui, col_w, tr("Echo delay"), |ui| {
+      aec_column(ui, col_w, tr("Echo"), |ui| {
+        aec_row(ui, tr("Removed"), |ui| {
+          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db));
+        });
         let (delay, hover) = match t.delay_ms {
           Some(d) => {
             let src = if t.from_cache { tr("  (from previous session, re-checking)") } else { "" };
@@ -335,32 +326,6 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
         };
         aec_row(ui, tr("Delay"), |ui| {
           ui.label(RichText::new(delay).color(p.ok)).on_hover_text(hover);
-        });
-        aec_row(ui, tr("Confidence"), |ui| {
-          aec_meter(ui, t.confidence, meter_w, p.accent, format!("{:.0} %", t.confidence * 100.0));
-        });
-        let last = t.raw_delay_ms.map_or_else(|| tr("no clear peak").to_string(), |d| format!("{d:.2} ms"));
-        aec_row(ui, tr("Last measurement"), |ui| {
-          ui.label(RichText::new(last).color(p.text)).on_hover_text(trf("{} measurements total", &[&t.estimate_count]));
-        });
-      });
-      ui.add_space(AEC_COLUMN_GAP);
-      aec_column(ui, col_w, tr("Echo removed (ERLE)"), |ui| {
-        aec_row(ui, tr("Removed"), |ui| {
-          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db));
-        });
-        let window_ms = format!("{:.1}", t.filter_taps as f32 / 48.0);
-        let pre_ms = format!("{:.1}", t.pre_delay_ms);
-        aec_row(ui, tr("Filter"), |ui| {
-          ui.label(RichText::new(trf("{} taps / {} ms", &[&t.filter_taps, &window_ms])).color(p.text)).on_hover_text(
-            trf(
-              "{} taps = {} ms window, starts {} ms before the measured delay",
-              &[&t.filter_taps, &window_ms, &pre_ms],
-            ),
-          );
-        });
-        aec_row(ui, tr("Pre-delay"), |ui| {
-          ui.label(RichText::new(format!("{pre_ms} ms")).color(p.text));
         });
       });
       ui.add_space(AEC_COLUMN_GAP);
@@ -372,16 +337,26 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
       });
     });
 
-    // Plots in their own row, captions kept to one line, so the plots always line up.
-    ui.add_space(8.0);
-    ui.horizontal_top(|ui| {
-      aec_plot(ui, col_w, tr("Correlation vs. delay"), None, |ui| corr_plot(ui, &t, col_w));
-      ui.add_space(AEC_COLUMN_GAP);
-      aec_plot(ui, col_w, tr("Echo path"), Some(tr("Echo path (adaptive filter impulse response)")), |ui| {
-        impulse_plot(ui, &t, col_w)
+    // Troubleshooting only: how sure the delay measurement is, and its history.
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new(tr("Details")).id_salt("aec_details").default_open(false).show(ui, |ui| {
+      ui.horizontal_top(|ui| {
+        aec_column(ui, col_w, tr("Delay measurement"), |ui| {
+          aec_row(ui, tr("Confidence"), |ui| {
+            aec_meter(ui, t.confidence, meter_w, p.accent, format!("{:.0} %", t.confidence * 100.0));
+          });
+          let last = t.raw_delay_ms.map_or_else(|| tr("no clear peak").to_string(), |d| format!("{d:.2} ms"));
+          aec_row(ui, tr("Last measurement"), |ui| {
+            ui.label(RichText::new(last).color(p.text)).on_hover_text(trf("{} measurements total", &[&t.estimate_count]));
+          });
+        });
       });
-      ui.add_space(AEC_COLUMN_GAP);
-      aec_plot(ui, col_w, tr("History (60 s): ERLE dB / delay ms"), None, |ui| history_plot(ui, state, col_w));
+      ui.add_space(8.0);
+      ui.horizontal_top(|ui| {
+        aec_plot(ui, col_w, tr("Correlation vs. delay"), None, |ui| corr_plot(ui, &t, col_w));
+        ui.add_space(AEC_COLUMN_GAP);
+        aec_plot(ui, col_w, tr("History (60 s): ERLE dB / delay ms"), None, |ui| history_plot(ui, state, col_w));
+      });
     });
   });
 }
@@ -503,41 +478,6 @@ fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
     });
 }
 
-fn impulse_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
-  let n = t.impulse.len().max(1);
-  let window_ms = t.filter_taps as f32 / 48.0;
-  let base_ms = t.delay_ms.unwrap_or(0.0) - t.pre_delay_ms;
-  // No filter yet (0 taps): every point would sit on one x, and egui_plot's auto-bounds jump
-  // around on a zero-width range. Draw nothing and keep a fixed x range instead.
-  let pts: PlotPoints = if t.filter_taps == 0 {
-    PlotPoints::default()
-  } else {
-    t.impulse
-      .iter()
-      .enumerate()
-      .map(|(i, &v)| [(base_ms + (i as f32 + 0.5) / n as f32 * window_ms) as f64, v as f64])
-      .collect()
-  };
-  let peak = t.impulse.iter().fold(0.0f32, |m, v| m.max(*v));
-  // Round the top up to a 1-2-5 value, so the axis labels are short numbers.
-  let top = [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0].into_iter().find(|&s| s >= peak as f64).unwrap_or(peak as f64);
-  let (line, mark) = (theme::adapt(ui, EQ_COLOR), theme::adapt(ui, OK_COLOR));
-  small_plot("aec_impulse_plot", width)
-    .include_x(base_ms as f64)
-    .include_x((base_ms + window_ms.max(IMPULSE_MIN_WINDOW_MS)) as f64)
-    .include_y(0.0)
-    .include_y(top)
-    .y_grid_spacer(y_steps(top))
-    .x_axis_formatter(|v, _| format!("{:.0} ms", v.value))
-    .label_formatter(|_, p| format!("{:.2} ms\n|w| {:.3}", p.x, p.y))
-    .show(ui, |pu| {
-      pu.line(Line::new(pts).stroke(Stroke::new(1.5_f32, line)).fill(0.0_f32).name("|w|"));
-      if let Some(d) = t.delay_ms {
-        pu.vline(VLine::new(d as f64).stroke(Stroke::new(1.0_f32, mark)).name(tr("measured delay")));
-      }
-    });
-}
-
 fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
   let now = state.aec_history.back().map_or(0.0, |p| p.t);
   let erle: PlotPoints = state.aec_history.iter().map(|p| [p.t - now, p.erle_db as f64]).collect();
@@ -604,19 +544,15 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
       return;
     }
     let status = state.denoise_status();
-    let (note, severity) = match status {
-      DenoiseStatus::Running(m) => {
-        (trf("Running: {}, adds {}", &[&model_name(m), &latency_text(m, ahead)]), Severity::Success)
-      }
-      DenoiseStatus::Idle(m) => (
-        trf(
-          "No app is using the microphone now. {} (adds {}) starts with the next call/recording.",
-          &[&model_name(m), &latency_text(m, ahead)],
-        ),
+    // Running as selected: nothing to say (the measured delay is at the top of the page).
+    let note = match status {
+      DenoiseStatus::Running(_) => None,
+      DenoiseStatus::Idle(m) => Some((
+        trf("No app is using the microphone now. {} starts with the next call/recording.", &[&model_name(m)]),
         Severity::Info,
-      ),
-      DenoiseStatus::Switching(m) => (trf("Switching... running: {}", &[&model_name(m)]), Severity::Warning),
-      DenoiseStatus::Limited { limit, running } => (
+      )),
+      DenoiseStatus::Switching(m) => Some((trf("Switching... running: {}", &[&model_name(m)]), Severity::Warning)),
+      DenoiseStatus::Limited { limit, running } => Some((
         match limit {
           DenoiseLimit::Overloaded => trf(
             "Limited: {} was too slow for real time on this CPU, {} runs instead. Pick {} again to retry.",
@@ -629,16 +565,15 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
           other => trf("Limited ({}), running: {}", &[&format!("{other:?}"), &model_name(running)]),
         },
         Severity::Error,
-      ),
-      DenoiseStatus::Failed { selected, running } => (
-        trf(
-          "{} could not be loaded by the audio engine, still on {} (adds {}).",
-          &[&model_name(selected), &model_name(running), &latency_text(running, ahead)],
-        ),
+      )),
+      DenoiseStatus::Failed { selected, running } => Some((
+        trf("{} could not be loaded by the audio engine, still on {}.", &[&model_name(selected), &model_name(running)]),
         Severity::Error,
-      ),
+      )),
     };
-    theme::status_line(ui, severity, &note);
+    if let Some((note, severity)) = note {
+      theme::status_line(ui, severity, &note);
+    }
     if !matches!(status, DenoiseStatus::Idle(_)) {
       dsp_load_row(ui, state.mic_dsp_load());
     }
@@ -674,7 +609,7 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
 
       ui.label("");
       ui.add_enabled_ui(gate_auto, |ui| {
-        let text = trf("Protect word onsets (+{})", &[&ms_text(AiVoiceIsolator::lookahead_ms())]);
+        let text = trf("Protect word onsets (+{})", &[&ms_text(AiVoiceIsolator::lookahead_ms(selected))]);
         changed |= ui
           .checkbox(&mut protect, text)
           .on_hover_text(tr(
@@ -695,6 +630,25 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
       }
     });
   });
+}
+
+/// One line: the delay the chain adds, measured in the DSP; the breakdown on hover. Hidden while
+/// no app uses the microphone (nothing to measure).
+fn latency_line(ui: &mut Ui, state: &mut AppState) {
+  if matches!(state.denoise_status(), DenoiseStatus::Idle(_)) {
+    return;
+  }
+  let l = state.mic_latency();
+  let text = match l.measured_ms {
+    Some(ms) => trf("After all filters your voice is delayed by {} in total (measured)", &[&ms_text(ms)]),
+    None => tr("Delay: measuring, say something...").to_owned(),
+  };
+  let breakdown = trf(
+    "Measured continuously: the raw microphone compared with what apps receive. Right now: echo cancellation {}, noise suppression {}, word-onset protection {}. EQ, leveler and limiter add no delay.",
+    &[&ms_text(l.aec_ms), &ms_text(l.denoise_ms), &ms_text(l.lookahead_ms)],
+  );
+  // Normal size with the status icon: a caption was easy to miss at the top of the page.
+  theme::status_line(ui, Severity::Info, &text).on_hover_text(breakdown);
 }
 
 /// CPU time of the whole mic chain against the real-time budget of each audio block.
@@ -734,15 +688,11 @@ const DPDFNET_ABOUT: &str =
 /// Delay the mic gets with this model: its own (measured, see the denoiser's latency test)
 /// plus the gate lookahead when word-onset protection is on.
 fn total_latency_ms(m: DenoiseModel, ahead: bool) -> f32 {
-  AiVoiceIsolator::latency_ms(m) + if ahead { AiVoiceIsolator::lookahead_ms() } else { 0.0 }
+  AiVoiceIsolator::latency_ms(m) + if ahead { AiVoiceIsolator::lookahead_ms(m) } else { 0.0 }
 }
 
 fn ms_text(ms: f32) -> String {
   trf("{} ms", &[&format!("{ms:.0}")])
-}
-
-fn latency_text(m: DenoiseModel, ahead: bool) -> String {
-  trf("{} ms latency", &[&format!("{:.0}", total_latency_ms(m, ahead))])
 }
 
 fn latency_breakdown(m: DenoiseModel, ahead: bool) -> String {
@@ -750,7 +700,7 @@ fn latency_breakdown(m: DenoiseModel, ahead: bool) -> String {
   if ahead {
     trf(
       "Expected latency: {} = {} model + {} word-onset protection.",
-      &[&ms_text(total_latency_ms(m, true)), &model, &ms_text(AiVoiceIsolator::lookahead_ms())],
+      &[&ms_text(total_latency_ms(m, true)), &model, &ms_text(AiVoiceIsolator::lookahead_ms(m))],
     )
   } else {
     trf("Expected latency: {}.", &[&model])

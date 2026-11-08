@@ -1,15 +1,16 @@
-pub mod aec;
+pub mod aec3;
 pub mod ai_denoiser;
 pub mod clip_detector;
 pub mod debug_capture;
 pub mod delay_estimator;
+pub mod latency_meter;
 mod dpdfnet;
 pub mod plugin;
 pub mod shared_memory;
 pub mod voice_leveler;
 pub mod vst_bridge;
 
-pub use aec::AcousticEchoCanceller;
+pub use aec3::EchoCanceller3;
 pub use ai_denoiser::AiVoiceIsolator;
 pub use delay_estimator::DelayEstimator;
 pub use plugin::{GamersEqualizerPlugin, PluginMode};

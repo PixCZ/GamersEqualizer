@@ -7,6 +7,11 @@ všech testů včetně dlouhé nahrávky vývojáře podle testovacího scéná�
 Stav kódu: větev `main`, commit `8105ce1` („Gate never cuts the voice: output detector and -12 dB floor“)
 plus necommitnuté úpravy v pracovním stromu. Měřeno 2026-11-06 na vývojářově PC (Windows 11, release build).
 
+**Aktualizace 2026-11-08:** popis řetězce (kapitoly 2–7) odpovídá kódu po milnících 29–31 v `DEVLOG.md`:
+AEC3 (`sonora`) místo NLMS/MDF, pevný HP 70 Hz před denoiserem, lookahead podle modelu, floor gate vázaný
+na leveler, učící leveler, peak limiter. Čísla v kapitolách 9–10 a v příloze A jsou pořád z 2026-11-06
+(před těmito změnami). Nová čísla jsou v DEVLOG.
+
 Rozlišení v textu: **Naměřeno** = číslo z testu. **Odvozeno z kódu** = plyne přímo ze zdrojáku.
 **Hypotéza** = vysvětlení, které ještě nikdo neověřil poslechem ani testem.
 
@@ -22,7 +27,7 @@ Rozlišení v textu: **Naměřeno** = číslo z testu. **Odvozeno z kódu** = pl
 | Řetězec běží na 48 kHz mono     | Jiné frekvence převádí `rate_bridge` (rubato sinc, +~5 ms). Zpracuje se 1. kanál a zkopíruje se do všech. |
 | Jen 32-bit float formáty        | APO jiné formáty nepřijme (pass-through).                                                  |
 | CPU rozpočet                    | Těžký model, který 3 okna po ~100 ms za sebou nestíhá, se přepne na RNNoise.               |
-| Modely jsou vložené v DLL       | `include_bytes!`: APO nikdy nečte z disku. Runtime je `tract` (DFN3 na 0.21.4 připnutém, DPDFNet na 0.23). |
+| Modely jsou vložené v DLL       | `include_bytes!`: APO nikdy nečte z disku. Runtime je `tract` 0.23.10 pro oba těžké modely (DFN3 přes vlastní fork `crates/vendor/deep_filter`). |
 | `tract` runtime není `Send`     | Model nejde načíst na jiném vlákně. Přepnutí modelu za běhu = jednorázová mezera ~0,1–0,2 s. |
 | Jen oficiální modely/API        | Žádné cloudové služby, vše lokálně.                                                        |
 | Nastavení přes sdílenou paměť   | Daemon (UI) zapisuje atomiky do Global mappingu, APO je čte v každém bloku.                |
@@ -41,15 +46,16 @@ Fyzický mikrofon
             ├─ RateBridge (jen když zařízení ≠ 48 kHz): device rate → 48 kHz → … → device rate
             └─ GamersEqualizerPlugin::mic_process  (crates/gamersequalizer-mic-vst/src/plugin.rs)
                  0. master_bypass? → surový signál, konec
-                 1. AEC: DelayEstimator (GCC-PHAT) + NLMS 1024 tapů      [jen když hraje reference]
-                 2. AiVoiceIsolator (ai_denoiser.rs)
+                 1. AEC: DelayEstimator (GCC-PHAT) + WebRTC AEC3 (sonora)  [jen když hraje reference]
+                 2. pevný high-pass 70 Hz (2. řád), pak AiVoiceIsolator (ai_denoiser.rs)
                       a. VAD na surovém vstupu (RNNoise prob.)
                       b. denoiser: RNNoise | DeepFilterNet 3 | DPDFNet-2
                       c. VAD na výstupu denoiseru
-                      d. lookahead delay 30 ms (výchozí zapnuto)
-                      e. noise gate (VAD-keyed, floor -12 dB)
+                      d. lookahead delay (výchozí zapnuto): RNNoise 15, DFN3 15, DPDFNet 10 ms
+                      e. noise gate (VAD-keyed, floor -12 dB a o zisk leveleru níž, max -24 dB)
                  3. Parametrický EQ (biquad kaskáda; výchozí HP 100 Hz/48 dB, LP 9 kHz/24 dB)
-                 4. Digitální boost (100–300 %) + soft limiter (knee -0,45 dBFS)
+                 4. Učící voice leveler (VoiceLeveler: cíl -24 dBFS, zisk -18 až +24 dB)
+                 5. Hlasitost/boost (0–300 %) + PeakLimiter (okamžitý attack, release 80 ms, strop -0,26 dBFS)
             └─ výsledek do všech kanálů
   └─ aplikace (Discord, hra, …) dostanou už zpracovaný signál
 ```
@@ -100,7 +106,7 @@ Režim gate (`crates/gamersequalizer-common/src/shm.rs`):
 
 ```rust
 pub const NOISE_GATE_AUTO: i32 = 0;            // automatická gate
-pub const NOISE_GATE_AUTO_LOOKAHEAD: i32 = 1;  // + 30 ms lookahead („Chránit začátky slov“), výchozí
+pub const NOISE_GATE_AUTO_LOOKAHEAD: i32 = 1;  // + lookahead 10–15 ms podle modelu („Chránit začátky slov“), výchozí
 pub const NOISE_GATE_OFF: i32 = -80;           // ≤ -79,5 = vypnuto
 ```
 
@@ -111,7 +117,7 @@ detektorem řeči, ne hlasitostí.
 
 ## 4. Fáze 1: AEC (potlačení ozvěny z reproduktorů)
 
-Kód: `mic-vst/src/delay_estimator.rs`, `mic-vst/src/aec.rs`, `plugin.rs::run_aec`.
+Kód: `mic-vst/src/delay_estimator.rs`, `mic-vst/src/aec3.rs`, `plugin.rs::run_aec`.
 
 **Reference:** render APO (nebo loopback) zapisuje, co hraje do reproduktorů, do ring bufferu ve
 sdílené paměti s QPC časy. Mic blok se k referenci zarovná podle QPC času (`ref_index_at(t)`).
@@ -132,27 +138,26 @@ sdílené paměti s QPC časy. Mic blok se k referenci zarovná podle QPC času 
 | `MIN_REF_RMS`          | 0,002 (-54 dBFS) | reference musí nést signál                                    |
 | `MIN_MIC_RMS`          | 0,0003 (-70 dBFS) |                                                              |
 
-**Filtr (NLMS):**
+**Filtr: WebRTC AEC3 (`sonora`, pure Rust, BSD-3)** místo dřívějšího NLMS a pak MDF (odstraněn 2026-11-08):
 
 ```rust
-// aec.rs
-pub const DEFAULT_FILTER_TAPS: usize = 1024;   // 21,3 ms okolo změřeného zpoždění
-pub const PRE_DELAY_SAMPLES: usize = 144;      // filtr začíná 3 ms před zpožděním
-pub const DTD_THRESHOLD: f32 = 1.6;            // Geigel: near-end řeč když |mic| > 1,6·max|ref|
-const DTD_HANGOVER_SAMPLES: u32 = 1440;        // 30 ms
-// step_size 0.3, leakage 0.99999
-let echo_estimate: f32 = self.weights.iter().zip(window).map(|(w, x)| w * x).sum();
-let error = mic_sample - echo_estimate;
-if !self.double_talk_active && far_end_active {          // adaptace jen když mluví jen reproduktor
-  let update = (self.step_size as f64 / (self.ref_energy + 1e-3)) as f32 * error;
-  for (w, &x) in self.weights.iter_mut().zip(window) { *w = *w * leak + update * x; }
-}
-// Žádné nelineární potlačení zbytku: dřívější verze tlumila vlastní hlas až o 90 %.
-// Zbytek ozvěny nechává na denoiseru.
+// aec3.rs
+pub const FRAME: usize = 480;                  // AEC3 pracuje po 10 ms
+pub const PRE_DELAY_SAMPLES: usize = 144;      // reference jde 3 ms před změřeným zpožděním
+pub const AEC3_LATENCY_SAMPLES: usize = 430;   // ~9 ms vlastní latence (band split + rámce)
+// Config: 48 kHz interně, vlastní high-pass AEC3 vypnutý (běží jen s referencí,
+// basy mikrofonu by se zapínaly a vypínaly s druhou stranou).
 ```
 
-AEC nebylo na nahrávkách testováno: chybí reference (co hrálo z reproduktorů). Jednotkové testy
-(syntetický šum) dávají > 20 dB potlačení ozvěny.
+Lineární filtr (coarse + refined) do 8 kHz plus nelineární supresor zbytku ve všech pásmech do 24 kHz
+s comfort noise. Selhání rámce nebo NaN = rámec projde nezpracovaný.
+
+Naměřeno (A/B na debug capturech 2026-11-07): o 10–25 dB víc odstraněné ozvěny než MDF, když hraje jen
+druhá strana, ~1,5 dB z hlasu při dvojí řeči. Syntetické testy v `aec3.rs`: dozvuk 200 ms 28 dB,
+dvojí řeč 54 dB ozvěny pryč / hlas -1,6 dB, tichý hlas pod hudbou 37,5 dB / -1,3 dB, změna cesty 35 dB.
+
+Maska `echo_only` (gate zavřená při čisté ozvěně) se nezavedla: po AEC3 slyší vstupní detektor řeč
+v blocích „jen ozvěna“ jen v 1–11 % a zbytek za denoiserem má -55 až -66 dBFS (`echo_gate_report`).
 
 ---
 
@@ -173,7 +178,7 @@ pub fn process_samples(&mut self, samples: &mut [f32]) {
     _                            => self.rnnoise.process(samples, self.strength),
   }
   let voice_out = self.gate.enabled && self.vad_out.process(samples);  // VAD na VÝSTUPU
-  self.delay.set_len(if self.gate.enabled && self.lookahead { GATE_LOOKAHEAD_SAMPLES } else { 0 });
+  self.delay.set_len(if self.gate.enabled && self.lookahead { self.lookahead_len() } else { 0 }); // podle modelu
   self.delay.process(samples);                                  // lookahead: zpozdí audio, ne detektory
   let hold = match (voice, voice_out) {
     (true, _)      => GATE_HOLD_SAMPLES + latency_samples(self.active) + self.delay.len(),
@@ -189,7 +194,7 @@ pub fn process_samples(&mut self, samples: &mut [f32]) {
 | Model           | Knihovna / runtime                    | Rámec               | Latence modelu | CPU (naměřeno, 1 jádro) |
 | --------------- | ------------------------------------- | ------------------- | -------------- | ----------------------- |
 | RNNoise         | `nnnoiseless 0.5` (Rust port)         | 480 vz. (10 ms)     | 20 ms          | 0,6 %                   |
-| DeepFilterNet 3 | `deep_filter` git `d375b2d`, tract 0.21.4 | hop 480, FFT 960 + 2 lookahead | 40 ms | 2,9 %             |
+| DeepFilterNet 3 | fork `deep_filter` (`d375b2d`), tract 0.23.10 | hop 480, FFT 960 + 2 lookahead | 40 ms | 2,0–2,2 % (na 0.21: 2,9–3,1 %) |
 | DPDFNet-2 48 kHz| ONNX v DLL, tract 0.23.10, vlastní STFT | hop 480, Vorbis okno 960, 4 lookahead hopy | 60 ms | 10,7 % |
 
 CPU je čas zpracování / délka audia při běhu celé nahrávky. Zahrnuje i vstupní VAD (jeden RNNoise průchod navíc).
@@ -213,6 +218,10 @@ self.output_fifo.push(alpha * (wet / I16_SCALE) + (1.0 - alpha) * (dry / I16_SCA
 * U RNNoise je stejná síla mix s **25 % suchého signálu**. RNNoise tak z principu nemůže ztlumit
   šum víc než 20·log10(0,25) ≈ **-12 dB**. Přesně tohle se naměřilo: RNNoise potlačí 10–12 dB
   všude, bez ohledu na druh šumu.
+* **Zůstává tak záměrně (2026-11-08).** Mix v dB (suchý podíl 6 dB až 20 / 30 dB) ztlumil pauzy o
+  19 / 25 dB místo 12–14, ale gate pak uřízla víc tichých slabik: 1,6–2,4 → 2,6–4,3 / 3,8–5,9 %.
+  Přísnější výstupní detektor pro RNNoise (práh 0,3 → 0,5) snížil otevírání na klávesy 31 → 18 %, ale
+  stál +0,3–0,4 bodu slabik. Pravidlo: radši pár kláves navíc než jedno uříznuté písmeno.
 * Suchý signál je u RNNoise zpožděný o 1 rámec (`prev_dry`), aby se mix nefázoval.
 
 #### DeepFilterNet 3: prahy
@@ -261,7 +270,10 @@ Gate:
 
 ```rust
 const GATE_FLOOR_DB: f32 = -12.0;                 // zavřená = -12 dB, NIKDY mute
-const GATE_LOOKAHEAD_SAMPLES: usize = 48 * 30;    // 30 ms
+const GATE_FLOOR_EXTRA_MAX_DB: f32 = 12.0;        // + o zisk leveleru níž (set_gate_floor_extra_db)
+const RNNOISE_LOOKAHEAD_SAMPLES: usize = 48 * 15; // lookahead podle modelu
+const DF_LOOKAHEAD_SAMPLES: usize = 48 * 15;
+const DPDF_LOOKAHEAD_SAMPLES: usize = 48 * 10;
 const GATE_HOLD_SAMPLES: usize = 48 * 200;        // 200 ms + latence modelu + lookahead
 const GATE_OPEN_COEF: f32 = 1.0 / 48.0;           // ~1 ms náběh
 const GATE_CLOSE_COEF: f32 = 1.0 / (48.0 * 50.0); // ~50 ms doběh
@@ -294,8 +306,15 @@ Proto floor -12 dB místo mute, dva detektory, hystereze a lookahead.
 
   EQ běží **až po denoiseru**. Další presety: Male voice, Radio voice, Discord clarity, Tame harsh S
   sounds, Walkie-talkie, Flat.
-* **Boost**: `mic_volume_permille` > 1000 → násobek 1,0–3,0 (jen zesílení, nikdy zeslabení).
-* **Soft limiter** (vždy, i bez boostu):
+* **Pevný high-pass 70 Hz** (2. řád, Butterworth) běží *před* detektory a denoiserem (`PRE_HIGH_PASS_HZ`
+  v `plugin.rs`), aby dunění stolu a klimatizace neviděly modely ani VAD. EQ s HP 100 Hz zůstává.
+* **Voice leveler** (`voice_leveler.rs`): učí se úroveň řeči jen z rámců, kde detektor slyší řeč, a
+  táhne ji k cíli -24 dBFS, zisk -18 (`MAX_CUT_DB`) až +24 dB.
+* **Hlasitost/boost**: s levelerem je `mic_volume_permille` 0–3000 to, jak hlasitě vás slyší ostatní
+  (100 % = cíl); bez něj jen boost > 100 %.
+* **PeakLimiter** (`gamersequalizer_common::limiter`, vždy poslední): okamžitý attack, release 80 ms,
+  strop 0,97, pak `soft_limit`. Dřív byl na konci jen `soft_limit` (níže), který od vstupu 1,003 ořezával.
+* **Soft limiter** (uvnitř PeakLimiteru jako pojistka):
 
   ```rust
   pub const LIMITER_KNEE: f32 = 0.95;            // -0,45 dBFS, pod tím bit-exact
@@ -306,19 +325,21 @@ Proto floor -12 dB místo mute, dva detektory, hystereze a lookahead.
   }
   ```
 
-V řetězci mikrofonu **není žádné AGC ani kompresor**. Úroveň hlasu určuje jen hardwarový zisk
-mikrofonu v systému a případný boost.
+AGC je jen učící leveler (pomalý, učí se z řeči), žádný rychlý kompresor.
 
 ---
 
 ## 7. Latence (výchozí nastavení)
 
-| Část                               | RNNoise | DFN3  | DPDFNet |
-| ---------------------------------- | ------- | ----- | ------- |
-| Model (priming + okno + lookahead) | 20 ms   | 40 ms | 60 ms   |
-| Gate lookahead (výchozí zapnutý)   | 30 ms   | 30 ms | 30 ms   |
-| RateBridge (jen mic ≠ 48 kHz)      | ~5 ms   | ~5 ms | ~5 ms   |
-| **Celkem navíc proti surovému mic**| 50 ms   | 70 ms | 90 ms   |
+| Část                                | RNNoise  | DFN3     | DPDFNet  |
+| ----------------------------------- | -------- | -------- | -------- |
+| Model (priming + okno + lookahead)  | 20 ms    | 40 ms    | 60 ms    |
+| Gate lookahead (výchozí zapnutý)    | 15 ms    | 15 ms    | 10 ms    |
+| AEC3 (jen když hraje reference)     | ~9 ms    | ~9 ms    | ~9 ms    |
+| RateBridge (jen mic ≠ 48 kHz)       | ~5 ms    | ~5 ms    | ~5 ms    |
+| **Celkem navíc proti surovému mic** | 35–49 ms | 55–69 ms | 70–84 ms |
+
+Skutečnou latenci za běhu měří `latency_meter.rs`.
 
 Latence modelů jsou ověřené křížovou korelací (`test_measured_latency_matches_constants`):
 RNNoise 960 vz., DFN3 1920 vz., DPDFNet 2877 vz. (konstanta 2880).
@@ -711,7 +732,7 @@ Pořadí modelů: DFN3 | DPDFNet | RNNoise. Sekunda 0 je zahřívání (gate sta
 | `crates/gamersequalizer-mic-vst/src/plugin.rs`        | řetězec: bypass → AEC → denoise → EQ → boost/limit, telemetrie, overload fallback |
 | `crates/gamersequalizer-mic-vst/src/ai_denoiser.rs`   | modely, VAD, gate, lookahead, všechny testy a reporty    |
 | `crates/gamersequalizer-mic-vst/src/dpdfnet.rs`       | DPDFNet-2: STFT, ONNX krok, overlap-add                  |
-| `crates/gamersequalizer-mic-vst/src/aec.rs`           | NLMS echo canceller                                      |
+| `crates/gamersequalizer-mic-vst/src/aec3.rs`          | WebRTC AEC3 (sonora) echo canceller                      |
 | `crates/gamersequalizer-mic-vst/src/delay_estimator.rs` | GCC-PHAT odhad zpoždění ozvěny                         |
 | `crates/gamersequalizer-common/src/shm.rs`            | sdílená paměť, výchozí hodnoty, enumy                    |
 | `crates/gamersequalizer-common/src/biquad.rs`, `limiter.rs` | EQ a limiter                                       |

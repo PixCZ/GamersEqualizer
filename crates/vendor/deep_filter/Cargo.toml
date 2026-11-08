@@ -1,0 +1,56 @@
+# Fork of DeepFilterNet's libDF (Rikorose/DeepFilterNet, rev d375b2d), inference only, on tract 0.23.
+# See README.md for what changed and why.
+[package]
+name = "deep_filter"
+version = "0.5.7-pre+gamersequalizer"
+authors = ["Hendrik Schröter"]
+edition = "2021"
+description = "Noise supression using deep filtering (inference-only fork on tract 0.23)"
+repository = "https://github.com/Rikorose/DeepFilterNet"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "df"
+path = "src/lib.rs"
+
+[features]
+default = []
+transforms = ["dep:thiserror", "dep:ndarray", "dep:rubato"]
+logging = ["dep:log", "dep:crossbeam-channel"]
+timings = []
+default-model = []
+tract = [
+  "transforms",
+  "logging",
+  "dep:tract-core",
+  "dep:tract-onnx",
+  "dep:tract-pulse",
+  "dep:tract-hir",
+  "dep:rust-ini",
+  "dep:ndarray",
+  "dep:anyhow",
+  "dep:flate2",
+  "dep:tar",
+]
+
+[dependencies]
+rustfft = "6.1"
+realfft = "3.1"
+itertools = "0.12"
+num-complex = { version = "0.4", features = ["serde"] }
+log = { version = "0.4", features = ["std"], optional = true }
+rubato = { version = "0.14", optional = true }
+thiserror = { version = "1.0", optional = true }
+anyhow = { version = "1.0", optional = true, features = ["backtrace"] }
+ndarray = { version = "0.17", optional = true }
+crossbeam-channel = { version = "0.5", optional = true }
+rust-ini = { version = "0.21", optional = true }
+# Exact pins: the same tract the DPDFNet model runs on (`tract-onnx-23` in the mic crate).
+tract-core = { version = "=0.23.10", optional = true }
+tract-onnx = { version = "=0.23.10", optional = true }
+tract-pulse = { version = "=0.23.10", optional = true }
+tract-hir = { version = "=0.23.10", optional = true }
+flate2 = { version = "1.0.24", optional = true }
+tar = { version = "0.4.38", optional = true }
+

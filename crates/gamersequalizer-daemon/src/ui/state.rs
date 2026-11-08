@@ -71,6 +71,16 @@ pub enum DenoiseStatus {
   },
 }
 
+/// Delay the mic chain adds, ms (see `mic_latency`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MicLatency {
+  /// None until the DSP has heard enough speech to measure.
+  pub measured_ms: Option<f32>,
+  pub aec_ms: f32,
+  pub denoise_ms: f32,
+  pub lookahead_ms: f32,
+}
+
 /// Mic chain CPU time as a share of real time (1.0 = 100 %), last ~100 ms.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DspLoad {
@@ -426,6 +436,20 @@ impl AppState {
       // The audio thread loads the model synchronously; still the old one after the grace period = load failed.
       (true, false) => DenoiseStatus::Failed { selected, running: active },
     }
+  }
+
+  /// Delay the mic chain adds: measured end to end in the DSP, and what each stage holds now.
+  pub fn mic_latency(&self) -> MicLatency {
+    self.shm_header().map_or(MicLatency::default(), |h| {
+      let ms = |us: u32| us as f32 / 1000.0;
+      let measured = h.mic_latency_measured_us.load(Ordering::Relaxed);
+      MicLatency {
+        measured_ms: (measured > 0).then(|| ms(measured)),
+        aec_ms: ms(h.mic_latency_aec_us.load(Ordering::Relaxed)),
+        denoise_ms: ms(h.mic_latency_denoise_us.load(Ordering::Relaxed)),
+        lookahead_ms: ms(h.mic_latency_lookahead_us.load(Ordering::Relaxed)),
+      }
+    })
   }
 
   pub fn mic_dsp_load(&self) -> DspLoad {

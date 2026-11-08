@@ -20,19 +20,17 @@ nnnoiseless = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 rustfft = "6.4"
-# Real-input FFT for the echo canceller (already in the tree via deep_filter).
+# Real-input FFT (delay estimator, DPDFNet STFT, latency meter; already in the tree via deep_filter).
 realfft = "3.5"
-# DeepFilterNet 3 (official repo, pinned commit; crates.io only has an old version without
-# inference). tract is pinned exactly: upstream allows ^0.21.4 but breaks on newer 0.21.x.
-deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "d375b2d8309e0935d165700c91da9de862a99c31", default-features = false, features = ["tract", "default-model"] }
-tract-core = "=0.21.4"
-tract-onnx = "=0.21.4"
-tract-pulse = "=0.21.4"
-tract-hir = "=0.21.4"
-# DPDFNet runs on current tract, ~3x faster than 0.21 on its graph; linked next to the pinned
-# 0.21 above (separate semver versions, no conflict).
-tract-onnx-23 = { package = "tract-onnx", version = "0.23.10" }
-ndarray = "0.15"
+# DeepFilterNet 3: our inference-only fork of upstream libDF (rev d375b2d) on tract 0.23, the
+# tract DPDFNet uses too (upstream pins tract 0.21). See crates/vendor/deep_filter/README.md.
+deep_filter = { path = "../vendor/deep_filter", features = ["tract", "default-model"] }
+# DPDFNet (ONNX), exactly the tract the fork is built against.
+tract-onnx-23 = { package = "tract-onnx", version = "=0.23.10" }
+# Same version as tract 0.23 (the fork's DfTract takes these arrays).
+ndarray = "0.17"
+# Echo canceller: pure Rust port of WebRTC AEC3 (BSD-3), see src/aec3.rs.
+sonora = "0.3"
 
 [dev-dependencies]
 # Reads the WAV fixtures in test_data/denoise (already in the lock file via other crates).
