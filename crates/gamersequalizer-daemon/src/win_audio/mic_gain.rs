@@ -12,8 +12,9 @@ use log::info;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-/// Clipped raw samples within `CLIP_WINDOW` that mean the converter is overdriven (a single
-/// click or desk thump stays under it).
+/// Clipped raw samples within `CLIP_WINDOW` that mean the converter is overdriven. Only clips
+/// next to speech count (see `AutoInputGain::tick`): a tap on the mic or a desk thump clips too,
+/// and a lower volume for those would only make the voice quieter.
 const CLIP_LIMIT: u32 = 50;
 const CLIP_WINDOW: Duration = Duration::from_secs(10);
 /// Leveler pinned near its boost cap (+24) / its cut cap (-6) for this much speech = the input
@@ -55,6 +56,8 @@ pub struct AutoInputGain {
   /// Counters of the previous tick.
   last: Option<(u32, u32)>,
   clip_window: Option<(Instant, u32)>,
+  /// Clips of the last tick if it had no speech: they count once the next tick has some.
+  loose_clips: u32,
   weak_ms: u32,
   hot_ms: u32,
   stepped_at: Option<Instant>,
@@ -84,6 +87,16 @@ impl AutoInputGain {
       }
       Some((c, s)) => (i.clips - c, i.speech_ms - s),
       None => return None,
+    };
+    // Clips count only with speech in the same tick or the next one (the DSP reports speech
+    // later than the raw clip, by the detector's and the chain's delay). Known limit: a tap
+    // while talking still counts.
+    let loose = std::mem::take(&mut self.loose_clips);
+    let clips = if speech > 0 {
+      clips.saturating_add(loose)
+    } else {
+      self.loose_clips = clips;
+      0
     };
     let (start, sum) = match self.clip_window {
       Some((start, sum)) if i.now.duration_since(start) < CLIP_WINDOW => (start, sum + clips),
@@ -251,6 +264,16 @@ mod tests {
     assert!(tick < 8, "within ~2 s: tick {tick}");
     assert_eq!(talking(tick), 0, "in a pause");
     assert!((level - 0.75).abs() < 1e-6);
+  }
+
+  #[test]
+  fn taps_on_the_mic_without_speech_do_not_lower_the_volume() {
+    // A hard tap every 2 s for 2 minutes, nobody talks.
+    let steps = drive(480, 0.9, |n| (if n % 8 == 0 { 200 } else { 0 }, 0, 0.0));
+    assert!(steps.is_empty(), "{steps:?}");
+    // A clipped word whose speech flag arrives one tick after its clips still counts.
+    let steps = drive(40, 0.9, |n| (if n == 5 { 200 } else { 0 }, if (6..9).contains(&n) { 250 } else { 0 }, 0.0));
+    assert_eq!(steps.len(), 1, "{steps:?}");
   }
 
   #[test]
