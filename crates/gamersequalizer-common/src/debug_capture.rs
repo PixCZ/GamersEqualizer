@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 /// Bump the version in the name on every layout change.
-pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v1";
+pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v2";
 pub const DEBUG_CAPTURE_MAGIC: u32 = 0x4744_4247; // 'GDBG'
 pub const DEBUG_CAPTURE_RATE: u32 = 48_000;
 pub const DEBUG_CAPTURE_MAX_SECONDS: u32 = 60;
@@ -44,7 +44,7 @@ pub const STAGE_AFTER_LEVELER: usize = 6;
 pub const STAGE_OUT: usize = 7;
 
 /// (column, meaning) of the per-block variable table (`vars.tsv`), all stored as f32.
-pub const DEBUG_VARS: [(&str, &str); 34] = [
+pub const DEBUG_VARS: [(&str, &str); 55] = [
   ("frame", "first frame of the block in the capture"),
   ("frames", "block length"),
   ("t_ms", "block time (mic QPC) since capture start; -1 without a timestamp"),
@@ -79,6 +79,27 @@ pub const DEBUG_VARS: [(&str, &str); 34] = [
   ("mic_volume", "1.0 = 100 %"),
   ("boost", "gain applied before the limiter"),
   ("load", "processing time / block duration"),
+  ("in_prob", "highest raw-input detector voice probability (in_net or RNNoise's own), -1 no frame done"),
+  ("out_prob", "highest output detector (out_net) voice probability, -1 no frame done / gate off"),
+  ("rescue_prob", "highest click-rescue detector voice probability, -1 rescue off / no frame done"),
+  ("vad_run", "input detector: consecutive frames over its open threshold"),
+  ("vad_active_left", "input detector: frames a weaker frame still counts as speech"),
+  ("vad_out_active_left", "output detector: frames a weaker frame still counts as speech"),
+  ("gate_gain_db", "noise gate gain after the block, dB (-100 floor), NaN gate off"),
+  ("gate_hold_left", "noise gate hold still to run (samples), -1 gate off"),
+  ("gate_floor_db", "closed-gate attenuation incl. the leveler extra, dB, NaN gate off"),
+  ("df_pre_gain_db", "DeepFilterNet input pre-gain, dB (applies only while DFN3 runs)"),
+  ("rescue_mix", "click rescue: RNNoise's share of the output 0..1"),
+  ("rescue_hold_left", "click rescue hold still to run (samples)"),
+  ("asleep", "heavy model asleep for a pause, RNNoise stands in (1)"),
+  ("bypassed", "denoiser bypassed (strength 0), audio untouched (1)"),
+  ("quiet_samples", "input samples since speech or activity was last seen"),
+  ("takeover", "model takeover / crossfade in progress (1)"),
+  ("lookahead_now", "gate lookahead in the output now (samples)"),
+  ("leveler_speech_ms", "speech the leveler has learned from (ms)"),
+  ("input_clips", "clipped raw input samples since the stream started (cumulative)"),
+  ("mic_auto_level", "Windows mic volume the automatic input gain set, 1.0 = 100 %, 0 none, NaN no shm"),
+  ("limiter_gain_db", "peak limiter gain reduction, dB (0 = none)"),
 ];
 
 #[repr(C)]
@@ -109,7 +130,7 @@ pub struct DebugCaptureLayout {
 }
 
 impl DebugCaptureLayout {
-  /// ~96 MB of pagefile-backed commit; physical memory only for pages actually written.
+  /// ~99 MB of pagefile-backed commit; physical memory only for pages actually written.
   pub const fn total_size_bytes() -> usize {
     std::mem::size_of::<Self>()
   }

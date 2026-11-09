@@ -689,6 +689,11 @@ impl GamersEqualizerPlugin {
       .zip(mic_qpc_hns)
       .and_then(|(h, t)| h.ref_age_hns(t))
       .map_or(-1.0, |a| a as f32 / 10_000.0);
+    let lin_db = |g: f32| (20.0 * g.log10()).max(-100.0);
+    let dn = self.ai_denoiser.debug_state();
+    let gate = |v: f32| if dn.gate_enabled { v } else { f32::NAN };
+    let mic_auto =
+      self.shm_header().map_or(f32::NAN, |h| h.mic_auto_gain_permille.load(Ordering::Relaxed) as f32 / 1000.0);
     let db = |rms: f32| db_x10(rms) as f32 / 10.0;
     let vars: [f32; DEBUG_VARS.len()] = [
       cap.frame() as f32,
@@ -724,6 +729,27 @@ impl GamersEqualizerPlugin {
       s.input_gain_db,
       s.mic_volume,
       s.boost,
+      dn.in_prob,
+      dn.out_prob,
+      dn.rescue_prob,
+      dn.vad_run as f32,
+      dn.vad_active_left as f32,
+      dn.vad_out_active_left as f32,
+      gate(lin_db(dn.gate_gain)),
+      if dn.gate_enabled { dn.gate_hold_left as f32 } else { -1.0 },
+      gate(lin_db(dn.gate_floor)),
+      lin_db(dn.df_pre_gain),
+      dn.rescue_mix,
+      dn.rescue_hold_left as f32,
+      b(self.ai_denoiser.asleep()),
+      b(dn.bypassed),
+      dn.quiet_samples as f32,
+      b(dn.takeover),
+      self.ai_denoiser.lookahead_now_samples() as f32,
+      self.leveler.speech_ms() as f32,
+      self.input_clips as f32,
+      mic_auto,
+      lin_db(self.limiter.gain()),
       s.load,
     ];
     if let Some(cap) = self.capture.as_mut() {

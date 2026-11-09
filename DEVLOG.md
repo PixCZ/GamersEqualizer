@@ -1199,3 +1199,61 @@ closer mic, headphones.
 - Speakers with the voice within ~10 dB of the echo: see above.
 - Pre-gain after "Learn again" (leveler gain 0) recovers only after the leveler hits its cap;
   seeding the pre-gain from the remembered level would remove that gap.
+
+### Cause 0 candidate: the window copied the default capture device's volume onto the mic in use
+
+Windows log 2026-11-08 20:48:30: the picked headset mic went from 53 % to 40 % when the service
+restarted next to the window, with no `[MicGain]` line (the automatic input gain did not do it).
+The service and the window each own a `ChatMixController`, and both push `mic_volume` to Windows
+and shared memory:
+
+- `bind_endpoints` (`read_bound_levels`) resolved the mic as the Windows default capture device
+  (`find_physical_microphone`: the default unless it is virtual, so a webcam counts) and copied
+  that device's volume into `mic_volume` / `last_applied_mic_vol`.
+- The user's pick was then swapped into `mic_device_id` without re-reading its volume: service
+  start, the service's device-change path, window start, and the window's first frame (its
+  endpoint list starts empty, so it binds again) plus every device change.
+- The service stored that `mic_volume` in shared memory and `apply_mix` wrote it onto the pick;
+  the window did the same through `sync_mixer_to_shm`.
+- `restore_mixer` took the service's wish into the window's fresh controller only for a boost
+  over 100 %.
+
+Fix: `ChatMixController::use_mic(pick)` is the only place the mic in use is resolved (pick, else
+the Windows default) and reads the volume only when the device changes, so a re-bind never copies
+another device's volume onto it. The mic is out of `read_bound_levels`; all callers (service
+start and device change, `WinAudioSystem::new`, window start, the window's re-bind, `pick_mic`)
+go through `use_mic`. Without a `mic_device_id` the mic part of `sync_from_system` / `apply_mix`
+is skipped (`set_system_mic_volume` / `_mute` are gone). A window started next to the running
+service (`daemon_active`) calls `restore_mixer` last and takes the service's wish and automatic
+level as they are, `last_applied_mic_vol` included; the service's own start keeps the boost-only
+rule. Code-level fix, not yet confirmed live; whether it explains the quiet-voice silence is open.
+
+### Debug capture: every automatically adjusting variable
+
+`vars.tsv` grows from 34 to 55 columns (mapping `GamersEqualizer_DebugCapture_v2`); the
+denoiser's state comes from one `AiVoiceIsolator::debug_state()`. Probabilities are the highest
+of the 10 ms frames completed in the block, so with 2 ms blocks most rows show -1.
+
+| Column                | Meaning                                                              |
+| --------------------- | -------------------------------------------------------------------- |
+| `in_prob`             | raw-input detector voice probability (`in_net` or RNNoise's own), -1 |
+| `out_prob`            | output detector (`out_net`) voice probability, -1                    |
+| `rescue_prob`         | click-rescue detector voice probability, -1 rescue off               |
+| `vad_run`             | input detector: frames in a row over its open threshold              |
+| `vad_active_left`     | input detector: frames a weaker frame still counts as speech         |
+| `vad_out_active_left` | the same for the output detector                                     |
+| `gate_gain_db`        | noise gate gain, dB (-100 floor), NaN gate off                       |
+| `gate_hold_left`      | gate hold still to run, samples, -1 gate off                         |
+| `gate_floor_db`       | closed-gate attenuation incl. the leveler extra, dB, NaN gate off    |
+| `df_pre_gain_db`      | DeepFilterNet input pre-gain, dB                                     |
+| `rescue_mix`          | RNNoise's share of the output in the click rescue, 0..1              |
+| `rescue_hold_left`    | click-rescue hold still to run, samples                              |
+| `asleep`              | heavy model asleep for a pause (1)                                   |
+| `bypassed`            | denoiser bypassed at strength 0 (1)                                  |
+| `quiet_samples`       | input samples since speech or activity was last seen                 |
+| `takeover`            | model takeover / crossfade in progress (1)                           |
+| `lookahead_now`       | gate lookahead in the output now, samples                            |
+| `leveler_speech_ms`   | speech the leveler has learned from, ms                              |
+| `input_clips`         | clipped raw input samples, cumulative                                |
+| `mic_auto_level`      | Windows mic volume set by the automatic input gain (0 none)          |
+| `limiter_gain_db`     | peak limiter gain reduction, dB                                      |

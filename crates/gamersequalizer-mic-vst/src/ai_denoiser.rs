@@ -151,6 +151,30 @@ const DF_LATENCY_SAMPLES: usize = 4 * 480;
 /// DPDFNet: 480 priming + 480 STFT overlap + 4 lookahead hops (2880 = 60 ms).
 const DPDF_LATENCY_SAMPLES: usize = dpdfnet::LATENCY_SAMPLES;
 
+/// Internal state for the debug capture (`AiVoiceIsolator::debug_state`), after the last block.
+/// Probabilities are the highest of the frames completed in the block, -1 when none completed.
+#[derive(Clone, Copy, Default)]
+pub struct DenoiseDebug {
+  pub in_prob: f32,
+  pub out_prob: f32,
+  pub rescue_prob: f32,
+  pub vad_run: u32,
+  pub vad_active_left: u32,
+  pub vad_out_active_left: u32,
+  pub gate_enabled: bool,
+  /// Linear gate gain and floor (incl. the leveler extra).
+  pub gate_gain: f32,
+  pub gate_hold_left: usize,
+  pub gate_floor: f32,
+  /// Linear DeepFilterNet pre-gain (1.0 = none).
+  pub df_pre_gain: f32,
+  pub rescue_mix: f32,
+  pub rescue_hold_left: usize,
+  pub bypassed: bool,
+  pub quiet_samples: usize,
+  pub takeover: bool,
+}
+
 pub struct AiVoiceIsolator {
   rnnoise: RnNoiseEngine,
   deepfilter: Option<Box<DeepFilterEngine>>,
@@ -204,6 +228,11 @@ pub struct AiVoiceIsolator {
   rescue: ClickRescue,
   /// Input samples since the input detector last heard speech or saw activity.
   quiet_samples: usize,
+  /// Highest voice probability of the raw-input detector / `out_net` / the rescue's detector in
+  /// the last block, -1 when none ran (debug capture only; a compare per 10 ms frame).
+  in_prob: f32,
+  out_prob: f32,
+  rescue_prob: f32,
   /// Quietest block per 100 ms segment, the last `FLOOR_SEGMENTS` (dBFS; +inf = no data yet).
   floor_segments: [f32; FLOOR_SEGMENTS],
   floor_pos: usize,
@@ -374,6 +403,9 @@ impl AiVoiceIsolator {
       takeover: None,
       rescue: ClickRescue::new(),
       quiet_samples: 0,
+      in_prob: -1.0,
+      out_prob: -1.0,
+      rescue_prob: -1.0,
       floor_segments: [f32::INFINITY; FLOOR_SEGMENTS],
       floor_pos: 0,
       floor_segment_samples: 0,
@@ -526,10 +558,33 @@ impl AiVoiceIsolator {
     self.asleep && self.takeover.is_none()
   }
 
+  /// Detector, gate and rescue state after the last block, for the debug capture.
+  pub fn debug_state(&self) -> DenoiseDebug {
+    DenoiseDebug {
+      in_prob: self.in_prob,
+      out_prob: self.out_prob,
+      rescue_prob: self.rescue_prob,
+      vad_run: self.vad.run,
+      vad_active_left: self.vad.active_left,
+      vad_out_active_left: self.vad_out.active_left,
+      gate_enabled: self.gate.enabled,
+      gate_gain: self.gate.gain,
+      gate_hold_left: self.gate.hold_left,
+      gate_floor: self.gate.floor,
+      df_pre_gain: self.df_pre_gain,
+      rescue_mix: self.rescue.mix,
+      rescue_hold_left: self.rescue.hold_left,
+      bypassed: self.bypassed,
+      quiet_samples: self.quiet_samples,
+      takeover: self.takeover.is_some(),
+    }
+  }
+
   /// Process microphone samples in place.
   /// RNNoise adds a fixed latency of one frame (10 ms) plus the model's own frame;
   /// every output sample is processed, whatever the block size.
   pub fn process_samples(&mut self, samples: &mut [f32]) {
+    (self.in_prob, self.out_prob, self.rescue_prob) = (-1.0, -1.0, -1.0);
     self.poll_load();
     let loaded = match self.selected {
       DenoiseModel::DeepFilterNet => self.deepfilter.is_some(),
@@ -547,9 +602,12 @@ impl AiVoiceIsolator {
       // Audio passes untouched, but a detector (`in_net`, ~2.8 % of a core) keeps running:
       // the leveler and the automatic input gain learn only from speech it hears.
       self.bypassed = true;
-      let (vad, mut voice) = (&mut self.vad, false);
+      let (vad, in_prob, mut voice) = (&mut self.vad, &mut self.in_prob, false);
       let (open, keep) = self.in_net.thresholds();
-      self.in_net.process(samples, |p| voice |= vad.frame_at(p, open, keep));
+      self.in_net.process(samples, |p| {
+        *in_prob = in_prob.max(p);
+        voice |= vad.frame_at(p, open, keep);
+      });
       self.heard_voice = voice;
       return;
     }
@@ -605,6 +663,9 @@ impl AiVoiceIsolator {
       mute_left,
       rescue,
       df_pre_gain,
+      in_prob,
+      out_prob,
+      rescue_prob,
       ..
     } = self;
     let (mut voice, mut voice_out) = (false, false);
@@ -612,7 +673,10 @@ impl AiVoiceIsolator {
     // RNNoise's own voice probability while it denoises alone, else `in_net` (RNNoise 0.2).
     if heavy_on {
       let (open, keep) = in_net.thresholds();
-      in_net.process(samples, |p| voice |= vad.frame_at(p, open, keep));
+      in_net.process(samples, |p| {
+        *in_prob = in_prob.max(p);
+        voice |= vad.frame_at(p, open, keep);
+      });
     }
     // During a takeover RNNoise works on a copy, the heavy model in place.
     let stand_in = match spare.get_mut(..n) {
@@ -639,6 +703,7 @@ impl AiVoiceIsolator {
       };
       rnnoise.process(buf, strength, |p| {
         if !heavy_on {
+          *in_prob = in_prob.max(p);
           voice |= vad.frame(p);
         }
       });
@@ -655,7 +720,7 @@ impl AiVoiceIsolator {
       }
     }
     if let (true, Some(stand)) = (rescue_on, spare.get(..n)) {
-      rescue.process(samples, stand);
+      *rescue_prob = rescue.process(samples, stand);
     } else {
       rescue.reset();
     }
@@ -663,7 +728,10 @@ impl AiVoiceIsolator {
     // a heavy model sleeps: it would hear the keys RNNoise leaves in (DFN3, loud typing: gate
     // open 25 % instead of 1 %); the input detector alone wakes the model.
     if gate_on && (heavy_on || !heavy) {
-      out_net.process(samples, |p| voice_out |= vad_out.frame(p));
+      out_net.process(samples, |p| {
+        *out_prob = out_prob.max(p);
+        voice_out |= vad_out.frame(p);
+      });
     }
     if let Some(mut t) = takeover {
       t.done += n;
@@ -1188,11 +1256,15 @@ impl ClickRescue {
     Self { net: VoiceNet::new(), hold_left: 0, env_dfn: 0.0, env_rnn: 0.0, mix: 0.0 }
   }
 
-  /// `out`: DFN3 output, in place; `rnn`: RNNoise's output of the same samples.
-  fn process(&mut self, out: &mut [f32], rnn: &[f32]) {
+  /// `out`: DFN3 output, in place; `rnn`: RNNoise's output of the same samples. Returns the
+  /// detector's highest voice probability in this block (-1: no frame completed).
+  fn process(&mut self, out: &mut [f32], rnn: &[f32]) -> f32 {
     let ratio = 10f32.powf(RESCUE_RATIO_DB / 10.0);
-    let mut heard = false;
-    self.net.process(out, |p| heard |= p > RESCUE_VOICE_PROB);
+    let (mut heard, mut prob) = (false, -1.0f32);
+    self.net.process(out, |p| {
+      prob = prob.max(p);
+      heard |= p > RESCUE_VOICE_PROB;
+    });
     if heard {
       self.hold_left = out.len() + RESCUE_HOLD_SAMPLES;
     }
@@ -1209,6 +1281,7 @@ impl ClickRescue {
       }
       *d += (r - *d) * self.mix;
     }
+    prob
   }
 
   /// Idle again (rescue off: RNNoise standing in, another model). No allocation; the detector
@@ -1321,6 +1394,19 @@ pub(crate) mod tests {
     assert_eq!(x, clean, "bypass leaves the audio untouched");
     assert_eq!(isolator.output_lead_samples(), 0);
     assert!(speech_blocks > clean.len() / 480 / 10, "heard speech in {speech_blocks} blocks");
+  }
+
+  #[test]
+  fn test_debug_state_reports_the_detector_and_the_gate() {
+    let (clean, _) = speech_over_keyboard(-30.0, 0.0);
+    let mut isolator = AiVoiceIsolator::new();
+    let mut x = clean.get(..480 * 20).unwrap_or_default().to_vec();
+    for b in x.chunks_mut(480) {
+      isolator.process_samples(b);
+      let d = isolator.debug_state();
+      assert!((0.0..=1.0).contains(&d.in_prob), "RNNoise's own probability, one frame per block: {}", d.in_prob);
+      assert!(d.gate_enabled && d.gate_gain <= 1.0 && d.rescue_prob == -1.0);
+    }
   }
 
   #[test]
