@@ -168,6 +168,8 @@ pub struct DenoiseDebug {
   pub in_prob: f32,
   pub out_prob: f32,
   pub rescue_prob: f32,
+  /// Silero VAD on the raw input (the gate's second key), -1 when no chunk completed.
+  pub soft_prob: f32,
   pub vad_run: u32,
   pub vad_active_left: u32,
   pub vad_out_active_left: u32,
@@ -251,6 +253,7 @@ pub struct AiVoiceIsolator {
   in_prob: f32,
   out_prob: f32,
   rescue_prob: f32,
+  soft_prob: f32,
   /// Quietest block per 100 ms segment, the last `FLOOR_SEGMENTS` (dBFS; +inf = no data yet).
   floor_segments: [f32; FLOOR_SEGMENTS],
   floor_pos: usize,
@@ -426,6 +429,7 @@ impl AiVoiceIsolator {
       in_prob: -1.0,
       out_prob: -1.0,
       rescue_prob: -1.0,
+      soft_prob: -1.0,
       floor_segments: [f32::INFINITY; FLOOR_SEGMENTS],
       floor_pos: 0,
       floor_segment_samples: 0,
@@ -584,6 +588,7 @@ impl AiVoiceIsolator {
       in_prob: self.in_prob,
       out_prob: self.out_prob,
       rescue_prob: self.rescue_prob,
+      soft_prob: self.soft_prob,
       vad_run: self.vad.run,
       vad_active_left: self.vad.active_left,
       vad_out_active_left: self.vad_out.active_left,
@@ -604,7 +609,7 @@ impl AiVoiceIsolator {
   /// RNNoise adds a fixed latency of one frame (10 ms) plus the model's own frame;
   /// every output sample is processed, whatever the block size.
   pub fn process_samples(&mut self, samples: &mut [f32]) {
-    (self.in_prob, self.out_prob, self.rescue_prob) = (-1.0, -1.0, -1.0);
+    (self.in_prob, self.out_prob, self.rescue_prob, self.soft_prob) = (-1.0, -1.0, -1.0, -1.0);
     self.poll_load();
     let loaded = match self.selected {
       DenoiseModel::DeepFilterNet => self.deepfilter.is_some(),
@@ -688,11 +693,15 @@ impl AiVoiceIsolator {
       in_prob,
       out_prob,
       rescue_prob,
+      soft_prob,
       ..
     } = self;
     let (mut voice, mut voice_out, mut voice_soft) = (false, false, false);
     if let (true, Some(net)) = (gate_on, soft_net.as_mut()) {
-      net.process(samples, |p| voice_soft |= p > *soft_voice_prob);
+      net.process(samples, |p| {
+        *soft_prob = soft_prob.max(p);
+        voice_soft |= p > *soft_voice_prob;
+      });
     }
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
     // RNNoise's own voice probability while it denoises alone, else `in_net` (RNNoise 0.2).
@@ -1432,12 +1441,16 @@ pub(crate) mod tests {
     let (clean, _) = speech_over_keyboard(-30.0, 0.0);
     let mut isolator = AiVoiceIsolator::new();
     let mut x = clean.get(..480 * 20).unwrap_or_default().to_vec();
+    let mut seen_soft = false;
     for b in x.chunks_mut(480) {
       isolator.process_samples(b);
       let d = isolator.debug_state();
       assert!((0.0..=1.0).contains(&d.in_prob), "RNNoise's own probability, one frame per block: {}", d.in_prob);
       assert!(d.gate_enabled && d.gate_gain <= 1.0 && d.rescue_prob == -1.0);
+      seen_soft |= (0.0..=1.0).contains(&d.soft_prob);
+      assert!(d.soft_prob == -1.0 || (0.0..=1.0).contains(&d.soft_prob), "{}", d.soft_prob);
     }
+    assert!(seen_soft, "Silero completes a chunk every 32 ms");
   }
 
   #[test]

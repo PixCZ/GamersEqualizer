@@ -1464,3 +1464,12 @@ memory and capture layouts untouched). The whisper still loses 8-15 dB inside DF
 this detector is the next step. `cargo fmt -p gamersequalizer-mic-vst` also reformatted
 `aec3.rs`, `dpdfnet.rs`, `lib.rs`, `plugin.rs`, `shared_memory.rs`, `voice_leveler.rs` and parts
 of `ai_denoiser.rs` and `latency_meter.rs` (formatting only; kept on the user's decision).
+
+### Silero's probability in the debug capture and the `[Chain]` log
+
+`DenoiseDebug::soft_prob` (highest Silero probability of the chunks completed in the block, -1
+when none). Debug capture: new `vars.tsv` column `soft_prob` after `rescue_prob` (56 columns,
+mapping `GamersEqualizer_DebugCapture_v3`). Shared memory layout v17:
+`mic_soft_prob_max_permille` (DSP -> daemon, highest of the last 250 ms); the `[Chain]` summary
+line reads `prob max in .. out .. Silero ..`. Needs the app and the APO rebuilt and the APO
+reinstalled (both layouts changed).

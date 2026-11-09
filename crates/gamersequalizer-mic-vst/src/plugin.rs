@@ -145,6 +145,7 @@ struct ChainWindow {
 struct ChainExtremes {
   in_prob: f32,
   out_prob: f32,
+  soft_prob: f32,
   /// Linear gains, 1.0 = no reduction.
   gate_gain: f32,
   limiter_gain: f32,
@@ -640,6 +641,7 @@ impl GamersEqualizerPlugin {
     h.mic_rescue_blocks.store(chain.rescue_blocks, Ordering::Relaxed);
     h.mic_in_prob_max_permille.store(permille(chain.last.in_prob), Ordering::Relaxed);
     h.mic_out_prob_max_permille.store(permille(chain.last.out_prob), Ordering::Relaxed);
+    h.mic_soft_prob_max_permille.store(permille(chain.last.soft_prob), Ordering::Relaxed);
     h.mic_gate_gain_min_db_x10.store(db_x10(chain.last.gate_gain).min(0), Ordering::Relaxed);
     h.mic_limiter_gain_min_db_x10.store(db_x10(chain.last.limiter_gain).min(0), Ordering::Relaxed);
     h.mic_gate_floor_db_x10.store(if dn.gate_enabled { db_x10(dn.gate_floor) } else { 0 }, Ordering::Relaxed);
@@ -782,6 +784,7 @@ impl GamersEqualizerPlugin {
       dn.in_prob,
       dn.out_prob,
       dn.rescue_prob,
+      dn.soft_prob,
       dn.vad_run as f32,
       dn.vad_active_left as f32,
       dn.vad_out_active_left as f32,
@@ -824,7 +827,7 @@ struct BlockSettings {
 impl Default for ChainExtremes {
   fn default() -> Self {
     // Probabilities of -1 (no frame finished) never beat 0; NaN never wins `max`/`min`.
-    Self { in_prob: 0.0, out_prob: 0.0, gate_gain: 1.0, limiter_gain: 1.0 }
+    Self { in_prob: 0.0, out_prob: 0.0, soft_prob: 0.0, gate_gain: 1.0, limiter_gain: 1.0 }
   }
 }
 
@@ -836,6 +839,7 @@ impl ChainWindow {
     let w = &mut self.now;
     w.in_prob = w.in_prob.max(dn.in_prob);
     w.out_prob = w.out_prob.max(dn.out_prob);
+    w.soft_prob = w.soft_prob.max(dn.soft_prob);
     if dn.gate_enabled {
       w.gate_gain = w.gate_gain.min(dn.gate_gain);
     }

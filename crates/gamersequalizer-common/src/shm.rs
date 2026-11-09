@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v16";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v17";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v16";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v17";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 16;
+pub const SHM_VERSION: u32 = 17;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -287,6 +287,8 @@ pub struct ShmHeader {
   /// Highest raw-input / output voice probability over the DSP's last ~250 ms, permille (0 = none).
   pub mic_in_prob_max_permille: AtomicU32,
   pub mic_out_prob_max_permille: AtomicU32,
+  /// v17: the same for Silero VAD on the raw input, the gate's second key.
+  pub mic_soft_prob_max_permille: AtomicU32,
   /// Lowest gate gain over the last ~250 ms, dB x 10 (0 = gate off or open all the time).
   pub mic_gate_gain_min_db_x10: AtomicI32,
   /// Closed-gate floor now, incl. the leveler extra, dB x 10 (0 = gate off).
@@ -508,6 +510,7 @@ impl Default for ShmHeader {
       mic_blocks: AtomicU32::new(0),
       mic_in_prob_max_permille: AtomicU32::new(0),
       mic_out_prob_max_permille: AtomicU32::new(0),
+      mic_soft_prob_max_permille: AtomicU32::new(0),
       mic_gate_gain_min_db_x10: AtomicI32::new(0),
       mic_gate_floor_db_x10: AtomicI32::new(0),
       mic_df_pre_gain_db_x10: AtomicI32::new(0),
@@ -692,6 +695,7 @@ impl ShmHeader {
     self.mic_blocks.store(src.mic_blocks.load(r), r);
     self.mic_in_prob_max_permille.store(src.mic_in_prob_max_permille.load(r), r);
     self.mic_out_prob_max_permille.store(src.mic_out_prob_max_permille.load(r), r);
+    self.mic_soft_prob_max_permille.store(src.mic_soft_prob_max_permille.load(r), r);
     self.mic_gate_gain_min_db_x10.store(src.mic_gate_gain_min_db_x10.load(r), r);
     self.mic_gate_floor_db_x10.store(src.mic_gate_floor_db_x10.load(r), r);
     self.mic_df_pre_gain_db_x10.store(src.mic_df_pre_gain_db_x10.load(r), r);

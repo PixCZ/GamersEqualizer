@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 /// Bump the version in the name on every layout change.
-pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v2";
+pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v3";
 pub const DEBUG_CAPTURE_MAGIC: u32 = 0x4744_4247; // 'GDBG'
 pub const DEBUG_CAPTURE_RATE: u32 = 48_000;
 pub const DEBUG_CAPTURE_MAX_SECONDS: u32 = 60;
@@ -44,7 +44,7 @@ pub const STAGE_AFTER_LEVELER: usize = 6;
 pub const STAGE_OUT: usize = 7;
 
 /// (column, meaning) of the per-block variable table (`vars.tsv`), all stored as f32.
-pub const DEBUG_VARS: [(&str, &str); 55] = [
+pub const DEBUG_VARS: [(&str, &str); 56] = [
   ("frame", "first frame of the block in the capture"),
   ("frames", "block length"),
   ("t_ms", "block time (mic QPC) since capture start; -1 without a timestamp"),
@@ -82,6 +82,7 @@ pub const DEBUG_VARS: [(&str, &str); 55] = [
   ("in_prob", "highest raw-input detector voice probability (in_net or RNNoise's own), -1 no frame done"),
   ("out_prob", "highest output detector (out_net) voice probability, -1 no frame done / gate off"),
   ("rescue_prob", "highest click-rescue detector voice probability, -1 rescue off / no frame done"),
+  ("soft_prob", "highest Silero VAD probability on the raw input (the gate's second key), -1 no chunk done / gate off"),
   ("vad_run", "input detector: consecutive frames over its open threshold"),
   ("vad_active_left", "input detector: frames a weaker frame still counts as speech"),
   ("vad_out_active_left", "output detector: frames a weaker frame still counts as speech"),

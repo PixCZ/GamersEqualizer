@@ -2,7 +2,7 @@
 //! goes live, one line per tick listing every switch or device/volume change (old -> new), and a
 //! summary of the automatically adjusting values every 10 s. Together with `[Leveler]`,
 //! `[MicGain]`, `[DSP]` and `[Mic]` it lets a log reconstruct what the chain did without the audio.
-//! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v16).
+//! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v17).
 
 use super::chatmix::{get_endpoint_volume, ChatMixController};
 use super::endpoint_lock::EndpointLockManager;
@@ -67,6 +67,7 @@ pub struct DspSnapshot {
   pub blocks: u32,
   pub in_prob_permille: u32,
   pub out_prob_permille: u32,
+  pub soft_prob_permille: u32,
   pub gate_min_x10: i32,
   pub gate_floor_x10: i32,
   pub df_pre_gain_x10: i32,
@@ -103,6 +104,7 @@ struct Interval {
   start: DspSnapshot,
   in_max: u32,
   out_max: u32,
+  soft_max: u32,
   gate_min: i32,
   limiter_min: i32,
 }
@@ -133,6 +135,7 @@ impl DspSnapshot {
       blocks: h.mic_blocks.load(r),
       in_prob_permille: h.mic_in_prob_max_permille.load(r),
       out_prob_permille: h.mic_out_prob_max_permille.load(r),
+      soft_prob_permille: h.mic_soft_prob_max_permille.load(r),
       gate_min_x10: h.mic_gate_gain_min_db_x10.load(r),
       gate_floor_x10: h.mic_gate_floor_db_x10.load(r),
       df_pre_gain_x10: h.mic_df_pre_gain_db_x10.load(r),
@@ -217,6 +220,7 @@ impl ChainLog {
     let iv = self.interval.get_or_insert_with(|| Interval::new(at, *d));
     iv.in_max = iv.in_max.max(d.in_prob_permille);
     iv.out_max = iv.out_max.max(d.out_prob_permille);
+    iv.soft_max = iv.soft_max.max(d.soft_prob_permille);
     iv.gate_min = iv.gate_min.min(d.gate_min_x10);
     iv.limiter_min = iv.limiter_min.min(d.limiter_min_x10);
     if at.duration_since(iv.since) < SUMMARY_EVERY {
@@ -233,7 +237,7 @@ impl ChainLog {
     let c = &now.ctx;
     Some(format!(
       "{:.0} s: mic {} dBFS, out {} dBFS, ref {} dBFS, ERLE {:.1} dB, voice {voice} of {blocks} blocks, \
-       prob max in {:.2} out {:.2}, gate min {} dB floor {} dB, DF pre-gain {} dB, rescue {} blocks, quiet {} ms, \
+       prob max in {:.2} out {:.2} Silero {:.2}, gate min {} dB floor {} dB, DF pre-gain {} dB, rescue {} blocks, quiet {} ms, \
        leveler gain {} dB level {} dBFS speech {} ms, input gain {} dB, limiter min {} dB, \
        Windows mic volume {} (default device {}), automatic level {}, clips {}, load avg {:.1} % peak {:.1} %, \
        latency {}",
@@ -244,6 +248,7 @@ impl ChainLog {
       d.erle_x10 as f32 / 10.0,
       iv.in_max as f32 / 1000.0,
       iv.out_max as f32 / 1000.0,
+      iv.soft_max as f32 / 1000.0,
       db(iv.gate_min),
       db(d.gate_floor_x10),
       db(d.df_pre_gain_x10),
@@ -267,7 +272,7 @@ impl ChainLog {
 
 impl Interval {
   fn new(since: Instant, start: DspSnapshot) -> Self {
-    Self { since, start, in_max: 0, out_max: 0, gate_min: 0, limiter_min: 0 }
+    Self { since, start, in_max: 0, out_max: 0, soft_max: 0, gate_min: 0, limiter_min: 0 }
   }
 }
 
