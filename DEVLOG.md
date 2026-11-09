@@ -1473,3 +1473,44 @@ mapping `GamersEqualizer_DebugCapture_v3`). Shared memory layout v17:
 `mic_soft_prob_max_permille` (DSP -> daemon, highest of the last 250 ms); the `[Chain]` summary
 line reads `prob max in .. out .. Silero ..`. Needs the app and the APO rebuilt and the APO
 reinstalled (both layouts changed).
+
+## Milestone 41: Live captures with the Silero key; click rescue only while Silero hears a voice (2026-11-09)
+
+Two captures of the build with the Silero key (`20261109-204900`: 60 s, no music, Windows volume
+30 %, quiet voice, mouse hammered at the end; `20261109-205013`: 30 s, music from the speakers).
+Gate "Auto" without lookahead in both.
+
+- **The key works live.** Speech: Silero 0.5-1.0, clicks alone at most 0.05, silence 0. Voice
+  windows lose 2-3.5 dB in the denoiser (-45..-60 dBFS at the mic), the gate is closed in 0-4 %
+  of them; with music 1-3 dB and never closed. Clicks alone (-40 dBFS): 40-65 dB off. Load 5 %
+  average, 17 % peak (debug build), no late block.
+- **Leak found: a click next to a word.** `204900` at 49.8 s: a click 300 ms after a word,
+  -39.8 dBFS in, -45.9 dBFS out, louder than the voice around it. DFN3 left enough of it for the
+  click rescue's own detector to arm, and the rescue then passed RNNoise's version of the click.
+- **While talking and hammering at once** (53-58 s) the rescue is on almost all the time and the
+  clicks lose only 3-6 dB: the known "voice over keys" trade-off, not changed here.
+- **`in_net` is nearly deaf behind AEC3 while music plays.** `205013`, 9-29 s, frames over 0.7:
+  74 % on the raw mic, 8 % on the AEC output (+20 dB: 9 %); the 2017 network 55 -> 48 %;
+  Silero 1.00. Older capture `162331`: 65 -> 49 %. `heard_voice` was set in 26-44 % of the
+  voice windows, so the leveler and the automatic gain learn from a fraction of the speech
+  while music plays. The gate is not affected (Silero and the output detector hold it). Open.
+
+**Change: `RESCUE_SOFT_PROB` = 0.15.** `ClickRescue` fills in only while one of Silero's last two
+chunks is over it (they cover what DFN3 puts out at that moment; Silero now also runs with the
+gate off while the rescue is on). New `capture_replay_report`: a capture's `04_after_aec.wav`
+through the denoiser as the chain ran it (fixed low cut, each block's leveler gain), compared
+with the live `05_after_denoise.wav` in 100 ms windows. Without the fixed low cut and the gain
+history the replay did not reproduce the leak; with them no window differs by more than 6 dB.
+
+| `204900`, DFN3                  | Before   | 0.15     | 0.3           | 0.5              |
+| ------------------------------- | -------- | -------- | ------------- | ---------------- |
+| Click at 49.8 s, output         | -45.9    | -80.2    | -80.4         | -80.4 dBFS       |
+| Click at 51.5 s, output         | -44.8    | -44.8    | -76.0         | -76.0 dBFS       |
+| Loud windows without a voice    | 16.3 dB  | 45.6 dB  | 43.2 dB       | 43.1 dB removed  |
+| Voice windows lost > 10 dB      | 4.4 %    | 4.4 %    | 4.4 %         | 4.7 %            |
+
+Synthetic mixes at 0.15 (private voice): frames lost > 15 dB under hammered clicks 5.8 % and
+`keyboard_call_report` 1.5 %, both unchanged; `near_pause_report` speech lost > 6 dB 7.5 -> 7.8 %
+(> 15 dB 3.4 % unchanged), pauses unchanged. At 0.3 word tails 21.3 -> 22.3 %. Captures
+`205013` and `162331`: no window changes. Test:
+`test_click_rescue_fills_in_only_while_silero_hears_a_voice`. Not heard live.

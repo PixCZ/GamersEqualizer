@@ -144,6 +144,16 @@ const RESCUE_RATIO_DB: f32 = 6.0;
 const RESCUE_HOLD_SAMPLES: usize = 48 * 100;
 /// Voice probability on DFN3's output that arms it (0.3 / 0.5 / 0.7 measured alike).
 const RESCUE_VOICE_PROB: f32 = 0.5;
+/// The rescue fills in only while Silero (`soft_net`) hears a voice in the raw input: one of its
+/// last two chunks over this. Live capture 2026-11-09 20:49 (quiet voice, mouse hammered): a
+/// click 300 ms after a word came out at -45.9 dBFS, louder than the voice, because DFN3 left
+/// enough of it for the rescue's own detector to arm on; Silero read 0.03 there. With this
+/// (`capture_replay_report`): -80.2 dBFS, every other 100 ms window within 6 dB of the live
+/// output, voice windows unchanged (mean loss 2.6 dB). 0.3 also drops a second leak (51.5 s) and
+/// costs 1 point of word tails on the private keys mix; 0.5 starts to cost voice in the capture.
+/// Synthetic mixes at 0.15: frames lost > 15 dB and under hammered clicks unchanged (3.4 %,
+/// 5.8 %), speech frames lost > 6 dB 7.5 -> 7.8 % (`near_pause_report`).
+const RESCUE_SOFT_PROB: f32 = 0.15;
 /// Energy envelopes (~5 ms); crossfade in (~2 ms), out (~30 ms).
 const RESCUE_ENV_COEF: f32 = 1.0 / (48.0 * 5.0);
 const RESCUE_IN_COEF: f32 = 1.0 / (48.0 * 2.0);
@@ -226,6 +236,10 @@ pub struct AiVoiceIsolator {
   soft_net: Option<Vad48k>,
   /// `SOFT_VOICE_PROB`; tests switch the key off with infinity.
   soft_voice_prob: f32,
+  /// Its last two probabilities (older first).
+  soft_recent: [f32; 2],
+  /// `RESCUE_SOFT_PROB`; tests switch the condition off with negative infinity.
+  rescue_soft_prob: f32,
   /// Lookahead requested by the settings; it runs only while the gate is on.
   lookahead: bool,
   /// Tests only: lookahead length instead of the model's (`lookahead_sweep`).
@@ -422,6 +436,8 @@ impl AiVoiceIsolator {
       out_net: VoiceNet::new(),
       soft_net: Vad48k::new().map_err(|e| log::error!("[Denoise] Silero voice detector failed to load: {e}")).ok(),
       soft_voice_prob: SOFT_VOICE_PROB,
+      soft_recent: [0.0; 2],
+      rescue_soft_prob: RESCUE_SOFT_PROB,
       asleep: false,
       takeover: None,
       rescue: ClickRescue::new(),
@@ -682,6 +698,8 @@ impl AiVoiceIsolator {
       out_net,
       soft_net,
       soft_voice_prob,
+      soft_recent,
+      rescue_soft_prob,
       rnnoise,
       deepfilter,
       dpdfnet,
@@ -697,12 +715,16 @@ impl AiVoiceIsolator {
       ..
     } = self;
     let (mut voice, mut voice_out, mut voice_soft) = (false, false, false);
-    if let (true, Some(net)) = (gate_on, soft_net.as_mut()) {
+    if let (true, Some(net)) = (gate_on || rescue_on, soft_net.as_mut()) {
       net.process(samples, |p| {
         *soft_prob = soft_prob.max(p);
         voice_soft |= p > *soft_voice_prob;
+        *soft_recent = [soft_recent[1], p];
       });
     }
+    // The chunk just reported and the one before cover what DFN3 puts out now (its latency is
+    // 40 ms, a chunk 32 ms).
+    let soft_voice_now = soft_net.is_none() || soft_recent[0].max(soft_recent[1]) > *rescue_soft_prob;
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
     // RNNoise's own voice probability while it denoises alone, else `in_net` (RNNoise 0.2).
     if heavy_on {
@@ -754,7 +776,7 @@ impl AiVoiceIsolator {
       }
     }
     if let (true, Some(stand)) = (rescue_on, spare.get(..n)) {
-      *rescue_prob = rescue.process(samples, stand);
+      *rescue_prob = rescue.process(samples, stand, soft_voice_now);
     } else {
       rescue.reset();
     }
@@ -1296,9 +1318,10 @@ impl ClickRescue {
     Self { net: VoiceNet::new(), hold_left: 0, env_dfn: 0.0, env_rnn: 0.0, mix: 0.0 }
   }
 
-  /// `out`: DFN3 output, in place; `rnn`: RNNoise's output of the same samples. Returns the
+  /// `out`: DFN3 output, in place; `rnn`: RNNoise's output of the same samples; `voice_now`:
+  /// Silero hears a voice in the raw input around these samples (see `RESCUE_SOFT_PROB`). Returns the
   /// detector's highest voice probability in this block (-1: no frame completed).
-  fn process(&mut self, out: &mut [f32], rnn: &[f32]) -> f32 {
+  fn process(&mut self, out: &mut [f32], rnn: &[f32], voice_now: bool) -> f32 {
     let ratio = 10f32.powf(RESCUE_RATIO_DB / 10.0);
     let (mut heard, mut prob) = (false, -1.0f32);
     self.net.process(out, |p| {
@@ -1312,7 +1335,7 @@ impl ClickRescue {
       self.hold_left = self.hold_left.saturating_sub(1);
       self.env_dfn += (*d * *d - self.env_dfn) * RESCUE_ENV_COEF;
       self.env_rnn += (r * r - self.env_rnn) * RESCUE_ENV_COEF;
-      let cut = self.hold_left > 0 && self.env_rnn > self.env_dfn * ratio;
+      let cut = voice_now && self.hold_left > 0 && self.env_rnn > self.env_dfn * ratio;
       let (target, coef) = if cut { (1.0, RESCUE_IN_COEF) } else { (0.0, RESCUE_OUT_COEF) };
       self.mix += (target - self.mix) * coef;
       if !(self.mix.is_finite() && self.env_dfn.is_finite() && self.env_rnn.is_finite()) {
@@ -1904,6 +1927,21 @@ pub(crate) mod tests {
       open_without * 100.0
     );
     assert!(open <= open_without + 0.01, "{open} vs {open_without}");
+  }
+
+  #[test]
+  fn test_click_rescue_fills_in_only_while_silero_hears_a_voice() {
+    // DFN3's output far under RNNoise's, the rescue armed: it crossfades to RNNoise only with
+    // `voice_now` (regression: a lone click next to a word came through at RNNoise's level).
+    let (dfn, rnn) = (vec![0.001f32; 4800], vec![0.1f32; 4800]);
+    for (voice_now, filled) in [(false, false), (true, true)] {
+      let mut rescue = ClickRescue::new();
+      rescue.hold_left = usize::MAX;
+      let mut out = dfn.clone();
+      rescue.process(&mut out, &rnn, voice_now);
+      let last = out.last().copied().unwrap_or_default();
+      assert_eq!(last > 0.05, filled, "voice_now {voice_now}: {last}");
+    }
   }
 
   #[test]
@@ -2538,6 +2576,76 @@ pub(crate) mod tests {
         eprintln!("{:<14}{}  {label}", format!("{model:?}").chars().take(13).collect::<String>(), cells.join(""));
       }
     }
+  }
+
+  /// A debug capture's denoiser input (`04_after_aec.wav`) through the denoiser as the chain ran
+  /// it (its fixed low cut, each block's leveler gain as pre-gain and gate floor), in 100 ms
+  /// windows: where the output differs from what the chain put out live (`05_after_denoise.wav`)
+  /// by more than 6 dB, then what happens to loud windows without a voice (Silero under 0.15)
+  /// and to voice windows. For trying a change on a real capture: with unchanged code a capture
+  /// of the same build replays without a difference. DFN3, gate auto, no lookahead.
+  /// `CAP=20261109-204900 cargo test -p gamersequalizer-mic-vst --release capture_replay_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn capture_replay_report() {
+    let cap = std::env::var("CAP").unwrap_or("20261109-204900".into());
+    if !std::path::Path::new(FIXTURES).join(format!("../private/captures/{cap}/vars.tsv")).exists() {
+      eprintln!("skipped: no capture {cap} in test_data/private/captures/");
+      return;
+    }
+    let dir = format!("../private/captures/{cap}");
+    let (x, live) = (read_wav_48k(&format!("{dir}/04_after_aec.wav")), read_wav_48k(&format!("{dir}/05_after_denoise.wav")));
+    let vars = std::fs::read_to_string(std::path::Path::new(FIXTURES).join(&dir).join("vars.tsv")).unwrap();
+    let mut lines = vars.lines();
+    let col = lines.next().unwrap().split('\t').position(|h| h == "leveler_gain_db").unwrap();
+    let gains: Vec<f32> = lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect();
+    let mut hp = BiquadCascade::default();
+    hp.set_bands(&[BiquadBand { filter_type: FilterType::HighPass, frequency: 70.0, q: 0.707, slope_db: 12, ..BiquadBand::default() }], 48_000.0);
+    let mut iso = AiVoiceIsolator::new();
+    iso.set_model(DenoiseModel::DeepFilterNet);
+    iso.set_gate_threshold_db(GATE_AUTO);
+    let mut out = x.clone();
+    for (b, g) in out.chunks_mut(480).zip(&gains) {
+      hp.process(b);
+      iso.set_gate_floor_extra_db(*g);
+      iso.set_pre_gain_db(*g);
+      iso.process_samples(b);
+    }
+    let lat = latency_samples(DenoiseModel::DeepFilterNet);
+    let (out, live) = (&out[lat..], &live[lat..]);
+    // Fidelity: 100 ms windows, replay against the live output.
+    let pairs: Vec<(f32, f32, f32)> = x.as_chunks::<4800>().0.iter().zip(out.as_chunks::<4800>().0).zip(live.as_chunks::<4800>().0).map(|((m, o), l)| (db(rms(m)), db(rms(o)), db(rms(l)))).collect();
+    let loud: Vec<&(f32, f32, f32)> = pairs.iter().skip(30).filter(|p| p.2 > -70.0 || p.1 > -70.0).collect();
+    let off = loud.iter().filter(|p| (p.1 - p.2).abs() > 6.0).count();
+    eprintln!("FIDELITY {} windows with output over -70 dBFS (live or replay): {off} differ by more than 6 dB", loud.len());
+    for (t, p) in pairs.iter().enumerate().skip(30) {
+      if (p.2 > -70.0 || p.1 > -70.0) && (p.1 - p.2).abs() > 6.0 {
+        eprintln!("DIFF {:.1} s mic {:6.1} replay {:6.1} live {:6.1}", t as f32 / 10.0, p.0, p.1, p.2);
+      }
+    }
+    // Clicks: loud windows the live chain's Silero would not call voice (standalone pass here).
+    let (mut vad, mut probs) = (Vad48k::new().unwrap(), Vec::new());
+    x.chunks(480).for_each(|b| vad.process(b, |p| probs.push(p)));
+    let silero = |t: usize| (0..4).map(|k| probs.get((t * 4800) / silero_vad::CHUNK_48K + k).copied().unwrap_or(0.0)).fold(0.0f32, f32::max);
+    let (mut n, mut e_in, mut e_out, mut leaks, mut sp, mut sp_loss, mut sp_cut) = (0usize, 0.0f32, 0.0f32, 0usize, 0usize, 0.0f32, 0usize);
+    for (t, p) in pairs.iter().enumerate().skip(30) {
+      if p.0 > -50.0 && silero(t) < 0.15 {
+        n += 1;
+        e_in += 10f32.powf(p.0 / 10.0);
+        e_out += 10f32.powf(p.1 / 10.0);
+        leaks += (p.0 - p.1 < 12.0) as usize;
+      } else if silero(t) > 0.5 {
+        sp += 1;
+        sp_loss += p.0 - p.1;
+        sp_cut += (p.0 - p.1 > 10.0) as usize;
+      }
+    }
+    eprintln!(
+      "RESULT loud windows without voice {n}: removed {:.1} dB, {leaks} under 12 dB | voice windows {sp}: mean loss {:.1} dB, > 10 dB in {:.1} %",
+      10.0 * (e_in / e_out.max(1e-12)).log10(),
+      sp_loss / sp.max(1) as f32,
+      sp_cut as f32 * 100.0 / sp.max(1) as f32
+    );
   }
 
   #[derive(Debug)]
