@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v15";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v16";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v15";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v16";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 15;
+pub const SHM_VERSION: u32 = 16;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -37,6 +37,11 @@ pub const NOISE_GATE_AUTO_LOOKAHEAD: i32 = 1;
 pub const NOISE_GATE_OFF: i32 = -80;
 /// The APO processes only while `owner_beat` changed within this time (the owner bumps it ~10x/s).
 pub const OWNER_TIMEOUT: Duration = Duration::from_secs(3);
+/// `mic_chain_flags` bits.
+pub const MIC_CHAIN_ASLEEP: u32 = 1;
+pub const MIC_CHAIN_BYPASSED: u32 = 1 << 1;
+pub const MIC_CHAIN_TAKEOVER: u32 = 1 << 2;
+pub const MIC_CHAIN_LOOKAHEAD: u32 = 1 << 3;
 
 /// One parametric EQ band in shared memory (f32 values stored as bits).
 #[repr(C)]
@@ -273,6 +278,29 @@ pub struct ShmHeader {
   /// Bumped when the user picks the selected model again: one that failed to load or was too
   /// slow gets another try (`denoise_model` alone can't say "again").
   pub denoise_retry_seq: AtomicU32,
+
+  // --- v16: chain telemetry for the debug log (DSP -> daemon) ---
+  /// Blocks (cumulative) in which the voice detector heard speech; with `mic_blocks` the voice share.
+  pub mic_voice_blocks: AtomicU32,
+  /// Blocks the mic chain processed (cumulative; a new stream starts at 0).
+  pub mic_blocks: AtomicU32,
+  /// Highest raw-input / output voice probability over the DSP's last ~250 ms, permille (0 = none).
+  pub mic_in_prob_max_permille: AtomicU32,
+  pub mic_out_prob_max_permille: AtomicU32,
+  /// Lowest gate gain over the last ~250 ms, dB x 10 (0 = gate off or open all the time).
+  pub mic_gate_gain_min_db_x10: AtomicI32,
+  /// Closed-gate floor now, incl. the leveler extra, dB x 10 (0 = gate off).
+  pub mic_gate_floor_db_x10: AtomicI32,
+  /// DeepFilterNet pre-gain now, dB x 10.
+  pub mic_df_pre_gain_db_x10: AtomicI32,
+  /// Blocks (cumulative) in which the rescue path was mixed in over half.
+  pub mic_rescue_blocks: AtomicU32,
+  /// `MIC_CHAIN_*` bits: model asleep, denoiser bypassed, takeover, lookahead on.
+  pub mic_chain_flags: AtomicU32,
+  /// Time since the denoiser last saw speech or activity (`quiet_samples`), ms.
+  pub mic_quiet_ms: AtomicU32,
+  /// Lowest peak limiter gain over the last ~250 ms, dB x 10 (0 = no reduction).
+  pub mic_limiter_gain_min_db_x10: AtomicI32,
 }
 
 /// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
@@ -476,6 +504,17 @@ impl Default for ShmHeader {
       mic_latency_denoise_us: AtomicU32::new(0),
       mic_latency_lookahead_us: AtomicU32::new(0),
       denoise_retry_seq: AtomicU32::new(0),
+      mic_voice_blocks: AtomicU32::new(0),
+      mic_blocks: AtomicU32::new(0),
+      mic_in_prob_max_permille: AtomicU32::new(0),
+      mic_out_prob_max_permille: AtomicU32::new(0),
+      mic_gate_gain_min_db_x10: AtomicI32::new(0),
+      mic_gate_floor_db_x10: AtomicI32::new(0),
+      mic_df_pre_gain_db_x10: AtomicI32::new(0),
+      mic_rescue_blocks: AtomicU32::new(0),
+      mic_chain_flags: AtomicU32::new(0),
+      mic_quiet_ms: AtomicU32::new(0),
+      mic_limiter_gain_min_db_x10: AtomicI32::new(0),
     };
     h.init_defaults();
     h
@@ -649,6 +688,17 @@ impl ShmHeader {
     self.mic_latency_aec_us.store(src.mic_latency_aec_us.load(r), r);
     self.mic_latency_denoise_us.store(src.mic_latency_denoise_us.load(r), r);
     self.mic_latency_lookahead_us.store(src.mic_latency_lookahead_us.load(r), r);
+    self.mic_voice_blocks.store(src.mic_voice_blocks.load(r), r);
+    self.mic_blocks.store(src.mic_blocks.load(r), r);
+    self.mic_in_prob_max_permille.store(src.mic_in_prob_max_permille.load(r), r);
+    self.mic_out_prob_max_permille.store(src.mic_out_prob_max_permille.load(r), r);
+    self.mic_gate_gain_min_db_x10.store(src.mic_gate_gain_min_db_x10.load(r), r);
+    self.mic_gate_floor_db_x10.store(src.mic_gate_floor_db_x10.load(r), r);
+    self.mic_df_pre_gain_db_x10.store(src.mic_df_pre_gain_db_x10.load(r), r);
+    self.mic_rescue_blocks.store(src.mic_rescue_blocks.load(r), r);
+    self.mic_chain_flags.store(src.mic_chain_flags.load(r), r);
+    self.mic_quiet_ms.store(src.mic_quiet_ms.load(r), r);
+    self.mic_limiter_gain_min_db_x10.store(src.mic_limiter_gain_min_db_x10.load(r), r);
     self.aec_state.store(src.aec_state.load(r), r);
     self.aec_delay_us.store(src.aec_delay_us.load(r), r);
     self.aec_raw_delay_us.store(src.aec_raw_delay_us.load(r), r);

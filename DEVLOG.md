@@ -1257,3 +1257,32 @@ of the 10 ms frames completed in the block, so with 2 ms blocks most rows show -
 | `input_clips`         | clipped raw input samples, cumulative                                |
 | `mic_auto_level`      | Windows mic volume set by the automatic input gain (0 none)          |
 | `limiter_gain_db`     | peak limiter gain reduction, dB                                      |
+
+### Debug log: chain telemetry
+
+With "save debug lines" on (Log page), the service now writes `[Chain]` lines next to
+`[Leveler]`, `[MicGain]`, `[DSP]` and `[Mic]` (`win_audio/chain_log.rs`), so a log alone shows
+what the mic chain did: a `start:` line with the full state when the DSP goes live (again);
+one `changed:` line per 250 ms tick with every change old -> new (selected / running model,
+limit, asleep / bypassed / takeover / lookahead, AEC state, delay, cache, double talk, gate mode,
+strength, voice EQ version, mic in use, Windows default mic, Windows volume of both, mute,
+automatic level, mic wish, new input clips, late blocks); and a summary every 10 s (levels, ERLE,
+voice share, detector maxima, gate min and floor, DeepFilterNet pre-gain, rescue blocks, quiet
+time, leveler, input gain, limiter min, volumes, clips, load, latency). Devices and volumes are
+read over COM only while debug logging is on. The DSP publishes its part in shared memory
+layout v16 (DSP -> daemon, mirrored by `copy_dsp_telemetry_from`); extremes are over the
+plugin's last 12000 samples (250 ms), the daemon keeps the extremes of each 10 s interval.
+
+| Field                         | Meaning                                                           |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `mic_voice_blocks`            | blocks with `heard_voice`, cumulative (voice share per interval)  |
+| `mic_blocks`                  | processed blocks, cumulative (0 at a new stream)                  |
+| `mic_in_prob_max_permille`    | highest raw-input detector probability, last 250 ms (0 none)      |
+| `mic_out_prob_max_permille`   | highest output detector probability, last 250 ms (0 none)         |
+| `mic_gate_gain_min_db_x10`    | lowest gate gain, last 250 ms (0 gate off or open)                |
+| `mic_gate_floor_db_x10`       | closed-gate floor now incl. the leveler extra (0 gate off)        |
+| `mic_df_pre_gain_db_x10`      | DeepFilterNet pre-gain now                                        |
+| `mic_rescue_blocks`           | blocks with click-rescue mix > 0.5, cumulative                    |
+| `mic_chain_flags`             | bits: 0 asleep, 1 bypassed, 2 takeover, 3 lookahead on            |
+| `mic_quiet_ms`                | time since speech or activity was last seen                       |
+| `mic_limiter_gain_min_db_x10` | lowest peak limiter gain, last 250 ms (0 no reduction)            |

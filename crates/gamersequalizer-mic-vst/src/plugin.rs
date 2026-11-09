@@ -1,6 +1,6 @@
 use crate::aec3::{EchoCanceller3, PRE_DELAY_SAMPLES};
 use crate::latency_meter::LatencyMeter;
-use crate::ai_denoiser::AiVoiceIsolator;
+use crate::ai_denoiser::{AiVoiceIsolator, DenoiseDebug};
 use crate::clip_detector::ClipDetector;
 use crate::delay_estimator::{DelayEstimator, LockChange, WindowOutcome, FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
 use crate::shared_memory::SharedMemoryClient;
@@ -9,8 +9,8 @@ use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
-  AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
-  NOISE_GATE_AUTO_LOOKAHEAD,
+  AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
+  MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10, NOISE_GATE_AUTO_LOOKAHEAD,
 };
 use std::sync::atomic::Ordering;
 
@@ -33,6 +33,9 @@ const OVERLOAD_AVG_LOAD: f32 = 0.9;
 const OVERLOAD_WINDOWS_TO_FALL_BACK: u32 = 3;
 /// Fixed low cut before the denoiser: 2nd-order Butterworth, below any voice's fundamental.
 const PRE_HIGH_PASS_HZ: f32 = 70.0;
+/// Window of the published chain extremes (probability max, gate / limiter min): 250 ms at 48 kHz,
+/// one daemon log tick.
+const CHAIN_WINDOW_SAMPLES: usize = 12_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginMode {
@@ -92,6 +95,8 @@ pub struct GamersEqualizerPlugin {
   clip_detector: ClipDetector,
   /// Shift of the reference fed to the AEC in the last block (None: the AEC didn't run).
   aec_ref_offset: Option<u32>,
+  /// Chain state for the daemon's debug log.
+  chain: ChainWindow,
   #[cfg(feature = "debug-capture")]
   capture: Option<CaptureWriter>,
   /// Tests without shared memory: (model, mic volume permille) instead of the defaults.
@@ -122,6 +127,27 @@ struct DspLoad {
   /// Cumulative late blocks (published; the UI/log compares successive values).
   late_total: u32,
   overloaded_windows: u32,
+}
+
+/// Chain state for the daemon's debug log: cumulative block counters, extremes per window.
+#[derive(Default)]
+struct ChainWindow {
+  voice_blocks: u32,
+  blocks: u32,
+  rescue_blocks: u32,
+  samples: usize,
+  /// Extremes of the running window; `last` holds the finished one's (the published values).
+  now: ChainExtremes,
+  last: ChainExtremes,
+}
+
+#[derive(Clone, Copy)]
+struct ChainExtremes {
+  in_prob: f32,
+  out_prob: f32,
+  /// Linear gains, 1.0 = no reduction.
+  gate_gain: f32,
+  limiter_gain: f32,
 }
 
 impl GamersEqualizerPlugin {
@@ -166,6 +192,7 @@ impl GamersEqualizerPlugin {
       input_clips: 0,
       clip_detector: ClipDetector::default(),
       aec_ref_offset: None,
+      chain: ChainWindow::default(),
       #[cfg(feature = "debug-capture")]
       capture: None,
       #[cfg(test)]
@@ -463,6 +490,7 @@ impl GamersEqualizerPlugin {
       *sample *= boost;
     }
     self.limiter.process(mic, 1);
+    self.chain.add_block(&self.ai_denoiser.debug_state(), self.ai_denoiser.heard_voice(), self.limiter.gain(), frames);
     // Field by field: `mic` still borrows `mic_mono_temp`.
     let stages = aec_latency_samples(self.aec_idle, self.aec_state, &self.aec) + self.ai_denoiser.output_lead_samples();
     if stages != std::mem::replace(&mut self.latency_stages, stages) {
@@ -602,6 +630,26 @@ impl GamersEqualizerPlugin {
     let lead = self.ai_denoiser.output_lead_samples();
     h.mic_latency_denoise_us.store(us(lead.saturating_sub(lookahead)), Ordering::Relaxed);
     h.mic_latency_lookahead_us.store(us(lookahead), Ordering::Relaxed);
+    // Chain state for the debug log.
+    let dn = self.ai_denoiser.debug_state();
+    let chain = &self.chain;
+    h.mic_voice_blocks.store(chain.voice_blocks, Ordering::Relaxed);
+    h.mic_blocks.store(chain.blocks, Ordering::Relaxed);
+    h.mic_rescue_blocks.store(chain.rescue_blocks, Ordering::Relaxed);
+    h.mic_in_prob_max_permille.store(permille(chain.last.in_prob), Ordering::Relaxed);
+    h.mic_out_prob_max_permille.store(permille(chain.last.out_prob), Ordering::Relaxed);
+    h.mic_gate_gain_min_db_x10.store(db_x10(chain.last.gate_gain).min(0), Ordering::Relaxed);
+    h.mic_limiter_gain_min_db_x10.store(db_x10(chain.last.limiter_gain).min(0), Ordering::Relaxed);
+    h.mic_gate_floor_db_x10.store(if dn.gate_enabled { db_x10(dn.gate_floor) } else { 0 }, Ordering::Relaxed);
+    // Not `db_x10`: it caps at +20 dB, the pre-gain goes to +24.
+    h.mic_df_pre_gain_db_x10.store((200.0 * dn.df_pre_gain.max(1e-6).log10()).round() as i32, Ordering::Relaxed);
+    let flag = |on: bool, bit: u32| if on { bit } else { 0 };
+    let flags = flag(self.ai_denoiser.asleep(), MIC_CHAIN_ASLEEP)
+      | flag(dn.bypassed, MIC_CHAIN_BYPASSED)
+      | flag(dn.takeover, MIC_CHAIN_TAKEOVER)
+      | flag(lookahead > 0, MIC_CHAIN_LOOKAHEAD);
+    h.mic_chain_flags.store(flags, Ordering::Relaxed);
+    h.mic_quiet_ms.store((dn.quiet_samples / 48).min(u32::MAX as usize) as u32, Ordering::Relaxed);
 
     let est = &self.delay_estimator;
     let to_us = |samples: f32| (samples / 48_000.0 * 1e6).round().max(0.0) as u32;
@@ -770,6 +818,33 @@ struct BlockSettings {
   mic_volume: f32,
   boost: f32,
   load: f32,
+}
+
+impl Default for ChainExtremes {
+  fn default() -> Self {
+    // Probabilities of -1 (no frame finished) never beat 0; NaN never wins `max`/`min`.
+    Self { in_prob: 0.0, out_prob: 0.0, gate_gain: 1.0, limiter_gain: 1.0 }
+  }
+}
+
+impl ChainWindow {
+  fn add_block(&mut self, dn: &DenoiseDebug, heard_voice: bool, limiter_gain: f32, frames: usize) {
+    self.blocks = self.blocks.wrapping_add(1);
+    self.voice_blocks = self.voice_blocks.wrapping_add(u32::from(heard_voice));
+    self.rescue_blocks = self.rescue_blocks.wrapping_add(u32::from(dn.rescue_mix > 0.5));
+    let w = &mut self.now;
+    w.in_prob = w.in_prob.max(dn.in_prob);
+    w.out_prob = w.out_prob.max(dn.out_prob);
+    if dn.gate_enabled {
+      w.gate_gain = w.gate_gain.min(dn.gate_gain);
+    }
+    w.limiter_gain = w.limiter_gain.min(limiter_gain);
+    self.samples += frames;
+    if self.samples >= CHAIN_WINDOW_SAMPLES {
+      self.samples = 0;
+      self.last = std::mem::take(&mut self.now);
+    }
+  }
 }
 
 impl DspLoad {

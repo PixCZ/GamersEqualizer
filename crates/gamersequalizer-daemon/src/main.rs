@@ -140,6 +140,8 @@ fn run_background_daemon() {
   let mut mic_gain = win_audio::mic_gain::MicGainLink::default();
   // Debug lines for every leveler change and its reason (written only with "save debug" on).
   let mut leveler_log = win_audio::leveler_log::LevelerLog::default();
+  // Debug lines for the whole mic chain: switches, devices, volumes, a 10 s summary.
+  let mut chain_log = win_audio::chain_log::ChainLog::default();
 
   // Notification-area icon: the window "hides to tray" by closing, the service keeps the icon.
   let mut tray_host = tray::TrayHost::new();
@@ -270,6 +272,9 @@ fn run_background_daemon() {
           app_state.save_audio_settings_if_changed(false);
         }
         leveler_log.tick(header);
+        chain_log.tick(header, || {
+          win_audio::chain_log::read_context(&win_audio.chatmix, &win_audio.endpoint_lock, mic_id.as_deref())
+        });
       }
 
       // 2. Read sub-bus levels from SHM for background session scaling

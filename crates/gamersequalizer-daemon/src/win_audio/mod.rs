@@ -2,6 +2,7 @@ pub mod aec_delay_cache;
 pub mod apo_install;
 pub mod apo_link;
 pub mod app_channels;
+pub mod chain_log;
 pub mod chatmix;
 pub mod console_owner;
 pub mod dolby_atmos;
