@@ -157,17 +157,25 @@ fn build_apm() -> AudioProcessing {
     .build()
 }
 
-/// AEC3 defaults, loosened for a voice quieter than the reference. `default_gain` 1.0 assumes the
-/// whole reference leaks into the mic until the filter converges (it never does without an echo,
-/// e.g. headphones), so a quieter voice is ducked; the wider masks let a near-end voice up to about
-/// the echo level through. Replayed on 2026-11-09 captures, AEC3 always on:
+/// AEC3 defaults, loosened for a voice quieter than the reference. While AEC3 cannot use its
+/// linear filter it takes `default_gain` x the reference for the echo. That is the case without
+/// an echo (headphones) and with a weak one: capture 2026-11-09 21:06, music from the speakers
+/// 50 dB down at the mic. The default 1.0 (the whole reference leaks in) ducks any quieter voice.
+/// 0.1 was still 30 dB over that real echo: the first 200 ms of a word at -46 dBFS after a pause
+/// came out at -81 dBFS, and clicks at -40 dBFS at -54..-77. With 0.01 (`capture_replay_report`)
+/// the word's onset passes (-54.9 / -52.1 dBFS in its two 100 ms windows) and echo alone is
+/// removed as before on all 15 captures with a reference (first 5 s, strongest echo: -72.9
+/// dBFS both; 0.003 lets it up to -68.6). The unit tests measure the same except the weak echo
+/// under speech (-6.4 -> -2.5 dB vs the mic: less of the voice taken). The wider masks let a
+/// near-end voice up to about the echo level through. Replayed on 2026-11-09 captures, AEC3
+/// always on, at 0.1:
 /// - headphones, voice -40 dBFS under music -28 dBFS: voice lost 26.8 dB with the defaults, 5.6 dB
 ///   with this (first 3 s after the music starts: about half of the voice frames still cut);
 /// - speakers, music -18 dBFS: echo-only removed 26 dB as before (-84 dBFS), voice during the
 ///   music passes better than with the defaults.
 fn tuning() -> EchoCanceller3Config {
   let mut cfg = EchoCanceller3Config::default();
-  cfg.ep_strength.default_gain = 0.1;
+  cfg.ep_strength.default_gain = 0.01;
   let normal = &mut cfg.suppressor.normal_tuning;
   normal.mask_lf.enr_transparent = 1.0;
   normal.mask_lf.enr_suppress = 1.1;
@@ -345,6 +353,41 @@ mod tests {
         write_wav(&out_dir.join(format!("{name}_{tag}.wav")), v);
       }
     }
+  }
+
+  /// One debug capture through AEC3 as it is now, against what the chain's AEC put out live
+  /// (`04_after_aec.wav`): the 100 ms windows more than 6 dB apart, then the level of the first
+  /// 5 s (echo alone in most captures). For trying a tuning on a real capture.
+  /// `CAP=20261109-210655 cargo test --release -p gamersequalizer-mic-vst --lib aec3::tests::capture_replay_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn capture_replay_report() {
+    let cap = std::env::var("CAP").unwrap_or("20261109-210655".into());
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_data/private/captures").join(&cap);
+    let read = |name: &str| -> Option<Vec<f32>> {
+      Some(hound::WavReader::open(dir.join(name)).ok()?.samples::<f32>().map_while(Result::ok).collect())
+    };
+    let (Some(mic), Some(refs), Some(live)) =
+      (read("01_mic_raw.wav"), read("03_ref_aec.wav"), read("04_after_aec.wav"))
+    else {
+      return eprintln!("skipped: no capture {cap} in test_data/private/captures/");
+    };
+    let out = run(&mut EchoCanceller3::new(), &refs, &mic, 480);
+    let level = |x: &[f32], window: usize| energy_db(x.get(window * 4_800..(window + 1) * 4_800).unwrap_or_default());
+    // The first second is AEC3 converging in the replay (the live one had its history).
+    for window in 10..mic.len() / 4_800 {
+      let (m, o, l) = (level(&mic, window), level(&out, window), level(&live, window));
+      if (o - l).abs() > 6.0 && o.max(l) > -75.0 {
+        eprintln!("{:5.1} s: mic {m:6.1}, live {l:6.1}, now {o:6.1} dBFS", window as f32 / 10.0);
+      }
+    }
+    let first = 48_000..(5 * 48_000).min(mic.len());
+    eprintln!(
+      "1-5 s: mic {:.1}, live {:.1}, now {:.1} dBFS",
+      energy_db(&mic[first.clone()]),
+      energy_db(&live[first.clone()]),
+      energy_db(&out[first])
+    );
   }
 
   /// Double talk, `echo` + `voice` on the mic: dB of echo removed and the voice level change

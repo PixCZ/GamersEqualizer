@@ -1514,3 +1514,76 @@ Synthetic mixes at 0.15 (private voice): frames lost > 15 dB under hammered clic
 (> 15 dB 3.4 % unchanged), pauses unchanged. At 0.3 word tails 21.3 -> 22.3 %. Captures
 `205013` and `162331`: no window changes. Test:
 `test_click_rescue_fills_in_only_while_silero_hears_a_voice`. Not heard live.
+
+### Capture `20261109-210655` (build `eabc699`: quiet voice under music, clicks, music fading out)
+
+60 s, Windows volume 30 %, music from the speakers to ~48 s (echo at the mic about -67 dBFS),
+voice -45..-60 dBFS from 10 s, clicks at 5-8 s and around 50 s.
+
+- **Ten loud bursts at 5-9 s** (-38..-43 dBFS, 110-170 ms each, every ~420 ms) came out at
+  -77 dBFS or less. Read as clicks at first; they are not echo and AEC3 removed them, see
+  milestone 42. A click 900 ms after a word (49.7 s, no music left): -39.1 -> -78.6 dBFS, the
+  rescue stayed off (Silero 0.43 a chunk earlier, in 0.01).
+- **The rescue condition costs no voice here**: replayed with and without it, voice windows
+  lose 3.9 dB on average and > 10 dB in 9.7 % either way.
+- **The first word after a pause lost ~0.5 s** (10.0-10.4 s). AEC3 removed the voiced onset
+  (mic -46.1, AEC output -81.4 dBFS, 200 ms), so no detector saw it; the next 200 ms fell into
+  the closed gate and the sleeping model's wake-up (-59.8 -> -73.5, -62.0 -> -107.1 dBFS).
+  Later quiet syllables lose 10-20 dB in AEC3 as well (10.8 s, 48.7 s): the voice is 7-17 dB
+  over the echo (milestone 36, "voice within ~10 dB of the echo").
+- **Voice windows lose more than without music**: 3.7-4.5 dB on average, > 10 dB in 6-20 %
+  (`204900`: 2-3.5 dB, 2-10 %), with the rescue active in 50-76 % of them.
+- **Silero reached 0.20-0.27 on click residue behind AEC3** (6.4-6.8 s) and 0.30 on an unknown
+  sound in `204900` (58-59 s): over `SOFT_VOICE_PROB`, so the gate opened for its hold. DFN3
+  removed the sound both times; with the heavy model asleep or RNNoise selected it would pass.
+- `in_net` again hears little while music plays: `heard_voice` in 0-50 % of the blocks per
+  second until the music fades (43 s on: 60-100 %).
+- `capture_replay_report` differs from the live output in 5 windows, all around the heavy
+  model's sleep and wake-up: the replay starts cold and does not know the noise floor and the
+  quiet time from before the capture.
+
+## Milestone 42: AEC3 erased sounds made at the mic while music played: `default_gain` 0.1 -> 0.01 (2026-11-09)
+
+Capture `20261109-210655`: music from the speakers at -18 dBFS, its echo at the mic about
+-68 dBFS (50 dB down). The first word after a pause lost its first 200 ms in the AEC (mic
+-46.1, AEC output -81.4 dBFS), and ten bursts at 5-9 s (-38..-43 dBFS) came out of the AEC at
+-54..-83 dBFS.
+
+- **They are not echo.** An echo path fitted on the echo-only stretch (1-4.5 s, least squares,
+  60 ms) predicts -70..-72 dBFS of echo in every one of those windows.
+- **Cause.** AEC3 was not using its linear filter there; then it takes `ep_strength.default_gain`
+  x the reference for the echo: 0.1 x -18 dBFS = -38 dBFS, 30 dB over the real echo, so
+  anything quieter at the mic counted as echo. Shown by which settings move the word's onset:
+  only `default_gain` and `model_reverb_in_nonlinear_mode`, both part of that estimate; not
+  one of 20 others (dominant near-end detection, masks, gain rise limit, audibility, ERLE,
+  saturation, high bands; a few of them let the bursts through in part).
+- **Change: 0.01.** New `aec3::tests::capture_replay_report` (a capture through AEC3 as it is
+  now, against the live `04_after_aec.wav`):
+
+| Window (mic dBFS)             | Live (0.1) | 0.03    | 0.01    | 0.003   |
+| ----------------------------- | ---------- | ------- | ------- | ------- |
+| Word onset 10.1 s (-46.1)     | -81.4      | -77.2   | -54.9   | -47.3   |
+| Word onset 10.2 s (-49.9)     | -59.8      | -71.5   | -52.1   | -51.1   |
+| Burst 5.2 s (-38.4)           | -69.6      | -43.7   | -40.5   | -39.2   |
+| Echo alone 1-4.5 s (replay)   | -77.9      | -77.9   | -77.9   | -77.8   |
+
+  All 15 captures with a reference, per 5 s: 0.01 equals 0.1 wherever only echo plays (first
+  5 s on the speakers: `122712` -72.9 both, `130319` -67.2 / -66.1) and passes more of the
+  voice where music starts on headphones (`122520`, 5-10 s: -54.2 -> -50.0 dBFS). 0.003 lets
+  echo through in the first 5 s (`122712` -68.6, `130319` -63.3, `091611` -64.9): too low.
+  Unit tests: the same numbers except weak echo under speech (-6.4 -> -2.5 dB against the mic).
+- **End to end** (new AEC output through the denoiser with the capture's leveler gains): the
+  word at 10.1-10.3 s comes out at -64.4 / -59.6 / -64.6 dBFS instead of -117 / -73.5 / -109;
+  voice windows 11-47 s lose 6.6 dB mic to denoiser output instead of 7.7 (over 10 dB in 14.4 %
+  instead of 21.9 %).
+- **The ten bursts now pass the whole chain** (-38.4 -> -40.4 dBFS at 5.2 s): behind the new AEC
+  `in_net` rates them 0.98-0.99, the output detector 1.00, Silero 0.22-0.85, and DFN3 leaves
+  them alone. Flat for 110-170 ms, 300-1000 Hz, every ~420 ms: short syllables or knocks; not
+  known which. If knocks, they pass as they do without music: the chain has nothing against a
+  sound its detectors take for a voice.
+- A synthetic test did not reproduce the state (white-noise and reverberant weak echoes keep
+  AEC3 on its linear filter: the onset passes at 0.1 too), so the evidence is the capture.
+- Also seen, open: with music playing AEC3 takes about 10 dB off the voice's 4-8 kHz band (the
+  high-band settings do not change it).
+
+Not heard live; needs the app and the APO rebuilt.
