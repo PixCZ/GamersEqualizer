@@ -22,6 +22,8 @@ rustfft = "6.4"
 # DeepFilterNet 3: our inference-only fork of upstream libDF (rev d375b2d) on tract 0.23, the
 # tract DPDFNet uses too (upstream pins tract 0.21). See crates/vendor/deep_filter/README.md.
 deep_filter = { path = "../vendor/deep_filter", features = ["tract", "default-model"] }
+# RNNoise 0.2 (pure-Rust port, see crates/vendor/rnnoise2/README.md): the raw-input voice detector.
+rnnoise2 = { path = "../vendor/rnnoise2" }
 # DPDFNet (ONNX), exactly the tract the fork is built against.
 tract-onnx-23 = { package = "tract-onnx", version = "=0.23.10" }
 # Same version as tract 0.23 (the fork's DfTract takes these arrays).

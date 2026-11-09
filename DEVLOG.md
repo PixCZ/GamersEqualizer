@@ -993,3 +993,70 @@ rather than ESC-50 clicks, a speech fixture with long pauses for the strength re
 column is empty on the private voice).
 
 Commit: `8dbfd74`.
+
+## Milestone 35: RNNoise 0.2 as the raw-input voice detector (2026-11-09)
+
+**Port.** `crates/vendor/rnnoise2` is a pure-Rust port of RNNoise as of its 0.2 rewrite (conv1d +
+3 GRUs, 32 bands, forked from nnnoiseless 0.5.2; no C, no FFI). It is bit-close to the upstream C:
+on the reference clips max 11 LSB (Full) / 19 LSB (Little), RMS under 1 LSB, threshold 32.8 LSB
+(`reference_matches_upstream`); on 10 s mixes every quality metric matches the upstream C demo
+within 0.2 dB / 0.6 % (crate README, "Cross-check against the upstream C").
+
+**Not as the filter.** As a denoiser 0.2 suppresses keys in pauses about twice as hard in dB
+(Full 36-41 dB vs 18 dB) but cuts quiet syllable onsets and tails much more (30-37 % lost
+> 10 dB vs 9 %) and loses slightly more speech under keys. The same holds for the upstream C, so
+it is the model, not the port. The filter, the pause stand-in, `out_net` and `ClickRescue` stay on
+nnnoiseless (their thresholds and alignment are tuned to it, and three Full passes would cost
+~8 % of a core).
+
+**As the raw-input detector it hears far more speech at the same false-alarm rate** (rnnoise2
+`vad_sweep`; share of frames whose probability reaches the threshold; speech = clean frame RMS
+>= clean RMS - 15 dB, quiet = -40..-15 dB, i.e. syllable onsets and tails; speech -20 dBFS under
+the ESC-50 keys; keys alone at -20 dBFS):
+
+| Detector        | Open / keep | Speech at open % | Quiet at open % | Quiet at keep % | Keys over open % | Keys over keep % |
+| --------------- | ----------- | ---------------- | --------------- | --------------- | ---------------- | ---------------- |
+| nnnoiseless 0.5 | 0.5 / 0.05  | 81.7 / 75.6      | 11.7 / 10.5     | 30-48           | 0.4              | 7.8              |
+| rnnoise2 Full   | 0.5 / 0.05  | 99.0 / 96.5      | 47.5 / 44.4     | -               | 1.3              | -                |
+| rnnoise2 Full   | 0.7 / 0.2   | 97.2 / 94.1      | 38.3 / 30.9     | 56-59           | 0.5              | 5.2              |
+
+Speech and quiet columns: 0 dB / -10 dB SNR; "-": not measured (0.05 is far below Full's useful
+range: at 0.3 it already fires on 3.1 % of keys-only frames).
+
+At 0.7 Full fires on keys alone as rarely as the old detector at 0.5, and at 0.2 less often than
+the old one at 0.05, while hearing 94-97 % of speech instead of 76-82 % and 31-38 % of quiet
+speech instead of 10-12 %. The rule for the gate is "never cut speech, rather let a key through",
+so this is the useful part of the new model.
+
+**Change** (`ai_denoiser.rs`). `in_net` (the raw-input detector that keys `vad` while a heavy model
+is awake, and the leveler / auto gain while the chain is bypassed) runs `rnnoise2` Full through
+the new `voice_probability` (analysis + network, no synthesis). `VoiceNet` holds either network
+(`VoiceModel::Old` / `New`); `vad` opens at `IN_NET_VOICE_PROB = 0.7` and keeps at
+`IN_NET_KEEP_PROB = 0.2` on `in_net`'s probability, and at the old 0.5 / 0.05 on the RNNoise
+filter's own probability (RNNoise alone, or standing in for a sleeping model). If the embedded
+weights fail to load, `in_net` logs it and falls back to the 2017 network with the old thresholds.
+`reset()` clears the new state in place (no re-parse); `flush()` unchanged (FIFO clear only).
+
+**Timing.** 0.2 has one frame of network lookahead: the probability returned for frame t is
+frame t-1's, so `in_net` reports 10 ms later than before. It still leads the heavy model's output
+by its latency minus 10 ms (DFN3 30 ms, DPDFNet 50 ms) plus the gate lookahead, so output latency
+is unchanged. Checked consumers: the gate hold (`GATE_HOLD_SAMPLES + latency + lookahead`, counted
+from the report) ends 10 ms later, i.e. errs toward keeping a tail; the leveler / auto gain map
+`heard_voice` to output audio by `output_lead_samples`, so their speech frames shift by one frame,
+well inside the detector's own hysteresis (`VOICE_ACTIVE_FRAMES` = 200 ms); waking a sleeping
+model is keyed by the RNNoise stand-in's probability and activity, not by `in_net`. Nothing
+adjusted. The per-model lookahead (`lookahead_sweep`, 2026-11-08) was tuned with the old timing
+and should be re-measured.
+
+**Cost.** One Full pass is ~10x the 2017 pass (macOS arm64: 414 vs 39 us per 10 ms frame): about
+2.8 % of a core on Windows instead of 0.26 %, only while a heavy model is awake or the chain is
+bypassed.
+
+**Tests.** `test_in_net_rarely_fires_on_keys_alone` (keys at -20 dBFS above 0.7 on < 2 % of
+frames; 0.5 % measured) and `test_in_net_hears_speech_under_keys` (0 dB SNR mix, > 90 % of speech
+frames above 0.7; 97.2 % measured, probability t+1 paired with clean frame t).
+
+**Open.** Written on macOS, where the mic crate does not build: Windows build, tests and clippy
+(`scripts/dev-rebuild.ps1 -Apo -Test`), the ignored reports (`keyboard_call_report`,
+`click_report`, `private_report`, `scenario_report`, `lookahead_sweep`), CPU on Windows and
+listening are pending (`docs/rnnoise-0.2-port.md`, chapter 8).

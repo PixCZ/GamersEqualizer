@@ -3,12 +3,15 @@
 //! load on first selection (DFN3 ~80 ms, DPDFNet ~120 ms) and then stay in memory. The stream
 //! loads its selected model before audio starts (`set_model`); a live switch (`request_model`)
 //! loads on a short-lived thread while RNNoise keeps running, so the audio thread never stalls.
+//! The raw-input voice detector (`in_net`) runs RNNoise 0.2 (`rnnoise2`), everything else the
+//! 2017 RNNoise network.
 
 use crate::dpdfnet::{self, DpdfEngine};
 use df::tract::{DfParams, DfTract, RuntimeParams};
 use gamersequalizer_common::shm::{DenoiseLimit, DenoiseModel};
 use ndarray::Array2;
 use nnnoiseless::{DenoiseState, FRAME_SIZE};
+use rnnoise2::DenoiseState as DenoiseState2;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
@@ -42,6 +45,15 @@ const VOICE_MIN_FRAMES: u32 = 2;
 /// 0.4-1.6 %, and typing right after speech keeps the gate open +0.2 % longer.
 const VOICE_KEEP_PROB: f32 = 0.05;
 const VOICE_ACTIVE_FRAMES: u32 = 20;
+/// `in_net` runs RNNoise 0.2 (`rnnoise2`, Full model), so `vad` opens and keeps at these instead
+/// while `in_net` feeds it (`VoiceNet::thresholds`; `VOICE_MIN_FRAMES`/`VOICE_ACTIVE_FRAMES`
+/// unchanged). Measured (rnnoise2 `vad_sweep`: speech -20 dBFS under ESC-50 keys at 0 and
+/// -10 dB SNR, keys alone at -20 dBFS): keys alone score above 0.7 / 0.2 on 0.5 / 5.2 % of
+/// frames (2017 model at 0.5 / 0.05: 0.4 / 7.8 %), while speech frames are heard 94-97 % (old
+/// 76-82 %) and quiet ones (clean RMS -40..-15 dB, syllable onsets and tails) 31-38 / 56-59 %
+/// (old 10-12 / 30-48 %). Same false-alarm rate, far fewer cut syllables.
+const IN_NET_VOICE_PROB: f32 = 0.7;
+const IN_NET_KEEP_PROB: f32 = 0.2;
 /// The second detector, on the denoised output, opens on one frame above this and stays open
 /// longer: keys are mostly gone there, and a cut voice is worse than a few keys let through.
 /// Measured on a private voice under its own keyboard (`private_report`): phrase onsets after
@@ -157,7 +169,12 @@ pub struct AiVoiceIsolator {
   /// raw-input one loses under typing (private voice, keys at -10 dB SNR: RNNoise's probability
   /// on soft syllables fell from ~0.95 to <0.1 and the gate cut 18-31 % of them).
   vad_out: VoiceHysteresis,
-  /// RNNoise run only for its voice probability: on the raw input while no RNNoise denoises it...
+  /// RNNoise run only for its voice probability: on the raw input while no RNNoise denoises it
+  /// (RNNoise 0.2, Full; ~10x the 2017 pass, ~2.8 % of a core). Its probability describes the
+  /// frame before the one just fed (one frame of network lookahead), so it reports 10 ms later
+  /// than the 2017 detector did; it still leads the heavy model's output by that model's
+  /// latency - 10 ms (DFN3 30 ms, DPDFNet 50 ms) plus the lookahead, so the output latency does
+  /// not change and the gate's hold (counted from the report) only ends 10 ms later...
   in_net: VoiceNet,
   /// ...and on the denoised output, with the gate on.
   out_net: VoiceNet,
@@ -256,10 +273,16 @@ struct DeepFilterEngine {
 
 /// RNNoise run only for its voice probability (see `vad`, `in_net`, `out_net`).
 struct VoiceNet {
-  state: Box<DenoiseState<'static>>,
+  state: VoiceModel,
   fifo: Vec<f32>,
   frame: [f32; FRAME_SIZE],
   scratch: [f32; FRAME_SIZE],
+}
+
+/// The 2017 network (`out_net`, `ClickRescue`) or RNNoise 0.2 (`in_net`).
+enum VoiceModel {
+  Old(Box<DenoiseState<'static>>),
+  New(Box<DenoiseState2>),
 }
 
 /// Speech decision from RNNoise's per-frame voice probability, with hysteresis. The RNNoise
@@ -340,7 +363,7 @@ impl AiVoiceIsolator {
       gate: NoiseGate::new(true),
       vad: VoiceHysteresis::new(),
       vad_out: VoiceHysteresis::new_output(),
-      in_net: VoiceNet::new(),
+      in_net: VoiceNet::new_input(),
       out_net: VoiceNet::new(),
       asleep: false,
       takeover: None,
@@ -504,11 +527,12 @@ impl AiVoiceIsolator {
     }
 
     if self.strength <= 0.001 {
-      // Audio passes untouched, but a detector (one RNNoise pass, ~0.26 % of a core) keeps
-      // running: the leveler and the automatic input gain learn only from speech it hears.
+      // Audio passes untouched, but a detector (`in_net`, ~2.8 % of a core) keeps running:
+      // the leveler and the automatic input gain learn only from speech it hears.
       self.bypassed = true;
       let (vad, mut voice) = (&mut self.vad, false);
-      self.in_net.process(samples, |p| voice |= vad.frame(p));
+      let (open, keep) = self.in_net.thresholds();
+      self.in_net.process(samples, |p| voice |= vad.frame_at(p, open, keep));
       self.heard_voice = voice;
       return;
     }
@@ -556,9 +580,10 @@ impl AiVoiceIsolator {
     } = self;
     let (mut voice, mut voice_out) = (false, false);
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
-    // RNNoise's own voice probability while it denoises alone, else one RNNoise pass of its own.
+    // RNNoise's own voice probability while it denoises alone, else `in_net` (RNNoise 0.2).
     if heavy_on {
-      in_net.process(samples, |p| voice |= vad.frame(p));
+      let (open, keep) = in_net.thresholds();
+      in_net.process(samples, |p| voice |= vad.frame_at(p, open, keep));
     }
     // During a takeover RNNoise works on a copy, the heavy model in place.
     let stand_in = match spare.get_mut(..n) {
@@ -638,7 +663,7 @@ impl AiVoiceIsolator {
   /// on, model change), never on a pause (`flush`).
   pub fn reset(&mut self) {
     self.reset_engines();
-    self.in_net = VoiceNet::new();
+    self.in_net.reset();
     self.out_net = VoiceNet::new();
     self.mute_left = 0;
     self.reset_timing();
@@ -976,24 +1001,60 @@ impl DeepFilterEngine {
 }
 
 impl VoiceNet {
+  /// The 2017 network (`out_net`, `ClickRescue`).
   fn new() -> Self {
-    Self {
-      state: DenoiseState::new(),
-      fifo: Vec::with_capacity(FRAME_SIZE * 4),
-      frame: [0.0; FRAME_SIZE],
-      scratch: [0.0; FRAME_SIZE],
+    Self::with_model(VoiceModel::Old(DenoiseState::new()))
+  }
+
+  /// `in_net`: RNNoise 0.2 (Full). If its embedded weights fail to load (never seen; a corrupt
+  /// build), the 2017 network instead, so the chain always has a detector.
+  fn new_input() -> Self {
+    let model = match DenoiseState2::with_model(rnnoise2::Model::Full) {
+      Ok(state) => VoiceModel::New(state),
+      Err(e) => {
+        log::error!("[Denoise] RNNoise 0.2 voice detector failed to load, using the 2017 one: {e}");
+        VoiceModel::Old(DenoiseState::new())
+      }
+    };
+    Self::with_model(model)
+  }
+
+  fn with_model(state: VoiceModel) -> Self {
+    Self { state, fifo: Vec::with_capacity(FRAME_SIZE * 4), frame: [0.0; FRAME_SIZE], scratch: [0.0; FRAME_SIZE] }
+  }
+
+  /// Open / keep thresholds of the raw-input `vad` for this network's probability.
+  fn thresholds(&self) -> (f32, f32) {
+    match self.state {
+      VoiceModel::Old(_) => (VOICE_PROB, VOICE_KEEP_PROB),
+      VoiceModel::New(_) => (IN_NET_VOICE_PROB, IN_NET_KEEP_PROB),
     }
   }
 
-  /// Calls `on_prob` with the voice probability of each frame completed in this block.
+  /// Calls `on_prob` with the voice probability of each frame completed in this block
+  /// (RNNoise 0.2: of the frame before it, see `in_net`).
   fn process(&mut self, samples: &[f32], mut on_prob: impl FnMut(f32)) {
     self.fifo.extend_from_slice(samples);
     while self.fifo.len() >= FRAME_SIZE {
       for (dst, src) in self.frame.iter_mut().zip(self.fifo.drain(..FRAME_SIZE)) {
         *dst = src * I16_SCALE;
       }
-      on_prob(self.state.process_frame(&mut self.scratch, &self.frame));
+      let prob = match &mut self.state {
+        VoiceModel::Old(state) => state.process_frame(&mut self.scratch, &self.frame),
+        VoiceModel::New(state) => state.voice_probability(&self.frame),
+      };
+      on_prob(prob);
     }
+  }
+
+  /// Fresh network state and no buffered audio. The 2017 network allocates a new state (user
+  /// actions only); RNNoise 0.2 clears its own without allocating or re-parsing its weights.
+  fn reset(&mut self) {
+    match &mut self.state {
+      VoiceModel::Old(state) => *state = DenoiseState::new(),
+      VoiceModel::New(state) => state.reset(),
+    }
+    self.fifo.clear();
   }
 }
 
@@ -1022,9 +1083,14 @@ impl VoiceHysteresis {
 
   /// One frame's voice probability -> is it speech.
   fn frame(&mut self, prob: f32) -> bool {
-    self.run = if prob > self.open_prob { self.run.saturating_add(1) } else { 0 };
+    self.frame_at(prob, self.open_prob, self.keep_prob)
+  }
+
+  /// `frame` with the thresholds of the network that scored `prob` (`VoiceNet::thresholds`).
+  fn frame_at(&mut self, prob: f32, open_prob: f32, keep_prob: f32) -> bool {
+    self.run = if prob > open_prob { self.run.saturating_add(1) } else { 0 };
     // Hysteresis: opening needs a clear syllable; once talking, a soft one keeps it open.
-    let voice = self.run >= self.min_frames || (self.active_left > 0 && prob > self.keep_prob);
+    let voice = self.run >= self.min_frames || (self.active_left > 0 && prob > keep_prob);
     self.active_left = if voice { self.active_frames } else { self.active_left.saturating_sub(1) };
     voice
   }
@@ -1225,6 +1291,34 @@ pub(crate) mod tests {
     assert_eq!(x, clean, "bypass leaves the audio untouched");
     assert_eq!(isolator.output_lead_samples(), 0);
     assert!(speech_blocks > clean.len() / 480 / 10, "heard speech in {speech_blocks} blocks");
+  }
+
+  #[test]
+  fn test_in_net_rarely_fires_on_keys_alone() {
+    // RNNoise 0.2 at `IN_NET_VOICE_PROB`: 0.5 % of frames in rnnoise2's `vad_sweep`.
+    let probs = in_net_probs(&keyboard_only(-20.0));
+    let share = probs.iter().filter(|&&p| p > IN_NET_VOICE_PROB).count() as f32 / probs.len().max(1) as f32;
+    eprintln!("in_net, keys alone: {:.1} % of frames above {IN_NET_VOICE_PROB}", share * 100.0);
+    assert!(share < 0.02, "{share}");
+  }
+
+  #[test]
+  fn test_in_net_hears_speech_under_keys() {
+    // 97 % in rnnoise2's `vad_sweep` (the 2017 detector at 0.5: 82 %).
+    let (clean, mixed) = speech_over_keyboard(-20.0, 0.0);
+    let probs = in_net_probs(&mixed);
+    let speech_db = db(rms(&clean)) - 15.0;
+    let (mut speech, mut heard) = (0usize, 0usize);
+    // Probability t + 1 describes frame t (one frame of network lookahead).
+    for (frame, p) in clean.as_chunks::<FRAME_SIZE>().0.iter().zip(probs.iter().skip(1)).skip(50) {
+      if db(rms(frame)) >= speech_db {
+        speech += 1;
+        heard += usize::from(*p > IN_NET_VOICE_PROB);
+      }
+    }
+    let share = heard as f32 / speech.max(1) as f32;
+    eprintln!("in_net, speech over keys at 0 dB SNR: {:.1} % of {speech} speech frames heard", share * 100.0);
+    assert!(speech > 100 && share > 0.9, "{heard} / {speech}");
   }
 
   #[test]
@@ -1828,6 +1922,17 @@ pub(crate) mod tests {
   fn scale_to_db(x: &[f32], target_db: f32) -> Vec<f32> {
     let gain = 10f32.powf(target_db / 20.0) / rms(x).max(1e-9);
     x.iter().map(|s| s * gain).collect()
+  }
+
+  /// `in_net`'s voice probability per 480-sample frame of `x`.
+  fn in_net_probs(x: &[f32]) -> Vec<f32> {
+    let mut net = VoiceNet::new_input();
+    assert!(matches!(net.state, VoiceModel::New(_)), "RNNoise 0.2 weights must load");
+    let mut probs = Vec::with_capacity(x.len() / FRAME_SIZE);
+    for block in x.chunks(FRAME_SIZE) {
+      net.process(block, |p| probs.push(p));
+    }
+    probs
   }
 
   fn rms(x: &[f32]) -> f32 {

@@ -72,12 +72,17 @@ if ($Apo -and -not $failed) {
 
 if ($Test -and -not $failed) {
   Step 'cargo test --workspace' { cargo test --workspace }
+  # rnnoise2 is excluded from the workspace (vendor fork): its AVX2-vs-scalar kernel test and the
+  # upstream reference test run only here on x86_64.
+  Step 'cargo test rnnoise2 (release)' { cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml }
   Step 'clippy --workspace' {
     # Windows PowerShell turns redirected native stderr into error records; with 'Stop' the
     # first clippy warning would abort the step.
     $ErrorActionPreference = 'Continue'
     $out = cargo clippy --workspace --all-targets 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Write-Host $out; throw 'clippy failed' }
+    $out += cargo clippy --manifest-path crates/vendor/rnnoise2/Cargo.toml --all-targets 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { Write-Host $out; throw 'clippy failed (rnnoise2)' }
     $warnings = ([regex]::Matches($out, '(?m)^warning: (?!`).*$')).Count
     Write-Host "clippy warnings: $warnings"
   }
