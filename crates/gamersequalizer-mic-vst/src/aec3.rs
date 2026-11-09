@@ -13,7 +13,7 @@
 //! framing; the MDF had none). It works on 10 ms frames: 480-sample blocks add nothing more,
 //! any other block size switches once to a further 10 ms buffer.
 
-use sonora::config::{EchoCanceller, MaxProcessingRate, Pipeline};
+use sonora::config::{EchoCanceller, EchoCanceller3Config, MaxProcessingRate, Pipeline, TransparentModeType};
 use sonora::{AudioProcessing, Config, StreamConfig};
 use std::collections::VecDeque;
 
@@ -142,10 +142,33 @@ fn build_apm() -> AudioProcessing {
   let stream = StreamConfig::new(48_000, 1);
   let config = Config {
     pipeline: Pipeline { maximum_internal_processing_rate: MaxProcessingRate::Rate48kHz, ..Default::default() },
-    echo_canceller: Some(EchoCanceller { enforce_high_pass_filtering: false, ..Default::default() }),
+    echo_canceller: Some(EchoCanceller {
+      enforce_high_pass_filtering: false,
+      // Detects "no echo" (headphones) faster than the default counter.
+      transparent_mode: TransparentModeType::Hmm,
+    }),
     ..Default::default()
   };
-  AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build()
+  AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).echo_canceller3_config(tuning()).build()
+}
+
+/// AEC3 defaults, loosened for a voice quieter than the reference. `default_gain` 1.0 assumes the
+/// whole reference leaks into the mic until the filter converges (it never does without an echo,
+/// e.g. headphones), so a quieter voice is ducked; the wider masks let a near-end voice up to about
+/// the echo level through. Replayed on 2026-11-09 captures, AEC3 always on:
+/// - headphones, voice -40 dBFS under music -28 dBFS: voice lost 26.8 dB with the defaults, 5.6 dB
+///   with this (first 3 s after the music starts: about half of the voice frames still cut);
+/// - speakers, music -18 dBFS: echo-only removed 26 dB as before (-84 dBFS), voice during the
+///   music passes better than with the defaults.
+fn tuning() -> EchoCanceller3Config {
+  let mut cfg = EchoCanceller3Config::default();
+  cfg.ep_strength.default_gain = 0.1;
+  let normal = &mut cfg.suppressor.normal_tuning;
+  normal.mask_lf.enr_transparent = 1.0;
+  normal.mask_lf.enr_suppress = 1.1;
+  normal.mask_hf.enr_transparent = 0.3;
+  normal.mask_hf.enr_suppress = 0.5;
+  cfg
 }
 
 fn finite(x: f32) -> f32 {
