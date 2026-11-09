@@ -1,0 +1,39 @@
+# Pure-Rust port of RNNoise (xiph/rnnoise, main @ 70f1d25, model 0a8755f8), forked from nnnoiseless 0.5.2.
+# See README.md for origin, model hashes and port notes.
+[package]
+name = "rnnoise2"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust port of the RNNoise 0.2-era noise suppressor (no C, no FFI)"
+license = "BSD-3-Clause"
+publish = false
+
+[lib]
+name = "rnnoise2"
+path = "src/lib.rs"
+
+[dependencies]
+rustfft = "6"
+
+[dev-dependencies]
+hound = "3.5"
+# Only for the `rnnoise2_report` / `rnnoise2_bench` comparison (ignored tests).
+nnnoiseless = { version = "0.5", default-features = false }
+
+# Excluded from the workspace, so the workspace lints are copied here (.claude/rules/code-style.md).
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "warn"
+await_holding_lock = "deny"
+let_underscore_future = "deny"
+clone_on_copy = "deny"
+needless_return = "deny"
+redundant_field_names = "deny"

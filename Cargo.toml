@@ -5,8 +5,8 @@ members = [
     "crates/gamersequalizer-mic-vst",
     "crates/gamersequalizer-apo",
 ]
-# Third-party fork, built only as the mic crate's dependency (not linted as our code).
-exclude = ["crates/vendor/deep_filter"]
+# Third-party forks, built only as the mic crate's dependencies (not linted as our code).
+exclude = ["crates/vendor/deep_filter", "crates/vendor/rnnoise2"]
 resolver = "2"
 
 [workspace.dependencies]
