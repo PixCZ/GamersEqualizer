@@ -14,29 +14,24 @@ For a build that goes to testers. Needs the Rust MSVC toolchain on Windows; take
    .\scripts\package.ps1
    ```
 
-   Cargo reuses an up-to-date build: if nothing changed since the last `dist` build, this takes seconds
-   and packages that same (fully optimized) exe. To force a build from scratch, clean both profiles first:
-
-   ```powershell
-   cargo clean --profile dist
-   cargo clean --profile apo
-   ```
-
-   (`cargo clean` alone wipes all of `target`, including the dev build and the ZIPs in `target\package`.)
+   The script always builds from scratch (`cargo clean --profile dist` / `--profile apo-dist`, never
+   the dev build or older ZIPs), ignores environment overrides such as `RUSTFLAGS` or `CARGO_PROFILE_*`,
+   builds with `--locked`, and then checks the real rustc command lines in the verbose log: it fails
+   unless both binaries were linked with the flags below and without the `debug-capture` feature.
 
 3. The result is `target\package\GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>.zip`; the script prints
-   its path, size and SHA256. Older ZIPs are kept.
+   its path, size and SHA256. Next to it: `<name>.build.log` (full cargo output) and `<name>.build.txt`
+   (toolchain, commit, flags, SHA256 of each file). Older ZIPs are kept.
 
-What the script runs:
+What the script runs (both: `--locked -v`, static CRT, stripped):
 
-| Step                                               | Profile | Optimization                                                 |
-| -------------------------------------------------- | ------- | ------------------------------------------------------------ |
-| `cargo build --profile dist -p gamersequalizer`    | `dist`  | `lto = "fat"`, `codegen-units = 1`, no incremental           |
-| `cargo build --profile apo -p gamersequalizer-apo` | `apo`   | like `release` (`opt-level = 3`, no LTO), `panic = "unwind"` |
+| Step                                                    | Profile    | Optimization                                                        |
+| ------------------------------------------------------- | ---------- | ------------------------------------------------------------------- |
+| `cargo build --profile dist -p gamersequalizer`         | `dist`     | `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, no incremental |
+| `cargo build --profile apo-dist -p gamersequalizer-apo` | `apo-dist` | same as `dist`, but `panic = "unwind"`                              |
 
-Only the app exe gets fat LTO. The APO DLL uses the `apo` profile, which inherits `release`, so it is
-optimized (`opt-level = 3`) but not LTO-linked. It keeps `panic = "unwind"` so a DSP panic inside
-`audiodg.exe` turns into pass-through audio instead of killing system audio.
+The APO DLL keeps `panic = "unwind"` so a DSP panic inside `audiodg.exe` turns into pass-through audio
+instead of killing system audio. Code is generic x86-64 (no `target-cpu=native`), so it runs on any tester PC.
 
 The app exe alone, without packaging:
 

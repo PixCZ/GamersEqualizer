@@ -68,7 +68,8 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 Portable ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls its system parts itself):
 `gamersequalizer.exe` + `gamersequalizer_apo.dll` + `CTI-ME.txt` (Czech tester guide, `packaging/CTI-ME.txt`).
 
-- `scripts/package.ps1`: final build (`dist` profile, fat LTO, minutes). `-Fast` packages the `release`
+- `scripts/package.ps1`: final build from scratch (`dist` + `apo-dist` profiles, fat LTO, minutes; verifies
+  the rustc flags in the verbose log). `-Fast` packages the `release`
   build instead (seconds); `scripts/dev-rebuild.ps1 -Package` does that after the dev build.
 - Output: `target/package/GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>[-dirty][-fast].zip`.
   Old ZIPs are never deleted or overwritten; only `target/package/staging` is cleared.

@@ -4,22 +4,32 @@
   target\package\GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>[-dirty][-fast].zip
 
 .DESCRIPTION
-  1. Builds the app: --profile dist (whole-program optimized, minutes) or, with -Fast, the
-     --release build the dev loop already made (seconds when it is up to date).
-  2. cargo build --profile apo -p gamersequalizer-apo (the APO DLL, unwinding profile).
-  3. Stages the layout the app looks for next to its exe (win_audio/apo_install.rs):
-       gamersequalizer.exe      (apo-install.ps1 / apo-uninstall.ps1 are built into it)
-       gamersequalizer_apo.dll  (loaded by audiodg from a file, so it stays separate)
-       CTI-ME.txt               (tester instructions, packaging\CTI-ME.txt)
-  4. Zips it under a new, time-stamped name. Older ZIPs are never deleted or overwritten;
-     only the scratch folder target\package\staging is cleared.
+  Final build (default) — every step is checked, nothing is taken on trust:
+  1. Clears environment overrides that would silently change the build (RUSTFLAGS,
+     CARGO_PROFILE_*, CARGO_INCREMENTAL, CARGO_TARGET_DIR, ...) for this process.
+  2. cargo clean --profile dist / apo-dist: everything is compiled from scratch, no stale objects.
+  3. cargo build --locked -v --profile dist     -p gamersequalizer      (exe, panic = abort)
+     cargo build --locked -v --profile apo-dist -p gamersequalizer-apo  (DLL, panic = unwind)
+     Both: opt-level 3, fat LTO, codegen-units 1, no incremental, stripped, static CRT.
+  4. Reads the real rustc command lines from the verbose log and fails unless the exe and the
+     DLL were linked with exactly those flags (and without the debug-capture feature).
+  5. Checks both binaries were written by this build and import no VCRUNTIME140.dll.
+  6. Stages gamersequalizer.exe + gamersequalizer_apo.dll + CTI-ME.txt and zips them under a new,
+     time-stamped name. Next to the ZIP: <name>.build.log (full cargo output) and
+     <name>.build.txt (toolchain, commit, flags, SHA256 of each file).
+     Older ZIPs are never deleted or overwritten; only target\package\staging is cleared.
+
+  -Fast packages the dev builds instead (release + apo profiles, no LTO, seconds, no checks
+  beyond the VCRUNTIME one). Never for testers' final builds.
 
   Portable ZIP, not a setup.exe: the app already installs/uninstalls its system parts itself.
-  Upgrade to a real installer (Inno Setup / WiX) when it should land in Program Files with a
-  Start menu entry. Binaries are unsigned: testers see a SmartScreen prompt.
+  Binaries are unsigned: testers see a SmartScreen prompt.
+
+  Known limit: generic x86-64 code (no target-cpu=native / AVX2), on purpose — it must run on
+  any tester PC. Upgrade only with a CPU check at startup.
 
 .EXAMPLE
-  .\scripts\package.ps1          # final build for testers (slow, fat LTO)
+  .\scripts\package.ps1          # final build for testers (from scratch, fat LTO, ~8 min)
   .\scripts\package.ps1 -Fast    # from the dev release build (also: dev-rebuild.ps1 -Package)
 #>
 param(
@@ -30,25 +40,105 @@ $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $root
 
+$appProfile = if ($Fast) { 'release' } else { 'dist' }
+$apoProfile = if ($Fast) { 'apo' } else { 'apo-dist' }
+
+# Flags the final rustc call of each binary must carry (verbose cargo output, see step 4).
+$commonFlags = @('-C opt-level=3', '-C lto=fat', '-C codegen-units=1', '-C strip=symbols',
+  '-C target-feature=+crt-static')
+
 function Invoke-Cargo([string[]]$cargoArgs) {
   & cargo @cargoArgs
   if ($LASTEXITCODE -ne 0) { throw "cargo $($cargoArgs -join ' ') failed (exit $LASTEXITCODE)" }
 }
 
-$appProfile = if ($Fast) { 'release' } else { 'dist' }
-Invoke-Cargo @('build', '--profile', $appProfile, '-p', 'gamersequalizer')
-Invoke-Cargo @('build', '--profile', 'apo', '-p', 'gamersequalizer-apo')
+# Full verbose output goes to the log; the console skips the long rustc command lines.
+function Invoke-CargoLogged([string[]]$cargoArgs, [string]$log) {
+  Add-Content -LiteralPath $log -Value "`n> cargo $($cargoArgs -join ' ')"
+  $ErrorActionPreference = 'Continue' # cargo writes progress to stderr; that is not an error
+  & cargo @cargoArgs 2>&1 | ForEach-Object {
+    $line = "$_"
+    Add-Content -LiteralPath $log -Value $line
+    if ($line -notmatch '^\s+Running `') { Write-Host $line }
+  }
+  if ($LASTEXITCODE -ne 0) { throw "cargo $($cargoArgs -join ' ') failed (exit $LASTEXITCODE), log: $log" }
+}
+
+# The one rustc call that produced $crate as $crateType, checked flag by flag.
+function Assert-RustcFlags([string]$log, [string]$crate, [string]$crateType, [string[]]$required, [string[]]$forbidden) {
+  $calls = @(Get-Content -LiteralPath $log | Where-Object {
+      $_ -match '^\s+Running `' -and $_ -match "--crate-name $crate\s" -and $_ -match "--crate-type $crateType\s"
+    })
+  if ($calls.Count -ne 1) { throw "expected 1 rustc call for $crate ($crateType), found $($calls.Count); log: $log" }
+  $call = $calls[0]
+  foreach ($flag in $required) {
+    if ($call -notmatch "(^|\s)$([regex]::Escape($flag))(\s|``|$)") { throw "$crate was built without '$flag'; log: $log" }
+  }
+  foreach ($flag in $forbidden) {
+    if ($call -match [regex]::Escape($flag)) { throw "$crate was built with '$flag'; log: $log" }
+  }
+  Write-Host "OK  $crate ($crateType): $($required -join ', ')"
+}
 
 $version = (Select-String -Path 'crates\gamersequalizer-daemon\Cargo.toml' -Pattern '^version\s*=\s*"(.+)"' |
   Select-Object -First 1).Matches[0].Groups[1].Value
 $commit = (git rev-parse --short HEAD).Trim()
-if (git status --porcelain) { $commit += '-dirty' }
+$dirty = [bool](git status --porcelain)
+if ($dirty) { $commit += '-dirty' }
 $name = "GamersEqualizer-$version-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$commit"
 if ($Fast) { $name += '-fast' }
 
 $out = Join-Path $root 'target\package'
 $zip = Join-Path $out "$name.zip"
 if (Test-Path $zip) { throw "$zip already exists; not overwriting it" }
+New-Item -ItemType Directory -Force $out | Out-Null
+$log = Join-Path $out "$name.build.log"
+$buildStart = Get-Date
+
+if ($Fast) {
+  Invoke-Cargo @('build', '--profile', $appProfile, '-p', 'gamersequalizer')
+  Invoke-Cargo @('build', '--profile', $apoProfile, '-p', 'gamersequalizer-apo')
+} else {
+  # 1. Overrides that beat Cargo.toml / .cargo\config.toml. RUSTFLAGS alone would drop +crt-static.
+  $overrides = @(Get-ChildItem Env: | Where-Object {
+      ($_.Name -in @('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'CARGO_BUILD_RUSTFLAGS', 'CARGO_INCREMENTAL',
+      'CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_TARGET', 'RUSTC', 'RUSTC_WRAPPER',
+      'RUSTC_WORKSPACE_WRAPPER', 'CARGO_BUILD_RUSTC_WRAPPER', 'RUSTUP_TOOLCHAIN')) -or
+      $_.Name -like 'CARGO_PROFILE_*' -or $_.Name -like 'CARGO_TARGET_*_RUSTFLAGS'
+    })
+  foreach ($var in $overrides) {
+    Write-Warning "ignoring $($var.Name)=$($var.Value) for this build"
+    Remove-Item "Env:$($var.Name)"
+  }
+  if ($dirty) { Write-Warning 'uncommitted changes: the ZIP is marked -dirty and does not match the commit' }
+
+  $toolchain = (& rustc -Vv) -join "`n"
+  Set-Content -LiteralPath $log -Value "$name`n$toolchain"
+
+  # 2. From scratch: only these two profile folders, never the dev build or older ZIPs.
+  Invoke-Cargo @('clean', '--profile', $appProfile)
+  Invoke-Cargo @('clean', '--profile', $apoProfile)
+
+  # 3. --locked: exactly the versions in Cargo.lock. No --features: the APO without debug-capture.
+  Invoke-CargoLogged @('build', '--locked', '-v', '--profile', $appProfile, '-p', 'gamersequalizer') $log
+  Invoke-CargoLogged @('build', '--locked', '-v', '--profile', $apoProfile, '-p', 'gamersequalizer-apo') $log
+
+  # 4. What rustc was really told to do.
+  $forbidden = @('-C incremental', 'debug-assertions=on', 'overflow-checks=on', 'feature="debug-capture"',
+    'feature=\"debug-capture\"')
+  Assert-RustcFlags $log 'gamersequalizer' 'bin' ($commonFlags + '-C panic=abort') $forbidden
+  Assert-RustcFlags $log 'gamersequalizer_apo' 'cdylib' $commonFlags ($forbidden + '-C panic=abort')
+}
+
+$exe = "target\$appProfile\gamersequalizer.exe"
+$dll = "target\$apoProfile\gamersequalizer_apo.dll"
+
+# 5. Built just now, not left over from an earlier run (the final build only; -Fast reuses).
+if (-not $Fast) {
+  foreach ($bin in $exe, $dll) {
+    if ((Get-Item $bin).LastWriteTime -lt $buildStart) { throw "$bin is older than this build" }
+  }
+}
 
 # Scratch folder only (never the ZIPs next to it).
 $staging = Join-Path $out 'staging'
@@ -56,8 +146,8 @@ if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
 $stage = Join-Path $staging $name
 New-Item -ItemType Directory -Force $stage | Out-Null
 
-Copy-Item "target\$appProfile\gamersequalizer.exe" $stage
-Copy-Item 'target\apo\gamersequalizer_apo.dll' $stage
+Copy-Item $exe $stage
+Copy-Item $dll $stage
 Copy-Item 'packaging\CTI-ME.txt' $stage
 
 # Fails loudly if static CRT linking (.cargo\config.toml) ever stops applying.
@@ -68,5 +158,22 @@ foreach ($bin in 'gamersequalizer.exe', 'gamersequalizer_apo.dll') {
 
 Compress-Archive -Path $stage -DestinationPath $zip
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+
+if (-not $Fast) {
+  $files = Get-ChildItem $stage | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $_.Name }
+  @(
+    $name
+    "commit   $(git rev-parse HEAD)$(if ($dirty) { ' (uncommitted changes)' })"
+    "exe      profile ${appProfile}: $(($commonFlags + '-C panic=abort') -join ' ')"
+    "apo dll  profile ${apoProfile}: $($commonFlags -join ' ') (panic=unwind)"
+    ''
+    $toolchain
+    ''
+    $files
+    "$hash  $name.zip"
+  ) | Set-Content -LiteralPath (Join-Path $out "$name.build.txt")
+}
+
 Write-Host "`n$zip"
 Write-Host ("{0:N1} MB, SHA256 {1}" -f ((Get-Item $zip).Length / 1MB), $hash)
+if (-not $Fast) { Write-Host "build log and info: $log, $(Join-Path $out "$name.build.txt")" }

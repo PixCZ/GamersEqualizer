@@ -90,6 +90,12 @@ debug-assertions = false
 inherits = "release"
 panic = "unwind"
 
+# The APO for testers: `dist` optimization (fat LTO, one codegen unit), still unwinding.
+#   cargo build --profile apo-dist -p gamersequalizer-apo   (scripts/package.ps1)
+[profile.apo-dist]
+inherits = "dist"
+panic = "unwind"
+
 # The no-panic rules from `.claude/rules/code-style.md`, enforced (they held only by discipline).
 # Not `unsafe_code = "deny"`: the app is Win32 / COM / APO FFI throughout; each `unsafe` block
 # carries a SAFETY comment instead. Tests may unwrap/expect/panic/index (`clippy.toml`).
