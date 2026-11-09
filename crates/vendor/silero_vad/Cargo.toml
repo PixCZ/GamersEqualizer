@@ -1,0 +1,34 @@
+# Pure-Rust port of Silero VAD v6 (snakers4/silero-vad, tag v6.2.3, the 16 kHz network).
+# See README.md for origin, model hash and port notes.
+[package]
+name = "silero_vad"
+version = "0.1.0"
+edition = "2021"
+description = "Pure-Rust port of the Silero VAD v6 voice detector, 16 kHz (no ONNX runtime, no FFI)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "silero_vad"
+path = "src/lib.rs"
+
+[dev-dependencies]
+hound = "3.5"
+
+# Excluded from the workspace, so the workspace lints are copied here (.claude/rules/code-style.md).
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "warn"
+await_holding_lock = "deny"
+let_underscore_future = "deny"
+clone_on_copy = "deny"
+needless_return = "deny"
+redundant_field_names = "deny"
