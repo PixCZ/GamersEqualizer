@@ -1234,6 +1234,11 @@ rule. Code-level fix, not yet confirmed live; whether it explains the quiet-voic
 denoiser's state comes from one `AiVoiceIsolator::debug_state()`. Probabilities are the highest
 of the 10 ms frames completed in the block, so with 2 ms blocks most rows show -1.
 
+Captures made with the first build of this (2026-11-09 `144824` and `162331`) have the columns
+from `load` onward shifted one to the left: `load` holds `in_prob`, `in_prob` holds `out_prob`,
+..., `df_pre_gain_db` holds `rescue_mix`, `limiter_gain_db` holds `load`. Fixed the same day
+(the value array in `plugin.rs` had `load` last, the header has it after `boost`).
+
 | Column                | Meaning                                                              |
 | --------------------- | -------------------------------------------------------------------- |
 | `in_prob`             | raw-input detector voice probability (`in_net` or RNNoise's own), -1 |

@@ -743,6 +743,8 @@ impl GamersEqualizerPlugin {
     let mic_auto =
       self.shm_header().map_or(f32::NAN, |h| h.mic_auto_gain_permille.load(Ordering::Relaxed) as f32 / 1000.0);
     let db = |rms: f32| db_x10(rms) as f32 / 10.0;
+    // Positional: one value per `DEBUG_VARS` row, in that order (a misplaced value shifts every
+    // column after it, as `load` did in the 2026-11-09 captures).
     let vars: [f32; DEBUG_VARS.len()] = [
       cap.frame() as f32,
       frames as f32,
@@ -777,6 +779,7 @@ impl GamersEqualizerPlugin {
       s.input_gain_db,
       s.mic_volume,
       s.boost,
+      s.load,
       dn.in_prob,
       dn.out_prob,
       dn.rescue_prob,
@@ -798,7 +801,6 @@ impl GamersEqualizerPlugin {
       self.input_clips as f32,
       mic_auto,
       lin_db(self.limiter.gain()),
-      s.load,
     ];
     if let Some(cap) = self.capture.as_mut() {
       cap.end_block(&vars);
