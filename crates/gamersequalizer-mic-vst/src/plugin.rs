@@ -1,8 +1,8 @@
 use crate::aec3::{EchoCanceller3, PRE_DELAY_SAMPLES};
-use crate::latency_meter::LatencyMeter;
 use crate::ai_denoiser::{AiVoiceIsolator, DenoiseDebug};
 use crate::clip_detector::ClipDetector;
 use crate::delay_estimator::{DelayEstimator, LockChange, WindowOutcome, FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
+use crate::latency_meter::LatencyMeter;
 use crate::shared_memory::SharedMemoryClient;
 use crate::voice_leveler::VoiceLeveler;
 use gamersequalizer_common::biquad::BiquadCascade;
@@ -336,7 +336,8 @@ impl GamersEqualizerPlugin {
     let mut reference_seq = self.reference_seq_seen;
     let mut leveler_on = true;
     let mut input_gain_x10 = 0;
-    let (mut leveler_target_x10, mut leveler_reset_seq, mut leveler_saved_x10) = (MIC_LEVELER_DEFAULT_TARGET_DB_X10, 0, 0);
+    let (mut leveler_target_x10, mut leveler_reset_seq, mut leveler_saved_x10) =
+      (MIC_LEVELER_DEFAULT_TARGET_DB_X10, 0, 0);
     if let Some(header) = self.shm_header() {
       leveler_on = header.mic_leveler_enabled.load(Ordering::Relaxed);
       input_gain_x10 = header.mic_input_gain_db_x10.load(Ordering::Relaxed);
@@ -546,7 +547,8 @@ impl GamersEqualizerPlugin {
   fn run_aec(&mut self, frames: usize, mic_qpc_hns: Option<u64>) -> AecState {
     // Assume it won't run; set back below when it does.
     let was_idle = std::mem::replace(&mut self.aec_idle, true);
-    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, aec_idle, .. } = self;
+    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, aec_idle, .. } =
+      self;
     let Some(shm) = shm_client.as_mut() else {
       return AecState::NoReference;
     };
@@ -732,11 +734,8 @@ impl GamersEqualizerPlugin {
       Some(WindowOutcome::NoPeak { peak_ratio }) => (-1.0, peak_ratio),
       _ => (-1.0, 0.0),
     };
-    let ref_age_ms = self
-      .shm_header()
-      .zip(mic_qpc_hns)
-      .and_then(|(h, t)| h.ref_age_hns(t))
-      .map_or(-1.0, |a| a as f32 / 10_000.0);
+    let ref_age_ms =
+      self.shm_header().zip(mic_qpc_hns).and_then(|(h, t)| h.ref_age_hns(t)).map_or(-1.0, |a| a as f32 / 10_000.0);
     let lin_db = |g: f32| (20.0 * g.log10()).max(-100.0);
     let dn = self.ai_denoiser.debug_state();
     let gate = |v: f32| if dn.gate_enabled { v } else { f32::NAN };
@@ -910,7 +909,13 @@ fn db_x10(rms: f32) -> i32 {
 
 fn pre_high_pass() -> BiquadCascade {
   let mut hp = BiquadCascade::default();
-  let band = BiquadBand { filter_type: FilterType::HighPass, frequency: PRE_HIGH_PASS_HZ, q: 0.707, slope_db: 12, ..BiquadBand::default() };
+  let band = BiquadBand {
+    filter_type: FilterType::HighPass,
+    frequency: PRE_HIGH_PASS_HZ,
+    q: 0.707,
+    slope_db: 12,
+    ..BiquadBand::default()
+  };
   hp.set_bands(&[band], 48_000.0);
   hp
 }
@@ -964,8 +969,20 @@ mod tests {
     let pow = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32;
     // Default mic EQ of the app: low cut 100 Hz 48 dB/oct, high cut 9 kHz.
     let bands = [
-      BiquadBand { filter_type: FilterType::HighPass, frequency: 100.0, q: 0.707, slope_db: 48, ..BiquadBand::default() },
-      BiquadBand { filter_type: FilterType::LowPass, frequency: 9_000.0, q: 0.707, slope_db: 12, ..BiquadBand::default() },
+      BiquadBand {
+        filter_type: FilterType::HighPass,
+        frequency: 100.0,
+        q: 0.707,
+        slope_db: 48,
+        ..BiquadBand::default()
+      },
+      BiquadBand {
+        filter_type: FilterType::LowPass,
+        frequency: 9_000.0,
+        q: 0.707,
+        slope_db: 12,
+        ..BiquadBand::default()
+      },
     ];
     // (output, leveler gain at the end, share of blocks the heavy model slept, whisper section only)
     let run = |model: DenoiseModel, permille: u32, input: &[f32]| -> (Vec<f32>, f32, f32) {
@@ -1010,12 +1027,16 @@ mod tests {
     // Pauses once the leveler has learned: 10th percentile of the 10 ms frame levels after 30 s
     // (digital silence left out).
     let pauses = |x: &[f32]| {
-      let mut l: Vec<f32> = x.get(60 * HALF_SEC..).unwrap_or_default().chunks(480).map(|f| db(pow(f))).filter(|l| *l > -119.0).collect();
+      let mut l: Vec<f32> =
+        x.get(60 * HALF_SEC..).unwrap_or_default().chunks(480).map(|f| db(pow(f))).filter(|l| *l > -119.0).collect();
       l.sort_by(f32::total_cmp);
       l.get(l.len() / 10).copied().unwrap_or(-120.0)
     };
     let sec = |x: &[f32], a: usize, b: usize| db(pow(x.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default()));
-    eprintln!("input {:+.1} dB = hot; sections dBFS: voice 45-49 s | voice 53-57 s | whisper 20-24 s | room 1-18 s", hot_db);
+    eprintln!(
+      "input {:+.1} dB = hot; sections dBFS: voice 45-49 s | voice 53-57 s | whisper 20-24 s | room 1-18 s",
+      hot_db
+    );
     for model in [DenoiseModel::DeepFilterNet, DenoiseModel::RnNoise] {
       for (name, input, permille) in &variants {
         let (out, gain, slept) = run(model, *permille, input);

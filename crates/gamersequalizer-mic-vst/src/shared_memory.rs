@@ -1,7 +1,7 @@
 use gamersequalizer_common::shm::{ShmLayout, ShmRingBuffer, SHM_MAGIC, SHM_NAME};
 use std::ptr::NonNull;
-use windows::core::PCWSTR;
 use windows::core::BOOL;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
@@ -102,8 +102,13 @@ pub(crate) fn create_mapping(name: &str, sddl: Option<&str>, size: usize) -> Res
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     if let Some(sddl) = sddl {
       let wide_sddl = wide(sddl);
-      ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(wide_sddl.as_ptr()), SDDL_REVISION_1, &mut descriptor, None)
-        .map_err(|e| format!("invalid SDDL: {e}"))?;
+      ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        PCWSTR(wide_sddl.as_ptr()),
+        SDDL_REVISION_1,
+        &mut descriptor,
+        None,
+      )
+      .map_err(|e| format!("invalid SDDL: {e}"))?;
     }
     let attributes = SECURITY_ATTRIBUTES {
       nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,

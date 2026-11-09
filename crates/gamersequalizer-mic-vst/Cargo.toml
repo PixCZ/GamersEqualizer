@@ -24,6 +24,8 @@ rustfft = "6.4"
 deep_filter = { path = "../vendor/deep_filter", features = ["tract", "default-model"] }
 # RNNoise 0.2 (pure-Rust port, see crates/vendor/rnnoise2/README.md): the raw-input voice detector.
 rnnoise2 = { path = "../vendor/rnnoise2" }
+# Silero VAD v6 (pure-Rust port, see crates/vendor/silero_vad/README.md): the gate's second key.
+silero_vad = { path = "../vendor/silero_vad" }
 # DPDFNet (ONNX), exactly the tract the fork is built against.
 tract-onnx-23 = { package = "tract-onnx", version = "=0.23.10" }
 # Same version as tract 0.23 (the fork's DfTract takes these arrays).

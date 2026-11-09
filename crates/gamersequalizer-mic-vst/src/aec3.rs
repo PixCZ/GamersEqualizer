@@ -149,7 +149,12 @@ fn build_apm() -> AudioProcessing {
     }),
     ..Default::default()
   };
-  AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).echo_canceller3_config(tuning()).build()
+  AudioProcessing::builder()
+    .config(config)
+    .capture_config(stream)
+    .render_config(stream)
+    .echo_canceller3_config(tuning())
+    .build()
 }
 
 /// AEC3 defaults, loosened for a voice quieter than the reference. `default_gain` 1.0 assumes the
@@ -380,8 +385,12 @@ mod tests {
   }
 
   fn write_wav(path: &std::path::Path, x: &[f32]) {
-    let spec =
-      hound::WavSpec { channels: 1, sample_rate: 48_000, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+    let spec = hound::WavSpec {
+      channels: 1,
+      sample_rate: 48_000,
+      bits_per_sample: 32,
+      sample_format: hound::SampleFormat::Float,
+    };
     if let Ok(mut w) = hound::WavWriter::create(path, spec) {
       x.iter().for_each(|&s| drop(w.write_sample(s)));
       let _ = w.finalize();

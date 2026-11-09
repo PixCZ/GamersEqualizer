@@ -139,7 +139,8 @@ impl DpdfEngine {
       bail!("norm init ({} + {}) exceeds state size {size}", erb.len(), spec.len());
     }
     // Layout from upstream: [erb_norm | spec_norm | RNN states (zeros)].
-    let init_state: Vec<f32> = erb.iter().chain(&spec).copied().chain(std::iter::repeat_n(0.0, size - erb.len() - spec.len())).collect();
+    let init_state: Vec<f32> =
+      erb.iter().chain(&spec).copied().chain(std::iter::repeat_n(0.0, size - erb.len() - spec.len())).collect();
 
     let plan = onnx
       .model_for_proto_model(&proto)?
@@ -186,7 +187,9 @@ impl DpdfEngine {
     self.fft.process_with_scratch(&mut self.spec, &mut self.scratch);
 
     let mut input = Tensor::zero::<f32>(&[1, 1, BINS, 2])?;
-    for ([re, im], c) in input.try_as_plain_ram_mut()?.as_slice_mut::<f32>()?.as_chunks_mut::<2>().0.iter_mut().zip(&self.spec) {
+    for ([re, im], c) in
+      input.try_as_plain_ram_mut()?.as_slice_mut::<f32>()?.as_chunks_mut::<2>().0.iter_mut().zip(&self.spec)
+    {
       *re = c.re;
       *im = c.im;
     }

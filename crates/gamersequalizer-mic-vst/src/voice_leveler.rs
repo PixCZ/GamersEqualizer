@@ -249,7 +249,9 @@ mod tests {
   /// Speech stand-in: a 200 Hz tone at `rms_db`, flagged as voice.
   fn tone(secs: f32, rms_db: f32) -> Vec<f32> {
     let amp = 10f32.powf(rms_db / 20.0) * std::f32::consts::SQRT_2;
-    (0..(secs * SR as f32) as usize).map(|i| amp * (i as f32 * 200.0 * std::f32::consts::TAU / SR as f32).sin()).collect()
+    (0..(secs * SR as f32) as usize)
+      .map(|i| amp * (i as f32 * 200.0 * std::f32::consts::TAU / SR as f32).sin())
+      .collect()
   }
 
   fn run(lv: &mut VoiceLeveler, x: &[f32], voice: bool) -> Vec<f32> {

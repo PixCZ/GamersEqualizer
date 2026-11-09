@@ -258,10 +258,18 @@ mod tests {
       let mut meter = LatencyMeter::new();
       let silent = [0.0f32; 480];
       for (i, block) in speech.as_chunks::<480>().0.iter().enumerate() {
-        if i == 300 {
-          if let Some(m) = switch_to {
-            iso.request_model(m);
+        if let Some(m) = switch_to.filter(|_| i == 300) {
+          // The model loads on its own thread: wait for it (silence meanwhile, not measured), or
+          // the speech is over before it takes over and nothing after a switch gets measured.
+          // The chain changed, so the old measurement goes, as in the plugin.
+          iso.request_model(m);
+          let started = std::time::Instant::now();
+          while iso.active_model() != m {
+            assert!(started.elapsed().as_secs() < 20, "{m:?} never took over");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            iso.process_samples(&mut [0.0f32; 480]);
           }
+          meter.invalidate();
         }
         meter.push_input(block);
         let mut b = block.to_vec();
@@ -271,8 +279,16 @@ mod tests {
       }
       let expected = (AEC3_LATENCY_SAMPLES + iso.output_lead_samples()) as f32;
       let got = meter.measured_samples().unwrap_or(f32::NAN);
-      eprintln!("{first:?} -> {switch_to:?}: active {:?}, measured {:.1} ms, stages {:.1} ms", iso.active_model(), got / 48.0, expected / 48.0);
-      assert!((got - expected).abs() <= 2.0 * DS as f32, "{first:?} -> {switch_to:?}: measured {got} vs stages {expected}");
+      eprintln!(
+        "{first:?} -> {switch_to:?}: active {:?}, measured {:.1} ms, stages {:.1} ms",
+        iso.active_model(),
+        got / 48.0,
+        expected / 48.0
+      );
+      assert!(
+        (got - expected).abs() <= 2.0 * DS as f32,
+        "{first:?} -> {switch_to:?}: measured {got} vs stages {expected}"
+      );
     }
   }
 
@@ -300,12 +316,22 @@ mod tests {
         meter.push_output(&b);
         slept |= iso.asleep();
         if i % 50 == 0 {
-          log.push(format!("{}:{}{:.0}", i / 100, if iso.asleep() { "z" } else { "" }, meter.measured_samples().unwrap_or(0.0) / 48.0));
+          log.push(format!(
+            "{}:{}{:.0}",
+            i / 100,
+            if iso.asleep() { "z" } else { "" },
+            meter.measured_samples().unwrap_or(0.0) / 48.0
+          ));
         }
       }
       let expected = (AEC3_LATENCY_SAMPLES + iso.output_lead_samples()) as f32;
       let got = meter.measured_samples().unwrap_or(f32::NAN);
-      eprintln!("{model:?}: slept {slept}, measured {:.1} ms, stages {:.1} ms | {}", got / 48.0, expected / 48.0, log.join(" "));
+      eprintln!(
+        "{model:?}: slept {slept}, measured {:.1} ms, stages {:.1} ms | {}",
+        got / 48.0,
+        expected / 48.0,
+        log.join(" ")
+      );
       assert!(slept, "{model:?} never slept");
       assert!((got - expected).abs() <= 2.0 * DS as f32, "{model:?}: measured {got} vs stages {expected}");
     }

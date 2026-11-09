@@ -1291,3 +1291,176 @@ plugin's last 12000 samples (250 ms), the daemon keeps the extremes of each 10 s
 | `mic_chain_flags`             | bits: 0 asleep, 1 bypassed, 2 takeover, 3 lookahead on            |
 | `mic_quiet_ms`                | time since speech or activity was last seen                       |
 | `mic_limiter_gain_min_db_x10` | lowest peak limiter gain, last 250 ms (0 no reduction)            |
+
+### Automatic input gain: a tap on the mic no longer lowers the volume
+
+`AutoInputGain::tick` counted every clipped raw sample, so 50 of them in 10 s (about 1 ms of
+clipping: one hard tap on the mic or the desk) took 15 % off the Windows mic volume, and only
+20 s of speech with the leveler at +18 dB brings 10 % back. Clips now count only when the DSP
+reports speech in the same 250 ms tick or the next one (the speech flag arrives later than the
+raw clip, by the detector's and the chain's delay). Daemon only, no APO change. Test:
+`taps_on_the_mic_without_speech_do_not_lower_the_volume`. Limits: a tap while talking still
+counts; found by reading the code, no capture holds a clipped sample, not checked live.
+
+## Milestone 37: Keys next to words: where they leak, three things tried and dropped (2026-11-09)
+
+Goal: clicks of keys and mouse and taps on the mic, without losing speech. Reading keyboard or
+mouse input (even only the time of a press) is ruled out: it is a keylogger in all but name.
+
+**The debug captures hold almost no such events.** A scan of all 19 captures for short transients
+in `01_mic_raw` (1 ms frames, 12 dB over the 18 ms before, decayed 30-50 ms later; stdlib Python,
+not in the repo) found 54: in pauses and within 500 ms of speech the chain takes a median 46 dB
+off them, while the detector hears speech they pass unchanged (cannot be told from plosives
+without labels). No capture has a clipped sample or a tap on the mic.
+
+**New report `near_pause_report`** (private voice at -30 dBFS under the private keys 10 dB louder):
+key suppression in pause frames by their distance from speech, plus speech lost > 6 / > 15 dB and
+word tails lost > 6 dB.
+
+| Model          | All pauses | 20 ms after | 30-50 ms after | 60-100 ms after | Speech lost > 6 dB | Tails lost > 6 dB |
+| -------------- | ---------- | ----------- | -------------- | --------------- | ------------------ | ----------------- |
+| DeepFilterNet  | 21.8 dB    | 12.5 dB     | 17.6 dB        | 13.2 dB         | 7.6 %              | 23.2 %            |
+| DFN3, no gate  | 19.8 dB    | 11.4 dB     | 17.2 dB        | 10.7 dB         | 6.8 %              | 18.5 %            |
+| DPDFNet        | 41.3 dB    | 32.4 dB     | 42.1 dB        | 48.3 dB         | 7.2 %              | 48.1 %            |
+| RNNoise        | 12.2 dB    | 12.6 dB     | 11.6 dB        | 13.2 dB         | 3.4 %              | 1.6 %             |
+
+The recording has no pause longer than ~200 ms, so the gate is held open throughout: what leaks
+is what DFN3 itself leaves in. It is not the click rescue (off: the same within 0.7 dB) and not
+DFN3's pass-through thresholds (`max_db_erb_thresh` 15 / 25 / 30 / 100, `max_db_df_thresh` 20 /
+100: the same within 1 dB).
+
+**Tried and dropped** (all removed again):
+- **Click rescue only while the raw-input detector hears a voice** (its probability delayed to
+  DFN3's output, over 0.1 / 0.2 / 0.5, 30 ms hold): pauses +0.1..+2.7 dB on one of three mixes,
+  hammered clicks lost > 15 dB 5.8 -> 6.1 %.
+- **Ceiling for sound that is not voice** (after the lookahead: where neither detector's
+  probability is over its keep threshold within +-30 ms, peaks limited to the level of the loud
+  voice frames plus an offset). Offset -12 dB: DFN3 pauses 21.8 -> 27.9 dB, speech lost > 6 dB
+  7.6 -> 8.0 %, tails 23.2 -> 24.8 %; RNNoise 12.2 -> 14.5 dB for tails 1.6 -> 8.6 %. Offset 0 dB
+  costs DFN3 no speech and gives 1.4 dB. Dropped by the rule "voice over keys"; the 0 dB variant is
+  the candidate against taps on the mic, once there is a recording to tune it on.
+- **The same ceiling only on fast rises** (never under 2-8x the 20-50 ms envelope): DFN3 unchanged
+  (21.8 dB), RNNoise +1.7..+2 dB. What DFN3 leaves of a key next to a word is not a short click
+  any more, so a transient suppressor after the denoiser has nothing to grab.
+
+**Open.** No recording of taps on the mic, a dragged cable or a real mouse exists; without one
+(solo and over speech, raw through `debug_capture`) nothing against them can be tuned. DFN3's
+leak next to words is the model's own; DPDFNet does not have it, at the price of its timbre and
+of word tails.
+
+## Milestone 38: Silero VAD v6 against the raw-input detector, offline (2026-11-09)
+
+Question: is a dedicated voice detector better than RNNoise 0.2 (`in_net`) as the gate key?
+Measured offline only, nothing in the chain changed. Silero VAD v6.2.3 (MIT, 2.3 MB ONNX, 16 kHz,
+32 ms chunks) ran on onnxruntime in a scratch Python environment; `in_net`'s probabilities came
+from the chain's own code on the same signals. Per 10 ms frame, share of frames over the
+threshold. Script and model are not in the repo.
+
+| Signal                                   | RNNoise 0.2 > 0.7 | RNNoise 0.2 > 0.2 | Silero > 0.5 | Silero > 0.15 | Either (0.7 or 0.15) |
+| ---------------------------------------- | ----------------- | ----------------- | ------------ | ------------- | -------------------- |
+| ESC-50 keys alone, -20 dBFS              | 0.5 %             | 5.2 %             | 0.0 %        | 0.0 %         | 0.5 %                |
+| Private keys alone, -20 dBFS             | 0.2 %             | 8.9 %             | 0.0 %        | 0.0 %         | 0.2 %                |
+| Hammered mouse clicks alone, -3 dBFS     | 0.0 %             | 0.0 %             | 0.0 %        | 0.0 %         | 0.0 %                |
+| `whisper_scenario`: whisper (20-24 s)    | 18.0 %            | 30.2 %            | 57.5 %       | 85.5 %        | 85.5 %               |
+| quieter whisper (26.5-31.5 s)            | 20.6 %            | 33.0 %            | 24.4 %       | 70.4 %        | 70.4 %               |
+| whisper + typing (36-41 s)               | 33.2 %            | 61.8 %            | 58.8 %       | 94.8 %        | 94.8 %               |
+| quiet voice (45-49 s)                    | 90.5 %            | 95.2 %            | 94.2 %       | 95.2 %        | 95.2 %               |
+| keys only (59.5-68.5 s), silence (1-18 s) | 0.0 %            | 0.2 % / 0.0 %     | 0.0 %        | 0.0 %         | 0.0 %                |
+| Capture `163832`, whisper (> -53 dBFS)   | 22.9 %            | 39.4 %            | 12.3 %       | 64.7 %        | 67.6 %               |
+| same, pauses (< -58 dBFS)                | 2.6 %             | 8.9 %             | 0.4 %        | 23.9 %        | 24.3 %               |
+
+Normal speech under keys (speech frames / onsets and tails / pause frames over the threshold):
+
+| Mix (voice dBFS, SNR)        | RNNoise 0.2 > 0.7  | Silero > 0.5       | Silero > 0.15      |
+| ---------------------------- | ------------------ | ------------------ | ------------------ |
+| Shared, -20, 0 dB            | 97.2 / 38.3 / 0.8  | 98.0 / 71.6 / 7.9  | 99.5 / 86.4 / 18.3 |
+| Shared, -20, -10 dB          | 94.1 / 30.9 / 1.7  | 91.7 / 54.9 / 7.1  | 97.0 / 80.2 / 15.4 |
+| Private, -20, 0 dB           | 93.8 / 10.4 / 0.0  | 95.2 / 21.9 / 1.8  | 97.6 / 30.5 / 12.1 |
+| Private, -30, -10 dB         | 91.3 / 9.4 / 0.7   | 90.5 / 18.7 / 0.4  | 94.8 / 32.2 / 18.1 |
+| Private + hammered clicks -3 | 97.1 / 17.6 / 0.0  | 89.8 / 21.3 / 0.7  | 95.4 / 28.2 / 5.3  |
+
+- **Keys alone never reach Silero's 0.15**, where RNNoise 0.2 at its keep threshold (0.2) fires on
+  5-9 % of key frames. That is the threshold the gate's hysteresis and hold run on.
+- **Whisper: 70-95 % of frames at 0.15** against 30-62 % (RNNoise 0.2 at 0.2), and adding it to
+  today's detector ("either") changes nothing on keys alone. Live whisper 65 % against 39 %, with
+  more of the quiet frames between the whispered words counted (24 % against 9 %; breaths and
+  tails cannot be told from pauses there without labels).
+- **Normal speech: no better.** Loud frames within 1-3 points either way, 7 points worse under
+  hammered clicks at 0.5; it hears more onsets and tails but also stays on longer in short pauses.
+- Raising the input by 20 dB before Silero does not help (whisper at 0.5: 57.5 -> 7.8 %).
+- Cost: 0.4 % of real time on one thread (onnxruntime, with the 48 -> 16 kHz resampling).
+
+**Not usable in the APO as published.** tract 0.23.10 fails to load both `silero_vad_16k_op15.onnx`
+(`If` whose branches differ in shape) and `silero_vad_op18_ifless.onnx` (an `If` remains; batch
+symbol against 1). It would need the `If` cut out of the graph or the small network ported like
+`rnnoise2` (weights: `silero_vad_16k.safetensors`, 1.2 MB). Also open: 32 ms chunks report later
+than `in_net` (10 ms frames), which matters for RNNoise alone (20 ms latency); and the detector
+is not what loses whisper most (DFN3 itself is, milestone 36 report), so it pays off only as the
+key for a whisper path through RNNoise.
+
+## Milestone 39: Silero VAD v6 ported to Rust (`crates/vendor/silero_vad`) (2026-11-09)
+
+tract cannot load the published model (milestone 38), so the 16 kHz network is written out by
+hand: STFT filter bank, four convolutions, one LSTM cell, about 0.7 million multiply-adds per
+32 ms chunk. No dependencies, no `unsafe`, no allocation after construction, outside the
+workspace like `rnnoise2` (own lints, own `Cargo.lock`).
+
+- **Matches onnxruntime**: 312 chunks (10 s of the shared speech over keys), largest difference
+  1.5e-6 (`matches_onnxruntime`).
+- **`Vad48k`**: 48 kHz blocks of any size in (63-tap low-pass, every third sample), one
+  probability per 1536 samples out. Clean speech: 198 of 199 loud chunks over 0.5; ESC-50 keys
+  alone: highest probability 0.08. Cost 0.16 % of real time on one thread.
+- **Weights** come from the ONNX file's initializers (`tools/convert_weights.py`, 1.2 MB blob).
+  The `.safetensors` file next to it upstream is another model (output off by up to 0.46).
+- `.gitattributes`: `*.bin` and `*.f32` are binary.
+
+**Not wired into the chain.** Next: as a second key next to `in_net` (milestone 38: keys alone
+never reach 0.15, whisper 70-95 %), measured with the existing reports before it replaces
+anything. Its chunk is 32 ms against `in_net`'s 10 ms.
+
+## Milestone 40: Silero VAD as the gate's second key (2026-11-09)
+
+`AiVoiceIsolator::soft_net` (`silero_vad::Vad48k`) runs on the raw input while the gate is on;
+a chunk over `SOFT_VOICE_PROB` = 0.15 opens the gate like the input detector does (same hold).
+**The gate only**: `heard_voice` (leveler, automatic input gain, the heavy model's sleep, the
+debug columns) stays on `in_net` / RNNoise, so a whisper it hears is not learned as the speech
+level. If the weights fail to load, the gate runs without it. It reports every 32 ms and is
+still ahead of the output (model latency + lookahead - 32 ms; RNNoise alone: 3 ms).
+
+`whisper_gate_report` (new, private `whisper_scenario.wav`, gate auto + lookahead): share of
+10 ms frames more than 6 dB under the same model's ungated output, without -> with the key.
+
+| Model         | Whisper   | Quieter whisper | Whisper + typing | Quiet voice | Keys only, silence |
+| ------------- | --------- | --------------- | ---------------- | ----------- | ------------------ |
+| DeepFilterNet | 40 -> 2 % | 38 -> 5 %       | 16 -> 3 %        | 4 -> 4 %    | 100 % both         |
+| DPDFNet       | 40 -> 2 % | 38 -> 4 %       | 15 -> 3 %        | 4 -> 4 %    | 98-100 % both      |
+| RNNoise       | 9 -> 2 %  | 41 -> 5 %       | 8 -> 4 %         | 5 -> 4 %    | 100 % both         |
+
+`private_report` (private voice under private keys, gate auto + lookahead; soft syllables lost
+> 15 dB, pause suppression), without -> with:
+
+| Mix (voice dBFS, SNR) | DeepFilterNet                   | DPDFNet                         | RNNoise                         |
+| --------------------- | ------------------------------- | ------------------------------- | ------------------------------- |
+| -20, 0 dB             | 0.9 -> 0.9 %, 28.7 -> 27.2 dB   | 2.6 -> 2.6 %, 44.4 -> 43.3 dB   | 2.1 -> 0.3 %, 14.1 -> 14.0 dB   |
+| -45, 0 dB             | 4.0 -> 2.4 %, 22.2 -> 20.0 dB   | 2.8 -> 2.8 %, 45.7 -> 45.4 dB   | 2.4 -> 0.3 %, 13.8 -> 13.6 dB   |
+| -30, -10 dB           | 5.2 -> 5.2 %, 21.8 -> 21.3 dB   | 7.3 -> 7.3 %, 41.3 -> 41.3 dB   | 1.6 -> 0.9 %, 12.2 -> 12.1 dB   |
+
+The gate on keys alone opens exactly as often as before (-20 dBFS: DFN3 1.1 %, DPDFNet 0.0 %,
+RNNoise 0.6 %). At a threshold of 0.5 the gain is a fraction (DFN3 4.0 -> 3.7 %, RNNoise
+2.1-2.4 -> 1.2-2.3 %). So the gate itself now cuts next to nothing, at 0.1-2.2 dB less key
+suppression in the short pauses between words: what is still lost is the models' own doing.
+
+Tests: `test_soft_key_keeps_more_speech_and_no_more_keys` (shared fixture: no more speech lost,
+keys alone open the gate no more often). `latency_meter::test_measures_the_real_chain` raced the
+model loader: the speech was over before the switched-to model took over, so its "after a live
+switch" cases measured RNNoise and passed for nothing (and failed once the chain got a little
+slower). It now waits for the takeover and invalidates the meter, as the plugin does: 64.0 ms
+measured, 64.0 ms expected for both switch cases. 73 tests pass.
+
+**Open.** Not heard live, not built into the APO (`dev-rebuild.ps1 -Apo`; the DLL grows by the
+1.2 MB of weights). No debug column or `[Chain]` field for the Silero probability yet (shared
+memory and capture layouts untouched). The whisper still loses 8-15 dB inside DFN3 and DPDFNet
+(milestone 36 report): the gate no longer adds to that, a whisper path through RNNoise keyed by
+this detector is the next step. `cargo fmt -p gamersequalizer-mic-vst` also reformatted
+`aec3.rs`, `dpdfnet.rs`, `lib.rs`, `plugin.rs`, `shared_memory.rs`, `voice_leveler.rs` and parts
+of `ai_denoiser.rs` and `latency_meter.rs` (formatting only; kept on the user's decision).
