@@ -175,7 +175,9 @@ pub struct ChatMixController {
   last_applied_chat_muted: bool,
   last_applied_media_vol: f32,
   last_applied_media_muted: bool,
-  last_applied_mic_vol: f32,
+  /// Mic volume this process last wrote (or saw) in Windows; `restore_mixer` sets it so a
+  /// window started next to the service does not write its own reading over the wish.
+  pub(crate) last_applied_mic_vol: f32,
   last_applied_mic_muted: bool,
 
   chat_executables: HashSet<String>,
@@ -314,7 +316,7 @@ impl ChatMixController {
     changed
   }
 
-  /// Master level, and the mic to use with its level.
+  /// Master level (the mic is resolved only by `use_mic`).
   fn read_bound_levels(&mut self) {
     // Initialize channel volumes directly from the resolved endpoints
     if let Some(ref id) = self.master_device_id {
@@ -330,16 +332,27 @@ impl ChatMixController {
       self.last_applied_master_vol = v;
       self.last_applied_master_muted = m;
     }
+  }
 
-    self.mic_device_id = Self::find_physical_microphone();
-    let mic_vol_opt =
-      if let Some(ref id) = self.mic_device_id { get_endpoint_volume(id) } else { get_system_mic_volume() };
-    if let Some((v, m)) = mic_vol_opt {
-      self.mic_volume = v;
-      self.mic_muted = m;
-      self.last_applied_mic_vol = v;
-      self.last_applied_mic_muted = m;
+  /// The only place the mic in use is resolved: the user's pick, else the Windows default
+  /// (`find_physical_microphone`). Its volume is read only when the device changes, so a
+  /// re-bind never copies another device's volume onto it (a webcam as the Windows default and
+  /// a picked headset: the headset went 53 % -> 40 %). No mic found keeps the current one.
+  /// True if the mic changed. An unchanged pick touches no COM.
+  pub fn use_mic(&mut self, pick: Option<String>) -> bool {
+    if pick.is_some() && pick == self.mic_device_id {
+      return false;
     }
+    let id = pick.or_else(Self::find_physical_microphone);
+    if id.is_none() || id == self.mic_device_id {
+      return false;
+    }
+    if let Some((v, m)) = id.as_deref().and_then(get_endpoint_volume) {
+      (self.mic_volume, self.mic_muted) = (v, m);
+      (self.last_applied_mic_vol, self.last_applied_mic_muted) = (v, m);
+    }
+    self.mic_device_id = id;
+    true
   }
 
   /// Game / Chat / Media levels from their own endpoints, where bound.
@@ -440,9 +453,9 @@ impl ChatMixController {
       }
     }
 
-    // 5. MIC: Sync with Windows microphone (prefer physical endpoint)
-    let mic_vol_opt =
-      if let Some(ref id) = self.mic_device_id { get_endpoint_volume(id) } else { get_system_mic_volume() };
+    // 5. MIC: Sync with the mic in use only; without one there is nothing to follow (the
+    // default capture device may be another mic, whose volume is not this one's wish).
+    let mic_vol_opt = self.mic_device_id.as_deref().and_then(get_endpoint_volume);
     if let Some((sys_mic_vol, sys_mic_muted)) = mic_vol_opt {
       let expected = self.mic_hw_auto.unwrap_or(self.mic_volume.min(1.0));
       if (sys_mic_vol - expected).abs() > 0.015 {
@@ -614,23 +627,18 @@ impl ChatMixController {
       }
     }
 
-    // 5. MIC: Sync microphone volume to the mic in use
-    let target_hw_mic = self.mic_volume.min(1.0);
-    if (target_hw_mic - self.last_applied_mic_vol).abs() > 0.005 {
-      // Only the mic in use: writing the default capture device too copied one mic's volume
-      // onto another (laptop mic + USB headset).
-      match self.mic_device_id {
-        Some(ref id) => set_endpoint_volume(id, target_hw_mic),
-        None => set_system_mic_volume(target_hw_mic),
+    // 5. MIC: Sync microphone volume to the mic in use, never to the default capture device
+    // (that copied one mic's volume onto another: laptop mic + USB headset, webcam).
+    if let Some(ref id) = self.mic_device_id {
+      let target_hw_mic = self.mic_volume.min(1.0);
+      if (target_hw_mic - self.last_applied_mic_vol).abs() > 0.005 {
+        set_endpoint_volume(id, target_hw_mic);
+        self.last_applied_mic_vol = target_hw_mic;
       }
-      self.last_applied_mic_vol = target_hw_mic;
-    }
-    if self.mic_muted != self.last_applied_mic_muted {
-      match self.mic_device_id {
-        Some(ref id) => set_endpoint_mute(id, self.mic_muted),
-        None => set_system_mic_mute(self.mic_muted),
+      if self.mic_muted != self.last_applied_mic_muted {
+        set_endpoint_mute(id, self.mic_muted);
+        self.last_applied_mic_muted = self.mic_muted;
       }
-      self.last_applied_mic_muted = self.mic_muted;
     }
 
     // 6. Per-app session volumes (fallback mode without dedicated channel endpoints).
@@ -932,32 +940,6 @@ pub fn get_system_mic_peak() -> Option<f32> {
 pub fn get_endpoint_peak(device_id: &str) -> Option<f32> {
   // SAFETY: COM call on a live interface.
   with_endpoint(&ENDPOINT_METERS, device_id, |m: &IAudioMeterInformation| unsafe { m.GetPeakValue() })
-}
-
-pub fn set_system_mic_volume(level: f32) {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
-        if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null());
-        }
-      }
-    }
-  }
-}
-
-pub fn set_system_mic_mute(muted: bool) {
-  unsafe {
-    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
-        if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMute(muted, std::ptr::null());
-        }
-      }
-    }
-  }
 }
 
 /// This app's own exe (the GUI and the background daemon run from the same file). Its audio

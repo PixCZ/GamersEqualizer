@@ -1,7 +1,6 @@
 use super::state::{AecTelemetry, AppState, DenoiseStatus};
 use super::theme::{self, icons, Severity};
 use crate::i18n::{tr, trf};
-use crate::win_audio::chatmix::{get_endpoint_volume, ChatMixController};
 use crate::win_audio::WinAudioSystem;
 use egui::{Color32, RichText, Stroke, Ui};
 use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, VLine};
@@ -59,15 +58,10 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
 /// The user picks a mic (`Some`) or goes back to the Windows default (`None`). Only a pick is
 /// saved; without one, the app and the service follow the Windows default microphone.
 pub(super) fn pick_mic(state: &mut AppState, win_audio: &mut WinAudioSystem, pick: Option<String>) {
-  let mic = pick.clone().or_else(ChatMixController::find_physical_microphone);
   state.selected_mic_endpoint_id = pick.clone();
   state.set_shm_selected_mic(pick.as_deref().unwrap_or_default());
-  win_audio.chatmix.mic_device_id = mic.clone();
-  win_audio.mic_stream.set_input_device(mic.clone());
-  if let Some((v, m)) = mic.as_deref().and_then(get_endpoint_volume) {
-    win_audio.chatmix.mic_volume = v;
-    win_audio.chatmix.mic_muted = m;
-  }
+  win_audio.chatmix.use_mic(pick);
+  win_audio.mic_stream.set_input_device(win_audio.chatmix.mic_device_id.clone());
 }
 
 fn leveler_section(ui: &mut Ui, state: &mut AppState) {

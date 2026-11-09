@@ -133,7 +133,10 @@ impl AudioSettings {
 
 /// Take the mixer from shared memory (saved or current values) into a fresh controller, whose
 /// channels otherwise start at 100 %. Channels on their own endpoint keep the Windows volume.
-pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController) {
+/// `service_runs`: a window starting next to the running service (`daemon_active`), which owns
+/// the mic in use: its mic wish (and automatic level) are taken as they are. Not at the service's
+/// own start, where the mapping may hold only the default capture device's volume.
+pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_runs: bool) {
   let r = Ordering::Relaxed;
   let level = |a: &std::sync::atomic::AtomicU32| a.load(r) as f32 / 1000.0;
   if chatmix.game_device_id.is_none() {
@@ -150,10 +153,18 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController) {
   }
   chatmix.balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
   let auto = h.mic_auto_gain_permille.load(r);
-  if auto > 0 {
-    chatmix.adopt_mic_auto(level(&h.mic_volume_permille), auto as f32 / 1000.0);
-  }
   let mic = level(&h.mic_volume_permille);
+  if service_runs {
+    // The window read its own guess of the mic (maybe the default capture device, not the mic
+    // in use): writing that back moved the headset from 53 % to 40 % at window start.
+    chatmix.mic_volume = mic;
+    chatmix.last_applied_mic_vol = mic.min(1.0);
+    chatmix.mic_hw_auto = (auto > 0).then_some(auto as f32 / 1000.0);
+    return;
+  }
+  if auto > 0 {
+    chatmix.adopt_mic_auto(mic, auto as f32 / 1000.0);
+  }
   if mic > 1.0 && chatmix.mic_volume >= MIC_FULL {
     chatmix.mic_volume = mic;
   }
@@ -207,5 +218,30 @@ mod tests {
     std::fs::write(dir.join(FILE), "{ nope").unwrap();
     assert_eq!(AudioSettings::load_or_default(&dir), AudioSettings::default());
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// Regression (log 2026-11-08 20:48:30): the window took the default capture device's 40 %
+  /// and wrote it over the service's 53 % on the mic in use.
+  #[test]
+  fn window_next_to_the_service_keeps_its_mic_wish() {
+    let h = ShmHeader::default();
+    h.mic_volume_permille.store(530, Ordering::Relaxed);
+    let mut window = ChatMixController::new();
+    (window.mic_device_id, window.mic_volume) = (Some("{headset}".into()), 0.40);
+    restore_mixer(&h, &mut window, true);
+    assert_eq!((window.mic_volume, window.last_applied_mic_vol, window.mic_hw_auto), (0.53, 0.53, None));
+    // A re-bind with the same mic (first frame, replug) does not re-read and undo the wish.
+    assert!(!window.use_mic(window.mic_device_id.clone()));
+    assert_eq!((window.mic_volume, window.last_applied_mic_vol), (0.53, 0.53));
+
+    // Service start: only a boost over a Windows mic at 100 % is taken from the mapping.
+    let mut service = ChatMixController::new();
+    service.mic_volume = 0.40;
+    restore_mixer(&h, &mut service, false);
+    assert_eq!(service.mic_volume, 0.40);
+    h.mic_volume_permille.store(2000, Ordering::Relaxed);
+    service.mic_volume = 1.0;
+    restore_mixer(&h, &mut service, false);
+    assert_eq!(service.mic_volume, 2.0);
   }
 }

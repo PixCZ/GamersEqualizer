@@ -103,13 +103,11 @@ fn run_background_daemon() {
     let def_id = win_audio.endpoint_lock.get_default_output_id();
     win_audio.chatmix.bind_endpoints(&devices, def_id.as_deref());
     last_default_out = def_id;
-    // Saved (or, if the window runs, current) channel levels instead of 100 %.
-    ui::audio_settings::restore_mixer(header, &mut win_audio.chatmix);
-    // The mic the user picked, if it is still connected.
+    // The mic the user picked, if it is still connected (its own volume, not the default's).
     let captures = win_audio.endpoint_lock.enumerate_capture_devices();
-    if let Some(id) = header.get_selected_mic_id().filter(|id| captures.iter().any(|d| &d.id == id)) {
-      win_audio.chatmix.mic_device_id = Some(id);
-    }
+    win_audio.chatmix.use_mic(header.get_selected_mic_id().filter(|id| captures.iter().any(|d| &d.id == id)));
+    // Saved (or, if the window runs, current) channel levels instead of 100 %.
+    ui::audio_settings::restore_mixer(header, &mut win_audio.chatmix, false);
     last_mic_version = header.mic_id_version.load(Ordering::Relaxed);
     last_default_mic = win_audio.endpoint_lock.get_default_capture_id();
 
@@ -217,10 +215,11 @@ fn run_background_daemon() {
         let wanted = picked.or_else(win_audio::ChatMixController::find_physical_microphone);
         if wanted.is_some() && wanted != win_audio.chatmix.mic_device_id {
           info!("[GamersEqualizer] microphone now {:?}", wanted);
+          // The old mic gets its own wish back before `use_mic` loads the new one's volume.
           let old = win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
           mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
-          win_audio.chatmix.mic_device_id = wanted.clone();
-          win_audio.mic_stream.set_input_device(wanted);
+          win_audio.chatmix.use_mic(wanted);
+          win_audio.mic_stream.set_input_device(win_audio.chatmix.mic_device_id.clone());
         }
       }
 
@@ -385,12 +384,13 @@ fn run_gui_mode() {
   let devices = win_audio.endpoint_lock.enumerate_playback_devices();
   let def_id = win_audio.endpoint_lock.get_default_output_id();
   win_audio.chatmix.bind_endpoints(&devices, def_id.as_deref());
+  // The saved pick only while it is connected (like the service and the window's re-bind).
+  let captures = win_audio.endpoint_lock.enumerate_capture_devices();
+  win_audio.chatmix.use_mic(state.selected_mic_endpoint_id.clone().filter(|id| captures.iter().any(|d| &d.id == id)));
   // The service's (or the saved) channel levels; the window would otherwise reset them to 100 %.
+  // Last, so the running service's mic wish wins over what this process read.
   if let Some(h) = state.shm_header() {
-    ui::audio_settings::restore_mixer(h, &mut win_audio.chatmix);
-  }
-  if let Some(id) = state.selected_mic_endpoint_id.clone() {
-    win_audio.chatmix.mic_device_id = Some(id);
+    ui::audio_settings::restore_mixer(h, &mut win_audio.chatmix, h.daemon_active.load(Ordering::Relaxed));
   }
 
   if let Some(ref mid) = win_audio.chatmix.master_device_id {

@@ -125,9 +125,8 @@ impl eframe::App for GamersEqualizerApp {
         .shm_header()
         .and_then(|h| h.get_selected_mic_id())
         .filter(|id| self.state.capture_endpoints.iter().any(|d| &d.id == id));
-      if let Some(ref id) = picked {
-        self.win_audio.chatmix.mic_device_id = Some(id.clone());
-      }
+      // Unchanged mic: no re-read, so the restored wish survives the first frame and replugs.
+      self.win_audio.chatmix.use_mic(picked.clone());
       self.state.selected_mic_endpoint_id = picked;
       if let Some(id) = self.win_audio.chatmix.mic_device_id.clone() {
         self.win_audio.mic_stream.set_input_device(Some(id));

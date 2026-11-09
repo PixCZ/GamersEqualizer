@@ -44,6 +44,7 @@ impl WinAudioSystem {
     let devices = endpoint_lock.enumerate_playback_devices();
     let def_id = endpoint_lock.get_default_output_id();
     chatmix.bind_endpoints(&devices, def_id.as_deref());
+    chatmix.use_mic(None);
 
     Ok(Self { endpoint_lock, dolby_guard, chatmix, game_detector, mic_stream })
   }
