@@ -129,6 +129,12 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
     }
   });
 
+  // The wizard sits above the editor: below it, it was off-screen on normal window heights.
+  let open = *state.headphones_ui.wizard_open.get_or_insert(state.output_eq.headphone_profiles.is_empty());
+  if open {
+    theme::card(ui, |ui| wizard(ui, state, &device_name));
+  }
+
   theme::card(ui, |ui| {
     let height = super::eq_editor::plot_height(ui, 0.28, 150.0, 380.0);
     let mut changed = false;
@@ -142,11 +148,6 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
       state.out_eq_unsaved = Some(OutputLayer::Headphone);
     }
   });
-
-  let open = *state.headphones_ui.wizard_open.get_or_insert(state.output_eq.headphone_profiles.is_empty());
-  if open {
-    theme::card(ui, |ui| wizard(ui, state, &device_name));
-  }
 }
 
 /// One button per imported headphone profile: one click switches (and is remembered for
@@ -264,7 +265,7 @@ fn step_web_download(ui: &mut Ui, state: &mut AppState) {
     shell::open_url(AUTOEQ_WEB_URL);
   }
   numbered(ui, 2, tr("Type your headphone model into the search box and pick it from the list."));
-  numbered(ui, 3, tr("As the equalizer app choose \"EqualizerAPO\" (any \"Parametric EQ\" option works)."));
+  numbered(ui, 3, tr("As the equalizer app choose \"EqualizerAPO ParametricEq\" (not GraphicEq)."));
   numbered(ui, 4, tr("Click Download. The browser saves \"<model> ParametricEQ.txt\" to Downloads."));
   ui.label(theme::caption(tr("Not the GraphicEQ file: the app will tell you if you picked the wrong one.")));
   nav(ui, state, Step::Choose, Some((tr("Next: find the file"), Step::WebFind)));

@@ -280,7 +280,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Click the button below. autoeq.app opens in your normal browser.", "Klikněte na tlačítko níže. V prohlížeči se otevře autoeq.app."),
   ("Open autoeq.app", "Otevřít autoeq.app"),
   ("Type your headphone model into the search box and pick it from the list.", "Do vyhledávání napište model sluchátek a vyberte ho ze seznamu."),
-  ("As the equalizer app choose \"EqualizerAPO\" (any \"Parametric EQ\" option works).", "Jako aplikaci ekvalizéru zvolte „EqualizerAPO“ (funguje jakákoli volba „Parametric EQ“)."),
+  ("As the equalizer app choose \"EqualizerAPO ParametricEq\" (not GraphicEq).", "Jako aplikaci ekvalizéru zvolte „EqualizerAPO ParametricEq“ (ne GraphicEq)."),
   ("Click Download. The browser saves \"<model> ParametricEQ.txt\" to Downloads.", "Klikněte na Download. Prohlížeč uloží „<model> ParametricEQ.txt“ do Stažených souborů."),
   ("Not the GraphicEQ file: the app will tell you if you picked the wrong one.", "Ne soubor GraphicEQ: aplikace vám řekne, když vyberete špatný."),
   ("Next: find the file", "Dále: najít soubor"),

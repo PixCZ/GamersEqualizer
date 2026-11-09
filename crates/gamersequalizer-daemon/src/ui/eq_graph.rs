@@ -208,9 +208,12 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
       ui.label(theme::caption(tr("No filters: the sound passes unchanged.")));
     }
     for (i, band) in bands.iter().enumerate() {
-      let c = theme::adapt(ui, dot_color(i, band));
-      let text = RichText::new(format!("● {}  {}", i + 1, describe(band))).color(c);
-      if ui.selectable_label(*selected == Some(i), text).clicked() {
+      let is_selected = *selected == Some(i);
+      let text = RichText::new(format!("● {}  {}", i + 1, describe(band)));
+      // On the accent selection fill the band color is unreadable: a selected chip keeps the
+      // theme's text-on-accent color, the others show the band color.
+      let text = if is_selected { text } else { text.color(theme::adapt(ui, dot_color(i, band))) };
+      if ui.selectable_label(is_selected, text).clicked() {
         *selected = if *selected == Some(i) { None } else { Some(i) };
       }
     }

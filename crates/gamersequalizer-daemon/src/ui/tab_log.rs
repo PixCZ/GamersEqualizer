@@ -49,6 +49,14 @@ pub struct LogView {
   /// allocations a second).
   shown: Vec<usize>,
   shown_stale: bool,
+  /// True while text is selected or being dragged. Holds reload still so the selection doesn't shift.
+  selecting: bool,
+  /// Combined text of all lines matching the filters.
+  buffer: String,
+  /// Cached layout job with severity colors.
+  layout_job: egui::text::LayoutJob,
+  /// Remembers theme so switching dark/light updates line colors in the cached layout.
+  dark_mode: Option<bool>,
 }
 
 impl Default for LogView {
@@ -65,13 +73,20 @@ impl Default for LogView {
       at_end: true,
       shown: Vec::new(),
       shown_stale: true,
+      selecting: false,
+      buffer: String::new(),
+      layout_job: egui::text::LayoutJob::default(),
+      dark_mode: None,
     }
   }
 }
 
 pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   let view = &mut state.log_view;
-  if view.read_at.is_none_or(|t| t.elapsed() >= REFRESH) {
+  // Hold reload still while text is selected or being dragged so rows don't shift under the cursor.
+  // Clicking anywhere to clear the selection resumes reloads on the next interval.
+  let selecting = view.selecting;
+  if !selecting && view.read_at.is_none_or(|t| t.elapsed() >= REFRESH) {
     view.read_at = Some(Instant::now());
     match app_log::read_tail(&app_log::log_path(), TAIL_BYTES) {
       Ok(lines) => {
@@ -139,7 +154,13 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     view.jump_to_end = true;
   }
 
-  if filters_changed || view.shown_stale {
+  let dark_mode = ui.visuals().dark_mode;
+  let theme_changed = view.dark_mode != Some(dark_mode);
+  if theme_changed {
+    view.dark_mode = Some(dark_mode);
+  }
+
+  if filters_changed || view.shown_stale || theme_changed {
     view.shown_stale = false;
     let search = view.search.to_lowercase();
     let (_, tags) = TOPICS.get(view.topic).copied().unwrap_or(("All", &[]));
@@ -154,37 +175,62 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
       .filter(|(_, l)| search.is_empty() || l.text.to_lowercase().contains(&search))
       .map(|(i, _)| i)
       .collect();
+
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let palette = theme::palette(ui);
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+    for &i in &view.shown {
+      if let Some(line) = view.lines.get(i) {
+        let color = match line.level {
+          LineLevel::Error => palette.err,
+          LineLevel::Warn => palette.warn,
+          LineLevel::Info => ui.style().visuals.text_color(),
+          LineLevel::Debug => ui.style().visuals.weak_text_color(),
+        };
+        let format = egui::text::TextFormat::simple(font_id.clone(), color);
+        job.append(&line.text, 0.0, format.clone());
+        job.append("\n", 0.0, format);
+      }
+    }
+    view.buffer = job.text.clone();
+    view.layout_job = job;
   }
-  let shown: Vec<&LogLine> = view.shown.iter().filter_map(|&i| view.lines.get(i)).collect();
 
   ui.separator();
   let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
   // egui keeps following the end by itself once the offset sits there (stick_to_bottom), and
   // stops/resumes when the user scrolls away/back. We only jump to the end once on request.
-  let mut area = egui::ScrollArea::both().id_salt("log_lines").auto_shrink([false, false]).stick_to_bottom(true);
+  let mut area = egui::ScrollArea::both()
+    .id_salt("log_lines")
+    .auto_shrink([false, false])
+    .stick_to_bottom(!view.selecting);
   if view.jump_to_end {
     view.jump_to_end = false;
     // Past the end on purpose; egui clamps it to the end after this frame and sticks there.
-    // Must be finite: `show_rows` derives the row range from it and f32::MAX overflows to an
-    // empty range. The overshot frame draws nothing, so paint the next one right away.
-    let content_height = shown.len() as f32 * (row_height + ui.spacing().item_spacing.y);
+    let content_height = view.shown.len() as f32 * row_height * 2.0;
     area = area.vertical_scroll_offset(content_height);
     ui.ctx().request_repaint();
   }
-  let out = area.show_rows(ui, row_height, shown.len(), |ui, range| {
-    for line in shown.get(range).unwrap_or(&[]) {
-      let text = RichText::new(&line.text).monospace();
-      let text = match line.level {
-        LineLevel::Error => text.color(theme::palette(ui).err),
-        LineLevel::Warn => text.color(theme::palette(ui).warn),
-        LineLevel::Info => text,
-        LineLevel::Debug => text.weak(),
-      };
-      ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
-    }
+  let cached_job = view.layout_job.clone();
+  let mut layouter = move |ui: &Ui, _buf: &dyn egui::text_edit::TextBuffer, _wrap_width: f32| {
+    ui.fonts_mut(|f| f.layout_job(cached_job.clone()))
+  };
+  let out = area.show(ui, |ui| {
+    let mut text_ref = view.buffer.as_str();
+    egui::TextEdit::multiline(&mut text_ref)
+      .id_salt("log_text")
+      .font(egui::TextStyle::Monospace)
+      .frame(egui::Frame::NONE)
+      .desired_width(f32::INFINITY)
+      .layouter(&mut layouter)
+      .show(ui)
   });
   let max_offset = (out.content_size.y - out.inner_rect.height()).max(0.0);
   view.at_end = out.state.unclamped_offset().y >= max_offset - BOTTOM_SLACK;
+  let has_selection = out.inner.cursor_range.is_some_and(|r| r.primary != r.secondary);
+  let is_pointer_down = out.inner.response.is_pointer_button_down_on();
+  view.selecting = has_selection || is_pointer_down;
 }
 
 fn open_folder() {
