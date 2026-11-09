@@ -71,6 +71,8 @@ const GATE_FLOOR_DB: f32 = -12.0;
 /// The floor goes up to this much further down while the leveler boosts (`set_gate_floor_extra_db`),
 /// so the noise in pauses doesn't rise with the leveler's gain.
 const GATE_FLOOR_EXTRA_MAX_DB: f32 = 12.0;
+/// Most the input may be raised for DeepFilterNet (see `AiVoiceIsolator::set_pre_gain_db`).
+const DF_PRE_GAIN_MAX_DB: f32 = 24.0;
 /// Shared-memory gate value at or below this = gate off; anything above = automatic gate.
 /// (The setting used to be a level threshold; the gate no longer has one.)
 const GATE_OFF_DB: f32 = -79.5;
@@ -161,6 +163,8 @@ pub struct AiVoiceIsolator {
   selected: DenoiseModel,
   active: DenoiseModel,
   strength: f32, // 0.0 to 1.0
+  /// Linear gain DeepFilterNet gets on its input and gives back on its output (1.0 = none).
+  df_pre_gain: f32,
   gate: NoiseGate,
   /// Speech on the raw input (the leveler; the gate, a model latency ahead of the output). Fed by
   /// the RNNoise denoiser's own voice probability while it runs, else by `in_net`.
@@ -360,6 +364,7 @@ impl AiVoiceIsolator {
       selected: DenoiseModel::RnNoise,
       active: DenoiseModel::RnNoise,
       strength: 0.75,
+      df_pre_gain: 1.0,
       gate: NoiseGate::new(true),
       vad: VoiceHysteresis::new(),
       vad_out: VoiceHysteresis::new_output(),
@@ -404,6 +409,18 @@ impl AiVoiceIsolator {
   /// Closed gate `extra_db` (0..=`GATE_FLOOR_EXTRA_MAX_DB`) under `GATE_FLOOR_DB`: the leveler's
   /// boost after the gate, so pauses stay where they were without it. Takes effect at once (the
   /// gate gain glides to the new floor).
+  /// DeepFilterNet cuts a voice that reaches it too quiet: a mic at -54 dBFS voice level lost
+  /// 45.6 dB (the 2026-11-09 capture, replayed offline), +4 dB on the input 16.6 dB, +10 dB
+  /// 1.4 dB; the same voice at -47.5 dBFS passes untouched, so the cliff is a few dB wide.
+  /// RNNoise and DPDFNet pass the quiet voice (-0.7 / -1.8 dB). So the leveler's boost (the
+  /// voice is quiet exactly when it is large) is applied to DeepFilterNet's input and removed
+  /// from its output: the model sees the voice at a normal level, everything else sees it as
+  /// before. The leveler follows it a block late (its gain moves in ~100 ms).
+  pub fn set_pre_gain_db(&mut self, db: f32) {
+    let db = if db.is_finite() { db.clamp(0.0, DF_PRE_GAIN_MAX_DB) } else { 0.0 };
+    self.df_pre_gain = 10f32.powf(db / 20.0);
+  }
+
   pub fn set_gate_floor_extra_db(&mut self, extra_db: f32) {
     let extra = if extra_db.is_finite() { extra_db.clamp(0.0, GATE_FLOOR_EXTRA_MAX_DB) } else { 0.0 };
     self.gate.floor = 10f32.powf((GATE_FLOOR_DB - extra) / 20.0);
@@ -576,7 +593,19 @@ impl AiVoiceIsolator {
     }
 
     let Self {
-      vad, vad_out, in_net, out_net, rnnoise, deepfilter, dpdfnet, sleep_delay, spare, mute_left, rescue, ..
+      vad,
+      vad_out,
+      in_net,
+      out_net,
+      rnnoise,
+      deepfilter,
+      dpdfnet,
+      sleep_delay,
+      spare,
+      mute_left,
+      rescue,
+      df_pre_gain,
+      ..
     } = self;
     let (mut voice, mut voice_out) = (false, false);
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
@@ -595,7 +624,7 @@ impl AiVoiceIsolator {
     };
     if heavy_on {
       match (active, deepfilter.as_mut(), dpdfnet.as_mut()) {
-        (DenoiseModel::DeepFilterNet, Some(df), _) => df.process(samples, strength),
+        (DenoiseModel::DeepFilterNet, Some(df), _) => df.process(samples, strength, *df_pre_gain),
         (DenoiseModel::DpdfNet, _, Some(dp)) => dp.process(samples, atten_lim(strength)),
         _ => {}
       }
@@ -970,12 +999,12 @@ impl DeepFilterEngine {
     })
   }
 
-  fn process(&mut self, samples: &mut [f32], strength: f32) {
+  fn process(&mut self, samples: &mut [f32], strength: f32, pre_gain: f32) {
     // Strength maps to the model's own attenuation limit (no dry/wet blend: DF's output
     // is delayed by its look-ahead, a blend would comb-filter).
     self.model.atten_lim = atten_lim(strength);
 
-    self.input_fifo.extend_from_slice(samples);
+    self.input_fifo.extend(samples.iter().map(|s| s * pre_gain));
     while self.input_fifo.len() >= self.hop {
       for (dst, src) in self.in_frame.iter_mut().zip(self.input_fifo.drain(..self.hop)) {
         *dst = src;
@@ -992,6 +1021,7 @@ impl DeepFilterEngine {
       }
     }
     drain_fifo(&mut self.output_fifo, samples);
+    samples.iter_mut().for_each(|s| *s /= pre_gain);
   }
 
   fn reset(&mut self) {
@@ -1935,6 +1965,27 @@ pub(crate) mod tests {
     probs
   }
 
+  /// Regression (2026-11-09): DeepFilterNet cut a voice quieter than about -52 dBFS by 30-45 dB
+  /// (studio speech at -58 dBFS: -43 dB); the leveler's boost as pre-gain brings it back.
+  #[test]
+  fn test_deepfilter_keeps_a_quiet_voice_with_pre_gain() {
+    let quiet = scale_to_db(&read_wav_48k("speech_clean.wav"), -58.0);
+    let kept_db = |pre_gain_db: f32| {
+      let mut isolator = AiVoiceIsolator::new();
+      isolator.set_model(DenoiseModel::DeepFilterNet);
+      isolator.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+      isolator.set_pre_gain_db(pre_gain_db);
+      let mut out = quiet.clone();
+      for block in out.chunks_mut(480) {
+        isolator.process_samples(block);
+      }
+      let lead = latency_samples(DenoiseModel::DeepFilterNet) + lookahead_samples(DenoiseModel::DeepFilterNet);
+      db(rms(&out[lead..])) - db(rms(&quiet[..quiet.len() - lead]))
+    };
+    assert!(kept_db(24.0) > -6.0, "voice changed by {:.1} dB with the pre-gain", kept_db(24.0));
+    assert!(kept_db(f32::NAN) == kept_db(0.0), "NaN counts as no gain");
+  }
+
   fn rms(x: &[f32]) -> f32 {
     (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
   }
@@ -2876,7 +2927,7 @@ pub(crate) mod tests {
       let mut x = mixed.clone();
       let t = Instant::now();
       for block in x.chunks_mut(480) {
-        df.process(block, strength);
+        df.process(block, strength, 1.0);
       }
       secs.push(t.elapsed().as_secs_f32() / (mixed.len() as f32 / 48_000.0) * 100.0);
       out.extend_from_slice(&x);

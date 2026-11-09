@@ -402,7 +402,9 @@ impl GamersEqualizerPlugin {
     // The closed gate goes as far further down as the leveler lifts (last block's gain), so
     // pauses don't get louder with a quiet mic.
     self.pre_high_pass.process(mic);
-    self.ai_denoiser.set_gate_floor_extra_db(if leveler_on { self.leveler.gain_db() } else { 0.0 });
+    let leveler_boost_db = if leveler_on { self.leveler.gain_db() } else { 0.0 };
+    self.ai_denoiser.set_gate_floor_extra_db(leveler_boost_db);
+    self.ai_denoiser.set_pre_gain_db(leveler_boost_db);
     self.ai_denoiser.process_samples(mic);
     #[cfg(feature = "debug-capture")]
     if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
