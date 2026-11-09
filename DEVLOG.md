@@ -1060,3 +1060,142 @@ frames above 0.7; 97.2 % measured, probability t+1 paired with clean frame t).
 (`scripts/dev-rebuild.ps1 -Apo -Test`), the ignored reports (`keyboard_call_report`,
 `click_report`, `private_report`, `scenario_report`, `lookahead_sweep`), CPU on Windows and
 listening are pending (`docs/rnnoise-0.2-port.md`, chapter 8).
+
+---
+
+## Milestone 36: "Only silence passes while I speak": DeepFilterNet 3 level cliff, AEC3 tuning (2026-11-09)
+
+**Symptom.** Right after installing the microphone APO, speaking produced only silence in the
+recording (the graph showed no voice), sometimes with music playing and sometimes without. It
+"healed" after a while, and switching models back and forth made everything work. Debug captures
+(`debug_capture`, 30 s of every stage, `test_data/private/captures/`, git-ignored) were taken of
+six situations: `20261109-115931` (headphones, music starts at 5 s), `20261109-122520`
+(headphones, music), `20261109-122712` (speakers, music), `20261109-125043` (no music, quiet
+voice), `20261109-125717` (no music, then speakers + music), `20261109-130319` (speakers + music,
+5 s silence / 5 s speech alternating).
+
+### Cause 1: DeepFilterNet 3 cuts a voice that reaches it too quiet (no music)
+
+Capture `125043`: AEC idle (no reference), the detector heard the voice (`heard_voice` = 1), the
+voice was only -50..-65 dBFS at the mic (yesterday's learned level: about -30..-40), and after
+the denoiser it was 45 dB down. Replayed offline through `AiVoiceIsolator` (strength 0.75, gate
+auto + lookahead, leveler boost 24 dB) with the input raised by a gain; "change" is the output
+level of the voice blocks relative to the input, in dB:
+
+| Model         | +0 dB  | +2 dB  | +4 dB  | +6 dB  | +8 dB | +10 dB | +20 dB | +30 dB |
+| ------------- | ------ | ------ | ------ | ------ | ----- | ------ | ------ | ------ |
+| RNNoise       | -0.7   | -      | -      | -      | -     | -0.8   | -0.7   | -0.8   |
+| DeepFilterNet | -45.6  | -44.4  | -16.6  | -16.4  | -3.4  | -1.4   | -1.3   | -1.2   |
+| DPDFNet       | -1.8   | -      | -      | -      | -     | -1.6   | -1.6   | -1.6   |
+
+The same voice at -47.5 dBFS (capture `115931`) passes DFN3 untouched at every gain (-0.5..-0.6
+dB). Studio speech (`speech_clean.wav`) scaled to a given RMS level reproduces the cliff without
+the mic: -30..-50 dBFS 0.0..-0.1 dB, -54 dBFS **-29.0 dB**, -58 dBFS **-43.1 dB**, -62 dBFS
+**-43.4 dB**. With the input raised by 12 or 24 dB (and taken off the output again) all of them
+are -0.0..-0.1 dB; the capture goes from -45.5 dB to -1.7 / -1.4 dB. This explains the whole
+picture: other models were fine (hence "switching models heals it"), a louder voice or a higher
+leveler gain gets over the cliff (hence "heals after a while"), and the louder voice of the day
+before never hit it.
+
+**Change** (`ai_denoiser.rs`, `plugin.rs`). `AiVoiceIsolator::set_pre_gain_db` (0..24 dB, NaN
+counts as 0): `DeepFilterEngine::process` multiplies its input by the gain and divides its output
+by it again. The plugin passes the leveler's current boost (the same value that already lowers the
+gate floor), so the voice is raised exactly as far as the leveler would raise it later. At start
+the leveler seeds from the level remembered for the mic, so the gain is there from the first
+block; after "Learn again" (gain 0) DFN3 cuts the voice at first, the leveler then learns the cut
+level, hits its 24 dB cap and the pre-gain lets the voice through within seconds. The gain moves
+with the leveler's ~100 ms smoothing; the output division uses the gain of the block it leaves in,
+not of the block it entered in (DFN3 latency 40 ms), which is negligible at that rate.
+Regression test: `test_deepfilter_keeps_a_quiet_voice_with_pre_gain` (studio speech at -58 dBFS,
+> -6 dB change with 24 dB, NaN equals 0).
+
+### Cause 2: AEC3 ducks a voice quieter than the reference (music)
+
+Capture `115931` (headphones, voice -40 dBFS under music -28 dBFS, real echo in the mic about
+-70 dBFS, the AEC locked on a 1 ms delay remembered from earlier sessions): from the moment the
+music started the AEC output sat at -85 dBFS for 3.5 s while the mic held the voice at -38..-50
+dBFS; correlation of the voice blocks with the reference was 0.01-0.02 (it is not echo), and the
+detector's "double talk" flag stayed 0. Replaying the capture through the same AEC3 offline
+reproduced it (output flat -85 dBFS), and it lasted longer in the replay (all 10 s) than live. The
+cause: AEC3 learns the echo path from the echo it hears; with none above the mic's noise it never
+converges, keeps `ep_strength.default_gain` = 1.0 (the whole reference leaks in) and takes a
+quieter near-end voice for echo. AEC3 itself is from 2026-11-08 16:00 (`f9a03fc`), not old.
+
+**Tuning** (`aec3.rs::tuning`, `transparent_mode = Hmm`): `ep_strength.default_gain` 0.1 and wider
+normal-tuning masks (`mask_lf` 1.0 / 1.1, `mask_hf` 0.3 / 0.5). Voice lost, headphone capture
+`115931`, voice blocks with the reference playing and mic > -50 dBFS (AEC3 alone, no gating):
+
+| Variant                              | Voice lost | Echo-only removal (8 s, -50 dB echo) |
+| ------------------------------------ | ---------- | ------------------------------------ |
+| defaults                             | 26.8 dB    | 26.1 dB                              |
+| `Hmm`                                | 10.7 dB    | 26.1 dB                              |
+| `default_gain` 0.1                   | 14.0 dB    | 26.1 dB                              |
+| `Hmm` + `default_gain` 0.1           | 6.9 dB     | 26.1 dB                              |
+| + `use_subband_nearend_detection`    | 7.0 dB     | 26.1 dB                              |
+| + wider masks (**current**)          | 5.6 dB     | 26.1 dB                              |
+
+Headphone capture `122520` (voice over music, AEC3 alone): the defaults cut the voice for the
+first ~3.4 s after the music starts (output -85 dBFS), the tuning passes about half of the voice
+blocks in that window and all of it afterwards. Speaker capture `122712`: echo-only still removed
+to -84 dBFS, voice during the music passes better than with the defaults (e.g. 7.7-8.3 s: -54..-61
+dBFS instead of -67..-77).
+
+Speaker capture `125717`, from 12 s (music + speech, 100 ms blocks sorted by mic level): loud
+half of the blocks out - mic -19.4 dB with the defaults, -19.9 (`Hmm`), -19.4 (gain), **-12.8**
+(masks only), **-13.3** (current); quietest quarter (echo only) -54 -> -79 / -80 / -79 / -77 /
+-77 dBFS. Only the masks help there. Easier dominant-near-end detection (`enr_threshold` 1.0,
+`snr_threshold` 10, `trigger_threshold` 6, `hold_duration` 100) gave -12.4 dB at 1 dB less echo
+removal, subband detection and using the near-end masks as the normal ones changed nothing:
+no further gain from AEC3's configuration.
+
+### Alternating capture `130319` (music from speakers all the time, 5 s silence / 5 s speech)
+
+Voice about 6.4-10.4, 16.5-20.3 and 26.6-30 s. 10 ms blocks, AEC (430 samples) and denoiser
+(1920 samples) delay aligned, levels in dBFS (mic -> after AEC -> after denoiser):
+
+| Block type                      | Blocks | Mic   | After AEC | After denoiser | AEC cut > 6 dB       |
+| ------------------------------- | ------ | ----- | --------- | -------------- | -------------------- |
+| Loud (mic > -46)                | 528    | -41.0 | -43.7     | -45.3          | 14 % (5 % at 100 ms) |
+| Medium (-52..-46)               | 318    | -49.3 | -61.1     | -69.6          | 67 %                 |
+| Quiet (< -52)                   | 269    | -54.2 | -68.2     | -82.0          | 92 %                 |
+| Pauses (echo only)              | -      | -55.2 | -71.1     | -112.1         | -                    |
+
+Loud syllables pass (AEC takes 2.7 dB, the denoiser 1.6 dB more) and pauses are removed (AEC
+15.9 dB, then the denoiser to -112 dBFS). What is chopped are syllable tails at -46..-54 dBFS,
+within 1-9 dB of the echo (-55 dBFS): the voice peaks at -37..-45 dBFS, so the margin over the
+echo is only 10-18 dB. The same capture through AEC3 offline, defaults vs current tuning: loud
+-41.0 -> -45.1 vs -43.8, medium -49.3 -> -61.8 vs -59.8, quiet -54.2 -> -68.2 vs -67.8, pauses
+-55.2 -> -70.5 vs -70.4 dBFS: the tuning is not what chops it (it keeps 1.3 / 2.0 dB more), the
+voice is just that close to the echo. Remedies are outside the AEC: music quieter, a hotter or
+closer mic, headphones.
+
+### Tried and dropped
+
+- **Switching the AEC off while no echo reaches the mic** (`EchoProbe`, new `AecState::NoEcho`).
+  First version: one-tap least-squares correlation of the mic with the delay-aligned reference,
+  on at > -62 dBFS, off at < -66 dBFS. On the headphone capture it fixed the voice (output equals
+  the mic), but on the speaker capture `122712` it idled the AEC 85 % of the time: a reverberant
+  speaker echo is not a one-tap copy of the reference, and the delay estimate wobbles (179 / 210 /
+  264 samples). Second version: the mic's quietest 10 ms block per 500 ms against the mic's noise
+  floor from before the music (on at +10 dB, off at +6 dB; floor -76 dBFS, headphone min -74,
+  speakers min -50): AEC ran 96 % of the music time on the speaker capture, but only 41-65 % on
+  the headphone captures, flapping with every pause in speech, and every toggle moves the mic by
+  AEC3's 430-sample latency (a click). Both removed, including the UI state and its translation.
+- **Blaming the raw-input detector** (a proposal to check `in_net`, RNNoise 0.2 at 0.7 / 0.2,
+  first). `rnnoise2` sanity tests on Windows: AVX2 kernel under test, 26 tests pass. On the three
+  captures taken before the quiet-voice one, `heard_voice` = 0 on 0-1 % of speech-level blocks
+  with the AEC inert (longest run 0.02 s); and the capture voice (`115931`, 1.7-4.6 s) made
+  quieter at the same mic noise floor (0, -6, -10, -14, -18, -22 dB) still opens the gate on 99.2
+  / 99.2 / 99.2 / 99.2 / 99.2 / 97.9 % of speech frames with RNNoise 0.2 (the 2017 detector:
+  95.0 / 95.4 / 94.6 / 94.6 / 95.0 / 95.4 %). The detector hears the voice; the denoiser cut it.
+
+### Open
+
+- Not checked live with the pre-gain and the AEC tuning together beyond captures `125717` and
+  `130319` (no music, 3-11 s of `125717`: voice passes, AEC cut 0 blocks and the denoiser 2 of
+  ~480).
+- DFN3's cliff (about -52 dBFS voice level) is a property of the model and is only worked
+  around, not understood.
+- Speakers with the voice within ~10 dB of the echo: see above.
+- Pre-gain after "Learn again" (leveler gain 0) recovers only after the leveler hits its cap;
+  seeding the pre-gain from the remembered level would remove that gap.
