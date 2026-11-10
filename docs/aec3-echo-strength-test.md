@@ -3,10 +3,12 @@
 Pro agenta (Antigravity) na Windows stroji s `test_data/private/captures/`. Větev `aec3-mic-gain`,
 poslední commit. Příkazy jsou pro PowerShell z kořene repa.
 
-**Druhé kolo.** První kolo (milník 46) neprošlo: měřič bral hlas za echo. Měřič je přepsaný
-(milník 47): sílu echa teď uzná jen tehdy, když úroveň mikrofonu sleduje úroveň reference
-okno po okně („potvrzeno"). Jinak hlásí jen horní mez a AEC3 nechá na -40 dB. Tenhle návod je
-upravený pro nový měřič: projdi ho celý znovu a výsledky zapiš jako milník 48.
+**Třetí kolo: udělej jen kapitoly 0 a 6** a výsledky zapiš jako milník 50. Kapitoly 1-5 jsou
+hotové (milník 48: test A shodný s milníkem 44, test B bez falešné detekce, test C prošel).
+
+Historie: první kolo (milník 46) neprošlo, měřič bral hlas za echo. Měřič je přepsaný (milník
+47): sílu echa uzná jen tehdy, když úroveň mikrofonu sleduje úroveň reference okno po okně
+(„potvrzeno"). Jinak hlásí jen horní mez a AEC3 nechá na -40 dB.
 
 Co test **je**: ověření měřiče síly echa a toho, co z něj plyne, na existujících nahrávkách.
 Co **není**: živý test (instalace APO, log od testera). Ten přijde potom a dělá ho člověk.
@@ -17,7 +19,7 @@ Co **není**: živý test (instalace APO, log od testera). Ten přijde potom a d
   Když něco nevyjde, zapiš čísla a zastav se. Rozhodnutí o změně udělá člověk.
 - Smíš opravit chyby překladu v souborech psaných bez překladače. Záměr je v
   `docs/aec3-tuning-guide.md`, kapitola 11.1. Každou takovou opravu vyjmenuj v DEVLOGu.
-- Výsledky zapiš do `DEVLOG.md` jako milník 48, commitni a pushni na `aec3-mic-gain`. Nemerguj.
+- Výsledky zapiš do `DEVLOG.md` jako milník 50, commitni a pushni na `aec3-mic-gain`. Nemerguj.
 
 ## 0. Přeložit a pustit testy
 
@@ -30,7 +32,8 @@ cargo test -p gamersequalizer-mic-vst --release
 cargo clippy --workspace --all-targets
 ```
 
-Čekaný výsledek: `aec3::` 16 passed, 4 ignored. Z výpisu si zkontroluj tyto řádky (hodnoty z Macu):
+Čekaný výsledek: `aec3::` 16 passed, 4 ignored; `chain_log` 5 passed. Sdílená paměť má layout v19
+(přibyl `fit` do logu), takže pozor na to, aby APO a aplikace byly ze stejného buildu. Z výpisu si zkontroluj tyto řádky (hodnoty z Macu):
 
 ```text
 echo -20 dB, music from 2 s: -20.0 dB (bound: false), fit 1.00 x 1.01
@@ -182,3 +185,43 @@ referencí), přidej pro ni `micscale=30`, pokud se nepřebudí.
   z nahrávky k zesílenému mikrofonu nepatří a čísla by nic neznamenala.
 - Nebalit ani neinstalovat nic. Živý test (přeinstalace APO kvůli layoutu v18, log se zapnutým
   „Ukládat debug na disk") je další krok a popisuje ho `docs/aec3-tuning-guide.md`, kapitola 11.3.
+
+## 6. Třetí kolo: jak nízko smí práh korelace
+
+Milník 48 ukázal, že práh 0.90 potvrdí echo jen na 2 z 11 nahrávek s reproduktory. Tabulka ale
+má `fit` jen z konce každé nahrávky. Než se práh sníží, je potřeba vědět, **kdy by nižší práh
+potvrdil něco, co echo není**. Na to je scéna `fit=<r>`: měřič potvrzuje už od korelace `r`.
+V kódu se nic nemění, konstanta `ECHO_FIT_MIN_CORRELATION` zůstává 0.90.
+
+```powershell
+$env:SCENES = ";fit=0.8;fit=0.7;fit=0.6;fit=0.5"
+Remove-Item Env:CAP -ErrorAction SilentlyContinue
+cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture
+```
+
+Pro každou nahrávku s referencí a každý práh zapiš: potvrzeno ano/ne, `meter`, `check`, `fallb`,
+a ze stopy čas prvního potvrzení a největší potvrzenou hodnotu.
+
+Každý řádek ohodnoť:
+
+| Verdikt             | Kdy                                                                              |
+| ------------------- | -------------------------------------------------------------------------------- |
+| **správně**         | potvrzeno a po celou stopu `check - 6 <= hodnota <= check + 2`                   |
+| **nepotvrzeno**     | `meter` je mez                                                                   |
+| **FALEŠNĚ**         | potvrzeno na sluchátkách (`115931`, `122520`)                                    |
+| **FALEŠNĚ**         | potvrzeno a některá hodnota ve stopě je nad `check + 2` (u `124950`, `125717`, `144824` bez `check`: nad -33) |
+| **FALEŠNĚ**         | potvrzená hodnota během řeči stoupne o 4 dB a víc                                |
+| **FALEŠNĚ**         | víc než jedna změna `fallback` ve stopě                                          |
+
+Souhrnná tabulka na konec:
+
+| Práh | správně (počet nahrávek) | FALEŠNĚ (které nahrávky) |
+| ---- | ------------------------ | ------------------------ |
+| 0.90 | ...                      | ...                      |
+| 0.80 | ...                      | ...                      |
+| 0.70 | ...                      | ...                      |
+| 0.60 | ...                      | ...                      |
+| 0.50 | ...                      | ...                      |
+
+Doporuč nejnižší práh, který nemá **žádný** řádek FALEŠNĚ. Konstantu v kódu neměň, jen napiš
+doporučení a tabulky do DEVLOGu jako milník 50, commitni a pushni.

@@ -136,9 +136,11 @@ struct EchoMeter {
   confirmed: Option<f32>,
   /// What is reported (see `ECHO_REPORT_STEP_DB`): the confirmed strength, else the bound.
   shown: Option<(f32, bool)>,
-  /// Correlation and slope of the last fit, for the capture report.
-  #[cfg(test)]
+  /// Correlation and slope of the last fit: for the log, where they show how near a real
+  /// room comes to `ECHO_FIT_MIN_CORRELATION`.
   fit: (f32, f32),
+  /// `ECHO_FIT_MIN_CORRELATION`; the capture report tries others.
+  min_correlation: f32,
 }
 
 impl EchoCanceller3 {
@@ -192,6 +194,12 @@ impl EchoCanceller3 {
   /// Moves in steps of 2 dB or more.
   pub fn echo_strength_db(&self) -> Option<(f32, bool)> {
     self.echo.shown
+  }
+
+  /// How the mic's level followed the reference's in the last fit: correlation and slope
+  /// (an echo is confirmed from 0.9 and a slope of 0.7-1.3). (0, 0) before the first.
+  pub fn echo_fit(&self) -> (f32, f32) {
+    self.echo.fit
   }
 
   /// Echo strength remembered for this mic and output: used until one is confirmed here, or
@@ -361,8 +369,8 @@ impl EchoMeter {
       loud_count: 0,
       confirmed: None,
       shown: None,
-      #[cfg(test)]
       fit: (0.0, 0.0),
+      min_correlation: ECHO_FIT_MIN_CORRELATION,
     }
   }
 
@@ -408,12 +416,9 @@ impl EchoMeter {
     }
     let correlation = cov / (ref_var * mic_var).sqrt().max(1e-9);
     let slope = cov / ref_var.max(1e-9);
-    #[cfg(test)]
-    {
-      self.fit = (correlation, slope);
-    }
+    self.fit = (correlation, slope);
     let follows = ref_var.sqrt() >= ECHO_FIT_MIN_REF_SPREAD_DB
-      && correlation >= ECHO_FIT_MIN_CORRELATION
+      && correlation >= self.min_correlation
       && ECHO_FIT_SLOPE.contains(&slope);
     if follows || self.confirmed.is_some_and(|c| bound < c - ECHO_BOUND_UNDER_DB) {
       self.confirmed = Some(bound);
@@ -1002,6 +1007,8 @@ mod tests {
   ///   would have learned the louder voice.
   /// - `seed=<dB>` or `seed=auto`: the strength a session remembers from the one before (the
   ///   daemon's cache); `auto` is what the scene before this one measured.
+  /// - `fit=<r>`: the correlation an echo is confirmed from, instead of 0.9: which captures
+  ///   would confirm at a lower one, and which would do so wrongly.
   ///
   /// Columns: `meter`: the strength at the end (dB under the reference, `<`: only a bound, no
   /// echo was seen following the reference); `fit`: correlation x slope of the mic's level
@@ -1052,6 +1059,9 @@ mod tests {
         let mut aec = EchoCanceller3::new();
         aec.variant = scene.into();
         aec.rebuild();
+        if let Some(r) = key("fit=") {
+          aec.echo.min_correlation = r.parse().expect("fit=<correlation>");
+        }
         match key("seed=") {
           Some("auto") => measured_before.into_iter().for_each(|db| aec.seed_echo_strength_db(db)),
           Some(db) => aec.seed_echo_strength_db(db.parse().expect("seed=<dB>|auto")),
@@ -1296,7 +1306,7 @@ mod tests {
       let mut number = || values.next().unwrap_or_else(|| panic!("AEC3 variant {token:?}: value missing"));
       let tunings = [&mut cfg.suppressor.normal_tuning, &mut cfg.suppressor.nearend_tuning];
       match key {
-        "pregain" | "micscale" | "seed" => {}
+        "pregain" | "micscale" | "seed" | "fit" => {}
         "open" => {
           for mask in tunings.into_iter().flat_map(|t| [&mut t.mask_lf, &mut t.mask_hf]) {
             (mask.enr_transparent, mask.enr_suppress) = (99.0, 100.0);

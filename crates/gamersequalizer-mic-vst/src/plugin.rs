@@ -704,6 +704,10 @@ impl GamersEqualizerPlugin {
     h.aec_echo_db_x10.store(echo_x10, Ordering::Relaxed);
     h.aec_fallback_echo_db_x10.store((self.aec.fallback_echo_db() * 10.0).round() as i32, Ordering::Relaxed);
     h.aec_mic_gain_db_x10.store((self.aec.mic_gain_db() * 10.0).round() as i32, Ordering::Relaxed);
+    let (fit, slope) = self.aec.echo_fit();
+    let signed_permille = |x: f32| (x * 1000.0).round().clamp(-10_000.0, 10_000.0) as i32;
+    h.aec_echo_fit_permille.store(signed_permille(fit), Ordering::Relaxed);
+    h.aec_echo_slope_permille.store(signed_permille(slope), Ordering::Relaxed);
     h.aec_double_talk.store(self.aec.is_double_talk(), Ordering::Relaxed);
     h.aec_ref_level_db_x10.store(db_x10(self.ref_rms), Ordering::Relaxed);
     h.aec_mic_level_db_x10.store(db_x10(self.mic_rms), Ordering::Relaxed);

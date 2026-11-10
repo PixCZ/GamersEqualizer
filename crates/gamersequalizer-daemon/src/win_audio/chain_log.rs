@@ -2,7 +2,7 @@
 //! goes live, one line per tick listing every switch or device/volume change (old -> new), and a
 //! summary of the automatically adjusting values every 10 s. Together with `[Leveler]`,
 //! `[MicGain]`, `[DSP]` and `[Mic]` it lets a log reconstruct what the chain did without the audio.
-//! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v18).
+//! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v19).
 
 use super::chatmix::{get_endpoint_volume, ChatMixController};
 use super::endpoint_lock::EndpointLockManager;
@@ -58,6 +58,9 @@ pub struct DspSnapshot {
   pub echo_x10: i32,
   pub fallback_echo_x10: i32,
   pub aec_mic_gain_x10: i32,
+  /// Start and summary only: the echo meter's last fit, correlation and slope x 1000.
+  pub echo_fit_permille: i32,
+  pub echo_slope_permille: i32,
   pub gate_db: i32,
   pub strength_permille: u32,
   pub eq_version: u32,
@@ -130,6 +133,8 @@ impl DspSnapshot {
       echo_x10: h.aec_echo_db_x10.load(r),
       fallback_echo_x10: h.aec_fallback_echo_db_x10.load(r),
       aec_mic_gain_x10: h.aec_mic_gain_db_x10.load(r),
+      echo_fit_permille: h.aec_echo_fit_permille.load(r),
+      echo_slope_permille: h.aec_echo_slope_permille.load(r),
       gate_db: h.noise_gate_threshold_db.load(r),
       strength_permille: h.ai_voice_strength_permille.load(r),
       eq_version: h.mic_eq_version.load(r),
@@ -255,7 +260,7 @@ impl ChainLog {
       level(d.out_level_x10),
       level(d.ref_level_x10),
       d.erle_x10 as f32 / 10.0,
-      echo(d),
+      echo_with_fit(d),
       db(d.fallback_echo_x10),
       db(d.aec_mic_gain_x10),
       iv.in_max as f32 / 1000.0,
@@ -354,7 +359,7 @@ fn state(s: &ChainSnapshot) -> String {
     ms(d.aec_delay_us),
     on_off(d.aec_from_cache),
     on_off(d.double_talk),
-    echo(d),
+    echo_with_fit(d),
     db(d.fallback_echo_x10),
     db(d.aec_mic_gain_x10),
     flags.join(", "),
@@ -396,6 +401,12 @@ fn echo(d: &DspSnapshot) -> String {
     v if v > 0 => format!("not confirmed (at most {:.1} dB under the reference)", -v as f32 / 10.0),
     v => format!("{:.1} dB under the reference", v as f32 / 10.0),
   }
+}
+
+/// `echo` with how the mic's level followed the reference's (correlation x slope; an echo is
+/// confirmed from 0.90 x 0.7-1.3). Not in the change lines: it moves all the time.
+fn echo_with_fit(d: &DspSnapshot) -> String {
+  format!("{}, fit {:.2} x {:.2}", echo(d), d.echo_fit_permille as f32 / 1000.0, d.echo_slope_permille as f32 / 1000.0)
 }
 
 fn gate(db: i32) -> String {
@@ -504,6 +515,20 @@ mod tests {
     now.dsp.echo_x10 = 580;
     let line = log.observe(now).unwrap();
     assert!(line.contains("-> not confirmed (at most -58.0 dB under the reference)"), "{line}");
+  }
+
+  #[test]
+  fn the_fit_is_in_the_summary_but_moving_alone_logs_nothing() {
+    let mut log = started();
+    let mut now = snap();
+    (now.dsp.echo_x10, now.dsp.echo_fit_permille, now.dsp.echo_slope_permille) = (343, 520, 960);
+    assert!(log.observe(now.clone()).unwrap().contains("echo not measured -> not confirmed"));
+    now.dsp.echo_fit_permille = 610;
+    assert_eq!(log.observe(now.clone()), None);
+    let t0 = Instant::now();
+    assert_eq!(log.summary(&now, t0), None);
+    let line = log.summary(&now, t0 + SUMMARY_EVERY).unwrap();
+    assert!(line.contains("echo not confirmed (at most -34.3 dB under the reference), fit 0.61 x 0.96 (AEC"), "{line}");
   }
 
   #[test]

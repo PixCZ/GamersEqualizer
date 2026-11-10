@@ -2168,3 +2168,31 @@ Verdikt podle sedmi kritérií: **VŠECH 7 KRITÉRIÍ SPLNĚNO (PROŠLO)**:
 
 ### 5. Shrnutí a doporučení
 - **Závěr**: Prošlo všechno (Test A je 100% shodný s M44, Test B spolehlivě zabránil falešným detekcím echa u sluchátek a hlasu, a Test C prokázal přínos zapamatované síly echa se zrychlením potlačení echa na začátku o 8 až 27 dB bez újmy na hlase); fit u reproduktorů v reálných místnostech (0.22–0.78) však ukazuje, že práh korelace 0.90 je pro difúzní echo příliš přísný a v živém testu potvrdí echo pouze u monitoru/přímých odrazů, takže člověk může zvážit jeho mírné uvolnění (např. na 0.70).
+
+## Milestone 49: The meter's fit in the debug log; a threshold scene for the captures (2026-11-10)
+
+After milestone 48 (second round: test A equal to milestone 44 on all 22 captures, no false
+detection in test B, test C passed on the two captures that confirm). Written on the Mac:
+`aec3.rs`, `shm.rs` and the pure part of `chain_log.rs` compiled and tested, `plugin.rs` edited
+without a compiler. Shared memory layout v19.
+
+- **What milestone 48 leaves open.** 0.9 confirms the echo on 2 of 11 speaker captures
+  (`091611`, `102403`: the monitor's speakers). The others end between 0.22 and 0.92 (`104318`
+  at 0.92 has a reference whose level does not move). Without an echo the captures end at
+  0.23-0.40 (headphones, speech over music with no window of echo alone). That is one value
+  per capture, taken at its end, often in speech: not enough to lower the threshold on. A wrong
+  confirmation is what milestone 46 was; a missed one costs nothing against milestone 44.
+- **`fit=<r>` scene in `capture_echo_report`**: the meter confirms from correlation `r`
+  instead of 0.9 (`EchoMeter::min_correlation`). Third round in
+  `docs/aec3-echo-strength-test.md`, chapter 6: which captures confirm at 0.8 / 0.7 / 0.6 /
+  0.5, and which do so wrongly.
+- **The fit in the debug log** (`aec_echo_fit_permille`, `aec_echo_slope_permille`): the
+  `[Chain]` start line and the 10 s summary now say e.g.
+  `echo not confirmed (at most -34.3 dB under the reference), fit 0.61 x 0.96`. Not in the
+  change lines: it moves all the time. A log from another machine now shows how near its echo
+  comes to being confirmed, which a capture cannot be asked of a tester.
+- Seen in milestone 48's traces and left as it is: on `102403` with a remembered strength the
+  bound fell 10 dB under it for a while (13.9 s) and the fallback stepped down, then the echo
+  was confirmed at the old value again at 55.3 s. The 2026-11-07 captures have output switches
+  and volume changes in them; if a capture with a steady volume shows the same, the 3 dB of
+  `ECHO_BOUND_UNDER_DB` is too eager.
