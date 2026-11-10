@@ -2334,3 +2334,92 @@ Z celkových 22 nahrávek má 15 nahrávek referenci (7 nahrávek bez reference 
 - Jakékoliv snížení prahu (0.80, 0.70, 0.60, 0.50) vede k falešné detekci echa na nahrávce `124950` (hlas do hudby je mylně potvrzen jako echo na -28 dB a přenastavuje fallback na -34 dB) a na nahrávce `101152` (dozvuk místnosti způsobí dvojí přestavení fallbacku -40 -> -34 -> -40 dB).
 - V souladu se zásadou z milníku 49 (_"A wrong confirmation is what milestone 46 was; a missed one costs nothing against milestone 44"_): je nesrovnatelně bezpečnější nechat nahrávky se slabším či difúzním echem na výchozím odhadu -40 dB (kde AEC3 funguje optimálně), než snížením prahu riskovat falešné odhady echa z lidského hlasu a rozbití potlačení echa.
 - Konstanta `ECHO_FIT_MIN_CORRELATION` v kódu zůstává beze změny na hodnotě **0.90**.
+
+
+## Milestone 51: Live APO Verification, Echo Strength Caching & Capture Analysis (2026-11-10)
+
+První kompletní živé ověření mikrofonního APO (`gamersequalizer_apo.dll`) běžícího přímo v audio enginu Windows (`audiodg.exe`) s rozložením sdílené paměti v19 po dokončení prahového sweepu v milníku 50 a zapracování funkcionalit z větve `aec3-mic-gain` podle `docs/aec3-tuning-guide.md`, kapitola 11.3.
+
+Sestaveno přes `scripts/dev-rebuild.ps1 -Apo -DebugCapture -Start`, nainstalováno do `C:\Program Files\GamersEqualizer\apo\` a otestováno v reálném provozu.
+
+### 1. Průběh živého testu v logu (`gamersequalizer.log`)
+
+V systémovém logu řetězce (`[Chain]`) a propojovací vrstvy (`[ApoLink]`) proběhl celý životní cyklus bez jediné chyby:
+
+1. **Start řetězce a zisk mikrofonu pro AEC3 (`AEC mic gain`):**
+   - Po startu mikrofonu detekováno zařízení `Mikrofon (Realtek(R) Audio)`:
+     ```text
+     [Chain] start: ... AEC on NoReference delay none (from cache off, double talk off), echo not measured, fit 0.00 x 0.00 (AEC fallback echo -40.0 dB, AEC mic gain +0.0 dB) ...
+     ```
+   - V čase 15:12:09 došlo k uzamčení zpoždění a automatický zisk mikrofonu pro AEC3 skočil přesně na navržených **+18.0 dB**:
+     ```text
+     [Chain] changed: AEC on NoReference -> on Locked, AEC mic gain +0.0 -> +18.0
+     ```
+
+2. **Měření síly echa reproduktorů (fit 0.95 x 0.80) a uložení do cache:**
+   - Při přehrávání audia z reproduktorů dosáhla korelace **0.95** se směrnicí **0.80** (překračuje přísný práh 0.90 i interval směrnice 0.70..1.40):
+     ```text
+     [Chain] 10 s: ... ERLE 7.0 dB, echo not confirmed (at most -46.7 dB under the reference), fit 0.95 x 0.80 (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB) ...
+     ```
+   - V čase 15:12:40 měřič stabilní echo potvrdil na hodnotě **-46.5 dB pod referencí**:
+     ```text
+     [ApoLink] saving echo strength -46.5 dB under the reference
+     [Chain] changed: echo not confirmed (at most -46.7 dB) -> -46.5 dB under the reference
+     ```
+   - Hodnota se uložila do souboru `%APPDATA%\GamersEqualizer\echo_strength_cache.json` (`-465`).
+
+3. **Přepnutí výstupního zařízení (izolace zařízení a ochrana proti falešné detekci):**
+   - V čase 15:12:52 došlo k přepnutí výstupu na jiné zařízení:
+     - Naměřená síla echa předchozího zařízení se okamžitě vynulovala (`echo -> not measured`).
+     - Nové zpoždění bylo změřeno a uzamčeno (5.1 ms -> 4.9 ms -> 4.8 ms).
+     - Při přehrávání s lidskou řečí (hlas v 61 % bloků) korelace dosahovala pouze 0.59 až 0.80 (pod prahem 0.90):
+       ```text
+       [Chain] 10 s: ... echo not confirmed (at most -35.9 dB under the reference), fit 0.77 x 0.82 ...
+       ```
+     - Měřič bezpečně podržel stav jako nepotvrzený (`<`), záložní odhad `fallback` zůstal na -40.0 dB a do cache se neuložila žádná falešná hodnota.
+
+4. **Návrat na původní zařízení (Warm start / Persistence):**
+   - V čase 15:14:01 došlo k přepnutí zpět na původní reproduktory:
+     ```text
+     [ApoLink] cached echo delay for this mic/output: 1.0 ms
+     [ApoLink] remembered echo strength for this mic/output: -46.5 dB under the reference
+     [ApoLink] reference output switched: the APO measures the echo delay again
+     [Chain] changed: AEC delay 5.0 ms -> 1.0 ms, delay from cache off -> on, echo not confirmed -> -46.5 dB under the reference
+     ```
+   - Zapamatovaná síla echa (-46.5 dB) i zpoždění (1.0 ms) byly okamžitě obnoveny v čase 0 s bez čekání na nové měření.
+
+---
+
+### 2. Analýza zachyceného capture balíčku (`test_data/private/captures/20261110-141406`)
+
+Záznam pořízen pomocí `cargo run --release -p gamersequalizer-apo --example debug_capture -- 30`:
+- Celková délka: 3000 bloků (30.0 sekund na 48 kHz).
+- Zpoždění echa: naprosto stabilní, přesně **45 vzorků** (~0.94 ms) po celou dobu nahrávky (0 odchylek).
+- `double_talk`: 0 bloků (žádné nežádoucí zamrzání filtru).
+- `input_clips`: 0 (žádný clipping ani limitace na vstupu).
+- `ERLE`: průměrně **5.5 dB** (max **6.7 dB**) během přehrávání reference.
+- Zátěž DSP: průměr 1.5–6 %, špičkově 4–10 % (včetně režijních zápisů ladicích dat do sdílené paměti).
+
+Úrovně RMS jednotlivých fází řetězce:
+
+| Soubor                | Fáze zpracování                             | Úroveň RMS |
+| :-------------------- | :------------------------------------------ | ---------: |
+| `01_mic_raw.wav`      | Vstup mikrofonu z audiodg                   | -42.3 dBFS |
+| `02_ref_at_mic.wav`   | Reference reproduktorů (loopback)           | -19.5 dBFS |
+| `03_ref_aec.wav`      | Reference zarovnaná o zpoždění do AEC3      | -19.5 dBFS |
+| `04_after_aec.wav`    | Signál po potlačení echa (AEC3)             | -42.9 dBFS |
+| `05_after_denoise.wav`| Po neuronovém odšumovači a šumové bráně     | -43.1 dBFS |
+| `06_after_eq.wav`     | Po parametrickém EQ hlasu                   | -43.1 dBFS |
+| `07_after_leveler.wav`| Po učícím se hlasovém leveleru              | -25.8 dBFS |
+| `08_out.wav`          | Výstup z APO po limiteru (odchozí mikrofon) | -31.8 dBFS |
+
+V tichých pauzách mezi řečí šumová brána a denoiser bezpečně stahují úroveň výstupu až na -100 až -110 dBFS, zatímco leveler zesiluje mluvené slovo na zřetelnou a vyrovnanou úroveň (-25.8 dBFS).
+
+---
+
+### 3. Závěr a stav větve `aec3-mic-gain`
+
+Živý test potvrdil kompletní funkčnost a stabilitu:
+1. Prahové pravidlo korelace (práh 0.90) spolehlivě potvrdilo reálné echo monitoru (-46.5 dB) a ignorovalo difúzní/sluchátkový odposlech.
+2. Persistence a přepínání zařízení v `ApoLink` funguje bezchybně a izolovaně pro každou dvojici (mikrofon, výstup).
+3. Sdílená paměť layoutu v19 je plně funkční v `audiodg.exe` bez pádů, přebuzení či zpoždění.
