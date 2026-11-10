@@ -10,9 +10,9 @@ Postupuj přesně po krocích. Každý krok má **Udělej**, **Ověř** a **Hoto
 
 | Soubor                                                   | Co obsahuje                                                                                               | Testy  |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------ |
-| `crates/gamersequalizer-common/src/sidetone.rs`          | `SidetoneRing`, `SidetoneReader`, `BandExpander`, `SidetoneChain`, `SidetonePairs`, `device_hash`         | 18     |
+| `crates/gamersequalizer-common/src/sidetone.rs`          | `SidetoneRing`, `SidetoneReader`, `BandExpander`, `SidetoneChain`, `SidetonePairs`, `device_hash`         | 21     |
 | `crates/gamersequalizer-common/src/shm.rs`               | sdílená paměť v20: pole `sidetone_*`, `ShmLayout::sidetone`, `write_sidetone`, `read_sidetone`, zrcadlení | 1 nový |
-| `crates/gamersequalizer-mic-vst/src/sidetone_denoise.rs` | `SidetoneDenoiser`: WebRTC NS, RNNoise, RNNoise 0.2 za jedním rozhraním                                   | 4      |
+| `crates/gamersequalizer-mic-vst/src/sidetone_denoise.rs` | `SidetoneDenoiser`: WebRTC NS, RNNoise, RNNoise 0.2 za jedním rozhraním                                   | 5      |
 
 Tyhle tři soubory jsou přeložené a testy na nich prošly. Zbytek tohoto návodu (kód pro APO,
 daemon a UI) je **psaný bez překladače**: může mít chyby překladu.
@@ -54,8 +54,8 @@ cargo clippy --workspace --all-targets
 
 **Hotovo, když:**
 
-- `gamersequalizer-common`: `51 passed`.
-- `sidetone_denoise`: `4 passed`.
+- `gamersequalizer-common`: `54 passed`.
+- `sidetone_denoise`: `5 passed`.
 - clippy nehlásí nic v `sidetone.rs`, `sidetone_denoise.rs` ani u polí `sidetone_*`.
 
 Když `delay_matches_the_measured_values` nebo `steady_hiss_is_turned_down` neprojde na
@@ -203,8 +203,12 @@ impl SidetoneTap {
   fn process_inner(&mut self, layout: &ShmLayout, buf: &[f32], channels: usize, qpc_hns: Option<u64>) {
     let h = &layout.header;
     let r = Ordering::Relaxed;
-    h.sidetone_mic_hash_seen.store(self.endpoint_hash, r);
     let pair_hash = h.sidetone_mic_hash.load(r);
+    // Reported only by the instance that is the pair's microphone or cannot tell: the APO of
+    // another microphone would overwrite it.
+    if self.endpoint_hash == pair_hash || self.endpoint_hash == 0 {
+      h.sidetone_mic_hash_seen.store(self.endpoint_hash, r);
+    }
     // The pair's microphone. An endpoint we could not identify may write too: a wrong
     // microphone is only a wrong voice, and the ring takes one writer.
     let ours = pair_hash != 0 && (self.endpoint_hash == pair_hash || self.endpoint_hash == 0);
@@ -212,8 +216,12 @@ impl SidetoneTap {
     settings.enabled &= ours && self.watch.live(h, Instant::now()) && !h.master_bypass.load(r);
     self.chain.configure(&settings, h.mic_input_gain_db_x10.load(r) as f32 / 10.0, h.mic_muted.load(r));
     if self.chain.is_silent() {
-      // Off, muted or not our pair: give the ring up (a clean stop for the reader).
+      // Off, muted or not our pair: give the ring up (a clean stop for the reader), and tell
+      // the suppressors about the pause, so nothing from before it is played afterwards.
       self.release(layout);
+      if let Some(denoiser) = self.denoiser.as_mut() {
+        denoiser.process(NoiseMode::Off, 0.0, &mut []);
+      }
       return;
     }
     if self.owner.is_none() {
@@ -254,7 +262,11 @@ impl SidetoneTap {
     }
     self.chain.run_level(mono);
     let end_qpc = qpc_hns.map_or(0, |t| t.saturating_add(frames_to_hns(frames as u64, self.rate).max(0) as u64));
-    layout.sidetone.write(owner, mono, self.rate, end_qpc);
+    if !layout.sidetone.write(owner, mono, self.rate, end_qpc) {
+      // Another instance took the ring over (we were not called for a while): claim again.
+      self.owner = None;
+      return;
+    }
 
     h.sidetone_writer_beat.fetch_add(1, r);
     h.sidetone_mic_rate.store(self.rate, r);
@@ -406,6 +418,8 @@ Do `struct OutputProcessor`:
   sidetone: SidetoneReader,
   sidetone_buf: Vec<f32>,
   sidetone_endpoint: u32,
+  /// Sidetone was mixed into the previous block.
+  sidetone_playing: bool,
 ```
 
 Do literálu v `OutputProcessor::create`:
@@ -414,6 +428,7 @@ Do literálu v `OutputProcessor::create`:
       sidetone: SidetoneReader::default(),
       sidetone_buf: Vec::with_capacity(4096),
       sidetone_endpoint: 0,
+      sidetone_playing: false,
 ```
 
 V `cfg_lock_for_process` větev `ApoKind::Output` změň tak, aby procesor dostal otisk zařízení:
@@ -467,8 +482,13 @@ slovem `sidetone` a rozdělení `run_eq_in_place` na `run_eq` + limiter:
       self.sample_rate,
       self.sidetone_endpoint,
     );
+    let sidetone_started = sidetone && !std::mem::replace(&mut self.sidetone_playing, sidetone);
     if self.wet <= 0.0 && goal <= 0.0 {
       if sidetone {
+        if sidetone_started {
+          // The limiter did not run while nothing was mixed in: its gain is from back then.
+          self.limiter = PeakLimiter::new(self.sample_rate);
+        }
         // No EQ, but the sum of the mix and the voice still must not clip.
         add_sidetone(buf, channels, &self.sidetone_buf);
         self.limiter.process(buf, channels);
@@ -543,8 +563,12 @@ fn read_sidetone(
 ) -> bool {
   let h = &layout.header;
   let r = Ordering::Relaxed;
-  h.sidetone_output_hash_seen.store(endpoint, r);
   let pair = h.sidetone_output_hash.load(r);
+  // Reported only by the instance that is the pair's output or cannot tell: the APO of
+  // another output would overwrite it.
+  if endpoint == pair || endpoint == 0 {
+    h.sidetone_output_hash_seen.store(endpoint, r);
+  }
   // Only on the pair's output, and only when this endpoint is known to be it: sidetone in
   // speakers is a feedback loop.
   if !h.sidetone_enabled.load(r) || pair == 0 || pair != endpoint {
@@ -754,7 +778,9 @@ fn main() -> windows::core::Result<()> {
     let end = Instant::now() + Duration::from_secs(secs);
     let mut next_print = Instant::now() + Duration::from_secs(1);
     let (mut writer, mut reader) = (h.sidetone_writer_beat.load(r), h.sidetone_reader_beat.load(r));
-    while Instant::now() < end {
+    // In a closure, so an error in the loop still reaches the "switch it off" below.
+    let outcome = (|| -> windows::core::Result<()> {
+     while Instant::now() < end {
       std::thread::sleep(Duration::from_millis(5));
       // Keep the microphone stream drained and the output stream fed with silence.
       while capture.GetNextPacketSize()? > 0 {
@@ -796,14 +822,16 @@ fn main() -> windows::core::Result<()> {
         h.sidetone_resyncs.load(r),
       );
       (writer, reader) = (w, rd);
-    }
+     }
+     Ok(())
+    })();
     if on {
       h.write_sidetone(&SidetoneSettings::default());
     }
-    mic.Stop()?;
-    out.Stop()?;
+    let _ = mic.Stop();
+    let _ = out.Stop();
+    outcome
   }
-  Ok(())
 }
 ```
 
@@ -823,6 +851,9 @@ Sdílená paměť má novou verzi, staré APO s novou aplikací nemluví.
 cargo run -p gamersequalizer-apo --example sidetone_probe -- 30 on -12 1
 ```
 
+Sondu nech vždy doběhnout. Po Ctrl+C zůstane příposlech zapnutý (naposledy zapsané nastavení):
+pusť ji pak znovu s `on` a nech ji skončit.
+
 **Požádej člověka:** „Mluv 30 s do mikrofonu. Slyšíš se ve sluchátkách? Je v pauzách ticho?"
 
 **Hotovo, když** (zapiš výpis do DEVLOGu):
@@ -837,8 +868,8 @@ cargo run -p gamersequalizer-apo --example sidetone_probe -- 30 on -12 1
 | `age`                | 10 000–25 000 µs při 10 ms periodě            | Zapiš hodnotu.                                                       |
 | člověk               | slyší se, v pauzách šum zmizí                 | Zapiš přesně, co slyší.                                              |
 
-Když `out: hash seen` je 0: přidej do `endpoint_hash` dočasně uložení `declared` a `size` do
-dvou volných polí telemetrie (např. `sidetone_queued_us`, `sidetone_age_us`), vypiš je sondou,
+Když `out: hash seen` není otisk výstupu (APO hlásí jen shodu nebo 0): přidej do `endpoint_hash`
+dočasně uložení `declared` a `size` do dvou volných polí telemetrie (např. `sidetone_queued_us`, `sidetone_age_us`), vypiš je sondou,
 zapiš do DEVLOGu a zastav se. Dočasný kód necommituj.
 
 ### 4.4 Obsahuje loopback příposlech? (riziko pro AEC)

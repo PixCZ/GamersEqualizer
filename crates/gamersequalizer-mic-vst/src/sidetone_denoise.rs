@@ -28,8 +28,8 @@ pub const SAMPLE_RATE: u32 = 48_000;
 const I16_SCALE: f32 = 32768.0;
 /// Delay of the WebRTC suppressor inside `sonora` (band split + overlap), measured.
 const WEBRTC_NS_DELAY: usize = 333;
-/// Silent frames that push old audio out of RNNoise when a mode starts (its pitch buffer
-/// holds 1728 samples).
+/// Silent frames that push old audio out of a suppressor when its mode starts (RNNoise's
+/// pitch buffer holds 1728 samples, the WebRTC one a third of a frame).
 const FLUSH_FRAMES: usize = 4;
 const QUEUE: usize = 2 * FRAME;
 const MAX_DEPTH_DB: f32 = 40.0;
@@ -170,8 +170,11 @@ impl SidetoneDenoiser {
             net.process_frame(&mut self.scratch_out, &silence);
           }
         }
-        // The WebRTC suppressor only keeps a noise estimate, no audio.
-        _ => {}
+        // The WebRTC suppressor holds a third of a frame of audio from its last run.
+        NoiseMode::WebRtcNs => {
+          let _ = self.ns.process_capture_f32(&[silence.as_slice()], &mut [self.scratch_out.as_mut_slice()]);
+        }
+        NoiseMode::Off | NoiseMode::Expander => {}
       }
     }
   }
@@ -294,6 +297,26 @@ mod tests {
       if mode != NoiseMode::WebRtcNs {
         assert!(cut > -19.0, "{mode:?}: deeper than the 18 dB asked for ({cut:.1} dB)");
       }
+    }
+  }
+
+  #[test]
+  fn nothing_from_before_a_pause_is_played() {
+    let mut denoiser = SidetoneDenoiser::new();
+    for mode in MODES {
+      // A loud voice, a pause (muted, or another mode), then silence in: silence out.
+      let mut before = speech(SAMPLE_RATE as usize);
+      before.iter_mut().for_each(|s| *s *= 5.0);
+      before.chunks_mut(FRAME).for_each(|chunk| {
+        denoiser.process(mode, 18.0, chunk);
+      });
+      denoiser.process(NoiseMode::Off, 0.0, &mut []);
+      let mut after = vec![0.0f32; 4 * FRAME];
+      after.chunks_mut(FRAME).for_each(|chunk| {
+        denoiser.process(mode, 18.0, chunk);
+      });
+      let peak = after.iter().fold(0.0f32, |p, s| p.max(s.abs()));
+      assert!(peak < 1e-3, "{mode:?}: {peak} left from before the pause");
     }
   }
 

@@ -739,6 +739,16 @@ impl ShmHeader {
     self.sidetone_underruns.store(src.sidetone_underruns.load(r), r);
     self.sidetone_resyncs.store(src.sidetone_resyncs.load(r), r);
     self.sidetone_output_hash_seen.store(src.sidetone_output_hash_seen.load(r), r);
+    // The mic APO's sidetone tap too: it runs without the mic chain (whose telemetry
+    // `copy_dsp_telemetry_from` waits for), e.g. after the chain failed.
+    self.sidetone_writer_beat.store(src.sidetone_writer_beat.load(r), r);
+    self.sidetone_mic_rate.store(src.sidetone_mic_rate.load(r), r);
+    self.sidetone_mic_block_frames.store(src.sidetone_mic_block_frames.load(r), r);
+    self.sidetone_peak_permille.store(src.sidetone_peak_permille.load(r), r);
+    self.sidetone_gate_gain_db_x10.store(src.sidetone_gate_gain_db_x10.load(r), r);
+    self.sidetone_noise_mode_active.store(src.sidetone_noise_mode_active.load(r), r);
+    self.sidetone_noise_delay_us.store(src.sidetone_noise_delay_us.load(r), r);
+    self.sidetone_mic_hash_seen.store(src.sidetone_mic_hash_seen.load(r), r);
   }
 
   /// Publish the combined output EQ. Readers pick it up when `out_eq_version` changes.
@@ -831,14 +841,6 @@ impl ShmHeader {
     self.aec_mic_gain_db_x10.store(src.aec_mic_gain_db_x10.load(r), r);
     self.aec_echo_fit_permille.store(src.aec_echo_fit_permille.load(r), r);
     self.aec_echo_slope_permille.store(src.aec_echo_slope_permille.load(r), r);
-    self.sidetone_writer_beat.store(src.sidetone_writer_beat.load(r), r);
-    self.sidetone_mic_rate.store(src.sidetone_mic_rate.load(r), r);
-    self.sidetone_mic_block_frames.store(src.sidetone_mic_block_frames.load(r), r);
-    self.sidetone_peak_permille.store(src.sidetone_peak_permille.load(r), r);
-    self.sidetone_gate_gain_db_x10.store(src.sidetone_gate_gain_db_x10.load(r), r);
-    self.sidetone_noise_mode_active.store(src.sidetone_noise_mode_active.load(r), r);
-    self.sidetone_noise_delay_us.store(src.sidetone_noise_delay_us.load(r), r);
-    self.sidetone_mic_hash_seen.store(src.sidetone_mic_hash_seen.load(r), r);
     self.aec_state.store(src.aec_state.load(r), r);
     self.aec_delay_us.store(src.aec_delay_us.load(r), r);
     self.aec_raw_delay_us.store(src.aec_raw_delay_us.load(r), r);
@@ -1371,11 +1373,11 @@ mod tests {
       (11, 22)
     );
 
-    // Telemetry goes the other way, each APO's part with its own copy function.
+    // Telemetry goes the other way.
     apo.sidetone_writer_beat.store(5, Ordering::Relaxed);
     apo.sidetone_reader_beat.store(7, Ordering::Relaxed);
     apo.sidetone_age_us.store(9_000, Ordering::Relaxed);
-    daemon.copy_dsp_telemetry_from(&apo);
+    // Both APOs' parts come with the output telemetry (mirrored on every tick).
     daemon.copy_output_telemetry_from(&apo);
     assert_eq!(daemon.sidetone_writer_beat.load(Ordering::Relaxed), 5);
     assert_eq!(daemon.sidetone_reader_beat.load(Ordering::Relaxed), 7);

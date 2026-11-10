@@ -14,6 +14,8 @@
 //! - `SidetoneReader` has no anti-alias filter: a mic running at a higher rate than the
 //!   output folds what is above the output's Nyquist back (a voice has little up there).
 //! - A reader that runs dry cuts to silence at once (a click); it then keeps a larger margin.
+//! - Microphone blocks of 100 ms or more look like a paused reader to `SidetoneReader` and
+//!   are dropped (the audio engine's periods are 10 ms or less).
 //! - The expander's bands overlap gently (differences of 12 dB/octave low-passes): a closed
 //!   band takes up to ~1 dB from a tone in the band next to it.
 
@@ -28,6 +30,11 @@ const RING_MASK: u32 = SIDETONE_RING_LEN as u32 - 1;
 const _: () = assert!(SIDETONE_RING_LEN.is_power_of_two());
 /// A sample beyond this is garbage (a torn write, a stale mapping): read as silence.
 const SAMPLE_MAX: f32 = 4.0;
+/// Refused claims in a row without a write in between before an owner of the same process
+/// counts as gone (one claim per block of the claimer: 85 ms at the shortest period).
+const STALE_CLAIMS: u32 = 32;
+/// The reader stays this far from where the writer writes next.
+const RING_GUARD: usize = 256;
 const HNS_PER_SEC: f64 = 10_000_000.0;
 
 pub const GAIN_DB_MIN: f32 = -40.0;
@@ -61,6 +68,9 @@ const ENV_RELEASE_SECONDS: f32 = 0.010;
 const ENV_SLOW_SECONDS: f32 = 0.100;
 const FLOOR_WINDOW_SECONDS: f32 = 0.5;
 const FLOOR_WINDOWS: usize = 6;
+/// After a start the slow level itself is the floor for this long (it has not settled, and
+/// its first values would otherwise sit in the minimum for seconds).
+const FLOOR_WARM_UP_SECONDS: f32 = 0.3;
 /// The floor stays inside -90..-30 dBFS: digital silence must not pull it to nothing, and a
 /// long loud sound must not push the threshold above a voice.
 const FLOOR_MIN: f32 = 3.16e-5;
@@ -92,7 +102,7 @@ const MAX_RATE_ADJUST: f64 = 0.003;
 const FADE_SECONDS: f32 = 0.002;
 /// This much queued beyond one call's need can only be audio from before a pause of the
 /// reader: it is dropped, not played late.
-const STALE_SECONDS: f32 = 0.050;
+const STALE_SECONDS: f32 = 0.100;
 
 /// What suppresses noise in the sidetone. Crosses the shared memory as a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -164,6 +174,10 @@ pub struct SidetoneRing {
   write_qpc_hns: AtomicU64,
   /// Writer: (process id << 32) | instance; 0 = none. A value of another process is stale.
   owner: AtomicU64,
+  /// Write index at the last refused claim, and how many refused claims in a row saw it
+  /// unchanged: an owner that stopped writing without releasing is replaced.
+  stale_seen: AtomicU32,
+  stale_count: AtomicU32,
   samples: [AtomicU32; SIDETONE_RING_LEN],
 }
 
@@ -229,17 +243,24 @@ pub struct BandExpander {
   /// One gain for all bands, from the wide detector (a plain expander).
   single_band: bool,
   phase: u32,
-  env_release: f32,
-  env_slow: f32,
+  rates: ControlRates,
   attack: f32,
   release: f32,
   hold_samples: u32,
-  window_ticks: u32,
   margin: f32,
   range_db: f32,
   split_buf: [[f32; CHUNK]; BANDS - 1],
   detect_buf: [[f32; CHUNK]; BANDS],
   wide_buf: [f32; CHUNK],
+}
+
+/// What `BandState::control` needs, per control tick.
+#[derive(Debug, Clone, Copy)]
+struct ControlRates {
+  env_release: f32,
+  env_slow: f32,
+  window_ticks: u32,
+  warm_up_ticks: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -253,6 +274,8 @@ struct BandState {
   mins: [f32; FLOOR_WINDOWS],
   next_min: usize,
   ticks: u32,
+  /// Control ticks left of the warm-up; None = no level seen yet.
+  warm_up: Option<u32>,
   target: f32,
   gain: f32,
   hold: u32,
@@ -429,6 +452,8 @@ impl Default for SidetoneRing {
       rate: AtomicU32::new(0),
       write_qpc_hns: AtomicU64::new(0),
       owner: AtomicU64::new(0),
+      stale_seen: AtomicU32::new(0),
+      stale_count: AtomicU32::new(0),
       samples: std::array::from_fn(|_| AtomicU32::new(0)),
     }
   }
@@ -440,8 +465,23 @@ impl SidetoneRing {
   pub fn claim_writer(&self, pid: u32, instance: u32) -> Option<u64> {
     let owner = (u64::from(pid) << 32) | u64::from(instance.max(1));
     let current = self.owner.load(Ordering::Acquire);
-    let free = current == 0 || (current >> 32) as u32 != pid;
-    (free && self.owner.compare_exchange(current, owner, Ordering::AcqRel, Ordering::Relaxed).is_ok()).then_some(owner)
+    let mut free = current == 0 || (current >> 32) as u32 != pid;
+    if !free {
+      // An owner in this process: alive if it wrote since our last try (a writer writes
+      // every block or releases). One whose stream stopped without a release never moves.
+      let head = self.write_index.load(Ordering::Relaxed);
+      if self.stale_seen.swap(head, Ordering::Relaxed) == head {
+        free = self.stale_count.fetch_add(1, Ordering::Relaxed) + 1 >= STALE_CLAIMS;
+      } else {
+        self.stale_count.store(0, Ordering::Relaxed);
+      }
+    }
+    if free && self.owner.compare_exchange(current, owner, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+      self.stale_count.store(0, Ordering::Relaxed);
+      Some(owner)
+    } else {
+      None
+    }
   }
 
   /// Gives the ring up. The rate goes to 0, which tells the readers "stopped on purpose":
@@ -453,10 +493,11 @@ impl SidetoneRing {
   }
 
   /// Appends a block. `end_qpc_hns`: capture time of the sample after the last one, 0 if
-  /// unknown. Does nothing unless `owner` holds the ring.
-  pub fn write(&self, owner: u64, samples: &[f32], rate: u32, end_qpc_hns: u64) {
+  /// unknown. False (and nothing written) unless `owner` holds the ring: the caller lost it
+  /// and has to claim again.
+  pub fn write(&self, owner: u64, samples: &[f32], rate: u32, end_qpc_hns: u64) -> bool {
     if self.owner.load(Ordering::Acquire) != owner || owner == 0 {
-      return;
+      return false;
     }
     let start = self.write_index.load(Ordering::Relaxed);
     for (i, sample) in samples.iter().enumerate() {
@@ -467,6 +508,7 @@ impl SidetoneRing {
     self.rate.store(rate, Ordering::Relaxed);
     self.write_qpc_hns.store(end_qpc_hns, Ordering::Relaxed);
     self.write_index.store(start.wrapping_add(samples.len() as u32), Ordering::Release);
+    true
   }
 
   pub fn write_index(&self) -> u32 {
@@ -570,7 +612,14 @@ impl SidetoneReader {
       self.state = ReaderState::Priming;
     }
     let mut avail = i64::from(head.wrapping_sub(self.base));
-    let stale = (need + margin + i64::from((STALE_SECONDS * ring_rate) as u32)).min((SIDETONE_RING_LEN / 2) as i64);
+    let seconds = |s: f32| i64::from((s * ring_rate) as u32);
+    let stale =
+      (need + margin + seconds(START_EXTRA_SECONDS + STALE_SECONDS)).min((SIDETONE_RING_LEN - RING_GUARD) as i64);
+    if need + margin > stale {
+      // One call needs more than the ring holds (a huge output block): cannot work.
+      self.state = ReaderState::Idle;
+      return silent(0);
+    }
     if avail > stale {
       // The reader was not called for a while (the output stood still): what piled up is old,
       // start over at the write head.
@@ -578,7 +627,7 @@ impl SidetoneReader {
       return silent(0);
     }
     if self.state == ReaderState::Priming {
-      if avail < need + margin + i64::from((START_EXTRA_SECONDS * ring_rate) as u32) {
+      if avail < (need + margin + seconds(START_EXTRA_SECONDS)).min(stale) {
         return silent(avail as u32);
       }
       self.state = ReaderState::Running;
@@ -658,6 +707,7 @@ impl BandState {
       mins: [f32::MAX; FLOOR_WINDOWS],
       next_min: 0,
       ticks: 0,
+      warm_up: None,
       target: 0.0,
       gain: 0.0,
       hold: 0,
@@ -695,12 +745,15 @@ impl BandExpander {
       bands: [BandState::new(); BANDS],
       single_band: false,
       phase: 0,
-      env_release: (-tick / ENV_RELEASE_SECONDS).exp(),
-      env_slow: 1.0 - (-tick / ENV_SLOW_SECONDS).exp(),
+      rates: ControlRates {
+        env_release: (-tick / ENV_RELEASE_SECONDS).exp(),
+        env_slow: 1.0 - (-tick / ENV_SLOW_SECONDS).exp(),
+        window_ticks: (FLOOR_WINDOW_SECONDS / tick) as u32,
+        warm_up_ticks: (FLOOR_WARM_UP_SECONDS / tick) as u32,
+      },
       attack: per_sample(ATTACK_SECONDS),
       release: per_sample(RELEASE_SECONDS),
       hold_samples: (HOLD_SECONDS * rate) as u32,
-      window_ticks: (FLOOR_WINDOW_SECONDS / tick) as u32,
       margin: 10.0,
       range_db: 18.0,
       split_buf: [[0.0; CHUNK]; BANDS - 1],
@@ -726,10 +779,14 @@ impl BandExpander {
     20.0 * min.max(1e-4).log10()
   }
 
+  /// For audio that does not continue the last block (after a pause): forgets the filter
+  /// memory and closes the bands. The noise floors stay: it is still the same microphone.
   pub fn reset(&mut self) {
     self.split.iter_mut().chain(self.detect.iter_mut()).for_each(BiquadCascade::reset_state);
     self.wide.reset_state();
-    self.bands = [BandState::new(); BANDS];
+    for band in self.bands.iter_mut() {
+      (band.peak, band.env, band.target, band.gain, band.hold) = (0.0, 0.0, 0.0, 0.0, 0);
+    }
     self.phase = 0;
   }
 
@@ -773,7 +830,7 @@ impl BandExpander {
           if self.single_band { at(&self.wide_buf, i) } else { self.detect_buf.get(k).map_or(0.0, |b| at(b, i)) };
         band.peak = band.peak.max(level.abs());
         if tick {
-          band.control(self.env_release, self.env_slow, self.window_ticks, self.margin, self.range_db);
+          band.control(&self.rates, self.margin, self.range_db);
         }
         if band.target >= band.gain {
           band.gain += (band.target - band.gain) * self.attack;
@@ -792,14 +849,31 @@ impl BandExpander {
 
 impl BandState {
   /// Once per `CONTROL_SAMPLES`: levels, noise floor, gain target.
-  fn control(&mut self, env_release: f32, env_slow: f32, window_ticks: u32, margin_db: f32, range_db: f32) {
+  fn control(&mut self, c: &ControlRates, margin_db: f32, range_db: f32) {
     let peak = if self.peak.is_finite() { self.peak } else { 0.0 };
     self.peak = 0.0;
-    self.env = peak.max(self.env * env_release);
-    self.env_slow += (self.env - self.env_slow) * env_slow;
-    self.window_min = self.window_min.min(self.env_slow);
-    self.ticks += 1;
-    if self.ticks >= window_ticks {
+    self.env = peak.max(self.env * c.env_release);
+    match self.warm_up {
+      // The first level: the slow one starts there, not at zero.
+      None => {
+        self.env_slow = self.env;
+        self.warm_up = Some(c.warm_up_ticks);
+      }
+      Some(left) => {
+        self.env_slow += (self.env - self.env_slow) * c.env_slow;
+        self.warm_up = Some(left.saturating_sub(1));
+      }
+    }
+    if self.warm_up.is_some_and(|left| left > 0) {
+      // Not settled yet: the floor is the slow level itself, so the band stays closed
+      // unless something clearly louder than the average comes.
+      self.window_min = self.env_slow;
+      self.ticks = 0;
+    } else {
+      self.window_min = self.window_min.min(self.env_slow);
+      self.ticks += 1;
+    }
+    if self.ticks >= c.window_ticks {
       self.ticks = 0;
       if let Some(slot) = self.mins.get_mut(self.next_min) {
         *slot = self.window_min;
@@ -1004,15 +1078,38 @@ mod tests {
     let owner = ring.claim_writer(OWNER_PID, 1).unwrap();
     assert!(ring.claim_writer(OWNER_PID, 2).is_none(), "one writer per process");
     let other = ring.claim_writer(OWNER_PID + 1, 1).unwrap();
-    ring.write(owner, &[0.5; 4], RATE, 0);
-    assert_eq!(ring.write_index(), 0, "the first owner was replaced (another process = stale)");
-    ring.write(other, &[0.25, f32::NAN, 100.0, -0.25], RATE, 10_000_000);
+    assert!(!ring.write(owner, &[0.5; 4], RATE, 0), "the first owner was replaced (another process = stale)");
+    assert_eq!(ring.write_index(), 0);
+    assert!(ring.write(other, &[0.25, f32::NAN, 100.0, -0.25], RATE, 10_000_000));
     assert_eq!(ring.write_index(), 4);
     assert_eq!([ring.sample(0), ring.sample(1), ring.sample(2), ring.sample(3)], [0.25, 0.0, 0.0, -0.25]);
     // 48 samples behind the head = 1 ms earlier.
     assert_eq!(ring.capture_qpc_hns(48), Some(10_000_000 - 10_000));
     ring.release_writer(other);
     assert!(ring.claim_writer(OWNER_PID, 3).is_some());
+  }
+
+  #[test]
+  fn ring_owner_that_stopped_writing_is_replaced() {
+    let ring = SidetoneRing::default();
+    let first = ring.claim_writer(OWNER_PID, 1).unwrap();
+    // While the owner writes, another instance of the same process never gets the ring.
+    for _ in 0..3 * STALE_CLAIMS {
+      assert!(ring.write(first, &[0.1; 480], RATE, 0));
+      assert!(ring.claim_writer(OWNER_PID, 2).is_none());
+    }
+    // Its stream stopped without a release: taken over after STALE_CLAIMS tries.
+    let tries = (1..=2 * STALE_CLAIMS).find(|_| ring.claim_writer(OWNER_PID, 2).is_some()).unwrap();
+    assert_eq!(tries, STALE_CLAIMS);
+    assert!(!ring.write(first, &[0.1; 480], RATE, 0), "the old owner is told it lost the ring");
+  }
+
+  #[test]
+  fn reader_plays_a_microphone_at_384_khz() {
+    // One output block needs 3840 ring samples: the queue limits must leave room to start.
+    let run = simulate(&Sim { seconds: 3.0, writer_rate: 384_000, writer_block: 3_840, ..Sim::default() });
+    assert_eq!(run.underruns, 0);
+    assert!(rms(&run.out[2 * RATE as usize..]) > 0.3);
   }
 
   #[test]
@@ -1081,8 +1178,8 @@ mod tests {
     };
     let playing = (0..50).filter_map(|_| step(&mut reader, true)).last().unwrap();
     assert!(playing.playing);
-    // 100 ms without a read (the output engine stood still), then reading again.
-    (0..10).for_each(|_| assert!(step(&mut reader, false).is_none()));
+    // 200 ms without a read (the output engine stood still), then reading again.
+    (0..20).for_each(|_| assert!(step(&mut reader, false).is_none()));
     assert!(!step(&mut reader, true).unwrap().playing, "the old queue is not played");
     let again = (0..50).filter_map(|_| step(&mut reader, true)).last().unwrap();
     assert!(again.playing && again.queued < 1_500, "back at a short queue: {}", again.queued);
@@ -1117,15 +1214,36 @@ mod tests {
   }
 
   #[test]
+  fn expander_closes_on_noise_at_once_and_stays_closed_after_a_reset() {
+    let mut expander = BandExpander::new(RATE as f32);
+    let mut block = noise(2 * RATE as usize, 0.001, 4);
+    let input = block.clone();
+    process_in_blocks(&mut block, |b| expander.process(b));
+    // Not 3 s later, when the first floor window has gone: from the first half second.
+    let half = RATE as usize / 2;
+    let cut = db(rms(&block[half..]) / rms(&input[half..]));
+    assert!(cut < -15.0, "noise from 0.5 s: {cut:.1} dB");
+    // After a pause (mute, pair switch) the floors are still known.
+    expander.reset();
+    let mut block = input.clone();
+    process_in_blocks(&mut block, |b| expander.process(b));
+    let cut = db(rms(&block[..half]) / rms(&input[..half]));
+    assert!(cut < -15.0, "noise right after a reset: {cut:.1} dB");
+  }
+
+  #[test]
   fn expander_opens_for_a_voice_within_two_milliseconds() {
     let mut expander = BandExpander::new(RATE as f32);
-    let onset = 3 * RATE as usize;
-    let mut input = noise(4 * RATE as usize, 0.001, 5);
+    let onset = 5 * RATE as usize;
+    let mut input = noise(6 * RATE as usize, 0.001, 5);
     for (i, s) in input.iter_mut().enumerate().skip(onset) {
       *s += voice(i - onset, 0.03);
     }
     let mut out = input.clone();
-    process_in_blocks(&mut out, |b| expander.process(b));
+    let (before, after) = out.split_at_mut(onset);
+    process_in_blocks(before, |b| expander.process(b));
+    assert!(expander.gain_db() < -17.0, "closed before the voice: {:.1} dB", expander.gain_db());
+    process_in_blocks(after, |b| expander.process(b));
     let ms = RATE as usize / 1000;
     let early = db(rms(&out[onset + 2 * ms..onset + 20 * ms]) / rms(&input[onset + 2 * ms..onset + 20 * ms]));
     let steady = db(rms(&out[onset + 100 * ms..]) / rms(&input[onset + 100 * ms..]));
