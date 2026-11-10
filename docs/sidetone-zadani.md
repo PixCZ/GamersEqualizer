@@ -299,11 +299,11 @@ Příposlech staví tři věci, které echo canceller (větev `aec3-mic-gain`, m
 Nic z toho není součástí kroků 0–8 a o všem rozhoduje člověk. Podklady pro implementaci jsou
 v návodu, krok 9.
 
-| Návrh                                                | Co příposlech dává                                                                 | Co by to vyřešilo                                                                                   |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| A. AEC vypnuté pro dvojici se zapnutým příposlechem  | Zapnutím dvojice uživatel říká „tento výstup jsou sluchátka" (pravidlo 5 návodu).  | Na sluchátkách echo není; AEC3 tam stojí ~9 ms latence a 0,6–0,7 dB hlasu (milník 44).              |
-| B. Kalibrace echa tlačítkem                          | Vlákno daemona umí na povel držet mikrofon i výstup otevřené bez nahrávající aplikace (`sidetone_test_beat`). | Zpoždění a síla echa změřené zkušebním signálem ještě před prvním hovorem.     |
-| C. Klíč cache podle dvojice                          | Matice pracuje s mikrofonem, který se opravdu používá (`get_selected_mic_id`).     | Cache zpoždění a síly echa dnes klíčuje výchozí mikrofon Windows (`apo_link.rs`).                    |
+| Návrh                                               | Co příposlech dává                                                                                            | Co by to vyřešilo                                                                      |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| A. AEC vypnuté pro dvojici se zapnutým příposlechem | Zapnutím dvojice uživatel říká „tento výstup jsou sluchátka" (pravidlo 5 návodu).                             | Na sluchátkách echo není; AEC3 tam stojí ~9 ms latence a 0,6–0,7 dB hlasu (milník 44). |
+| B. Kalibrace echa tlačítkem                         | Vlákno daemona umí na povel držet mikrofon i výstup otevřené bez nahrávající aplikace (`sidetone_test_beat`). | Zpoždění a síla echa změřené zkušebním signálem ještě před prvním hovorem.             |
+| C. Klíč cache podle dvojice                         | Matice pracuje s mikrofonem, který se opravdu používá (`get_selected_mic_id`).                                | Cache zpoždění a síly echa dnes klíčuje výchozí mikrofon Windows (`apo_link.rs`).      |
 
 Proč to stojí za úvahu:
 

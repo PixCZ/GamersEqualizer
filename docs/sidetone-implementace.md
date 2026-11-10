@@ -1280,13 +1280,13 @@ Tabulka do DEVLOGu: režim, perioda mikrofonu, perioda výstupu, změřeno ms, �
 Hudba hraje do sluchátek dvojice 60 s a člověk občas mluví. Jednou s vypnutým a jednou se
 zapnutým příposlechem, obojí se zapnutým „Ukládat debug na disk". Z logu `[Chain]` porovnej:
 
-| Co                                        | Kde v logu                                              | Čekaný výsledek                          |
-| ----------------------------------------- | ------------------------------------------------------- | ---------------------------------------- |
-| stav AEC a zpoždění                       | `AEC on Locked`, `AEC delay`                            | bez rozdílu                              |
-| síla echa                                 | `echo ...` v řádcích `start:`, `changed:` a v souhrnu   | v obou bězích `not confirmed`            |
-| shoda mikrofonu s referencí               | `fit A x B` v souhrnu po 10 s                           | se zapnutým příposlechem ne o víc než 0,2 výš |
-| záložní odhad a zesílení mikrofonu v AEC3 | `AEC fallback echo`, `AEC mic gain`                     | `-40.0`; zesílení bez rozdílu            |
-| ERLE                                      | souhrn po 10 s                                          | bez rozdílu (±1 dB)                      |
+| Co                                        | Kde v logu                                            | Čekaný výsledek                               |
+| ----------------------------------------- | ----------------------------------------------------- | --------------------------------------------- |
+| stav AEC a zpoždění                       | `AEC on Locked`, `AEC delay`                          | bez rozdílu                                   |
+| síla echa                                 | `echo ...` v řádcích `start:`, `changed:` a v souhrnu | v obou bězích `not confirmed`                 |
+| shoda mikrofonu s referencí               | `fit A x B` v souhrnu po 10 s                         | se zapnutým příposlechem ne o víc než 0,2 výš |
+| záložní odhad a zesílení mikrofonu v AEC3 | `AEC fallback echo`, `AEC mic gain`                   | `-40.0`; zesílení bez rozdílu                 |
+| ERLE                                      | souhrn po 10 s                                        | bez rozdílu (±1 dB)                           |
 
 Když se se zapnutým příposlechem objeví `echo X dB under the reference` nebo
 `AEC fallback echo` jiné než `-40.0`: echo canceller bere vlastní hlas z příposlechu za echo.
