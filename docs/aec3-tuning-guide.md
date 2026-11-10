@@ -259,6 +259,9 @@ záměr je:
 
 ### 11.2 Co měřič čte na nahrávkách
 
+**Celý postup testu na nahrávkách, včetně nasimulovaného silného echa, je v
+`docs/aec3-echo-strength-test.md`. Postupuj podle něj;** zbytek této podkapitoly je jen přehled.
+
 ```powershell
 $env:VARIANTS = ""
 cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture

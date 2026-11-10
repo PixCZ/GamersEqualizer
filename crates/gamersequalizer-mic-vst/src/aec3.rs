@@ -963,7 +963,7 @@ mod tests {
         let mut aec = EchoCanceller3::new();
         aec.variant = variant.into();
         aec.rebuild();
-        let (out, erle) = run_gained(&mut aec, &refs, &mic, &gains);
+        let (out, erle, _) = run_gained(&mut aec, &refs, &mic, &gains);
         let label = if variant.trim().is_empty() { "(as built)" } else { variant.trim() };
         let strength = match aec.echo_strength_db() {
           Some((db, true)) => format!("<{db:.0}"),
@@ -978,6 +978,101 @@ mod tests {
         }
       }
     }
+  }
+
+  /// Echo strength on the debug captures: what the meter reads, what follows from it, and how
+  /// it moves over a capture. Each capture (`CAP=a,b`: only those) once per scene (`SCENES`,
+  /// `;` between them). A scene is a list of `apply_variant` keys and of:
+  /// - `micscale=<dB>`: the raw mic that much louder, so the echo is that much stronger against
+  ///   the reference, as with speakers close to the mic (no capture has an echo stronger than
+  ///   37 dB under the reference). The mic gain asked for goes down by as much, as the leveler
+  ///   would have learned the louder voice.
+  /// - `seed=<dB>` or `seed=auto`: the strength a session remembers from the one before (the
+  ///   daemon's cache); `auto` is what the scene before this one measured.
+  ///
+  /// Columns: `meter`: the strength at the end (dB under the reference, `<`: only a bound);
+  /// `check`: the same measured another way, the median of mic level - reference level over the
+  /// windows Silero finds the echo alone in while the reference is over -30 dBFS (the mic's
+  /// noise is not taken off: for a weak echo this reads higher than the meter); `fallb`: the
+  /// fallback echo estimate at the end; `start`: dB removed from the echo-alone windows in the
+  /// first 0.1-0.5 s of loud reference, where AEC3 has no filter yet and the fallback is all
+  /// it has; the rest as in `capture_tuning_report`, from 3 s on. Under each line the trace: when the reported
+  /// strength, the fallback and the mic gain changed, as the debug log would show it.
+  /// `SCENES=";micscale=20;micscale=20 seed=auto" cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture`
+  #[test]
+  #[ignore = "needs private recordings"]
+  fn capture_echo_report() {
+    let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_data/private");
+    let scenes = std::env::var("SCENES").unwrap_or(";micscale=20;micscale=20 seed=auto".into());
+    let only = std::env::var("CAP").unwrap_or_default();
+    let Ok(dirs) = std::fs::read_dir(base.join("captures")) else { return eprintln!("no captures") };
+    let mut dirs: Vec<_> = dirs.flatten().map(|d| d.path()).collect();
+    dirs.sort();
+    let cell = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.1}"));
+    for dir in dirs {
+      let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+      if !only.is_empty() && !only.split(',').any(|c| c == name) {
+        continue;
+      }
+      let (Some(mic), Some(refs)) = (read_capture(&dir, "01_mic_raw.wav"), read_capture(&dir, "03_ref_aec.wav")) else {
+        continue;
+      };
+      let heard = sort_windows(&mic, &refs);
+      let level = |x: &[f32], w: usize| energy_db(x.get(w * WINDOW..(w + 1) * WINDOW).unwrap_or_default());
+      let alone = |from: usize, to: usize| (from..to.min(heard.len())).filter(|w| heard[*w] == Heard::EchoAlone);
+      let loud_alone = alone(COLD_WINDOWS, heard.len()).filter(|w| level(&refs, *w) > -30.0);
+      let check = median(loud_alone.map(|w| level(&mic, w) - level(&refs, w)).collect());
+      let music_at = (0..heard.len()).find(|w| level(&refs, *w) > -30.0).unwrap_or(heard.len());
+      eprintln!("\n{name}: {} windows with the echo alone", alone(COLD_WINDOWS, heard.len()).count());
+      eprintln!(
+        "  {:<28} gain  meter  check fallb  start   echo   left  voice  >6dB >10dB  onset  4-8k   ERLE",
+        "scene"
+      );
+      let mut measured_before = None;
+      for scene in scenes.split(';') {
+        let key = |name: &str| scene.split_whitespace().find_map(|t| t.strip_prefix(name));
+        let scale_db: f32 = key("micscale=").map_or(0.0, |v| v.parse().expect("micscale=<dB>"));
+        let scaled: Vec<f32> = mic.iter().map(|s| s * 10f32.powf(scale_db / 20.0)).collect();
+        let gains: Vec<f32> = capture_gains(&dir, mic.len()).iter().map(|g| g - scale_db).collect();
+        let mut aec = EchoCanceller3::new();
+        aec.variant = scene.into();
+        aec.rebuild();
+        match key("seed=") {
+          Some("auto") => measured_before.into_iter().for_each(|db| aec.seed_echo_strength_db(db)),
+          Some(db) => aec.seed_echo_strength_db(db.parse().expect("seed=<dB>|auto")),
+          None => {}
+        }
+        let (out, erle, trace) = run_gained(&mut aec, &refs, &scaled, &gains);
+        let late = out.get(AEC3_LATENCY_SAMPLES..).unwrap_or_default();
+        let start = median(alone(music_at + 1, music_at + 5).map(|w| level(&scaled, w) - level(late, w)).collect());
+        let meter = match aec.echo_strength_db() {
+          Some((db, true)) => format!("<{db:.1}"),
+          Some((db, false)) => format!("{db:.1}"),
+          None => "-".into(),
+        };
+        measured_before = aec.echo_strength_db().filter(|s| !s.1).map(|s| s.0);
+        eprintln!(
+          "  {:<28} {:4.0} {meter:>6} {:>6} {:5.0} {:>6} {}",
+          if scene.trim().is_empty() { "(as recorded)" } else { scene.trim() },
+          aec.mic_gain_db(),
+          cell(check.map(|c| c + scale_db)),
+          aec.fallback_echo_db(),
+          cell(start),
+          window_report(&scaled, &out, &erle, &heard)
+        );
+        let clipped = scaled.iter().filter(|s| s.abs() > 1.0).count();
+        if clipped > 0 {
+          eprintln!("    {clipped} samples of the scaled mic are over full scale: use a smaller micscale");
+        }
+        eprintln!("    trace: {}", if trace.is_empty() { "nothing changed".into() } else { trace.join(", ") });
+      }
+    }
+  }
+
+  /// The middle value; None for none.
+  fn median(mut values: Vec<f32>) -> Option<f32> {
+    values.sort_by(f32::total_cmp);
+    values.get(values.len() / 2).copied()
   }
 
   /// Each 100 ms window of a capture by what Silero hears on the raw mic: a voice (over 0.5 in
@@ -1175,8 +1270,8 @@ mod tests {
   /// does not use it), `masks=<k>` (suppressor thresholds times k), `erle=<lf>,<hf>`
   /// (`erle.max_l` / `max_h`, defaults 4 / 1.5), `hf=<n>` (`bands_in_limiting_gain`, default 1,
   /// 0 = bins over 2 kHz no longer follow the 2 kHz bin), `len=<blocks>` (filter length,
-  /// default 13 = 52 ms), `gain=<x>` (fallback echo gain, default 0.01). `pregain=` belongs
-  /// to the report.
+  /// default 13 = 52 ms), `gain=<x>` (fallback echo gain, default 0.01). `pregain=`,
+  /// `micscale=` and `seed=` belong to the reports.
   pub(super) fn apply_variant(cfg: &mut EchoCanceller3Config, spec: &str, mic_gain: f32) {
     for token in spec.split_whitespace() {
       let (key, value) = token.split_once('=').unwrap_or((token, ""));
@@ -1184,7 +1279,7 @@ mod tests {
       let mut number = || values.next().unwrap_or_else(|| panic!("AEC3 variant {token:?}: value missing"));
       let tunings = [&mut cfg.suppressor.normal_tuning, &mut cfg.suppressor.nearend_tuning];
       match key {
-        "pregain" => {}
+        "pregain" | "micscale" | "seed" => {}
         "open" => {
           for mask in tunings.into_iter().flat_map(|t| [&mut t.mask_lf, &mut t.mask_hf]) {
             (mask.enr_transparent, mask.enr_suppress) = (99.0, 100.0);
@@ -1245,17 +1340,39 @@ mod tests {
   }
 
   /// `run` in 480-sample blocks with the mic gain the chain asks for in each (`gains`, dB).
-  /// Also AEC3's own ERLE estimate after each block.
-  fn run_gained(aec: &mut EchoCanceller3, refs: &[f32], mic: &[f32], gains: &[f32]) -> (Vec<f32>, Vec<f32>) {
-    let (mut out, mut erle) = (Vec::with_capacity(mic.len()), Vec::new());
+  /// Also AEC3's own ERLE estimate after each block, and a trace: when the reported echo
+  /// strength, the fallback echo estimate and the mic gain changed.
+  fn run_gained(
+    aec: &mut EchoCanceller3,
+    refs: &[f32],
+    mic: &[f32],
+    gains: &[f32],
+  ) -> (Vec<f32>, Vec<f32>, Vec<String>) {
+    let (mut out, mut erle, mut trace) = (Vec::with_capacity(mic.len()), Vec::new(), Vec::new());
+    let state = |aec: &EchoCanceller3| (aec.echo_strength_db(), aec.fallback_echo_db(), aec.mic_gain_db());
+    let mut last = state(aec);
     for (k, (r, m)) in refs.chunks(480).zip(mic.chunks(480)).enumerate() {
       aec.set_mic_gain_db(gains.get(k).copied().unwrap_or(0.0));
       let mut b = m.to_vec();
       aec.process_block(r, &mut b);
       out.extend_from_slice(&b);
       erle.push(aec.erle_db());
+      let now = state(aec);
+      let at = (k + 1) as f32 / 100.0;
+      match now.0.filter(|_| now.0 != last.0) {
+        Some((db, true)) => trace.push(format!("{at:.1} s echo within the noise (under {db:.1})")),
+        Some((db, false)) => trace.push(format!("{at:.1} s echo {db:.1}")),
+        None => {}
+      }
+      if now.1 != last.1 {
+        trace.push(format!("{at:.1} s fallback {} -> {}", last.1, now.1));
+      }
+      if now.2 != last.2 {
+        trace.push(format!("{at:.1} s mic gain {} -> {}", last.2, now.2));
+      }
+      last = now;
     }
-    (out, erle)
+    (out, erle, trace)
   }
 
   /// Direct path at `delay` plus an exponentially decaying noise tail (`rt60` seconds).

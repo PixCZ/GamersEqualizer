@@ -1856,6 +1856,17 @@ that the linear filter has it either way.
   - the same three values in the 10 s summary, after the ERLE;
   - `[ApoLink] remembered echo strength for this mic/output: ...` / `saving echo strength ...`.
 - **`capture_tuning_report`**: two more columns, `strength` (`<`: a bound) and `fallb`.
+- **`aec3::tests::capture_echo_report`** (ignored) and `docs/aec3-echo-strength-test.md`: the
+  test on the captures. Per capture and scene: the meter against a second estimate (`check`:
+  mic level - reference level in the windows Silero finds the echo alone in), the fallback,
+  the dB removed in the first 0.1-0.5 s of loud reference (`start`), and a trace of when the
+  reported strength, the fallback and the mic gain changed. Scenes: `micscale=<dB>` makes the
+  raw mic louder, i.e. the echo that much stronger against the reference with the real room,
+  mic and voice (no capture has a strong echo); `seed=auto` hands over the strength the scene
+  before measured, as the daemon's cache does in the next session; `gain=0.01` pins the
+  fallback at the old -40 dB for comparison. On the synthetic strong echo (22 dB under the
+  reference): `start` 1.1 dB in a first session and with the fallback pinned, 17.0 dB with the
+  strength remembered, the columns from 3 s on equal.
 - **Tests**: with a louder voice in 40 % of the windows the meter reads -20.0 / -50.0 dB for
   echoes 20 / 50 dB under a reference that starts after 2 s, -20.1 / -49.6 dB under one that
   plays from the start, 4.9 dB for an echo 5 dB over the reference (fallback 0 dB), and a
