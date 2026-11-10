@@ -38,7 +38,7 @@ const RING_GUARD: usize = 256;
 const HNS_PER_SEC: f64 = 10_000_000.0;
 
 pub const GAIN_DB_MIN: f32 = -40.0;
-pub const GAIN_DB_MAX: f32 = 12.0;
+pub const GAIN_DB_MAX: f32 = 24.0;
 pub const LOW_CUT_HZ_MIN: f32 = 80.0;
 pub const LOW_CUT_HZ_MAX: f32 = 400.0;
 pub const HIGH_CUT_HZ_MIN: f32 = 4_000.0;
@@ -330,7 +330,7 @@ impl Default for SidetoneSettings {
     Self {
       enabled: false,
       noise_mode: NoiseMode::Expander,
-      gain_db: -20.0,
+      gain_db: 0.0,
       low_cut_hz: 200.0,
       high_cut_hz: 0.0,
       gate_margin_db: 10.0,
@@ -1067,7 +1067,7 @@ mod tests {
     let newer = r#"{"pairs":[{"mic_id":"m","output_id":"o","noise_mode":77,"future":true}],"extra":1}"#;
     let parsed = SidetonePairs::from_json(newer).unwrap();
     let p = parsed.find("m", "o").unwrap();
-    assert_eq!((p.noise_mode, p.gain_db, p.enabled), (77, -20.0, false));
+    assert_eq!((p.noise_mode, p.gain_db, p.enabled), (77, 0.0, false));
     assert_eq!(p.settings().noise_mode, NoiseMode::Expander);
     assert!(SidetonePairs::from_json("{ not json").is_err());
   }

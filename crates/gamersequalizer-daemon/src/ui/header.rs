@@ -22,7 +22,7 @@ enum Nav {
 }
 
 /// Navigation order: (tab, icon, label, short explanation).
-const NAV: [Nav; 10] = [
+const NAV: [Nav; 12] = [
   Nav::Section(tk("Output")),
   Nav::Item(ActiveTab::Mixer, icons::VOLUME, tk("Mixer & device"), tk("Volumes per app group, output device, ChatMix")),
   Nav::Item(
@@ -34,6 +34,8 @@ const NAV: [Nav; 10] = [
   Nav::Item(ActiveTab::Game, icons::GAME, tk("Game"), tk("Game profiles, automatic game detection")),
   Nav::Item(ActiveTab::Chat, icons::CHAT, tk("Chat"), tk("Voice EQ for Discord & co., instead of the game profile")),
   Nav::Item(ActiveTab::Media, icons::MEDIA, tk("Media"), tk("Music / video EQ for browsers and players")),
+  Nav::Section(tk("Sidetone")),
+  Nav::Item(ActiveTab::Sidetone, icons::HEADPHONES, tk("Sidetone"), tk("Your own voice in the headphones")),
   Nav::Section(tk("Input")),
   Nav::Item(ActiveTab::Mic, icons::MIC, tk("Microphone"), tk("Echo cancellation, noise suppression, mic EQ")),
   Nav::Section(tk("Diagnostics")),

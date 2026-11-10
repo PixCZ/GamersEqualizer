@@ -36,7 +36,7 @@ const MAX_DEPTH_DB: f32 = 40.0;
 
 /// All three suppressors, built once (not on the audio thread), one running at a time.
 pub struct SidetoneDenoiser {
-  ns: AudioProcessing,
+  ns: Box<AudioProcessing>,
   rnnoise: Box<DenoiseState<'static>>,
   /// None: the weights did not load; RNNoise (2017) stands in.
   rnnoise2: Option<Box<DenoiseState2>>,
@@ -44,15 +44,15 @@ pub struct SidetoneDenoiser {
   running: Option<NoiseMode>,
   /// Blocks have been whole frames so far: processed in place, without the queue.
   direct: bool,
-  pending: [f32; FRAME],
+  pending: Vec<f32>,
   pending_len: usize,
-  ready: [f32; QUEUE],
+  ready: Vec<f32>,
   ready_start: usize,
   ready_len: usize,
   /// The last two input frames: the dry signal, delayed like the network's output.
-  dry: [[f32; FRAME]; 2],
-  scratch_in: [f32; FRAME],
-  scratch_out: [f32; FRAME],
+  dry: [Vec<f32>; 2],
+  scratch_in: Vec<f32>,
+  scratch_out: Vec<f32>,
 }
 
 impl Default for SidetoneDenoiser {
@@ -73,19 +73,19 @@ impl SidetoneDenoiser {
       ..Default::default()
     };
     Self {
-      ns: AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build(),
+      ns: Box::new(AudioProcessing::builder().config(config).capture_config(stream).render_config(stream).build()),
       rnnoise: DenoiseState::new(),
       rnnoise2: DenoiseState2::with_model(rnnoise2::Model::Full).ok(),
       running: None,
       direct: true,
-      pending: [0.0; FRAME],
+      pending: vec![0.0; FRAME],
       pending_len: 0,
-      ready: [0.0; QUEUE],
+      ready: vec![0.0; QUEUE],
       ready_start: 0,
       ready_len: 0,
-      dry: [[0.0; FRAME]; 2],
-      scratch_in: [0.0; FRAME],
-      scratch_out: [0.0; FRAME],
+      dry: [vec![0.0; FRAME], vec![0.0; FRAME]],
+      scratch_in: vec![0.0; FRAME],
+      scratch_out: vec![0.0; FRAME],
     }
   }
 
@@ -133,7 +133,7 @@ impl SidetoneDenoiser {
     if self.direct {
       // From here on through the queue, with one frame of silence ahead so it never runs dry.
       self.direct = false;
-      self.ready = [0.0; QUEUE];
+      self.ready.fill(0.0);
       self.ready_start = 0;
       self.ready_len = FRAME;
     }
@@ -143,9 +143,10 @@ impl SidetoneDenoiser {
         self.pending_len += 1;
       }
       if self.pending_len >= FRAME {
-        let mut frame = self.pending;
+        let mut frame = std::mem::take(&mut self.pending);
         self.run_frame(mode, dry_share, &mut frame);
         self.push_ready(&frame);
+        self.pending = frame;
         self.pending_len = 0;
       }
       *sample = self.pop_ready();
@@ -158,21 +159,26 @@ impl SidetoneDenoiser {
     self.direct = true;
     self.pending_len = 0;
     self.ready_len = 0;
-    self.dry = [[0.0; FRAME]; 2];
-    let silence = [0.0f32; FRAME];
+    if let Some(d0) = self.dry.first_mut() {
+      d0.fill(0.0);
+    }
+    if let Some(d1) = self.dry.get_mut(1) {
+      d1.fill(0.0);
+    }
+    self.scratch_in.fill(0.0);
     for _ in 0..FLUSH_FRAMES {
       match mode {
         NoiseMode::RnNoise => {
-          self.rnnoise.process_frame(&mut self.scratch_out, &silence);
+          self.rnnoise.process_frame(&mut self.scratch_out, &self.scratch_in);
         }
         NoiseMode::RnNoise2 => {
           if let Some(net) = self.rnnoise2.as_mut() {
-            net.process_frame(&mut self.scratch_out, &silence);
+            net.process_frame(&mut self.scratch_out, &self.scratch_in);
           }
         }
         // The WebRTC suppressor holds a third of a frame of audio from its last run.
         NoiseMode::WebRtcNs => {
-          let _ = self.ns.process_capture_f32(&[silence.as_slice()], &mut [self.scratch_out.as_mut_slice()]);
+          let _ = self.ns.process_capture_f32(&[&self.scratch_in], &mut [&mut self.scratch_out]);
         }
         NoiseMode::Off | NoiseMode::Expander => {}
       }
@@ -180,17 +186,18 @@ impl SidetoneDenoiser {
   }
 
   /// One frame through the running suppressor, in place.
-  fn run_frame(&mut self, mode: NoiseMode, dry_share: f32, frame: &mut [f32; FRAME]) {
-    self.scratch_in = *frame;
-    // The dry signal each mode mixes back in: delayed like its output.
-    let dry = match mode {
-      NoiseMode::RnNoise2 => self.dry.get(1).copied(),
-      _ => self.dry.first().copied(),
+  fn run_frame(&mut self, mode: NoiseMode, dry_share: f32, frame: &mut [f32]) {
+    if let (Some(dst), Some(src)) = (self.scratch_in.get_mut(..FRAME), frame.get(..FRAME)) {
+      dst.copy_from_slice(src);
     }
-    .unwrap_or([0.0; FRAME]);
+    // The dry signal each mode mixes back in: delayed like its output.
+    let dry_idx = match mode {
+      NoiseMode::RnNoise2 => 1,
+      _ => 0,
+    };
     let ran = match mode {
       NoiseMode::WebRtcNs => {
-        self.ns.process_capture_f32(&[self.scratch_in.as_slice()], &mut [self.scratch_out.as_mut_slice()]).is_ok()
+        self.ns.process_capture_f32(&[&self.scratch_in], &mut [&mut self.scratch_out]).is_ok()
       }
       NoiseMode::RnNoise | NoiseMode::RnNoise2 => {
         self.scratch_in.iter_mut().for_each(|s| *s *= I16_SCALE);
@@ -202,6 +209,7 @@ impl SidetoneDenoiser {
             self.rnnoise.process_frame(&mut self.scratch_out, &self.scratch_in);
           }
         }
+        let dry = self.dry.get(dry_idx).map(Vec::as_slice).unwrap_or(&[]);
         for (out, dry) in self.scratch_out.iter_mut().zip(dry.iter()) {
           *out = *out / I16_SCALE * (1.0 - dry_share) + dry * dry_share;
         }
@@ -209,17 +217,22 @@ impl SidetoneDenoiser {
       }
       NoiseMode::Off | NoiseMode::Expander => false,
     };
-    let [newest, older] = &mut self.dry;
-    *older = *newest;
-    *newest = *frame;
+    if let (Some(d0), Some(d1)) = (self.dry.first().cloned(), self.dry.get_mut(1)) {
+      d1.copy_from_slice(&d0);
+    }
+    if let (Some(d0), Some(src)) = (self.dry.first_mut(), frame.get(..FRAME)) {
+      d0.copy_from_slice(src);
+    }
     if ran {
-      for (dst, src) in frame.iter_mut().zip(self.scratch_out.iter()) {
-        *dst = if src.is_finite() { *src } else { 0.0 };
+      if let Some(dst) = frame.get_mut(..FRAME) {
+        for (dst, src) in dst.iter_mut().zip(self.scratch_out.iter()) {
+          *dst = if src.is_finite() { *src } else { 0.0 };
+        }
       }
     }
   }
 
-  fn push_ready(&mut self, frame: &[f32; FRAME]) {
+  fn push_ready(&mut self, frame: &[f32]) {
     for sample in frame {
       let index = (self.ready_start + self.ready_len) % QUEUE;
       if let Some(slot) = self.ready.get_mut(index) {

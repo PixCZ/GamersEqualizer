@@ -76,6 +76,11 @@ pub fn init(process: &'static str) {
   if !file_ok {
     log::warn!("[Log] could not open {}, logging to stderr only", path.display());
   }
+  let orig_hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |info| {
+    log::error!("[PANIC] {info}");
+    orig_hook(info);
+  }));
   // The other process may switch it: follow the marker file.
   let spawned = std::thread::Builder::new().name("log-debug-marker".into()).spawn(|| loop {
     std::thread::sleep(DEBUG_MARKER_CHECK);

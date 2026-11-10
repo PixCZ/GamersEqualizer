@@ -15,6 +15,7 @@ pub mod tab_log;
 pub mod tab_mic;
 pub mod tab_mixer;
 pub mod tab_settings;
+pub mod tab_sidetone;
 pub mod theme;
 pub mod window_state;
 

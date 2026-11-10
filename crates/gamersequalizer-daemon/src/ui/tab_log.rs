@@ -134,6 +134,9 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   ui.horizontal(|ui| {
     ui.label(tr("Search:"));
     filters_changed |= ui.text_edit_singleline(&mut view.search).changed();
+    if ui.button(format!("📋  {}", tr("Copy"))).on_hover_text(tr("Copy the shown log lines to the clipboard.")).clicked() {
+      ui.ctx().copy_text(view.buffer.clone());
+    }
     if ui.button(format!("📂  {}", tr("Open log folder"))).clicked() {
       open_folder();
     }

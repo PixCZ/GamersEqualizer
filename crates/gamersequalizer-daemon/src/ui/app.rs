@@ -180,6 +180,9 @@ impl eframe::App for GamersEqualizerApp {
         render_nav(ui, &mut self.state);
       });
     let page = chrome.inner_margin(egui::Margin { left: 24, right: 24, top: 8, bottom: 8 });
+    if self.state.active_tab != ActiveTab::Sidetone {
+      self.state.sidetone_ui.testing = false;
+    }
     egui::CentralPanel::default().frame(page).show(ui, |ui| {
       match self.state.active_tab {
         // The mixer strips fill the window height (it scrolls itself); so does the mic page.
@@ -191,6 +194,7 @@ impl eframe::App for GamersEqualizerApp {
           // Log page's "follow" offset (f32::MAX) left the other pages scrolled past their content.
           egui::ScrollArea::vertical().id_salt(("page", tab)).auto_shrink([false, false]).show(ui, |ui| match tab {
             ActiveTab::Headphones => super::tab_headphones::render_tab_headphones(ui, &mut self.state, &mut self.win_audio),
+            ActiveTab::Sidetone => super::tab_sidetone::render_tab_sidetone(ui, &mut self.state, &mut self.win_audio),
             ActiveTab::Settings => super::tab_settings::render_tab_settings(ui, &mut self.state),
             other => render_tab_eq(ui, &mut self.state, other),
           });

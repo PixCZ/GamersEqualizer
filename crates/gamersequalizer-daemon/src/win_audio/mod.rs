@@ -15,6 +15,7 @@ pub mod mic_gain;
 pub mod mic_stream;
 pub mod policy_config;
 pub mod shell;
+pub mod sidetone;
 pub mod stream_router;
 
 pub use chatmix::{AudioBus, AudioSessionInfo, ChatMixController};
