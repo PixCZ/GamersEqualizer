@@ -7,6 +7,7 @@ mod dpdfnet;
 pub mod latency_meter;
 pub mod plugin;
 pub mod shared_memory;
+pub mod sidetone_denoise;
 pub mod voice_leveler;
 pub mod vst_bridge;
 
