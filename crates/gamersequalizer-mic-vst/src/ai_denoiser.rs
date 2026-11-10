@@ -2584,6 +2584,8 @@ pub(crate) mod tests {
   /// by more than 6 dB, then what happens to loud windows without a voice (Silero under 0.15)
   /// and to voice windows. For trying a change on a real capture: with unchanged code a capture
   /// of the same build replays without a difference. DFN3, gate auto, no lookahead.
+  /// `AEC_WAV=<capture>_v<n>.wav` takes the denoiser input from `test_data/private/aec_ab/`
+  /// instead (an AEC3 variant written by `aec3::tests::capture_tuning_report` with `WAV=1`).
   /// `CAP=20261109-204900 cargo test -p gamersequalizer-mic-vst --release capture_replay_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
@@ -2594,7 +2596,9 @@ pub(crate) mod tests {
       return;
     }
     let dir = format!("../private/captures/{cap}");
-    let (x, live) = (read_wav_48k(&format!("{dir}/04_after_aec.wav")), read_wav_48k(&format!("{dir}/05_after_denoise.wav")));
+    let aec_wav =
+      std::env::var("AEC_WAV").map_or(format!("{dir}/04_after_aec.wav"), |name| format!("../private/aec_ab/{name}"));
+    let (x, live) = (read_wav_48k(&aec_wav), read_wav_48k(&format!("{dir}/05_after_denoise.wav")));
     let vars = std::fs::read_to_string(std::path::Path::new(FIXTURES).join(&dir).join("vars.tsv")).unwrap();
     let mut lines = vars.lines();
     let col = lines.next().unwrap().split('\t').position(|h| h == "leveler_gain_db").unwrap();

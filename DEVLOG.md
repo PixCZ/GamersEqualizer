@@ -1587,3 +1587,68 @@ Capture `20261109-210655`: music from the speakers at -18 dBFS, its echo at the 
   high-band settings do not change it).
 
 Not heard live; needs the app and the APO rebuilt.
+
+## Milestone 43: AEC3 gets the mic at call level (mic gain from the leveler); capture tuning report (2026-11-10)
+
+Written on the Mac: no captures there and the workspace does not build (`windows` crates), so
+`aec3.rs` was compiled and tested through a scratch crate that includes the file, and
+`plugin.rs` / `ai_denoiser.rs` were edited without a compiler. Nothing here is measured on a
+capture or heard live. Analysis: `docs/mic-aec3-voice-analysis.md`; how to finish the tuning on
+the captures: `docs/aec3-tuning-guide.md`.
+
+- **Cause found in AEC3's source** (`sonora-aec3` 0.3.0). It accepts a converged filter only on
+  mic blocks over RMS 50 in int16 scale, -56.3 dBFS (`subtractor_output_analyzer.rs:41-50`), and
+  uses its linear filter only after that or after its own delay estimator locked
+  (`aec_state.rs:269-281`). The captures have the echo at -55..-70 dBFS and the voice at
+  -45..-60 dBFS: AEC3 stays on `default_gain` x reference and ducks whatever is under it.
+  Milestone 42's 0.01 is the value AEC3 has built in for its "no echo" mode, so that knob is used up.
+- **Reproduced synthetically**, which milestone 42 could not: music-like far end at -18 dBFS, its
+  echo at -68 dBFS on the mic, room noise -76 dBFS, voice -46 dBFS. Voice -4.7 dB, its 4-8 kHz
+  band -15 dB, 58 % of the loud 10 ms voice blocks cut by over 6 dB; AEC3's own ERLE estimate 0.2 dB.
+- **Change: `EchoCanceller3::set_mic_gain_db`.** The mic goes into AEC3 louder and comes out
+  quieter by the same gain. `plugin.rs` passes the leveler's boost less what the leveler's
+  target is over its default, i.e. the gain that brings the speech to about -24 dBFS.
+  - 6 dB steps (nearest, 1.5 dB hysteresis), 0..24 dB.
+  - A step change rebuilds AEC3, because the fallback echo gain is scaled with it (0.01 x gain:
+    the estimate stays where the captures had it). That costs the learned echo path and 430
+    samples of silence, so it waits until the request held for 2 s and then for a frame 18 dB
+    under the loudest since (6 s at most). Before the first frame it is applied at once.
+  - `sonora` clamps its float input and output at full scale and reads 32700 / 32768 as a
+    saturated capture: a frame whose peak would pass 0.9 gets less gain for that frame (never
+    under 1, so without a mic gain nothing changes).
+- **Synthetic results** (long room, 200 ms tail; voice / 4-8 kHz band / loud blocks cut > 6 dB):
+
+| Echo, voice on the mic (dBFS)    | No mic gain            | With mic gain              | Echo alone removed |
+| -------------------------------- | ---------------------- | -------------------------- | ------------------ |
+| -68, -46                         | -4.7 dB, -15 dB, 58 %  | 24 dB: -1.4, -2.4, 16 %    | 13.2 -> 14.0 dB    |
+| -55, -46                         | -4.9 dB, -14 dB, 45 %  | 24 dB: -3.5, -7.8, 29 %    | 17.6 -> 22.3 dB    |
+| -70, -40 (headphones' bleed)     | -1.9 dB, -4.2 dB, 28 % | 12 dB: -1.1, -1.4, 14 %    | 11.8 -> 12.5 dB    |
+| -40, -30 (call level)            | -3.2 dB, -8.5 dB, 37 % | 6 dB: -3.2, -8.4, 36 %     | 20.8 -> 22.3 dB    |
+
+  More gain than the leveler asks for hurts again (voice -33 dBFS with 24 dB: -8.5 dB instead of
+  -5.6 with 12 dB): the speech must stay around -20 dBFS inside AEC3.
+- **Tests** (`aec3.rs`): quiet mic regression (-5.4 / -19 dB without the gain, -1.6 / -2.4 dB
+  with 24 dB), no harm at call levels, a shout 46 dB over the level does not clip, the step /
+  wait logic.
+- **`aec3::tests::capture_tuning_report`** (ignored): every capture through AEC3 once per
+  variant (`VARIANTS`), 100 ms windows sorted by Silero on the raw mic, one line per variant:
+  echo removed and left, voice lost, share lost over 6 / 10 dB, word onsets, 4-8 kHz band, AEC3's
+  ERLE. Variants come from the test-only `apply_variant` (`open`, `masks=`, `erle=`, `hf=`,
+  `len=`, `gain=`) without a rebuild; `WAV=1` writes the outputs, and
+  `ai_denoiser::tests::capture_replay_report` takes one with `AEC_WAV`. `capture_export` and
+  `capture_replay_report` now use the capture's leveler gain as mic gain, as the chain does.
+- **Also seen synthetically, not changed** (for the captures to decide):
+  - Where the linear filter works well (short room, it alone removes 40 dB), the suppressor adds
+    nothing to the echo removed and costs the voice 6 dB (-7.8 dB against -1.9 dB with `open`).
+    AEC3 caps its ERLE estimate at 6 dB below 4 kHz and 1.8 dB above (`erle.max_l` / `max_h`);
+    `erle=30,10` gives -4.6 dB, `erle=100,30` -4.1 dB for 1-3 dB less echo removed. In the long
+    room (the filter removes 11.6 dB) the caps matter little (-3.2 -> -2.6 dB).
+  - `high_frequency_suppression.bands_in_limiting_gain` = 0 (bins over 2 kHz no longer follow
+    the 2 kHz bin) with `erle=30,10`: 4-8 kHz band -8.5 -> -5.5 dB.
+  - A 128 ms filter (`len=32`) removes 32 dB instead of 21 in the long room.
+- **Refuted synthetically:** that AEC3 reads the reference 20 ms late until its own delay
+  estimator locks (`statistics().delay_ms` is 0 from the start; `default_delay` 1 and
+  `use_external_delay_estimator` change nothing).
+- **Open:** all of it on the captures and live (rebuild and reinstall the APO). The rebuild at
+  a gain step is audible if it lands in speech. With the leveler off there is no mic gain. No
+  capture has speech from the speakers. The reference is still a mono downmix.
