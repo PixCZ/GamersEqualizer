@@ -272,10 +272,12 @@ Kroky, příkazy, kód k vložení a co má být výsledkem: `docs/sidetone-impl
 | 2    | mic APO zapisuje do bufferu, APO pozná své zařízení    | zbývá  |
 | 3    | Output EQ APO přimíchává                               | zbývá  |
 | 4    | zkouška na zvuku bez UI; obsahuje loopback příposlech? | zbývá  |
+| 4.5  | bere se loopback před hlasitostí Windows, nebo za ní?  | zbývá  |
 | 5    | daemon: matice, vlákno, držení streamů                 | zbývá  |
 | 6    | sekce „Příposlech" v okně                              | zbývá  |
 | 7    | nízká latence                                          | zbývá  |
 | 8    | měření: latence, AEC, 1 vs 4 pásma, ztráta hlasu       | zbývá  |
+| 9    | návrh: co z příposlechu získá echo canceller (7.2)     | čeká   |
 
 ### 7.1 Později, jen když expander nestačí a rámcové režimy jsou moc pozdě
 
@@ -290,6 +292,37 @@ Kroky, příkazy, kód k vložení a co má být výsledkem: `docs/sidetone-impl
   hlásku, ale stačí na „posledních 2 s nikdo nemluvil → citlivost o 6 dB výš".
 - Hlasitost podle naučené úrovně hlasu (`mic_leveler_level_db_x10`): stejně hlasitý příposlech
   s každým mikrofonem.
+
+### 7.2 Co z příposlechu získá echo canceller (návrh, nerozhodnuto)
+
+Příposlech staví tři věci, které echo canceller (větev `aec3-mic-gain`, milníky 43–50) nemá.
+Nic z toho není součástí kroků 0–8 a o všem rozhoduje člověk. Podklady pro implementaci jsou
+v návodu, krok 9.
+
+| Návrh                                                | Co příposlech dává                                                                 | Co by to vyřešilo                                                                                   |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| A. AEC vypnuté pro dvojici se zapnutým příposlechem  | Zapnutím dvojice uživatel říká „tento výstup jsou sluchátka" (pravidlo 5 návodu).  | Na sluchátkách echo není; AEC3 tam stojí ~9 ms latence a 0,6–0,7 dB hlasu (milník 44).              |
+| B. Kalibrace echa tlačítkem                          | Vlákno daemona umí na povel držet mikrofon i výstup otevřené bez nahrávající aplikace (`sidetone_test_beat`). | Zpoždění a síla echa změřené zkušebním signálem ještě před prvním hovorem.     |
+| C. Klíč cache podle dvojice                          | Matice pracuje s mikrofonem, který se opravdu používá (`get_selected_mic_id`).     | Cache zpoždění a síly echa dnes klíčuje výchozí mikrofon Windows (`apo_link.rs`).                    |
+
+Proč to stojí za úvahu:
+
+- **A.** Rozpoznat „žádné echo" z měření se nepodařilo spolehlivě. Vypínání podle sondy echa
+  kmitalo (milník 36). Měřič síly echa bral hlas za echo (milník 46) a po opravě už jen říká
+  „nepotvrzeno" (milník 48), což neznamená „echo není". Zapnutý příposlech je naopak výslovné
+  tvrzení uživatele.
+- **B.** Pasivní měřič potvrdil echo jen na 2 z 11 nahrávek s reproduktory (milníky 48 a 50):
+  hudba a dozvuk dávají slabou shodu úrovní. Šum s řízeně kolísající hlasitostí, do ticha, ji
+  dá. Zpoždění se navíc dnes změří až během hovoru, a jen když zrovna něco hraje.
+
+Otázky pro člověka:
+
+- A: má jít AEC pro takovou dvojici zapnout ručně (Auto / Zapnuto / Vypnuto)? Otevřená
+  sluchátka nahlas echo dělat mohou.
+- B: smí aplikace při kalibraci asi 8 s hrát šum z reproduktorů? Kdy ji nabízet: při prvním
+  spuštění, u každého nového výstupu, jen na vyžádání?
+- B závisí na kroku 4.5. Když se loopback bere před hlasitostí Windows, platí změřená síla echa
+  jen pro hlasitost, při které se měřilo.
 
 ## 8. Kdy je hotovo
 
@@ -307,7 +340,8 @@ Kroky, příkazy, kód k vložení a co má být výsledkem: `docs/sidetone-impl
 - 10 minut řeči a hry: 0 podtečení, 0 výpadků mikrofonu (`mic_call_gaps` neroste rychleji než dnes).
 - Odchozí zvuk mikrofonu je stejný se zapnutým i vypnutým příposlechem (odbočka buffer jen čte;
   hlídá to test `sidetone_plays_on_the_pair_output_only`).
-- Telemetrie AEC (stav, zpoždění, síla echa) se zapnutím příposlechu nezmění.
+- Telemetrie AEC se zapnutím příposlechu nezmění: stav, zpoždění, síla echa (`echo ...` v řádcích
+  `[Chain]` zůstane `not confirmed` nebo na stejné hodnotě) a `fit` vedle ní nestoupne (krok 8.2).
 - Výstup do reproduktorů: příposlech nehraje.
 - `cargo test` a `cargo clippy --workspace --all-targets` čisté.
 
@@ -323,6 +357,12 @@ Kroky, příkazy, kód k vložení a co má být výsledkem: `docs/sidetone-impl
 | 6  | Tichý stream daemona změní chování loopbacku (stálé tiché pakety místo žádných).                                                                                  | V kroku 8.2 návodu ověřit stav AEC „bez reference" vs „ticho" a zpoždění.                                                               |
 | 7  | Id zařízení se po přeinstalaci ovladače změní a záznam v matici osiří.                                                                                            | Uživatel dvojici zapne znovu; starý záznam smaže v seznamu. Párování podle názvu nedělat.                                               |
 | 8  | APO pozná své zařízení podle poslední položky kolekce v `Initialize`. Dokumentováno je to pro `APOInitSystemEffects2`; naše APO dostává nejspíš starší strukturu. | Krok 4.3 návodu porovná otisk, který APO vidí, se skutečným. Když výstupní APO zařízení nepozná, příposlech nehraje a práce se zastaví. |
+
+K riziku 1 od milníku 47: echo canceller má měřič síly echa, který echo pozná podle toho, že
+úroveň mikrofonu sleduje úroveň reference. Kdyby reference obsahovala vlastní hlas, sledoval by
+ji mikrofon dokonale. Měřič by pak potvrdil silné echo, které neexistuje, zapamatoval si ho pro
+dvojici a AEC3 by při každém startu tlumilo hlas. Proto kroky 4.4 a 8.2 hlídají i `echo` a `fit`
+v logu `[Chain]`.
 
 ## 10. Co se nedělá
 

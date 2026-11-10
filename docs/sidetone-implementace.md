@@ -894,6 +894,41 @@ cargo run -p gamersequalizer-apo --example level_probe -- 5 render
   DEVLOGu, **zastav se** a nech rozhodnout člověka (zadání, kapitola 9, riziko 1).
 - RMS stejné → loopback je před EFX, AEC je v bezpečí. Pokračuj.
 
+**Navíc, kvůli měřiči síly echa** (DEVLOG, milník 47). Měřič uzná echo, když úroveň mikrofonu
+sleduje úroveň reference. Vlastní hlas v referenci by ji sledoval dokonale a měřič by potvrdil
+echo, které není. Při bodu 2 proto zapni v okně na stránce Log „Ukládat debug na disk" a po
+20 s mluvení najdi v logu poslední řádek `[Chain] ... s:` (souhrn po 10 s). Zapiš z něj část
+`echo ..., fit A x B`:
+
+- `echo not confirmed (...)` nebo `echo not measured` a `fit` pod 0.7 → v pořádku.
+- `echo X dB under the reference` (potvrzeno), nebo `fit` nad 0.9 se sklonem 0.7–1.3 →
+  **reference obsahuje hlas**, i kdyby RMS vyšlo stejné. Zapiš tučně a **zastav se**.
+
+### 4.5 Bere se loopback před hlasitostí Windows, nebo za ní?
+
+Otázka z větve echo canceller (DEVLOG, milník 45, „Open"): zapamatovaná síla echa je poměr
+mikrofon / reference. Když se reference bere před posuvníkem hlasitosti, mění se ten poměr
+s hlasitostí. Měření na pět minut, kód se nemění.
+
+**Požádej člověka**, ať pustí stálý zvuk (hudbu nebo tón) a nastaví hlasitost výstupu ve
+Windows na 100 %. Pak:
+
+```powershell
+cargo run -p gamersequalizer-apo --example level_probe -- 5 render
+```
+
+Člověk sníží hlasitost Windows na 25 % (zvuk hraje dál) a příkaz se pustí znovu.
+
+**Hotovo, když** jsou v DEVLOGu obě hodnoty RMS, název zařízení a závěr:
+
+- RMS při 25 % o víc než 6 dB nižší → loopback je **za** hlasitostí. Síla echa na hlasitosti
+  nezávisí.
+- RMS stejné (do 1 dB) → loopback je **před** hlasitostí. Síla echa platí jen pro hlasitost,
+  při které se měřila.
+
+Jestli má člověk víc výstupů (USB sluchátka, zvukovka na desce, monitor přes HDMI), změř každý:
+zařízení s hardwarovou hlasitostí se mohou chovat jinak než ta bez ní.
+
 ## Krok 5: daemon
 
 Nový soubor `crates/gamersequalizer-daemon/src/win_audio/sidetone.rs`, do `win_audio/mod.rs`
@@ -1243,8 +1278,22 @@ Tabulka do DEVLOGu: režim, perioda mikrofonu, perioda výstupu, změřeno ms, �
 ### 8.2 AEC se zapnutým příposlechem
 
 Hudba hraje do sluchátek dvojice 60 s a člověk občas mluví. Jednou s vypnutým a jednou se
-zapnutým příposlechem. Z logu `[Chain]` porovnej stav AEC,
-zpoždění a sílu echa. Čekaný výsledek: bez rozdílu.
+zapnutým příposlechem, obojí se zapnutým „Ukládat debug na disk". Z logu `[Chain]` porovnej:
+
+| Co                                        | Kde v logu                                              | Čekaný výsledek                          |
+| ----------------------------------------- | ------------------------------------------------------- | ---------------------------------------- |
+| stav AEC a zpoždění                       | `AEC on Locked`, `AEC delay`                            | bez rozdílu                              |
+| síla echa                                 | `echo ...` v řádcích `start:`, `changed:` a v souhrnu   | v obou bězích `not confirmed`            |
+| shoda mikrofonu s referencí               | `fit A x B` v souhrnu po 10 s                           | se zapnutým příposlechem ne o víc než 0,2 výš |
+| záložní odhad a zesílení mikrofonu v AEC3 | `AEC fallback echo`, `AEC mic gain`                     | `-40.0`; zesílení bez rozdílu            |
+| ERLE                                      | souhrn po 10 s                                          | bez rozdílu (±1 dB)                      |
+
+Když se se zapnutým příposlechem objeví `echo X dB under the reference` nebo
+`AEC fallback echo` jiné než `-40.0`: echo canceller bere vlastní hlas z příposlechu za echo.
+Zapiš oba logy a **zastav se** (zadání, kapitola 9, riziko 1).
+
+Tichý stream daemona (zadání, riziko 6): v obou bězích zapiš i stav AEC ve chvílích, kdy hudba
+nehraje (`on NoReference` proti `on ReferenceSilent`).
 
 ### 8.3 Jedno pásmo, nebo čtyři?
 
@@ -1261,3 +1310,68 @@ slovech a v pauzách proti vstupu. Tabulka do DEVLOGu.
 
 Milník v DEVLOGu: co je hotové, tabulky z kroků 1, 4, 7 a 8, seznam oprav kódu z návodu
 (pravidlo 1), co zůstalo otevřené. Commit, push. Nemerguj.
+
+## Krok 9 (návrh): echo canceller a příposlech
+
+**Nic z tohoto kroku nedělej, dokud člověk nerozhodne** (zadání, kapitola 7.2). Je tu proto, aby
+rozhodnutí mělo podklad a další práce nezačínala od nuly. Čísla řádků neuvádím schválně: ověř
+si místa hledáním názvů.
+
+### 9.1 AEC vypnuté pro dvojici se zapnutým příposlechem
+
+Zapnutý příposlech pro dvojici znamená, že výstup jsou sluchátka. Echo tam není a AEC3 jen
+přidává latenci.
+
+- Dnes: `aec_enabled` v hlavičce zapisuje okno (`ui/state.rs`, `update_shm_mic_controls`;
+  `ui/audio_settings.rs`). `plugin.rs` ho čte každý blok a při `false` AEC přeskočí
+  (`AecState::Disabled`).
+- Nejmenší změna: nové pole `aec_off_for_pair: AtomicBool` v hlavičce (další verze sdílené
+  paměti, pravidlo 9). Zapisuje ho vlákno příposlechu ve stejném bodě jako otisky dvojice
+  (krok 5.2, bod 2). `plugin.rs` počítá `aec_enabled && !aec_off_for_pair`. Zrcadlení přidej do
+  `ShmHeader::copy_controls_from`.
+- Okno: přepínač AEC zůstane, pod ním text „Vypnuto pro tato sluchátka (příposlech je zapnutý)".
+  Jestli má jít AEC vynutit, rozhodne člověk (zadání, 7.2, otázka A).
+- Pozor na latenci: vypnutí AEC zkrátí řetězec o 430 vzorků, takže přepnutí je slyšet jako
+  lupnutí. Přepíná se jen se změnou dvojice nebo jejího nastavení, nikdy podle měření.
+- Test: `plugin.rs`, vzor `test_aec_switched_back_on_drops_audio_queued_before`: s polem
+  nastaveným je stav `AecState::Disabled` a po jeho zrušení nevyjdou staré vzorky.
+
+### 9.2 Kalibrace echa tlačítkem
+
+Cíl: změřit zpoždění a sílu echa pro výstup **bez příposlechu** (reproduktory) dřív, než
+proběhne první hovor.
+
+Nic nového se neměří. Vlákno daemona pustí do výstupu zkušební signál a drží otevřený mikrofon;
+zbytek udělá stávající cesta: loopback → reference → `DelayEstimator` a `EchoMeter` v mic APO →
+telemetrie → `apo_link.rs` uloží zpoždění i sílu echa do cache.
+
+- **Povel.** Nový tep `aec_calibrate_beat` (okno → daemon), stejný vzor jako `sidetone_test_beat`.
+  Dokud je čerstvý, vlákno z kroku 5 drží nahrávací stream na mikrofonu a přehrávací na výstupu
+  **bez ohledu na `enabled`** a příposlech v té době nehraje (jako u sondy).
+- **Signál** místo ticha v přehrávacím streamu, 8 s:
+  - šum s plochým spektrem, obě stopy stejné;
+  - hlasitost se mění po 200 ms v krocích 0, −8, −4, −12 dB a dokola, od RMS −14 dBFS (tedy
+    −14 až −26 dBFS). Měřič potřebuje referenci nad −30 dBFS, jejíž úroveň se v oknech po
+    100 ms hýbe aspoň o 2 dB (`REF_LOUD_POWER`, `ECHO_FIT_MIN_REF_SPREAD_DB` v `aec3.rs`);
+  - náběh a doběh 50 ms;
+  - 8 s proto, že `DelayEstimator` chce dvě shodná okna po 1 s a `EchoMeter` 5 s hlasité
+    reference.
+- **Okno** (stránka mikrofonu, vedle přepínače AEC): tlačítko „Změřit echo", text „Chvíli
+  nemluvte, z reproduktorů zazní šum." Po skončení čte z hlavičky `aec_state`,
+  `aec_delay_us` a `aec_echo_db_x10`:
+  - záporná hodnota: „Zpoždění X ms, echo Y dB pod zvukem z reproduktorů.";
+  - kladná nebo nula: „Echo se nepotvrdilo. Na sluchátkách je to v pořádku."
+- **Hlasitost.** Podle výsledku kroku 4.5: když je loopback před hlasitostí Windows, zapiš do
+  cache i hlasitost výstupu při měření a sílu echa přepočítej podle aktuální hlasitosti
+  (`get_endpoint_volume` v `chatmix.rs`). Návrh přepočtu nech schválit člověkem.
+- **Hotovo, když** na reproduktorech do 8 s od stisku log ukáže
+  `echo X dB under the reference` s `fit` aspoň 0.9, `[ApoLink] saving echo delay` a
+  `[ApoLink] saving echo strength`; na sluchátkách `echo not confirmed` a nic se neuloží.
+
+### 9.3 Klíč cache podle mikrofonu, který se používá
+
+`apo_link.rs` (`sync_delay_cache`) skládá klíč cache zpoždění, úrovně hlasu a síly echa z
+`resolve_default_capture_id()`, tedy z výchozího mikrofonu Windows. Vlákno příposlechu (krok
+5.2, bod 1) už bere `header.get_selected_mic_id()` a výchozí mikrofon jen jako náhradu. Stejné
+pořadí použij v `apo_link.rs`. Záznamy pod starým klíčem zůstanou nevyužité a změří se znovu;
+nemaž je.
