@@ -2196,3 +2196,141 @@ without a compiler. Shared memory layout v19.
   was confirmed at the old value again at 55.3 s. The 2026-11-07 captures have output switches
   and volume changes in them; if a capture with a steady volume shows the same, the 3 dB of
   `ECHO_BOUND_UNDER_DB` is too eager.
+
+
+## Milestone 50: Echo Meter Correlation Threshold Sweep (2026-11-10)
+
+Třetí kolo testování měřiče síly echa podle `docs/aec3-echo-strength-test.md`, kapitola 6 ("Třetí kolo: jak nízko smí práh korelace").
+Cílem bylo ověřit, jak nízko smí klesnout práh korelace `EchoMeter::min_correlation` z výchozí hodnoty 0.90 (testováno pro prahy 0.90, 0.80, 0.70, 0.60 a 0.50 přes scénu `fit=<r>`), aniž by došlo k falešnému potvrzení echa na nahrávkách bez echa (sluchátka), při řeči do hudby, při odrazech/dozvuku nebo k nestabilitě záložního odhadu (`fallback`).
+
+### 1. Step 0: Kompilace a jednotkové testy
+Před spuštěním sweepu proběhla verifikace podle kapitoly 0:
+- `cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture`: 16 passed, 4 ignored (100% shoda s referenčními hodnotami z Macu).
+- `cargo test -p gamersequalizer-common`: 32 passed, 0 failed.
+- `cargo test -p gamersequalizer chain_log`: 5 passed, 0 failed.
+- Všechny testy čisté, shared memory layout v19 funkční.
+
+### 2. Výsledky prahového sweepu pro nahrávky s referencí
+Spuštěno příkazem:
+```powershell
+$env:SCENES = ";fit=0.8;fit=0.7;fit=0.6;fit=0.5"
+Remove-Item Env:CAP -ErrorAction SilentlyContinue
+cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture
+```
+Z celkových 22 nahrávek má 15 nahrávek referenci (7 nahrávek bez reference `091216`, `100621`, `104424`, `125043`, `163832`, `163934`, `204900` zůstalo ve všech scénách čistých s `meter: -`, `fallb: -40`).
+
+| Nahrávka        | Práh | Potvrzeno |  meter | check | fallb | Čas 1. potv. | Max hodn. | Verdikt     | Poznámka                                                                         |
+| :-------------- | :--: | :-------: | -----: | ----: | ----: | -----------: | --------: | :---------: | :------------------------------------------------------------------------------- |
+| 20261107-091611 | 0.90 | ano       |  -38.9 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
+| 20261107-091611 | 0.80 | ano       |  -38.7 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
+| 20261107-091611 | 0.70 | ano       |  -38.3 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
+| 20261107-091611 | 0.60 | ano       |  -38.3 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
+| 20261107-091611 | 0.50 | ano       |  -37.4 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
+| 20261107-100150 | 0.90 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-100150 | 0.80 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-100150 | 0.70 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-100150 | 0.60 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-100150 | 0.50 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-101152 | 0.90 | ne        | <-28.2 | -29.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-101152 | 0.80 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
+| 20261107-101152 | 0.70 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
+| 20261107-101152 | 0.60 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
+| 20261107-101152 | 0.50 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
+| 20261107-102403 | 0.90 | ano       |  -25.8 | -28.3 |   -40 |       55.3 s |     -25.8 | správně *   | V normě s tolerancí 0.5 dB jako v M48 (-25.8 vs max -26.3)                       |
+| 20261107-102403 | 0.80 | ano       |  -25.0 | -28.3 |   -28 |       11.8 s |     -25.0 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.0 > check+2 (-26.3); skok o 13.0 dB |
+| 20261107-102403 | 0.70 | ano       |  -25.2 | -28.3 |   -28 |       11.8 s |     -25.2 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.2 > check+2 (-26.3); skok o 12.8 dB |
+| 20261107-102403 | 0.60 | ano       |  -25.3 | -28.3 |   -28 |       11.8 s |     -25.3 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.3 > check+2 (-26.3); skok o 12.7 dB |
+| 20261107-102403 | 0.50 | ano       |  -25.3 | -28.3 |   -28 |       11.8 s |     -25.3 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.3 > check+2 (-26.3); skok o 12.7 dB |
+| 20261107-104318 | 0.90 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-104318 | 0.80 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-104318 | 0.70 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-104318 | 0.60 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261107-104318 | 0.50 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-115931 | 0.90 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-115931 | 0.80 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-115931 | 0.70 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-115931 | 0.60 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-115931 | 0.50 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122520 | 0.90 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122520 | 0.80 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122520 | 0.70 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122520 | 0.60 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122520 | 0.50 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122712 | 0.90 | ne        | <-34.3 | -34.8 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-122712 | 0.80 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
+| 20261109-122712 | 0.70 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
+| 20261109-122712 | 0.60 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
+| 20261109-122712 | 0.50 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
+| 20261109-124950 | 0.90 | ne        | <-28.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-124950 | 0.80 | ano       |  -29.1 |     - |   -34 |       24.2 s |     -29.1 | FALEŠNĚ     | hodnota -29.1 > -33 bez checku                                                   |
+| 20261109-124950 | 0.70 | ano       |  -28.2 |     - |   -34 |       22.4 s |     -28.2 | FALEŠNĚ     | hodnota -28.2 > -33 bez checku                                                   |
+| 20261109-124950 | 0.60 | ano       |  -28.2 |     - |   -34 |       22.4 s |     -28.2 | FALEŠNĚ     | hodnota -28.2 > -33 bez checku                                                   |
+| 20261109-124950 | 0.50 | ano       |  -28.2 |     - |   -34 |       22.4 s |     -28.2 | FALEŠNĚ     | hodnota -28.2 > -33 bez checku                                                   |
+| 20261109-125717 | 0.90 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-125717 | 0.80 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-125717 | 0.70 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-125717 | 0.60 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-125717 | 0.50 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-130319 | 0.90 | ne        | <-38.1 | -37.0 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-130319 | 0.80 | ne        | <-38.1 | -37.0 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-130319 | 0.70 | ano       |  -36.6 | -37.0 |   -40 |       19.2 s |     -36.6 | správně     | V normě checku                                                                   |
+| 20261109-130319 | 0.60 | ano       |  -36.6 | -37.0 |   -40 |       19.2 s |     -36.6 | správně     | V normě checku                                                                   |
+| 20261109-130319 | 0.50 | ano       |  -36.6 | -37.0 |   -40 |       19.2 s |     -36.6 | správně     | V normě checku                                                                   |
+| 20261109-144824 | 0.90 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-144824 | 0.80 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-144824 | 0.70 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-144824 | 0.60 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-144824 | 0.50 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-162331 | 0.90 | ne        | <-33.3 | -33.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-162331 | 0.80 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
+| 20261109-162331 | 0.70 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
+| 20261109-162331 | 0.60 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
+| 20261109-162331 | 0.50 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
+| 20261109-205013 | 0.90 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-205013 | 0.80 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-205013 | 0.70 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-205013 | 0.60 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-205013 | 0.50 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-210655 | 0.90 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-210655 | 0.80 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-210655 | 0.70 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-210655 | 0.60 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| 20261109-210655 | 0.50 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+
+### 3. Detailní rozbor chování a falešných detekcí při snížení prahu pod 0.90
+- **20261107-101152 (dozvuk / reverb v místnosti)**:
+  - Při prahu 0.90: bezpečně nepotvrzeno (`<-28.2 dB`).
+  - Při prahu <= 0.80: v čase 8.7 s dochází ke korelaci 0.89 a falešnému potvrzení echa na -30.3 dB, což v čase 11.0 s přenastaví fallback na -34 dB. V čase 14.0 s hodnota klesá na -36.2 dB (mimo toleranci `check - 6` = -35.1 dB), a v čase 16.0 s fallback padá zpět na -40 dB. Dvojí změna fallbacku ve stopě a podstřelení checku znamenají verdikt **FALEŠNĚ**.
+- **20261107-102403 (změny hlasitosti reproduktorů a řeč)**:
+  - Při prahu 0.90: potvrzeno až v čase 55.3 s na -25.8 dB (`fit 0.90 x 1.02`), fallback zůstává stabilní na -40 dB (v milníku 48 akceptováno s odchylkou 0.5 dB od `check + 2`).
+  - Při prahu <= 0.80: v čase 11.8 s potvrzeno na -30.1 dB, následně klesá až na -38.0 dB (pod `check - 6` = -34.3 dB), a v čase 47–51 s skáče na -25.0 dB až -25.3 dB (nad `check + 2` = -26.3 dB). Skok o **12.7 až 13.0 dB** během nahrávky znamená verdikt **FALEŠNĚ**.
+- **20261109-124950 (hlas do hlasité hudby, pouze 6 čistých oken echa)**:
+  - Při prahu 0.90: bezpečně nepotvrzeno (`<-28.2 dB`).
+  - Při prahu <= 0.80: v čase 22–24 s dosahuje fit 0.80 x 0.97 resp. 0.73 x 0.95 a falešně potvrzuje echo na -29.1 dB / -28.2 dB. Obě hodnoty jsou nad hranicí -33 dB pro nahrávky bez checku a vedou k chybnému nastavení fallbacku na -34 dB. Lidský hlas do hudby je mylně pokládán za echo -> verdikt **FALEŠNĚ**.
+- **Sluchátka (`20261109-115931`, `20261109-122520`)**:
+  - Zůstala nepotvrzena na všech prazích (max korelace 0.23 a 0.27). Ani při prahu 0.50 nedošlo k falešné detekci sluchátek.
+- **Dlouhá řeč do hudby (`20261109-205013`, `20261109-125717`, `20261109-144824`)**:
+  - Zůstala nepotvrzena na všech prazích (korelace 0.29 až 0.40). Hlas nezpůsobil falešnou detekci.
+- **Nově potvrzené nahrávky při nižších prazích**:
+  - `20261109-122712`: potvrdila echo při prahu <= 0.80 (-34.3 dB vs check -34.8 dB, přesně v normě, 0 změn fallbacku).
+  - `20261109-162331`: potvrdila echo při prahu <= 0.80 (-34.8 dB vs check -33.3 dB, v normě, 0 změn fallbacku).
+  - `20261109-130319`: potvrdila echo při prahu <= 0.70 (-36.6 dB vs check -37.0 dB, v normě, 0 změn fallbacku).
+
+### 4. Souhrnná tabulka
+
+| Práh | správně (počet nahrávek)           | FALEŠNĚ (které nahrávky) |
+| :--: | :--------------------------------- | :----------------------- |
+| 0.90 | 2 (091611, 102403 *)               | žádná *                  |
+| 0.80 | 3 (091611, 122712, 162331)         | 101152, 102403, 124950   |
+| 0.70 | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950   |
+| 0.60 | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950   |
+| 0.50 | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950   |
+
+\* _Poznámka k prahu 0.90 a nahrávce 102403_: V milníku 48 byla hodnota -25.8 dB (oproti check + 2 = -26.3 dB) vyhodnocena jako prošlá s tolerovanou odchylkou 0.5 dB. Pokud by byla posuzována striktně bez této tolerance, má práh 0.90: 1 správně (091611) a 1 FALEŠNĚ (102403). Na celkovém závěru to nic nemění, neboť všechny nižší prahy mají 3 jednoznačně falešné detekce.
+
+### 5. Doporučení
+- **Doporučený minimální práh korelace**: **0.90** (`ECHO_FIT_MIN_CORRELATION = 0.90`).
+- Práh 0.90 je **jediný** práh, u kterého nedochází k falešným detekcím echa způsobeným lidským hlasem (`124950`) či dozvukem (`101152`) a k nestabilitě záložního odhadu.
+- Jakékoliv snížení prahu (0.80, 0.70, 0.60, 0.50) vede k falešné detekci echa na nahrávce `124950` (hlas do hudby je mylně potvrzen jako echo na -28 dB a přenastavuje fallback na -34 dB) a na nahrávce `101152` (dozvuk místnosti způsobí dvojí přestavení fallbacku -40 -> -34 -> -40 dB).
+- V souladu se zásadou z milníku 49 (_"A wrong confirmation is what milestone 46 was; a missed one costs nothing against milestone 44"_): je nesrovnatelně bezpečnější nechat nahrávky se slabším či difúzním echem na výchozím odhadu -40 dB (kde AEC3 funguje optimálně), než snížením prahu riskovat falešné odhady echa z lidského hlasu a rozbití potlačení echa.
+- Konstanta `ECHO_FIT_MIN_CORRELATION` v kódu zůstává beze změny na hodnotě **0.90**.
