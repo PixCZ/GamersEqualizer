@@ -1891,3 +1891,126 @@ that the linear filter has it either way.
   stronger echo. The cache key is the Windows default mic, like the delay's, not always the
   mic in use. Not known: whether the loopback reference is taken before the Windows speaker
   volume; if so, the strength moves with the volume and a remembered one fits only that volume.
+
+
+## Milestone 46: Echo Strength Measurement Verification on Real Captures (2026-11-10)
+
+Ověření měřiče síly echa a adaptivního záložního odhadu na existujících nahrávkách podle `docs/aec3-echo-strength-test.md`.
+
+### 1. Compilation & Unit Tests (Step 0)
+- Všechny soubory psané bez překladače na Macu (`plugin.rs`, `apo_link.rs`, `aec_delay_cache.rs`, `shm.rs`, `chain_log.rs`) se na Windows přeložily bez jediné chyby. Žádné opravy kódu nebyly nutné. (Pozn.: příkaz v návodu specifikoval `gamersequalizer-daemon`, v Cargo.toml je název balíčku `gamersequalizer`).
+- Jednotkové testy:
+  - `gamersequalizer-mic-vst --lib aec3::`: 16 passed, 4 ignored.
+  - Výstupy na Windows se přesně shodují s referencí z Macu:
+    - `echo -20 dB, music from 2 s: measured -20.0 dB (bound: false)`
+    - `echo -50 dB, music from 0 s: measured -49.6 dB (bound: false)`
+    - `echo -200 dB, music from 0 s: measured -60.5 dB (bound: true)`
+    - `strong echo, first 0.4 s: mic -38.8, out -40.2, remembered -82.7 dBFS`
+  - `gamersequalizer-common`: 32 passed, 0 failed.
+  - `gamersequalizer chain_log`: 4 passed, 0 failed.
+  - `gamersequalizer-mic-vst --release`: 81 passed, 21 ignored, 0 failed.
+  - `cargo clippy --workspace --all-targets`: 0 chyb.
+
+### 2. Test A: capture_tuning_report vs Milník 44 Winner
+- **Verdikt: NEPROŠLO**.
+- Očekávání: `fallb` zůstane na -40 dB a čísla se shodují s milníkem 44 do 0,1 dB / 1 bodu %.
+- Skutečnost:
+  - Na 11 nahrávkách z 22 došlo k odchylkám:
+    - 7 nahrávek (`102403`, `115931`, `122520`, `124950`, `125717`, `144824`) skončilo s `fallb` jiným než -40 dB (nastaveno na -28 nebo -34 dB).
+    - 4 nahrávky (`091611`, `100150`, `101152`, `162331`) sice skončily s `fallb` -40 dB, ale v průběhu nahrávky došlo k přechodnému přestavení `fallback` a zbytečným rebuildům AEC3, což zhoršilo konvergenci a výsledná čísla.
+  - Nahrávky, které prošly beze změny (shodné s milníkem 44): `091216`, `100621`, `104318`, `104424`, `122712`, `125043`, `130319`, `163832`, `163934`, `204900`, `205013`, `210655`.
+
+Srovnání odlišných nahrávek:
+
+| Capture | Zdroj        | gain | strength | fallb | echo |  left | voice | >6dB | >10dB | onset | 4-8k | ERLE |
+| :------ | :----------- | ---: | -------: | ----: | ---: | ----: | ----: | ---: | ----: | ----: | ---: | ---: |
+| 091611  | winner (M44) |    - |        - |   -40 | 15.3 | -71.3 |   2.4 |  11% |    6% |   5.7 |  5.7 |    - |
+| 091611  | test A       |    0 |      -38 |   -40 | 14.0 | -66.5 |   2.4 |  11% |    6% |   5.0 |  5.2 |  0.5 |
+| 100150  | winner (M44) |    - |        - |   -40 | 16.6 | -61.2 |   2.0 |   8% |    3% |   3.9 |  4.9 |    - |
+| 100150  | test A       |    0 |    <-38  |   -40 | 14.3 | -50.2 |   1.4 |   4% |    2% |   4.4 |  3.2 |  1.3 |
+| 101152  | winner (M44) |    - |        - |   -40 | 20.0 | -59.8 |   6.0 |  37% |   21% |   5.6 | 10.9 |    - |
+| 101152  | test A       |    0 |    <-29  |   -40 | 12.6 | -58.0 |   3.2 |  14% |    5% |   3.7 |  4.5 |  5.8 |
+| 102403  | winner (M44) |    - |        - |   -40 | 17.2 | -55.9 |   4.7 |  28% |   15% |   8.7 |  6.5 |    - |
+| 102403  | test A       |    0 |      -26 |   -28 | 15.1 | -52.6 |   4.2 |  24% |   13% |   7.9 |  5.4 |  5.2 |
+| 115931  | winner (M44) |    - |        - |   -40 |  0.6 | -60.9 |   0.6 |   1% |    0% |   0.5 |  1.9 |    - |
+| 115931  | test A       |   18 |      -31 |   -28 |  0.9 | -61.0 |   0.7 |   1% |    0% |   0.5 |  2.0 |  0.3 |
+| 122520  | winner (M44) |    - |        - |   -40 |  4.4 | -59.5 |   0.7 |   1% |    0% |   2.1 |  3.6 |    - |
+| 122520  | test A       |   24 |      -42 |   -34 |  7.9 | -59.6 |   0.9 |   3% |    1% |   2.3 |  3.6 |  1.9 |
+| 124950  | winner (M44) |    - |        - |   -40 | 11.4 | -67.0 |   2.9 |  17% |    5% |   2.5 |  3.4 |    - |
+| 124950  | test A       |   24 |      -28 |   -34 | 11.4 | -67.0 |   3.1 |  17% |    7% |   2.6 |  3.3 |  0.2 |
+| 125717  | winner (M44) |    - |        - |   -40 |  0.0 |   0.0 |   4.7 |  33% |   17% |   2.9 |  4.9 |    - |
+| 125717  | test A       |   24 |      -35 |   -34 |  0.0 |   0.0 |   3.9 |  25% |    8% |   2.4 |  3.3 |  0.0 |
+| 144824  | winner (M44) |    - |        - |   -40 |  0.0 |   0.0 |   2.6 |  12% |    6% |   3.4 |  4.6 |    - |
+| 144824  | test A       |   12 |      -22 |   -28 |  0.0 |   0.0 |   2.9 |  14% |    8% |   3.4 |  4.9 |  0.0 |
+| 162331  | winner (M44) |    - |        - |   -40 | 10.1 | -54.6 |   1.4 |   3% |    2% |   2.0 |  5.4 |    - |
+| 162331  | test A       |    6 |      -33 |   -40 | 10.5 | -54.0 |   1.4 |   3% |    2% |   2.0 |  5.4 |  2.8 |
+
+### 3. Test B: capture_echo_report
+- **Verdikt: NEPROŠLO**.
+- Kritéria a zjištěné problémy:
+  1. **Sluchátka (`115931`, `122520`)**:
+     - Kritérium: `meter` je mez (`<...`) nebo je pod -50 dB.
+     - Výsledek: `115931` naměřil `meter` -30.6 dB (check -41.4 dB, není mez, daleko nad -50 dB) a nastavil `fallb` na -28 dB. `122520` naměřil `meter` -41.9 dB (není mez ani pod -50 dB) a kvůli přechodné špičce -27.7 dB v čase 15.7 s přestavil `fallb` na -34 dB.
+  2. **Reproduktory / monitor (`check - 6 <= meter <= check + 2`)**:
+     - `205013`: `meter` vyšel -33.2 dB proti `check` -50.5 dB (odchylka +17.3 dB). Měřič během řeči do hudby vystoupal z -51.5 dB (v 8.3 s) až na -33.2 dB (v 28.0 s).
+  3. **Stabilita a kolísání měřiče (`trace`)**:
+     - Kritérium: nejvýš 2 změny za 30 s při stálé hlasitosti, žádné střídání „echo X" a „within the noise", žádný fallback pokud meter <= -33.
+     - Selhání:
+       - `091611`: 14 změn během 35 s, přechodný skok fallbacku na -28 dB a návrat na -40 dB.
+       - `100150`: 16 změn, skoky fallbacku na -34, -28 a návrat na -40 dB.
+       - `101152`: Opakované střídání „within the noise" a „echo", 5 skoků fallbacku (-40 -> -34 -> -40 -> -34 -> -28 -> -40).
+       - `162331`: 18 změn, střídání šumu a echa, 4 skoky fallbacku.
+  4. **Hlas považován za echo**:
+     - `125717`: 0 oken se samotným echem (čistá řeč do hudby), přesto naměřil echo -30.9 dB a zvedl fallback na -34 dB.
+     - `144824`: 0 oken se samotným echem, naměřil echo -22.3 dB a zvedl fallback na -28 dB.
+
+Tabulka Testu B:
+
+| Capture         | meter   | check   | fallb | Verdikt      | Poznámka                                                        |
+| :-------------- | :------ | :------ | ----: | :----------- | :-------------------------------------------------------------- |
+| 20261107-091216 | -       | -       |   -40 | Prošlo       | Bez reference, trace čistý                                      |
+| 20261107-091611 | -38.4   | -36.6   |   -40 | **Neprošlo** | Silné kolísání (14 změn), přechodně fallback -28 v 33.6 s       |
+| 20261107-100150 | <-38.2  | -37.2   |   -40 | **Neprošlo** | Silné kolísání (16 změn), přechodně fallback -34 a -28          |
+| 20261107-100621 | -       | -       |   -40 | Prošlo       | Bez reference, trace čistý                                      |
+| 20261107-101152 | <-28.9  | -29.1   |   -40 | **Neprošlo** | Střídání noise/echo, 5 skoků fallbacku (-40, -34, -28, -40)     |
+| 20261107-102403 | -26.4   | -28.3   |   -28 | **Neprošlo** | Kolísání a střídání noise/echo, 10 změn, fallb -28              |
+| 20261107-104318 | <-39.6  | -39.1   |   -40 | Prošlo       | Horní mez pod šumem, fallb -40                                  |
+| 20261107-104424 | -       | -       |   -40 | Prošlo       | Bez reference, trace jen mic gain                               |
+| 20261109-115931 | -30.6   | -41.4   |   -28 | **Neprošlo** | Sluchátka: meter není mez ani pod -50, fallb přestaven na -28   |
+| 20261109-122520 | -41.9   | -41.3   |   -34 | **Neprošlo** | Sluchátka: meter není mez ani pod -50, fallb přestaven na -34   |
+| 20261109-122712 | -34.3   | -34.8   |   -40 | Prošlo       | meter odpovídá check, fallb -40, jediná změna v 7.7 s           |
+| 20261109-124950 | -28.5   | -       |   -34 | **Neprošlo** | Málo oken s echem, fallb přestaven na -34                       |
+| 20261109-125043 | -       | -       |   -40 | Prošlo       | Bez reference, trace jen mic gain                               |
+| 20261109-125717 | -35.1   | -       |   -34 | **Neprošlo** | Jen řeč do hudby, meter bere hlas za echo (-30.9 dB, fallb -34) |
+| 20261109-130319 | <-38.1  | -37.0   |   -40 | Prošlo       | Horní mez pod šumem, fallb -40, stabilní                        |
+| 20261109-144824 | -22.3   | -       |   -28 | **Neprošlo** | Jen řeč do hudby, meter bere hlas za echo (-22.3 dB, fallb -28) |
+| 20261109-162331 | -32.6   | -33.3   |   -40 | **Neprošlo** | Silné kolísání (18 změn), střídání noise/echo, 4 skoky fallb    |
+| 20261109-163832 | -       | -       |   -40 | Prošlo       | Bez reference                                                   |
+| 20261109-163934 | -       | -       |   -40 | Prošlo       | Bez reference                                                   |
+| 20261109-204900 | -       | -       |   -40 | Prošlo       | Bez reference                                                   |
+| 20261109-205013 | -33.2   | -50.5   |   -40 | **Neprošlo** | meter o 17.3 dB nad check; během řeči stoupl z -51.5 na -33.2   |
+| 20261109-210655 | -44.8   | -50.3   |   -40 | S výhradou   | Hodnoty odpovídají, ale 8 změn v průběhu                        |
+
+Stopy nahrávek s více než jednou změnou:
+- `20261107-091611`: `11.5 s echo -36.4, 30.2 s echo -34.2, 31.6 s echo -31.0, 32.0 s echo -29.0, 32.8 s echo -26.2, 33.3 s echo -24.2, 33.6 s fallback -40 -> -28, 38.9 s echo -26.2, 41.0 s echo -29.0, 43.5 s echo -31.4, 43.8 s echo -33.9, 44.8 s echo -36.3, 46.3 s echo -38.4, 46.7 s fallback -28 -> -40`
+- `20261107-100150`: `8.9 s echo -40.5, 20.4 s echo -38.3, 22.2 s echo -36.2, 23.3 s echo -34.0, 24.1 s echo -31.3, 26.1 s echo -29.0, 26.2 s echo -26.6, 26.3 s fallback -40 -> -34, 27.1 s echo -24.3, 29.1 s fallback -34 -> -28, 29.2 s echo -26.3, 30.2 s echo -28.6, 33.9 s echo -30.8, 35.3 s echo -32.8, 36.1 s fallback -28 -> -34, 49.3 s echo -34.9, 50.9 s echo -37.0, 51.4 s echo within the noise (under -38.2), 56.3 s fallback -34 -> -40`
+- `20261107-101152`: `5.0 s echo within the noise (under -29.0), 8.6 s echo -30.2, 11.0 s fallback -40 -> -34, 13.7 s echo -32.2, 14.0 s echo -36.2, 16.0 s fallback -34 -> -40, 22.6 s echo -31.6, 22.7 s echo -28.6, 24.6 s fallback -40 -> -34, 25.0 s echo -26.2, 26.9 s echo -24.2, 27.1 s fallback -34 -> -28, 31.2 s echo -26.2, 33.5 s echo -28.2, 38.9 s echo within the noise (under -28.9), 41.1 s fallback -28 -> -40`
+- `20261107-102403`: `11.8 s echo -30.2, 13.4 s echo -32.3, 13.9 s echo -39.4, 32.0 s echo within the noise (under -39.3), 39.0 s echo within the noise (under -37.1), 39.5 s echo within the noise (under -33.4), 39.7 s echo within the noise (under -30.3), 39.9 s echo -28.5, 41.9 s fallback -40 -> -34, 43.3 s echo -26.4, 45.3 s fallback -34 -> -28`
+- `20261107-104318`: `0.0 s mic gain 0 -> 24, 5.0 s echo within the noise (under -39.6), 10.8 s mic gain 24 -> 6`
+- `20261109-115931`: `0.0 s mic gain 0 -> 24, 10.8 s echo -41.5, 11.0 s echo -37.1, 11.8 s echo -34.7, 12.3 s echo -32.7, 12.6 s mic gain 24 -> 18, 12.7 s echo -30.6, 13.1 s echo -26.3, 14.7 s fallback -40 -> -28, 29.9 s echo -30.6`
+- `20261109-122520`: `0.0 s mic gain 0 -> 24, 14.4 s echo -32.5, 15.2 s echo -30.2, 15.7 s echo -27.7, 16.5 s fallback -40 -> -34, 18.2 s echo -29.9, 18.9 s echo -32.5, 21.4 s echo -30.2, 22.4 s echo -32.5, 23.4 s echo -35.5, 26.8 s echo -37.5, 28.8 s echo -39.7, 29.5 s echo -41.9`
+- `20261109-122712`: `0.0 s mic gain 0 -> 24, 7.7 s echo -34.3`
+- `20261109-124950`: `0.0 s mic gain 0 -> 24, 22.4 s echo -28.5, 27.3 s fallback -40 -> -34`
+- `20261109-125717`: `0.0 s mic gain 0 -> 24, 16.6 s echo -30.9, 18.7 s fallback -40 -> -34, 25.2 s echo -33.0, 28.3 s echo -35.1`
+- `20261109-130319`: `0.0 s mic gain 0 -> 24, 5.0 s echo within the noise (under -38.1), 9.3 s mic gain 24 -> 18`
+- `20261109-144824`: `0.0 s mic gain 0 -> 18, 23.3 s echo -22.3, 26.6 s fallback -40 -> -28, 26.6 s mic gain 18 -> 12`
+- `20261109-162331`: `0.0 s mic gain 0 -> 12, 5.0 s echo within the noise (under -36.6), 8.8 s mic gain 12 -> 6, 12.9 s echo within the noise (under -33.9), 15.8 s echo within the noise (under -31.5), 26.2 s echo -31.4, 27.5 s echo -29.4, 27.8 s echo -27.2, 27.9 s fallback -40 -> -34, 28.9 s echo -25.0, 29.2 s echo -22.9, 30.5 s echo -24.9, 30.9 s fallback -34 -> -28, 32.1 s echo -27.2, 32.6 s echo -29.2, 34.1 s echo -31.3, 36.1 s echo -33.3, 38.1 s echo within the noise (under -34.3), 38.9 s fallback -28 -> -40, 41.3 s echo -34.9, 54.0 s echo -32.6`
+- `20261109-204900`: `0.0 s mic gain 0 -> 12, 9.2 s mic gain 12 -> 18`
+- `20261109-205013`: `0.0 s mic gain 0 -> 18, 8.3 s echo -51.5, 18.7 s echo -49.5, 19.8 s echo -47.4, 20.2 s echo -45.4, 20.4 s echo -43.1, 20.6 s echo -39.3, 22.9 s echo -37.3, 23.6 s echo -35.2, 28.0 s echo -33.2`
+- `20261109-210655`: `0.0 s mic gain 0 -> 18, 5.0 s echo within the noise (under -51.1), 15.0 s echo within the noise (under -49.0), 16.5 s echo -47.1, 22.1 s echo -44.9, 22.7 s echo -42.6, 23.9 s echo -44.6, 27.0 s echo -42.6, 39.5 s echo -44.8, 55.4 s mic gain 18 -> 24`
+
+### 4. Test C: silné echo nasimulované z nahrávek
+- **Neprováděn (zastaveno podle pravidel návodu)**: Podle zadání v `docs/aec3-echo-strength-test.md`, kapitola 2 („Když test B neprojde, **zastav se** a zapiš tabulku a stopy. Test C pak nemá smysl.") a kapitola Pravidla („Neměň konstanty měřiče ... Když něco nevyjde, zapiš čísla a zastav se. Rozhodnutí o změně udělá člověk.").
+
+### 5. Shrnutí a doporučení
+- **Závěr**: Neprošel Test A ani Test B: měřič síly echa na reálných nahrávkách výrazně kolísá, plete si lidský hlas a šum mikrofonu se silným echem (zejména na sluchátkách a při promluvách do hudby) a neoprávněně přestavuje záložní odhad AEC3 (`fallback`), což vede k opakovaným zbytečným rebuildům filtru a degradaci zvuku; živý test s instalací APO v tomto stavu nemá smysl provádět, dokud člověk neupraví parametry či logiku měřiče echa.
