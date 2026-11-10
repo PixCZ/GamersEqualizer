@@ -106,15 +106,18 @@ zapiš kterou a proč, a nepokračuj laděním dalších variant, dokud to není
 
 Klíče (lze kombinovat mezerou, definice v `aec3::tests::apply_variant`):
 
-| Klíč           | Co mění                                                        | Výchozí |
-| -------------- | -------------------------------------------------------------- | ------- |
-| `erle=<a>,<b>` | strop odhadu ERLE pod 4 kHz / nad 4 kHz (`erle.max_l`, `max_h`) | 4,1.5   |
-| `hf=0`         | biny nad 2 kHz už nenásledují zisk binu na 2 kHz               | 1       |
-| `len=<bloky>`  | délka lineárního filtru, 1 blok = 4 ms                         | 13      |
-| `masks=<k>`    | prahy potlačovače krát k (větší = měkčí)                       | 1       |
-| `gain=<x>`     | záložní zisk echa (`default_gain`), jen když filtr neběží      | 0.01    |
-| `open`         | potlačovač průhledný (jen měření)                              | -       |
-| `pregain=<dB>` | pevné zesílení místo hodnoty z nahrávky                        | -       |
+| Klíč           | Co mění                                                         | Výchozí |
+| -------------- | --------------------------------------------------------------- | ------- |
+| `erle=<a>,<b>` | strop odhadu ERLE pod 4 kHz / nad 4 kHz (`erle.max_l`, `max_h`) | 30,10   |
+| `hf=0`         | biny nad 2 kHz už nenásledují zisk binu na 2 kHz                | 0       |
+| `len=<bloky>`  | délka lineárního filtru, 1 blok = 4 ms                          | 13      |
+| `masks=<k>`    | prahy potlačovače krát k (větší = měkčí)                        | 1       |
+| `gain=<x>`     | záložní zisk echa (`default_gain`), jen když filtr neběží       | 0.01    |
+| `open`         | potlačovač průhledný (jen měření)                               | -       |
+| `pregain=<dB>` | pevné zesílení místo hodnoty z nahrávky                         | -       |
+
+Sloupec Výchozí platí od milníku 44: `tuning()` má `erle` 30,10 a `hf` 0. Samotné AEC3 má 4,1.5 a 1;
+s těmi hodnotami se ladění v milníku 44 začínalo.
 
 Pořadí:
 

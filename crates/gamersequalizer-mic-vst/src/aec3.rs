@@ -1295,10 +1295,11 @@ mod tests {
   /// (`capture_tuning_report`). Space separated:
   /// `open` (suppressor transparent: the output is the linear filter's, or the mic while AEC3
   /// does not use it), `masks=<k>` (suppressor thresholds times k), `erle=<lf>,<hf>`
-  /// (`erle.max_l` / `max_h`, defaults 4 / 1.5), `hf=<n>` (`bands_in_limiting_gain`, default 1,
-  /// 0 = bins over 2 kHz no longer follow the 2 kHz bin), `len=<blocks>` (filter length,
-  /// default 13 = 52 ms), `gain=<x>` (fallback echo gain, default 0.01). `pregain=`,
-  /// `micscale=` and `seed=` belong to the reports.
+  /// (`erle.max_l` / `max_h`; `tuning` sets 30 / 10, AEC3's own are 4 / 1.5), `hf=<n>`
+  /// (`bands_in_limiting_gain`; `tuning` sets 0 = bins over 2 kHz no longer follow the 2 kHz
+  /// bin, AEC3's own is 1), `len=<blocks>` (filter length, default 13 = 52 ms), `gain=<x>`
+  /// (fallback echo gain, default 0.01). `pregain=`, `micscale=` and `seed=` belong to the
+  /// reports.
   pub(super) fn apply_variant(cfg: &mut EchoCanceller3Config, spec: &str, mic_gain: f32) {
     for token in spec.split_whitespace() {
       let (key, value) = token.split_once('=').unwrap_or((token, ""));

@@ -1815,7 +1815,8 @@ To evaluate whether this was an artifact of the cold replay start, tests were ru
 Written on the Mac like milestone 43: `aec3.rs`, `shm.rs` and the pure part of `chain_log.rs`
 compiled and tested there, `plugin.rs`, `apo_link.rs` and `aec_delay_cache.rs` edited without a
 compiler. Not run on a capture, not heard live. Shared memory layout v18: the APO has to be
-reinstalled.
+reinstalled. The meter's rule described here (the low quartile of mic level over reference level
+taken as the echo) failed on the captures in milestone 46 and was replaced in milestone 47.
 
 **Why.** `ep_strength.default_gain` = 0.01 says "the echo is 40 dB under the reference". That
 is what AEC3 takes for the echo while it has no usable linear filter (a start, a reset, an echo
@@ -1895,13 +1896,13 @@ that the linear filter has it either way.
 
 ## Milestone 46: Echo Strength Measurement Verification on Real Captures (2026-11-10)
 
-Ověření měřiče síly echa a adaptivního záložního odhadu na existujících nahrávkách podle `docs/aec3-echo-strength-test.md`.
+First round: the echo strength meter and the adaptive fallback estimate of milestone 45 on the existing captures, following `docs/aec3-echo-strength-test.md`. Tests A and B failed; milestone 47 replaced the meter's logic because of the results below.
 
 ### 1. Compilation & Unit Tests (Step 0)
-- Všechny soubory psané bez překladače na Macu (`plugin.rs`, `apo_link.rs`, `aec_delay_cache.rs`, `shm.rs`, `chain_log.rs`) se na Windows přeložily bez jediné chyby. Žádné opravy kódu nebyly nutné. (Pozn.: příkaz v návodu specifikoval `gamersequalizer-daemon`, v Cargo.toml je název balíčku `gamersequalizer`).
-- Jednotkové testy:
+- All files written on the Mac without a compiler (`plugin.rs`, `apo_link.rs`, `aec_delay_cache.rs`, `shm.rs`, `chain_log.rs`) compiled on Windows without an error. No code fixes were needed. (Note: the guide's command named `gamersequalizer-daemon`; the package name in Cargo.toml is `gamersequalizer`.)
+- Unit tests:
   - `gamersequalizer-mic-vst --lib aec3::`: 16 passed, 4 ignored.
-  - Výstupy na Windows se přesně shodují s referencí z Macu:
+  - The output on Windows matches the Mac reference exactly:
     - `echo -20 dB, music from 2 s: measured -20.0 dB (bound: false)`
     - `echo -50 dB, music from 0 s: measured -49.6 dB (bound: false)`
     - `echo -200 dB, music from 0 s: measured -60.5 dB (bound: true)`
@@ -1909,27 +1910,27 @@ Ověření měřiče síly echa a adaptivního záložního odhadu na existujíc
   - `gamersequalizer-common`: 32 passed, 0 failed.
   - `gamersequalizer chain_log`: 4 passed, 0 failed.
   - `gamersequalizer-mic-vst --release`: 81 passed, 21 ignored, 0 failed.
-  - `cargo clippy --workspace --all-targets`: 0 chyb.
+  - `cargo clippy --workspace --all-targets`: 0 errors.
 
-### 2. Test A: capture_tuning_report vs Milník 44 Winner
-- **Verdikt: NEPROŠLO**.
-- Očekávání: `fallb` zůstane na -40 dB a čísla se shodují s milníkem 44 do 0,1 dB / 1 bodu %.
-- Skutečnost:
-  - Na 11 nahrávkách z 22 došlo k odchylkám:
-    - 7 nahrávek (`102403`, `115931`, `122520`, `124950`, `125717`, `144824`) skončilo s `fallb` jiným než -40 dB (nastaveno na -28 nebo -34 dB).
-    - 4 nahrávky (`091611`, `100150`, `101152`, `162331`) sice skončily s `fallb` -40 dB, ale v průběhu nahrávky došlo k přechodnému přestavení `fallback` a zbytečným rebuildům AEC3, což zhoršilo konvergenci a výsledná čísla.
-  - Nahrávky, které prošly beze změny (shodné s milníkem 44): `091216`, `100621`, `104318`, `104424`, `122712`, `125043`, `130319`, `163832`, `163934`, `204900`, `205013`, `210655`.
+### 2. Test A: capture_tuning_report vs Milestone 44 Winner
+- **Verdict: FAILED**.
+- Expected: `fallb` stays at -40 dB and the numbers match milestone 44 within 0.1 dB / 1 percentage point.
+- Found:
+  - 10 of the 22 captures differ:
+    - 6 captures (`102403`, `115931`, `122520`, `124950`, `125717`, `144824`) ended with `fallb` other than -40 dB (-28 or -34 dB).
+    - 4 captures (`091611`, `100150`, `101152`, `162331`) ended with `fallb` at -40 dB, but the fallback moved for a while during the capture; the needless AEC3 rebuilds hurt convergence and the final numbers.
+  - Captures identical to milestone 44: `091216`, `100621`, `104318`, `104424`, `122712`, `125043`, `130319`, `163832`, `163934`, `204900`, `205013`, `210655`.
 
-Srovnání odlišných nahrávek:
+The captures that differ:
 
-| Capture | Zdroj        | gain | strength | fallb | echo |  left | voice | >6dB | >10dB | onset | 4-8k | ERLE |
+| Capture | Source       | gain | strength | fallb | echo |  left | voice | >6dB | >10dB | onset | 4-8k | ERLE |
 | :------ | :----------- | ---: | -------: | ----: | ---: | ----: | ----: | ---: | ----: | ----: | ---: | ---: |
 | 091611  | winner (M44) |    - |        - |   -40 | 15.3 | -71.3 |   2.4 |  11% |    6% |   5.7 |  5.7 |    - |
 | 091611  | test A       |    0 |      -38 |   -40 | 14.0 | -66.5 |   2.4 |  11% |    6% |   5.0 |  5.2 |  0.5 |
 | 100150  | winner (M44) |    - |        - |   -40 | 16.6 | -61.2 |   2.0 |   8% |    3% |   3.9 |  4.9 |    - |
-| 100150  | test A       |    0 |    <-38  |   -40 | 14.3 | -50.2 |   1.4 |   4% |    2% |   4.4 |  3.2 |  1.3 |
+| 100150  | test A       |    0 |     <-38 |   -40 | 14.3 | -50.2 |   1.4 |   4% |    2% |   4.4 |  3.2 |  1.3 |
 | 101152  | winner (M44) |    - |        - |   -40 | 20.0 | -59.8 |   6.0 |  37% |   21% |   5.6 | 10.9 |    - |
-| 101152  | test A       |    0 |    <-29  |   -40 | 12.6 | -58.0 |   3.2 |  14% |    5% |   3.7 |  4.5 |  5.8 |
+| 101152  | test A       |    0 |     <-29 |   -40 | 12.6 | -58.0 |   3.2 |  14% |    5% |   3.7 |  4.5 |  5.8 |
 | 102403  | winner (M44) |    - |        - |   -40 | 17.2 | -55.9 |   4.7 |  28% |   15% |   8.7 |  6.5 |    - |
 | 102403  | test A       |    0 |      -26 |   -28 | 15.1 | -52.6 |   4.2 |  24% |   13% |   7.9 |  5.4 |  5.2 |
 | 115931  | winner (M44) |    - |        - |   -40 |  0.6 | -60.9 |   0.6 |   1% |    0% |   0.5 |  1.9 |    - |
@@ -1946,52 +1947,52 @@ Srovnání odlišných nahrávek:
 | 162331  | test A       |    6 |      -33 |   -40 | 10.5 | -54.0 |   1.4 |   3% |    2% |   2.0 |  5.4 |  2.8 |
 
 ### 3. Test B: capture_echo_report
-- **Verdikt: NEPROŠLO**.
-- Kritéria a zjištěné problémy:
-  1. **Sluchátka (`115931`, `122520`)**:
-     - Kritérium: `meter` je mez (`<...`) nebo je pod -50 dB.
-     - Výsledek: `115931` naměřil `meter` -30.6 dB (check -41.4 dB, není mez, daleko nad -50 dB) a nastavil `fallb` na -28 dB. `122520` naměřil `meter` -41.9 dB (není mez ani pod -50 dB) a kvůli přechodné špičce -27.7 dB v čase 15.7 s přestavil `fallb` na -34 dB.
-  2. **Reproduktory / monitor (`check - 6 <= meter <= check + 2`)**:
-     - `205013`: `meter` vyšel -33.2 dB proti `check` -50.5 dB (odchylka +17.3 dB). Měřič během řeči do hudby vystoupal z -51.5 dB (v 8.3 s) až na -33.2 dB (v 28.0 s).
-  3. **Stabilita a kolísání měřiče (`trace`)**:
-     - Kritérium: nejvýš 2 změny za 30 s při stálé hlasitosti, žádné střídání „echo X" a „within the noise", žádný fallback pokud meter <= -33.
-     - Selhání:
-       - `091611`: 14 změn během 35 s, přechodný skok fallbacku na -28 dB a návrat na -40 dB.
-       - `100150`: 16 změn, skoky fallbacku na -34, -28 a návrat na -40 dB.
-       - `101152`: Opakované střídání „within the noise" a „echo", 5 skoků fallbacku (-40 -> -34 -> -40 -> -34 -> -28 -> -40).
-       - `162331`: 18 změn, střídání šumu a echa, 4 skoky fallbacku.
-  4. **Hlas považován za echo**:
-     - `125717`: 0 oken se samotným echem (čistá řeč do hudby), přesto naměřil echo -30.9 dB a zvedl fallback na -34 dB.
-     - `144824`: 0 oken se samotným echem, naměřil echo -22.3 dB a zvedl fallback na -28 dB.
+- **Verdict: FAILED**.
+- Criteria and what went wrong:
+  1. **Headphones (`115931`, `122520`)**:
+     - Criterion: `meter` is a bound (`<...`) or under -50 dB.
+     - Result: `115931` measured `meter` -30.6 dB (check -41.4 dB; not a bound, far over -50 dB) and set `fallb` to -28 dB. `122520` measured `meter` -41.9 dB (neither a bound nor under -50 dB) and moved `fallb` to -34 dB because of a short peak of -27.7 dB at 15.7 s.
+  2. **Speakers / monitor (`check - 6 <= meter <= check + 2`)**:
+     - `205013`: `meter` came out at -33.2 dB against `check` -50.5 dB (17.3 dB over). With speech over the music the meter climbed from -51.5 dB (at 8.3 s) to -33.2 dB (at 28.0 s).
+  3. **Stability of the meter (`trace`)**:
+     - Criterion: at most 2 changes per 30 s at a constant volume, no flipping between "echo X" and "within the noise", no fallback change while meter <= -33.
+     - Failures:
+       - `091611`: 14 changes in 35 s, the fallback jumped to -28 dB and back to -40 dB.
+       - `100150`: 16 changes, the fallback jumped to -34, -28 and back to -40 dB.
+       - `101152`: repeated flipping between "within the noise" and "echo", 5 fallback jumps (-40 -> -34 -> -40 -> -34 -> -28 -> -40).
+       - `162331`: 18 changes, flipping between noise and echo, 4 fallback jumps.
+  4. **Voice taken for echo**:
+     - `125717`: 0 echo-alone windows (only speech over music), yet it measured an echo of -30.9 dB and raised the fallback to -34 dB.
+     - `144824`: 0 echo-alone windows, measured an echo of -22.3 dB and raised the fallback to -28 dB.
 
-Tabulka Testu B:
+Test B table:
 
-| Capture         | meter   | check   | fallb | Verdikt      | Poznámka                                                        |
-| :-------------- | :------ | :------ | ----: | :----------- | :-------------------------------------------------------------- |
-| 20261107-091216 | -       | -       |   -40 | Prošlo       | Bez reference, trace čistý                                      |
-| 20261107-091611 | -38.4   | -36.6   |   -40 | **Neprošlo** | Silné kolísání (14 změn), přechodně fallback -28 v 33.6 s       |
-| 20261107-100150 | <-38.2  | -37.2   |   -40 | **Neprošlo** | Silné kolísání (16 změn), přechodně fallback -34 a -28          |
-| 20261107-100621 | -       | -       |   -40 | Prošlo       | Bez reference, trace čistý                                      |
-| 20261107-101152 | <-28.9  | -29.1   |   -40 | **Neprošlo** | Střídání noise/echo, 5 skoků fallbacku (-40, -34, -28, -40)     |
-| 20261107-102403 | -26.4   | -28.3   |   -28 | **Neprošlo** | Kolísání a střídání noise/echo, 10 změn, fallb -28              |
-| 20261107-104318 | <-39.6  | -39.1   |   -40 | Prošlo       | Horní mez pod šumem, fallb -40                                  |
-| 20261107-104424 | -       | -       |   -40 | Prošlo       | Bez reference, trace jen mic gain                               |
-| 20261109-115931 | -30.6   | -41.4   |   -28 | **Neprošlo** | Sluchátka: meter není mez ani pod -50, fallb přestaven na -28   |
-| 20261109-122520 | -41.9   | -41.3   |   -34 | **Neprošlo** | Sluchátka: meter není mez ani pod -50, fallb přestaven na -34   |
-| 20261109-122712 | -34.3   | -34.8   |   -40 | Prošlo       | meter odpovídá check, fallb -40, jediná změna v 7.7 s           |
-| 20261109-124950 | -28.5   | -       |   -34 | **Neprošlo** | Málo oken s echem, fallb přestaven na -34                       |
-| 20261109-125043 | -       | -       |   -40 | Prošlo       | Bez reference, trace jen mic gain                               |
-| 20261109-125717 | -35.1   | -       |   -34 | **Neprošlo** | Jen řeč do hudby, meter bere hlas za echo (-30.9 dB, fallb -34) |
-| 20261109-130319 | <-38.1  | -37.0   |   -40 | Prošlo       | Horní mez pod šumem, fallb -40, stabilní                        |
-| 20261109-144824 | -22.3   | -       |   -28 | **Neprošlo** | Jen řeč do hudby, meter bere hlas za echo (-22.3 dB, fallb -28) |
-| 20261109-162331 | -32.6   | -33.3   |   -40 | **Neprošlo** | Silné kolísání (18 změn), střídání noise/echo, 4 skoky fallb    |
-| 20261109-163832 | -       | -       |   -40 | Prošlo       | Bez reference                                                   |
-| 20261109-163934 | -       | -       |   -40 | Prošlo       | Bez reference                                                   |
-| 20261109-204900 | -       | -       |   -40 | Prošlo       | Bez reference                                                   |
-| 20261109-205013 | -33.2   | -50.5   |   -40 | **Neprošlo** | meter o 17.3 dB nad check; během řeči stoupl z -51.5 na -33.2   |
-| 20261109-210655 | -44.8   | -50.3   |   -40 | S výhradou   | Hodnoty odpovídají, ale 8 změn v průběhu                        |
+| Capture         | meter  | check | fallb | Verdict           | Note                                                                         |
+| :-------------- | :----- | :---- | ----: | :---------------- | :--------------------------------------------------------------------------- |
+| 20261107-091216 | -      | -     |   -40 | Passed            | No reference, clean trace                                                    |
+| 20261107-091611 | -38.4  | -36.6 |   -40 | **Failed**        | Heavy wobble (14 changes), fallback briefly -28 at 33.6 s                    |
+| 20261107-100150 | <-38.2 | -37.2 |   -40 | **Failed**        | Heavy wobble (16 changes), fallback briefly -34 and -28                      |
+| 20261107-100621 | -      | -     |   -40 | Passed            | No reference, clean trace                                                    |
+| 20261107-101152 | <-28.9 | -29.1 |   -40 | **Failed**        | Noise/echo flipping, 5 fallback jumps (-40, -34, -28, -40)                   |
+| 20261107-102403 | -26.4  | -28.3 |   -28 | **Failed**        | Wobble and noise/echo flipping, 10 changes, fallb -28                        |
+| 20261107-104318 | <-39.6 | -39.1 |   -40 | Passed            | Upper bound under the noise, fallb -40                                       |
+| 20261107-104424 | -      | -     |   -40 | Passed            | No reference, trace has mic gain only                                        |
+| 20261109-115931 | -30.6  | -41.4 |   -28 | **Failed**        | Headphones: meter neither a bound nor under -50, fallb moved to -28          |
+| 20261109-122520 | -41.9  | -41.3 |   -34 | **Failed**        | Headphones: meter neither a bound nor under -50, fallb moved to -34          |
+| 20261109-122712 | -34.3  | -34.8 |   -40 | Passed            | meter matches check, fallb -40, a single change at 7.7 s                     |
+| 20261109-124950 | -28.5  | -     |   -34 | **Failed**        | Few echo windows, fallb moved to -34                                         |
+| 20261109-125043 | -      | -     |   -40 | Passed            | No reference, trace has mic gain only                                        |
+| 20261109-125717 | -35.1  | -     |   -34 | **Failed**        | Only speech over music, meter takes the voice for echo (-30.9 dB, fallb -34) |
+| 20261109-130319 | <-38.1 | -37.0 |   -40 | Passed            | Upper bound under the noise, fallb -40, stable                               |
+| 20261109-144824 | -22.3  | -     |   -28 | **Failed**        | Only speech over music, meter takes the voice for echo (-22.3 dB, fallb -28) |
+| 20261109-162331 | -32.6  | -33.3 |   -40 | **Failed**        | Heavy wobble (18 changes), noise/echo flipping, 4 fallb jumps                |
+| 20261109-163832 | -      | -     |   -40 | Passed            | No reference                                                                 |
+| 20261109-163934 | -      | -     |   -40 | Passed            | No reference                                                                 |
+| 20261109-204900 | -      | -     |   -40 | Passed            | No reference                                                                 |
+| 20261109-205013 | -33.2  | -50.5 |   -40 | **Failed**        | meter 17.3 dB over check; rose from -51.5 to -33.2 during speech             |
+| 20261109-210655 | -44.8  | -50.3 |   -40 | With reservations | Values match, but 8 changes on the way                                       |
 
-Stopy nahrávek s více než jednou změnou:
+Traces:
 - `20261107-091611`: `11.5 s echo -36.4, 30.2 s echo -34.2, 31.6 s echo -31.0, 32.0 s echo -29.0, 32.8 s echo -26.2, 33.3 s echo -24.2, 33.6 s fallback -40 -> -28, 38.9 s echo -26.2, 41.0 s echo -29.0, 43.5 s echo -31.4, 43.8 s echo -33.9, 44.8 s echo -36.3, 46.3 s echo -38.4, 46.7 s fallback -28 -> -40`
 - `20261107-100150`: `8.9 s echo -40.5, 20.4 s echo -38.3, 22.2 s echo -36.2, 23.3 s echo -34.0, 24.1 s echo -31.3, 26.1 s echo -29.0, 26.2 s echo -26.6, 26.3 s fallback -40 -> -34, 27.1 s echo -24.3, 29.1 s fallback -34 -> -28, 29.2 s echo -26.3, 30.2 s echo -28.6, 33.9 s echo -30.8, 35.3 s echo -32.8, 36.1 s fallback -28 -> -34, 49.3 s echo -34.9, 50.9 s echo -37.0, 51.4 s echo within the noise (under -38.2), 56.3 s fallback -34 -> -40`
 - `20261107-101152`: `5.0 s echo within the noise (under -29.0), 8.6 s echo -30.2, 11.0 s fallback -40 -> -34, 13.7 s echo -32.2, 14.0 s echo -36.2, 16.0 s fallback -34 -> -40, 22.6 s echo -31.6, 22.7 s echo -28.6, 24.6 s fallback -40 -> -34, 25.0 s echo -26.2, 26.9 s echo -24.2, 27.1 s fallback -34 -> -28, 31.2 s echo -26.2, 33.5 s echo -28.2, 38.9 s echo within the noise (under -28.9), 41.1 s fallback -28 -> -40`
@@ -2009,11 +2010,11 @@ Stopy nahrávek s více než jednou změnou:
 - `20261109-205013`: `0.0 s mic gain 0 -> 18, 8.3 s echo -51.5, 18.7 s echo -49.5, 19.8 s echo -47.4, 20.2 s echo -45.4, 20.4 s echo -43.1, 20.6 s echo -39.3, 22.9 s echo -37.3, 23.6 s echo -35.2, 28.0 s echo -33.2`
 - `20261109-210655`: `0.0 s mic gain 0 -> 18, 5.0 s echo within the noise (under -51.1), 15.0 s echo within the noise (under -49.0), 16.5 s echo -47.1, 22.1 s echo -44.9, 22.7 s echo -42.6, 23.9 s echo -44.6, 27.0 s echo -42.6, 39.5 s echo -44.8, 55.4 s mic gain 18 -> 24`
 
-### 4. Test C: silné echo nasimulované z nahrávek
-- **Neprováděn (zastaveno podle pravidel návodu)**: Podle zadání v `docs/aec3-echo-strength-test.md`, kapitola 2 („Když test B neprojde, **zastav se** a zapiš tabulku a stopy. Test C pak nemá smysl.") a kapitola Pravidla („Neměň konstanty měřiče ... Když něco nevyjde, zapiš čísla a zastav se. Rozhodnutí o změně udělá člověk.").
+### 4. Test C: strong echo simulated from the captures
+- **Not run (stopped as the guide says)**: `docs/aec3-echo-strength-test.md`, chapter 2 (when test B fails, stop and write down the table and the traces; test C then makes no sense) and its rules (do not change the meter's constants; when something fails, write the numbers down and stop; a human decides about the change).
 
-### 5. Shrnutí a doporučení
-- **Závěr**: Neprošel Test A ani Test B: měřič síly echa na reálných nahrávkách výrazně kolísá, plete si lidský hlas a šum mikrofonu se silným echem (zejména na sluchátkách a při promluvách do hudby) a neoprávněně přestavuje záložní odhad AEC3 (`fallback`), což vede k opakovaným zbytečným rebuildům filtru a degradaci zvuku; živý test s instalací APO v tomto stavu nemá smysl provádět, dokud člověk neupraví parametry či logiku měřiče echa.
+### 5. Summary
+- Tests A and B failed. On real captures the meter wobbles, takes the human voice and the mic's noise for a strong echo (mostly on headphones and with speech over music) and moves AEC3's fallback estimate without a reason, which rebuilds the filter again and again and degrades the sound. A live test with the APO installed makes no sense until the meter's logic changes (done in milestone 47).
 
 ## Milestone 47: The echo meter took the voice for an echo; it now needs the mic to follow the reference (2026-11-10)
 
@@ -2051,15 +2052,15 @@ Second round on the captures: `docs/aec3-echo-strength-test.md`, to be written u
   drops a remembered one on a bound (the APO lowers it itself and reports the lowered value).
 - **Synthetic, the cases of milestone 46 added** (20 s each; fit = correlation x slope):
 
-| Scene                                                        | Reported             | Fit         | Fallback |
-| ------------------------------------------------------------ | -------------------- | ----------- | -------- |
-| echo -20 dB, voice in 40 % of the windows                    | -20.0 dB             | 1.00 x 1.01 | -22 dB   |
-| echo -50 dB, voice in 40 %                                   | -49.4 dB             | 1.00 x 0.85 | -40 dB   |
-| echo -80 dB (under the noise), voice in 40 %                 | bound -58.1 dB       | 0.26 x 0.01 | -40 dB   |
-| no echo, voice all the time over the music (headphones)      | bound -16.5 dB       | 0.56 x 0.75 | -40 dB   |
-| echo -50 dB, then a voice 20 dB louder that never pauses     | -49.2 dB (no climb)  | 0.56 x 0.75 | -40 dB   |
-| echo -20 dB, then a voice that never pauses                  | -20.1 dB (stays)     | 0.86 x 1.32 | -22 dB   |
-| echo 5 dB over the reference                                 | 4.9 dB               | 1.00 x 1.02 | 0 dB     |
+| Scene                                                    | Reported            | Fit         | Fallback |
+| :------------------------------------------------------- | :------------------ | :---------- | :------- |
+| echo -20 dB, voice in 40 % of the windows                | -20.0 dB            | 1.00 x 1.01 | -22 dB   |
+| echo -50 dB, voice in 40 %                               | -49.4 dB            | 1.00 x 0.85 | -40 dB   |
+| echo -80 dB (under the noise), voice in 40 %             | bound -58.1 dB      | 0.26 x 0.01 | -40 dB   |
+| no echo, voice all the time over the music (headphones)  | bound -16.5 dB      | 0.56 x 0.75 | -40 dB   |
+| echo -50 dB, then a voice 20 dB louder that never pauses | -49.2 dB (no climb) | 0.56 x 0.75 | -40 dB   |
+| echo -20 dB, then a voice that never pauses              | -20.1 dB (stays)    | 0.86 x 1.32 | -22 dB   |
+| echo 5 dB over the reference                             | 4.9 dB              | 1.00 x 1.02 | 0 dB     |
 
   The 0.56 of the voice alone is this test's doing: the synthetic music beats at 2 Hz and the
   synthetic voice at 4 Hz, so their levels are not independent. A real voice should fit worse.
@@ -2074,13 +2075,13 @@ Second round on the captures: `docs/aec3-echo-strength-test.md`, to be written u
 
 ## Milestone 48: Echo Strength Measurement Verification with Fit & Correlation Check (2026-11-10)
 
-Druhé kolo ověření měřiče síly echa a záložního odhadu na existujících nahrávkách podle `docs/aec3-echo-strength-test.md` po přepsání měřiče v milníku 47 (podmínka sledování reference mikrofonem okno po okně).
+Second round of the echo strength test on the existing captures, following `docs/aec3-echo-strength-test.md`, after milestone 47 rewrote the meter (an echo is confirmed only when the mic level follows the reference level window by window).
 
 ### 1. Compilation & Unit Tests (Step 0)
-- Všechny soubory psané bez překladače na Macu (`aec3.rs`, `shm.rs`, `chain_log.rs`, `apo_link.rs`) se na Windows přeložily bez chyb. Žádné opravy kódu nebyly nutné.
-- Jednotkové testy:
+- All files written on the Mac without a compiler (`aec3.rs`, `shm.rs`, `chain_log.rs`, `apo_link.rs`) compiled on Windows without errors. No code fixes were needed.
+- Unit tests:
   - `gamersequalizer-mic-vst --lib aec3::`: 16 passed, 4 ignored.
-  - Výstupy na Windows se přesně shodují s referenčními hodnotami z Macu:
+  - The output on Windows matches the Mac reference exactly:
     - `echo -20 dB, music from 2 s: -20.0 dB (bound: false), fit 1.00 x 1.01`
     - `echo -50 dB, music from 0 s: -49.6 dB (bound: false), fit 1.00 x 0.85`
     - `echo -200 dB, music from 0 s: -16.5 dB (bound: true), fit 0.56 x 0.75`
@@ -2088,86 +2089,86 @@ Druhé kolo ověření měřiče síly echa a záložního odhadu na existujíc�
   - `gamersequalizer-common`: 32 passed, 0 failed.
   - `gamersequalizer chain_log`: 4 passed, 0 failed.
   - `gamersequalizer-mic-vst --release`: 81 passed, 21 ignored, 0 failed.
-  - `cargo clippy --workspace --all-targets`: 0 chyb.
+  - `cargo clippy --workspace --all-targets`: 0 errors.
 
-### 2. Test A: capture_tuning_report vs Milník 44 Winner
-- **Verdikt: PROŠLO (100 % shodné)**.
-- Záložní odhad `fallb` zůstal na -40 dB u všech 22 nahrávek.
-- Všechna čísla (`echo`, `left`, `voice`, `>6dB`, `>10dB`, `onset`, `4-8k`) se na všech 22 nahrávkách přesně shodují s vítězem milníku 44 (`erle=30,10 hf=0`). Žádná nahrávka se neliší.
+### 2. Test A: capture_tuning_report vs Milestone 44 Winner
+- **Verdict: PASSED (identical)**.
+- The fallback estimate `fallb` stayed at -40 dB on all 22 captures.
+- All numbers (`echo`, `left`, `voice`, `>6dB`, `>10dB`, `onset`, `4-8k`) match the milestone 44 winner (`erle=30,10 hf=0`) exactly on all 22 captures. No capture differs.
 
 ### 3. Test B: capture_echo_report
-- **Verdikt: Všechny nahrávky prošly nebo byly nepotvrzeny (žádné NEPROŠLO)**.
-- Kritéria a zhodnocení:
-  - **Sluchátka (`115931`, `122520`)**: `meter` zůstal jako horní mez s `<` (korelace 0.23 a 0.27 nedosáhly prahu 0.90) a `fallb` zůstal na -40 dB. Falešné detekce echa ze sluchátek jsou zcela odstraněny.
-  - **Řeč do hudby bez oken echa o samotě (`124950`, `125717`, `144824`)**: `fallb` zůstal na -40 dB, hlas už není mylně považován za echo.
-  - **Dlouhá řeč do hudby (`205013`)**: v prvním kole stoupal odhad z -51 na -33 dB; nyní korelace 0.29 drží stav jako nepotvrzený (`<-33.9 dB`), `fallb` je -40 dB.
-  - **Potvrzená echa**:
-    - `091611`: potvrzeno (`-38.9 dB`), `check` -36.6 dB je v toleranci, 2 změny ve stopě.
-    - `102403`: potvrzeno v 55.3 s (`-25.8 dB`, fit `0.90 x 1.02`), odchylka od `check + 2` (-26.3 dB) je 0.5 dB.
-  - **Nepotvrzené nahrávky s reproduktory**: korelace v reálných místnostech se pohybuje mezi 0.22 a 0.78 (reverb a zpoždění stírají korelaci na 100 ms oknech), takže nepřekračují práh 0.90 a bezpečně drží AEC3 na -40 dB.
+- **Verdict: every capture passed or stayed unconfirmed (no FAILED)**.
+- Criteria:
+  - **Headphones (`115931`, `122520`)**: `meter` stayed an upper bound with `<` (correlations 0.23 and 0.27 did not reach the 0.90 threshold) and `fallb` stayed at -40 dB. The false echo detections on headphones are gone.
+  - **Speech over music with no echo-alone windows (`124950`, `125717`, `144824`)**: `fallb` stayed at -40 dB; the voice is no longer taken for an echo.
+  - **Long speech over music (`205013`)**: in the first round the estimate climbed from -51 to -33 dB; now a correlation of 0.29 keeps it unconfirmed (`<-33.9 dB`), `fallb` is -40 dB.
+  - **Confirmed echoes**:
+    - `091611`: confirmed (`-38.9 dB`), `check` -36.6 dB is within tolerance, 2 changes in the trace.
+    - `102403`: confirmed at 55.3 s (`-25.8 dB`, fit `0.90 x 1.02`), 0.5 dB over `check + 2` (-26.3 dB).
+  - **Unconfirmed speaker captures**: the correlation in real rooms is 0.22 to 0.78 (reverb and delay smear it over 100 ms windows), so they do not cross the 0.90 threshold and AEC3 stays at -40 dB.
 
-Tabulka Testu B:
+Test B table:
 
-| Capture         | meter  | fit       | check | fallb | Verdikt      | Poznámka                                                            |
-| :-------------- | :----- | :-------- | ----: | ----: | :----------- | :------------------------------------------------------------------ |
-| 20261107-091216 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace čistý                                          |
-| 20261107-091611 | -38.9  | 0.89x0.87 | -36.6 |   -40 | Prošlo       | Potvrzeno (15.1 s), check v normě, 2 změny ve stopě                 |
-| 20261107-100150 | <-39.0 | 0.75x0.71 | -37.2 |   -40 | Nepotvrzeno  | Fit 0.75x0.71 pod prahem 0.90, fallb -40                            |
-| 20261107-100621 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace čistý                                          |
-| 20261107-101152 | <-28.2 | 0.34x0.26 | -29.1 |   -40 | Nepotvrzeno  | Reverb, fit 0.34x0.26, fallb -40                                   |
-| 20261107-102403 | -25.8  | 0.77x0.89 | -28.3 |   -40 | Prošlo       | Potvrzeno v 55.3 s (fit 0.90x1.02), odchylka od check+2 je 0.5 dB   |
-| 20261107-104318 | <-39.6 | 0.92x0.80 | -39.1 |   -40 | Nepotvrzeno  | Korelace 0.92, ale ref spread pod 2 dB, fallb -40                   |
-| 20261107-104424 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace jen mic gain                                   |
-| 20261109-115931 | <-30.2 | 0.23x2.07 | -41.4 |   -40 | Nepotvrzeno  | Sluchátka: korelace 0.23, nepotvrzeno, fallb -40                    |
-| 20261109-122520 | <-41.3 | 0.27x0.19 | -41.3 |   -40 | Nepotvrzeno  | Sluchátka: korelace 0.27, nepotvrzeno, fallb -40                    |
-| 20261109-122712 | <-34.3 | 0.52x0.96 | -34.8 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.52x0.96, fallb -40                              |
-| 20261109-124950 | <-28.2 | 0.78x0.94 |     - |   -40 | Nepotvrzeno  | Jen 6 oken echa, fit 0.78x0.94, fallb -40                           |
-| 20261109-125043 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace jen mic gain                                   |
-| 20261109-125717 | <-32.9 | 0.40x0.68 |     - |   -40 | Nepotvrzeno  | Řeč do hudby, fit 0.40x0.68, hlas nebyl vzat za echo, fallb -40    |
-| 20261109-130319 | <-38.1 | 0.26x0.39 | -37.0 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.26x0.39, fallb -40                              |
-| 20261109-144824 | <-22.2 | 0.33x0.66 |     - |   -40 | Nepotvrzeno  | Řeč do hudby, fit 0.33x0.66, hlas nebyl vzat za echo, fallb -40    |
-| 20261109-162331 | <-33.3 | 0.45x0.27 | -33.3 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.45x0.27, fallb -40                              |
-| 20261109-163832 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference                                                       |
-| 20261109-163934 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference                                                       |
-| 20261109-204900 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference                                                       |
-| 20261109-205013 | <-33.9 | 0.29x1.18 | -50.5 |   -40 | Nepotvrzeno  | Hlas do hudby nezvedá fallback, fit 0.29x1.18, fallb -40           |
-| 20261109-210655 | <-44.8 | 0.22x0.48 | -50.3 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.22x0.48, fallb -40                              |
+| Capture         | meter  | fit       | check | fallb | Verdict       | Note                                                                   |
+| :-------------- | :----- | :-------- | ----: | ----: | :------------ | :--------------------------------------------------------------------- |
+| 20261107-091216 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference, clean trace                                              |
+| 20261107-091611 | -38.9  | 0.89x0.87 | -36.6 |   -40 | Passed        | Confirmed (15.1 s), check within tolerance, 2 changes in the trace     |
+| 20261107-100150 | <-39.0 | 0.75x0.71 | -37.2 |   -40 | Not confirmed | Fit 0.75x0.71 under the 0.90 threshold, fallb -40                      |
+| 20261107-100621 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference, clean trace                                              |
+| 20261107-101152 | <-28.2 | 0.34x0.26 | -29.1 |   -40 | Not confirmed | Reverb, fit 0.34x0.26, fallb -40                                       |
+| 20261107-102403 | -25.8  | 0.77x0.89 | -28.3 |   -40 | Passed        | Confirmed at 55.3 s (fit 0.90x1.02), 0.5 dB over check+2               |
+| 20261107-104318 | <-39.6 | 0.92x0.80 | -39.1 |   -40 | Not confirmed | Correlation 0.92, but ref spread under 2 dB, fallb -40                 |
+| 20261107-104424 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference, trace has mic gain only                                  |
+| 20261109-115931 | <-30.2 | 0.23x2.07 | -41.4 |   -40 | Not confirmed | Headphones: correlation 0.23, not confirmed, fallb -40                 |
+| 20261109-122520 | <-41.3 | 0.27x0.19 | -41.3 |   -40 | Not confirmed | Headphones: correlation 0.27, not confirmed, fallb -40                 |
+| 20261109-122712 | <-34.3 | 0.52x0.96 | -34.8 |   -40 | Not confirmed | Speakers, fit 0.52x0.96, fallb -40                                     |
+| 20261109-124950 | <-28.2 | 0.78x0.94 |     - |   -40 | Not confirmed | Only 6 echo windows, fit 0.78x0.94, fallb -40                          |
+| 20261109-125043 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference, trace has mic gain only                                  |
+| 20261109-125717 | <-32.9 | 0.40x0.68 |     - |   -40 | Not confirmed | Speech over music, fit 0.40x0.68, voice not taken for echo, fallb -40  |
+| 20261109-130319 | <-38.1 | 0.26x0.39 | -37.0 |   -40 | Not confirmed | Speakers, fit 0.26x0.39, fallb -40                                     |
+| 20261109-144824 | <-22.2 | 0.33x0.66 |     - |   -40 | Not confirmed | Speech over music, fit 0.33x0.66, voice not taken for echo, fallb -40  |
+| 20261109-162331 | <-33.3 | 0.45x0.27 | -33.3 |   -40 | Not confirmed | Speakers, fit 0.45x0.27, fallb -40                                     |
+| 20261109-163832 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference                                                           |
+| 20261109-163934 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference                                                           |
+| 20261109-204900 | -      | 0.00x0.00 |     - |   -40 | Passed        | No reference                                                           |
+| 20261109-205013 | <-33.9 | 0.29x1.18 | -50.5 |   -40 | Not confirmed | Voice over music does not raise the fallback, fit 0.29x1.18, fallb -40 |
+| 20261109-210655 | <-44.8 | 0.22x0.48 | -50.3 |   -40 | Not confirmed | Speakers, fit 0.22x0.48, fallb -40                                     |
 
-Stopy změn u nahrávek s potvrzeným echem:
+Traces of the captures with a confirmed echo:
 - `20261107-091611`: `11.5 s no echo confirmed (at most -35.7), 15.1 s echo -35.4 (fit 0.90 x 0.91), 53.3 s echo -38.9 (fit 0.91 x 0.81)`
 - `20261107-102403`: `11.8 s no echo confirmed (at most -30.1), 13.4 s no echo confirmed (at most -32.2), 13.9 s no echo confirmed (at most -38.0), 39.5 s no echo confirmed (at most -33.4), 39.7 s no echo confirmed (at most -30.3), 40.2 s no echo confirmed (at most -28.2), 43.7 s no echo confirmed (at most -26.1), 55.3 s echo -25.8 (fit 0.90 x 1.02)`
 
-### 4. Test C: silné echo nasimulované z nahrávek
-Test C proběhl na nahrávkách s potvrzeným echem (`091611` a `102403`) s `micscale=12` (při `micscale=20` docházelo k přebuzení mikrofonu: 6655 vzorků u 091611 a 63 vzorků u 102403 nad plný rozsah). Ostatní nahrávky (`101152`, `122712`, `130319`, `205013`, `210655`) byly v testu B nepotvrzeny, takže test C u nich nic neukáže (fallb zůstává -40 dB).
+### 4. Test C: strong echo simulated from the captures
+Test C ran on the captures with a confirmed echo (`091611` and `102403`) with `micscale=12` (`micscale=20` overdrove the mic: 6655 samples on 091611 and 63 samples on 102403 over full scale). The other captures (`101152`, `122712`, `130319`, `205013`, `210655`) were not confirmed in test B, so test C shows nothing on them (fallb stays at -40 dB).
 
-| Capture | Scéna                            | gain |  meter |       fit | check | fallb | start |  echo |  left | voice | >6dB | >10dB | onset | 4-8k | ERLE |
-| :------ | :------------------------------- | ---: | -----: | --------: | ----: | ----: | ----: | ----: | ----: | ----: | ---: | ----: | ----: | ---: | ---: |
-| 091611  | (as recorded)                    |    0 |  -38.9 | 0.89x0.87 | -36.6 |   -40 |  12.8 |  15.3 | -71.3 |   2.4 |  11% |    6% |   5.7 |  5.7 |  0.8 |
-| 091611  | micscale=12                      |    0 |  -26.9 | 0.89x0.87 | -24.6 |   -28 |   4.7 |  14.5 | -54.8 |   1.2 |   3% |    1% |   1.9 |  3.2 |  3.9 |
-| 091611  | micscale=12 seed=auto            |    0 |  -26.9 | 0.89x0.87 | -24.6 |   -28 |  12.8 |  14.6 | -55.7 |   1.2 |   2% |    2% |   1.7 |  3.8 |  4.1 |
-| 091611  | micscale=12 seed=auto gain=0.01  |    0 |  -26.9 | 0.89x0.87 | -24.6 |   -28 |   4.7 |  14.6 | -54.8 |   1.2 |   2% |    2% |   1.7 |  3.8 |  4.1 |
-| 102403  | (as recorded)                    |    0 |  -25.8 | 0.77x0.89 | -28.3 |   -40 |   9.5 |  17.2 | -55.9 |   4.7 |  28% |   15% |   8.7 |  6.5 |  5.4 |
-| 102403  | micscale=12                      |    0 |  -13.8 | 0.77x0.89 | -16.3 |   -40 |   2.1 |  15.1 | -39.9 |   2.8 |  14% |    6% |   5.8 |  4.1 |  5.1 |
-| 102403  | micscale=12 seed=auto            |    0 |  -13.8 | 0.77x0.89 | -16.3 |   -28 |  28.8 |  14.7 | -40.5 |   2.5 |  10% |    6% |   5.7 |  3.7 |  4.5 |
-| 102403  | micscale=12 seed=auto gain=0.01  |    0 |  -13.8 | 0.77x0.89 | -16.3 |   -28 |   2.1 |  14.7 | -40.5 |   2.5 |  10% |    6% |   5.7 |  3.7 |  4.5 |
+| Capture | Scene                           | gain | meter |       fit | check | fallb | start | echo |  left | voice | >6dB | >10dB | onset | 4-8k | ERLE |
+| :------ | :------------------------------ | ---: | ----: | --------: | ----: | ----: | ----: | ---: | ----: | ----: | ---: | ----: | ----: | ---: | ---: |
+| 091611  | (as recorded)                   |    0 | -38.9 | 0.89x0.87 | -36.6 |   -40 |  12.8 | 15.3 | -71.3 |   2.4 |  11% |    6% |   5.7 |  5.7 |  0.8 |
+| 091611  | micscale=12                     |    0 | -26.9 | 0.89x0.87 | -24.6 |   -28 |   4.7 | 14.5 | -54.8 |   1.2 |   3% |    1% |   1.9 |  3.2 |  3.9 |
+| 091611  | micscale=12 seed=auto           |    0 | -26.9 | 0.89x0.87 | -24.6 |   -28 |  12.8 | 14.6 | -55.7 |   1.2 |   2% |    2% |   1.7 |  3.8 |  4.1 |
+| 091611  | micscale=12 seed=auto gain=0.01 |    0 | -26.9 | 0.89x0.87 | -24.6 |   -28 |   4.7 | 14.6 | -54.8 |   1.2 |   2% |    2% |   1.7 |  3.8 |  4.1 |
+| 102403  | (as recorded)                   |    0 | -25.8 | 0.77x0.89 | -28.3 |   -40 |   9.5 | 17.2 | -55.9 |   4.7 |  28% |   15% |   8.7 |  6.5 |  5.4 |
+| 102403  | micscale=12                     |    0 | -13.8 | 0.77x0.89 | -16.3 |   -40 |   2.1 | 15.1 | -39.9 |   2.8 |  14% |    6% |   5.8 |  4.1 |  5.1 |
+| 102403  | micscale=12 seed=auto           |    0 | -13.8 | 0.77x0.89 | -16.3 |   -28 |  28.8 | 14.7 | -40.5 |   2.5 |  10% |    6% |   5.7 |  3.7 |  4.5 |
+| 102403  | micscale=12 seed=auto gain=0.01 |    0 | -13.8 | 0.77x0.89 | -16.3 |   -28 |   2.1 | 14.7 | -40.5 |   2.5 |  10% |    6% |   5.7 |  3.7 |  4.5 |
 
-Stopy Testu C:
+Test C traces:
 - `091611 micscale=12`: `11.5 s no echo confirmed (at most -23.7), 15.1 s echo -23.4 (fit 0.90 x 0.91), 21.1 s fallback -40 -> -28, 53.3 s echo -26.9 (fit 0.91 x 0.81)`
 - `091611 micscale=12 seed=auto`: `0.0 s fallback -40 -> -28, 15.1 s echo -23.4 (fit 0.90 x 0.91), 53.3 s echo -26.9 (fit 0.91 x 0.81)`
 - `102403 micscale=12`: `11.8 s no echo confirmed (at most -18.1), 13.4 s no echo confirmed (at most -20.2), 13.9 s no echo confirmed (at most -26.0), 39.5 s no echo confirmed (at most -21.4), 39.7 s no echo confirmed (at most -18.3), 40.2 s no echo confirmed (at most -16.2), 43.7 s no echo confirmed (at most -14.1), 55.3 s echo -13.8 (fit 0.90 x 1.02)`
 - `102403 micscale=12 seed=auto`: `0.0 s fallback -40 -> -16, 11.8 s echo -18.1 (fit 0.88 x 0.89), 13.8 s echo -21.4 (fit 0.59 x 1.26), 13.9 s echo -26.0 (fit 0.61 x 1.28), 14.2 s fallback -16 -> -28, 55.3 s echo -13.8 (fit 0.90 x 1.02)`
 
-Verdikt podle sedmi kritérií: **VŠECH 7 KRITÉRIÍ SPLNĚNO (PROŠLO)**:
-1. Linearita u `micscale=12`: `meter` stoupl přesně o 12.0 dB na obou nahrávkách (-38.9 -> -26.9 dB a -25.8 -> -13.8 dB).
-2. `fallb` u `micscale=12`: u `091611` je -28 dB (mezi meter - 8 a meter + 2). U `102403` zůstal -40 dB, protože potvrzení přišlo v 55.3 s a do konce nahrávky nenastala pauza k rebuildnutí.
-3. Stopa u `micscale=12`: právě jedno přestavení fallbacku (21.1 s na -28 dB u 091611).
-4. Stopa u `seed=auto`: nastavení z cache hned na začátku streamu (`0.0 s fallback -40 -> X`).
-5. `start` (`seed=auto` vs `gain=0.01`): na `091611` zlepšení o +8.1 dB (12.8 vs 4.7 dB), na `102403` zlepšení o +26.7 dB (28.8 vs 2.1 dB) – obojí vysoce překračuje požadavek min. 6 dB.
-6. Hlas (`seed=auto` vs `gain=0.01`): `voice`, `onset` a `>10dB` jsou zcela beze změny (odchylka 0.0 dB / 0 bodů).
-7. Echo (`seed=auto` vs `gain=0.01`): `echo` beze změny, `left` shodný nebo o 0.9 dB lepší.
+Verdict by the seven criteria: **ALL 7 MET (PASSED)**:
+1. Linearity with `micscale=12`: `meter` rose by exactly 12.0 dB on both captures (-38.9 -> -26.9 dB and -25.8 -> -13.8 dB).
+2. `fallb` with `micscale=12`: -28 dB on `091611` (between meter - 8 and meter + 2). On `102403` it stayed at -40 dB: the confirmation came at 55.3 s and no pause for a rebuild followed before the capture ended.
+3. Trace with `micscale=12`: exactly one fallback change (to -28 dB at 21.1 s on 091611).
+4. Trace with `seed=auto`: the cached value sets the fallback right at the stream start (`0.0 s fallback -40 -> X`).
+5. `start` (`seed=auto` vs `gain=0.01`): +8.1 dB on `091611` (12.8 vs 4.7 dB) and +26.7 dB on `102403` (28.8 vs 2.1 dB); both far over the required 6 dB.
+6. Voice (`seed=auto` vs `gain=0.01`): `voice`, `onset` and `>10dB` do not change at all (0.0 dB / 0 points).
+7. Echo (`seed=auto` vs `gain=0.01`): `echo` unchanged, `left` equal or 0.9 dB better.
 
-### 5. Shrnutí a doporučení
-- **Závěr**: Prošlo všechno (Test A je 100% shodný s M44, Test B spolehlivě zabránil falešným detekcím echa u sluchátek a hlasu, a Test C prokázal přínos zapamatované síly echa se zrychlením potlačení echa na začátku o 8 až 27 dB bez újmy na hlase); fit u reproduktorů v reálných místnostech (0.22–0.78) však ukazuje, že práh korelace 0.90 je pro difúzní echo příliš přísný a v živém testu potvrdí echo pouze u monitoru/přímých odrazů, takže člověk může zvážit jeho mírné uvolnění (např. na 0.70).
+### 5. Summary
+- Everything passed: test A is identical to milestone 44, test B no longer detects an echo on headphones or in the voice, and test C shows what the remembered echo strength is for: 8 to 27 dB more echo removed at the stream start at no cost to the voice. The fit on speakers in real rooms (0.22-0.78) shows that the 0.90 threshold is strict for a diffuse echo: live it will confirm an echo only from a monitor or direct reflections. The report suggested loosening it (to 0.70, say); milestone 50 tried that and kept 0.90.
 
 ## Milestone 49: The meter's fit in the debug log; a threshold scene for the captures (2026-11-10)
 
@@ -2200,226 +2201,271 @@ without a compiler. Shared memory layout v19.
 
 ## Milestone 50: Echo Meter Correlation Threshold Sweep (2026-11-10)
 
-Třetí kolo testování měřiče síly echa podle `docs/aec3-echo-strength-test.md`, kapitola 6 ("Třetí kolo: jak nízko smí práh korelace").
-Cílem bylo ověřit, jak nízko smí klesnout práh korelace `EchoMeter::min_correlation` z výchozí hodnoty 0.90 (testováno pro prahy 0.90, 0.80, 0.70, 0.60 a 0.50 přes scénu `fit=<r>`), aniž by došlo k falešnému potvrzení echa na nahrávkách bez echa (sluchátka), při řeči do hudby, při odrazech/dozvuku nebo k nestabilitě záložního odhadu (`fallback`).
+Third round of the echo meter test, following `docs/aec3-echo-strength-test.md`, chapter 6 (how low the correlation threshold may go).
+The question: how far `EchoMeter::min_correlation` can drop from its 0.90 (tried 0.90, 0.80, 0.70, 0.60 and 0.50 through the `fit=<r>` scene) without a false echo confirmation on captures with no echo (headphones), with speech over music or with reverb, and without an unstable fallback estimate.
 
-### 1. Step 0: Kompilace a jednotkové testy
-Před spuštěním sweepu proběhla verifikace podle kapitoly 0:
-- `cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture`: 16 passed, 4 ignored (100% shoda s referenčními hodnotami z Macu).
+### 1. Step 0: compilation and unit tests
+Checked as chapter 0 says before the sweep:
+- `cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture`: 16 passed, 4 ignored (identical to the Mac reference).
 - `cargo test -p gamersequalizer-common`: 32 passed, 0 failed.
 - `cargo test -p gamersequalizer chain_log`: 5 passed, 0 failed.
-- Všechny testy čisté, shared memory layout v19 funkční.
+- All tests clean, shared memory layout v19 works.
 
-### 2. Výsledky prahového sweepu pro nahrávky s referencí
-Spuštěno příkazem:
+### 2. Threshold sweep on the captures with a reference
+Run with:
 ```powershell
 $env:SCENES = ";fit=0.8;fit=0.7;fit=0.6;fit=0.5"
 Remove-Item Env:CAP -ErrorAction SilentlyContinue
 cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture
 ```
-Z celkových 22 nahrávek má 15 nahrávek referenci (7 nahrávek bez reference `091216`, `100621`, `104424`, `125043`, `163832`, `163934`, `204900` zůstalo ve všech scénách čistých s `meter: -`, `fallb: -40`).
+15 of the 22 captures have a reference (the 7 without one, `091216`, `100621`, `104424`, `125043`, `163832`, `163934`, `204900`, stayed clean in every scene: `meter: -`, `fallb: -40`).
 
-| Nahrávka        | Práh | Potvrzeno |  meter | check | fallb | Čas 1. potv. | Max hodn. | Verdikt     | Poznámka                                                                         |
-| :-------------- | :--: | :-------: | -----: | ----: | ----: | -----------: | --------: | :---------: | :------------------------------------------------------------------------------- |
-| 20261107-091611 | 0.90 | ano       |  -38.9 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
-| 20261107-091611 | 0.80 | ano       |  -38.7 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
-| 20261107-091611 | 0.70 | ano       |  -38.3 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
-| 20261107-091611 | 0.60 | ano       |  -38.3 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
-| 20261107-091611 | 0.50 | ano       |  -37.4 | -36.6 |   -40 |       15.1 s |     -35.4 | správně     | V normě checku                                                                   |
-| 20261107-100150 | 0.90 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-100150 | 0.80 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-100150 | 0.70 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-100150 | 0.60 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-100150 | 0.50 | ne        | <-39.0 | -37.2 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-101152 | 0.90 | ne        | <-28.2 | -29.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-101152 | 0.80 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
-| 20261107-101152 | 0.70 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
-| 20261107-101152 | 0.60 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
-| 20261107-101152 | 0.50 | ano       |  -36.2 | -29.1 |   -40 |        8.7 s |     -30.3 | FALEŠNĚ     | hodnota -36.2 < check-6 (-35.1); 2 změn fallbacku                                |
-| 20261107-102403 | 0.90 | ano       |  -25.8 | -28.3 |   -40 |       55.3 s |     -25.8 | správně *   | V normě s tolerancí 0.5 dB jako v M48 (-25.8 vs max -26.3)                       |
-| 20261107-102403 | 0.80 | ano       |  -25.0 | -28.3 |   -28 |       11.8 s |     -25.0 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.0 > check+2 (-26.3); skok o 13.0 dB |
-| 20261107-102403 | 0.70 | ano       |  -25.2 | -28.3 |   -28 |       11.8 s |     -25.2 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.2 > check+2 (-26.3); skok o 12.8 dB |
-| 20261107-102403 | 0.60 | ano       |  -25.3 | -28.3 |   -28 |       11.8 s |     -25.3 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.3 > check+2 (-26.3); skok o 12.7 dB |
-| 20261107-102403 | 0.50 | ano       |  -25.3 | -28.3 |   -28 |       11.8 s |     -25.3 | FALEŠNĚ     | hodnota -38.0 < check-6 (-34.3); hodnota -25.3 > check+2 (-26.3); skok o 12.7 dB |
-| 20261107-104318 | 0.90 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-104318 | 0.80 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-104318 | 0.70 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-104318 | 0.60 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261107-104318 | 0.50 | ne        | <-39.6 | -39.1 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-115931 | 0.90 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-115931 | 0.80 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-115931 | 0.70 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-115931 | 0.60 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-115931 | 0.50 | ne        | <-30.2 | -41.4 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122520 | 0.90 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122520 | 0.80 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122520 | 0.70 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122520 | 0.60 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122520 | 0.50 | ne        | <-41.3 | -41.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122712 | 0.90 | ne        | <-34.3 | -34.8 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-122712 | 0.80 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
-| 20261109-122712 | 0.70 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
-| 20261109-122712 | 0.60 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
-| 20261109-122712 | 0.50 | ano       |  -34.3 | -34.8 |   -40 |        7.7 s |     -34.3 | správně     | V normě checku                                                                   |
-| 20261109-124950 | 0.90 | ne        | <-28.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-124950 | 0.80 | ano       |  -29.1 |     - |   -34 |       24.2 s |     -29.1 | FALEŠNĚ     | hodnota -29.1 > -33 bez checku                                                   |
-| 20261109-124950 | 0.70 | ano       |  -28.2 |     - |   -34 |       22.4 s |     -28.2 | FALEŠNĚ     | hodnota -28.2 > -33 bez checku                                                   |
-| 20261109-124950 | 0.60 | ano       |  -28.2 |     - |   -34 |       22.4 s |     -28.2 | FALEŠNĚ     | hodnota -28.2 > -33 bez checku                                                   |
-| 20261109-124950 | 0.50 | ano       |  -28.2 |     - |   -34 |       22.4 s |     -28.2 | FALEŠNĚ     | hodnota -28.2 > -33 bez checku                                                   |
-| 20261109-125717 | 0.90 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-125717 | 0.80 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-125717 | 0.70 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-125717 | 0.60 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-125717 | 0.50 | ne        | <-32.9 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-130319 | 0.90 | ne        | <-38.1 | -37.0 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-130319 | 0.80 | ne        | <-38.1 | -37.0 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-130319 | 0.70 | ano       |  -36.6 | -37.0 |   -40 |       19.2 s |     -36.6 | správně     | V normě checku                                                                   |
-| 20261109-130319 | 0.60 | ano       |  -36.6 | -37.0 |   -40 |       19.2 s |     -36.6 | správně     | V normě checku                                                                   |
-| 20261109-130319 | 0.50 | ano       |  -36.6 | -37.0 |   -40 |       19.2 s |     -36.6 | správně     | V normě checku                                                                   |
-| 20261109-144824 | 0.90 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-144824 | 0.80 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-144824 | 0.70 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-144824 | 0.60 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-144824 | 0.50 | ne        | <-22.2 |     - |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-162331 | 0.90 | ne        | <-33.3 | -33.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-162331 | 0.80 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
-| 20261109-162331 | 0.70 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
-| 20261109-162331 | 0.60 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
-| 20261109-162331 | 0.50 | ano       |  -34.8 | -33.3 |   -40 |       40.3 s |     -34.8 | správně     | V normě checku                                                                   |
-| 20261109-205013 | 0.90 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-205013 | 0.80 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-205013 | 0.70 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-205013 | 0.60 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-205013 | 0.50 | ne        | <-33.9 | -50.5 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-210655 | 0.90 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-210655 | 0.80 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-210655 | 0.70 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-210655 | 0.60 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
-| 20261109-210655 | 0.50 | ne        | <-44.8 | -50.3 |   -40 |            - |         - | nepotvrzeno | Horní mez (<)                                                                    |
+| Capture         | Threshold | Confirmed |  meter | check | fallb | First confirmed | Highest |    Verdict    | Note                                                                          |
+| :-------------- | :-------: | :-------: | -----: | ----: | ----: | --------------: | ------: | :-----------: | :---------------------------------------------------------------------------- |
+| 20261107-091611 |    0.90   |    yes    |  -38.9 | -36.6 |   -40 |          15.1 s |   -35.4 |    correct    | Within the check's tolerance                                                  |
+| 20261107-091611 |    0.80   |    yes    |  -38.7 | -36.6 |   -40 |          15.1 s |   -35.4 |    correct    | Within the check's tolerance                                                  |
+| 20261107-091611 |    0.70   |    yes    |  -38.3 | -36.6 |   -40 |          15.1 s |   -35.4 |    correct    | Within the check's tolerance                                                  |
+| 20261107-091611 |    0.60   |    yes    |  -38.3 | -36.6 |   -40 |          15.1 s |   -35.4 |    correct    | Within the check's tolerance                                                  |
+| 20261107-091611 |    0.50   |    yes    |  -37.4 | -36.6 |   -40 |          15.1 s |   -35.4 |    correct    | Within the check's tolerance                                                  |
+| 20261107-100150 |    0.90   |     no    | <-39.0 | -37.2 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-100150 |    0.80   |     no    | <-39.0 | -37.2 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-100150 |    0.70   |     no    | <-39.0 | -37.2 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-100150 |    0.60   |     no    | <-39.0 | -37.2 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-100150 |    0.50   |     no    | <-39.0 | -37.2 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-101152 |    0.90   |     no    | <-28.2 | -29.1 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-101152 |    0.80   |    yes    |  -36.2 | -29.1 |   -40 |           8.7 s |   -30.3 |     FALSE     | value -36.2 < check-6 (-35.1); 2 fallback changes                             |
+| 20261107-101152 |    0.70   |    yes    |  -36.2 | -29.1 |   -40 |           8.7 s |   -30.3 |     FALSE     | value -36.2 < check-6 (-35.1); 2 fallback changes                             |
+| 20261107-101152 |    0.60   |    yes    |  -36.2 | -29.1 |   -40 |           8.7 s |   -30.3 |     FALSE     | value -36.2 < check-6 (-35.1); 2 fallback changes                             |
+| 20261107-101152 |    0.50   |    yes    |  -36.2 | -29.1 |   -40 |           8.7 s |   -30.3 |     FALSE     | value -36.2 < check-6 (-35.1); 2 fallback changes                             |
+| 20261107-102403 |    0.90   |    yes    |  -25.8 | -28.3 |   -40 |          55.3 s |   -25.8 |   correct *   | Within tolerance with the 0.5 dB allowed in M48 (-25.8 vs max -26.3)          |
+| 20261107-102403 |    0.80   |    yes    |  -25.0 | -28.3 |   -28 |          11.8 s |   -25.0 |     FALSE     | value -38.0 < check-6 (-34.3); value -25.0 > check+2 (-26.3); jump of 13.0 dB |
+| 20261107-102403 |    0.70   |    yes    |  -25.2 | -28.3 |   -28 |          11.8 s |   -25.2 |     FALSE     | value -38.0 < check-6 (-34.3); value -25.2 > check+2 (-26.3); jump of 12.8 dB |
+| 20261107-102403 |    0.60   |    yes    |  -25.3 | -28.3 |   -28 |          11.8 s |   -25.3 |     FALSE     | value -38.0 < check-6 (-34.3); value -25.3 > check+2 (-26.3); jump of 12.7 dB |
+| 20261107-102403 |    0.50   |    yes    |  -25.3 | -28.3 |   -28 |          11.8 s |   -25.3 |     FALSE     | value -38.0 < check-6 (-34.3); value -25.3 > check+2 (-26.3); jump of 12.7 dB |
+| 20261107-104318 |    0.90   |     no    | <-39.6 | -39.1 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-104318 |    0.80   |     no    | <-39.6 | -39.1 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-104318 |    0.70   |     no    | <-39.6 | -39.1 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-104318 |    0.60   |     no    | <-39.6 | -39.1 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261107-104318 |    0.50   |     no    | <-39.6 | -39.1 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-115931 |    0.90   |     no    | <-30.2 | -41.4 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-115931 |    0.80   |     no    | <-30.2 | -41.4 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-115931 |    0.70   |     no    | <-30.2 | -41.4 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-115931 |    0.60   |     no    | <-30.2 | -41.4 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-115931 |    0.50   |     no    | <-30.2 | -41.4 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122520 |    0.90   |     no    | <-41.3 | -41.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122520 |    0.80   |     no    | <-41.3 | -41.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122520 |    0.70   |     no    | <-41.3 | -41.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122520 |    0.60   |     no    | <-41.3 | -41.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122520 |    0.50   |     no    | <-41.3 | -41.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122712 |    0.90   |     no    | <-34.3 | -34.8 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-122712 |    0.80   |    yes    |  -34.3 | -34.8 |   -40 |           7.7 s |   -34.3 |    correct    | Within the check's tolerance                                                  |
+| 20261109-122712 |    0.70   |    yes    |  -34.3 | -34.8 |   -40 |           7.7 s |   -34.3 |    correct    | Within the check's tolerance                                                  |
+| 20261109-122712 |    0.60   |    yes    |  -34.3 | -34.8 |   -40 |           7.7 s |   -34.3 |    correct    | Within the check's tolerance                                                  |
+| 20261109-122712 |    0.50   |    yes    |  -34.3 | -34.8 |   -40 |           7.7 s |   -34.3 |    correct    | Within the check's tolerance                                                  |
+| 20261109-124950 |    0.90   |     no    | <-28.2 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-124950 |    0.80   |    yes    |  -29.1 |     - |   -34 |          24.2 s |   -29.1 |     FALSE     | value -29.1 > -33 without a check                                             |
+| 20261109-124950 |    0.70   |    yes    |  -28.2 |     - |   -34 |          22.4 s |   -28.2 |     FALSE     | value -28.2 > -33 without a check                                             |
+| 20261109-124950 |    0.60   |    yes    |  -28.2 |     - |   -34 |          22.4 s |   -28.2 |     FALSE     | value -28.2 > -33 without a check                                             |
+| 20261109-124950 |    0.50   |    yes    |  -28.2 |     - |   -34 |          22.4 s |   -28.2 |     FALSE     | value -28.2 > -33 without a check                                             |
+| 20261109-125717 |    0.90   |     no    | <-32.9 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-125717 |    0.80   |     no    | <-32.9 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-125717 |    0.70   |     no    | <-32.9 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-125717 |    0.60   |     no    | <-32.9 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-125717 |    0.50   |     no    | <-32.9 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-130319 |    0.90   |     no    | <-38.1 | -37.0 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-130319 |    0.80   |     no    | <-38.1 | -37.0 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-130319 |    0.70   |    yes    |  -36.6 | -37.0 |   -40 |          19.2 s |   -36.6 |    correct    | Within the check's tolerance                                                  |
+| 20261109-130319 |    0.60   |    yes    |  -36.6 | -37.0 |   -40 |          19.2 s |   -36.6 |    correct    | Within the check's tolerance                                                  |
+| 20261109-130319 |    0.50   |    yes    |  -36.6 | -37.0 |   -40 |          19.2 s |   -36.6 |    correct    | Within the check's tolerance                                                  |
+| 20261109-144824 |    0.90   |     no    | <-22.2 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-144824 |    0.80   |     no    | <-22.2 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-144824 |    0.70   |     no    | <-22.2 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-144824 |    0.60   |     no    | <-22.2 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-144824 |    0.50   |     no    | <-22.2 |     - |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-162331 |    0.90   |     no    | <-33.3 | -33.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-162331 |    0.80   |    yes    |  -34.8 | -33.3 |   -40 |          40.3 s |   -34.8 |    correct    | Within the check's tolerance                                                  |
+| 20261109-162331 |    0.70   |    yes    |  -34.8 | -33.3 |   -40 |          40.3 s |   -34.8 |    correct    | Within the check's tolerance                                                  |
+| 20261109-162331 |    0.60   |    yes    |  -34.8 | -33.3 |   -40 |          40.3 s |   -34.8 |    correct    | Within the check's tolerance                                                  |
+| 20261109-162331 |    0.50   |    yes    |  -34.8 | -33.3 |   -40 |          40.3 s |   -34.8 |    correct    | Within the check's tolerance                                                  |
+| 20261109-205013 |    0.90   |     no    | <-33.9 | -50.5 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-205013 |    0.80   |     no    | <-33.9 | -50.5 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-205013 |    0.70   |     no    | <-33.9 | -50.5 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-205013 |    0.60   |     no    | <-33.9 | -50.5 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-205013 |    0.50   |     no    | <-33.9 | -50.5 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-210655 |    0.90   |     no    | <-44.8 | -50.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-210655 |    0.80   |     no    | <-44.8 | -50.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-210655 |    0.70   |     no    | <-44.8 | -50.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-210655 |    0.60   |     no    | <-44.8 | -50.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
+| 20261109-210655 |    0.50   |     no    | <-44.8 | -50.3 |   -40 |               - |       - | not confirmed | Upper bound (<)                                                               |
 
-### 3. Detailní rozbor chování a falešných detekcí při snížení prahu pod 0.90
-- **20261107-101152 (dozvuk / reverb v místnosti)**:
-  - Při prahu 0.90: bezpečně nepotvrzeno (`<-28.2 dB`).
-  - Při prahu <= 0.80: v čase 8.7 s dochází ke korelaci 0.89 a falešnému potvrzení echa na -30.3 dB, což v čase 11.0 s přenastaví fallback na -34 dB. V čase 14.0 s hodnota klesá na -36.2 dB (mimo toleranci `check - 6` = -35.1 dB), a v čase 16.0 s fallback padá zpět na -40 dB. Dvojí změna fallbacku ve stopě a podstřelení checku znamenají verdikt **FALEŠNĚ**.
-- **20261107-102403 (změny hlasitosti reproduktorů a řeč)**:
-  - Při prahu 0.90: potvrzeno až v čase 55.3 s na -25.8 dB (`fit 0.90 x 1.02`), fallback zůstává stabilní na -40 dB (v milníku 48 akceptováno s odchylkou 0.5 dB od `check + 2`).
-  - Při prahu <= 0.80: v čase 11.8 s potvrzeno na -30.1 dB, následně klesá až na -38.0 dB (pod `check - 6` = -34.3 dB), a v čase 47–51 s skáče na -25.0 dB až -25.3 dB (nad `check + 2` = -26.3 dB). Skok o **12.7 až 13.0 dB** během nahrávky znamená verdikt **FALEŠNĚ**.
-- **20261109-124950 (hlas do hlasité hudby, pouze 6 čistých oken echa)**:
-  - Při prahu 0.90: bezpečně nepotvrzeno (`<-28.2 dB`).
-  - Při prahu <= 0.80: v čase 22–24 s dosahuje fit 0.80 x 0.97 resp. 0.73 x 0.95 a falešně potvrzuje echo na -29.1 dB / -28.2 dB. Obě hodnoty jsou nad hranicí -33 dB pro nahrávky bez checku a vedou k chybnému nastavení fallbacku na -34 dB. Lidský hlas do hudby je mylně pokládán za echo -> verdikt **FALEŠNĚ**.
-- **Sluchátka (`20261109-115931`, `20261109-122520`)**:
-  - Zůstala nepotvrzena na všech prazích (max korelace 0.23 a 0.27). Ani při prahu 0.50 nedošlo k falešné detekci sluchátek.
-- **Dlouhá řeč do hudby (`20261109-205013`, `20261109-125717`, `20261109-144824`)**:
-  - Zůstala nepotvrzena na všech prazích (korelace 0.29 až 0.40). Hlas nezpůsobil falešnou detekci.
-- **Nově potvrzené nahrávky při nižších prazích**:
-  - `20261109-122712`: potvrdila echo při prahu <= 0.80 (-34.3 dB vs check -34.8 dB, přesně v normě, 0 změn fallbacku).
-  - `20261109-162331`: potvrdila echo při prahu <= 0.80 (-34.8 dB vs check -33.3 dB, v normě, 0 změn fallbacku).
-  - `20261109-130319`: potvrdila echo při prahu <= 0.70 (-36.6 dB vs check -37.0 dB, v normě, 0 změn fallbacku).
+### 3. What happens under 0.90, capture by capture
+- **20261107-101152 (room reverb)**:
+  - At 0.90: safely unconfirmed (`<-28.2 dB`).
+  - At <= 0.80: at 8.7 s the correlation reaches 0.89 and an echo of -30.3 dB is confirmed falsely, which moves the fallback to -34 dB at 11.0 s. At 14.0 s the value drops to -36.2 dB (outside `check - 6` = -35.1 dB) and at 16.0 s the fallback falls back to -40 dB. Two fallback changes in the trace and a value under the check's tolerance: **FALSE**.
+- **20261107-102403 (speaker volume changes and speech)**:
+  - At 0.90: confirmed only at 55.3 s at -25.8 dB (`fit 0.90 x 1.02`), the fallback stays at -40 dB (accepted in milestone 48 with 0.5 dB over `check + 2`).
+  - At <= 0.80: confirmed at 11.8 s at -30.1 dB, then it drops to -38.0 dB (under `check - 6` = -34.3 dB) and at 47-51 s jumps to -25.0 .. -25.3 dB (over `check + 2` = -26.3 dB). A jump of **12.7 to 13.0 dB** within one capture: **FALSE**.
+- **20261109-124950 (voice over loud music, only 6 echo-alone windows)**:
+  - At 0.90: safely unconfirmed (`<-28.2 dB`).
+  - At <= 0.80: at 22-24 s the fit reaches 0.80 x 0.97 and 0.73 x 0.95 and an echo of -29.1 dB / -28.2 dB is confirmed falsely. Both are over the -33 dB limit for captures without a check and move the fallback to -34 dB. The voice over music is taken for an echo: **FALSE**.
+- **Headphones (`20261109-115931`, `20261109-122520`)**:
+  - Unconfirmed at every threshold (highest correlations 0.23 and 0.27). Not even 0.50 detects an echo on headphones.
+- **Long speech over music (`20261109-205013`, `20261109-125717`, `20261109-144824`)**:
+  - Unconfirmed at every threshold (correlations 0.29 to 0.40). The voice caused no false detection.
+- **Captures newly confirmed at lower thresholds**:
+  - `20261109-122712`: confirmed at <= 0.80 (-34.3 dB vs check -34.8 dB, within tolerance, 0 fallback changes).
+  - `20261109-162331`: confirmed at <= 0.80 (-34.8 dB vs check -33.3 dB, within tolerance, 0 fallback changes).
+  - `20261109-130319`: confirmed at <= 0.70 (-36.6 dB vs check -37.0 dB, within tolerance, 0 fallback changes).
 
-### 4. Souhrnná tabulka
+### 4. Summary table
 
-| Práh | správně (počet nahrávek)           | FALEŠNĚ (které nahrávky) |
-| :--: | :--------------------------------- | :----------------------- |
-| 0.90 | 2 (091611, 102403 *)               | žádná *                  |
-| 0.80 | 3 (091611, 122712, 162331)         | 101152, 102403, 124950   |
-| 0.70 | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950   |
-| 0.60 | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950   |
-| 0.50 | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950   |
+| Threshold | correct (number of captures)       | FALSE (which captures) |
+| :-------: | :--------------------------------- | :--------------------- |
+|    0.90   | 2 (091611, 102403 *)               | none *                 |
+|    0.80   | 3 (091611, 122712, 162331)         | 101152, 102403, 124950 |
+|    0.70   | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950 |
+|    0.60   | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950 |
+|    0.50   | 4 (091611, 122712, 130319, 162331) | 101152, 102403, 124950 |
 
-\* _Poznámka k prahu 0.90 a nahrávce 102403_: V milníku 48 byla hodnota -25.8 dB (oproti check + 2 = -26.3 dB) vyhodnocena jako prošlá s tolerovanou odchylkou 0.5 dB. Pokud by byla posuzována striktně bez této tolerance, má práh 0.90: 1 správně (091611) a 1 FALEŠNĚ (102403). Na celkovém závěru to nic nemění, neboť všechny nižší prahy mají 3 jednoznačně falešné detekce.
+\* _Threshold 0.90 and capture 102403_: milestone 48 passed the value of -25.8 dB (against check + 2 = -26.3 dB) with a tolerated 0.5 dB. Judged strictly, without that tolerance, 0.90 has 1 correct (091611) and 1 FALSE (102403). The conclusion does not change: every lower threshold has 3 clear false detections.
 
-### 5. Doporučení
-- **Doporučený minimální práh korelace**: **0.90** (`ECHO_FIT_MIN_CORRELATION = 0.90`).
-- Práh 0.90 je **jediný** práh, u kterého nedochází k falešným detekcím echa způsobeným lidským hlasem (`124950`) či dozvukem (`101152`) a k nestabilitě záložního odhadu.
-- Jakékoliv snížení prahu (0.80, 0.70, 0.60, 0.50) vede k falešné detekci echa na nahrávce `124950` (hlas do hudby je mylně potvrzen jako echo na -28 dB a přenastavuje fallback na -34 dB) a na nahrávce `101152` (dozvuk místnosti způsobí dvojí přestavení fallbacku -40 -> -34 -> -40 dB).
-- V souladu se zásadou z milníku 49 (_"A wrong confirmation is what milestone 46 was; a missed one costs nothing against milestone 44"_): je nesrovnatelně bezpečnější nechat nahrávky se slabším či difúzním echem na výchozím odhadu -40 dB (kde AEC3 funguje optimálně), než snížením prahu riskovat falešné odhady echa z lidského hlasu a rozbití potlačení echa.
-- Konstanta `ECHO_FIT_MIN_CORRELATION` v kódu zůstává beze změny na hodnotě **0.90**.
+### 5. Recommendation
+- **Lowest safe correlation threshold**: **0.90** (`ECHO_FIT_MIN_CORRELATION = 0.90`).
+- 0.90 is the **only** threshold with no false echo confirmed from the voice (`124950`) or from reverb (`101152`) and with a stable fallback estimate.
+- Any lower threshold (0.80, 0.70, 0.60, 0.50) confirms a false echo on `124950` (voice over music confirmed as an echo of -28 dB, fallback moved to -34 dB) and on `101152` (room reverb moves the fallback twice, -40 -> -34 -> -40 dB).
+- In line with milestone 49 (_"A wrong confirmation is what milestone 46 was; a missed one costs nothing against milestone 44"_): leaving captures with a weaker or diffuse echo on the -40 dB default, where AEC3 works well, is far safer than risking a false echo estimate from the voice and breaking the echo suppression.
+- `ECHO_FIT_MIN_CORRELATION` stays at **0.90** in the code.
 
 
 ## Milestone 51: Live APO Verification, Echo Strength Caching & Capture Analysis (2026-11-10)
 
-První kompletní živé ověření mikrofonního APO (`gamersequalizer_apo.dll`) běžícího přímo v audio enginu Windows (`audiodg.exe`) s rozložením sdílené paměti v19 po dokončení prahového sweepu v milníku 50 a zapracování funkcionalit z větve `aec3-mic-gain` podle `docs/aec3-tuning-guide.md`, kapitola 11.3.
+First complete live run of the mic APO (`gamersequalizer_apo.dll`) inside the Windows audio engine (`audiodg.exe`) with the v19 shared memory layout, after the threshold sweep of milestone 50, following `docs/aec3-tuning-guide.md`, chapter 11.3.
 
-Sestaveno přes `scripts/dev-rebuild.ps1 -Apo -DebugCapture -Start`, nainstalováno do `C:\Program Files\GamersEqualizer\apo\` a otestováno v reálném provozu.
+Built with `scripts/dev-rebuild.ps1 -Apo -DebugCapture -Start`, installed into `C:\Program Files\GamersEqualizer\apo\` and used live.
 
-### 1. Průběh živého testu v logu (`gamersequalizer.log`)
+### 1. The live run in the log (`gamersequalizer.log`)
 
-V systémovém logu řetězce (`[Chain]`) a propojovací vrstvy (`[ApoLink]`) proběhl celý životní cyklus bez jediné chyby:
+The chain log (`[Chain]`) and the link layer (`[ApoLink]`) show the whole life cycle without a single error:
 
-1. **Start řetězce a zisk mikrofonu pro AEC3 (`AEC mic gain`):**
-   - Po startu mikrofonu detekováno zařízení `Mikrofon (Realtek(R) Audio)`:
+1. **Chain start and the mic gain into AEC3 (`AEC mic gain`):**
+   - The mic starts on the device `Mikrofon (Realtek(R) Audio)`:
      ```text
      [Chain] start: ... AEC on NoReference delay none (from cache off, double talk off), echo not measured, fit 0.00 x 0.00 (AEC fallback echo -40.0 dB, AEC mic gain +0.0 dB) ...
      ```
-   - V čase 15:12:09 došlo k uzamčení zpoždění a automatický zisk mikrofonu pro AEC3 skočil přesně na navržených **+18.0 dB**:
+   - At 15:12:09 the delay locked and the automatic mic gain into AEC3 went to **+18.0 dB**:
      ```text
      [Chain] changed: AEC on NoReference -> on Locked, AEC mic gain +0.0 -> +18.0
      ```
 
-2. **Měření síly echa reproduktorů (fit 0.95 x 0.80) a uložení do cache:**
-   - Při přehrávání audia z reproduktorů dosáhla korelace **0.95** se směrnicí **0.80** (překračuje přísný práh 0.90 i interval směrnice 0.70..1.40):
+2. **Speaker echo strength measured (fit 0.95 x 0.80) and cached:**
+   - With audio playing from the speakers the correlation reached **0.95** at a slope of **0.80** (over the 0.90 threshold and inside the slope range 0.7..1.3):
      ```text
      [Chain] 10 s: ... ERLE 7.0 dB, echo not confirmed (at most -46.7 dB under the reference), fit 0.95 x 0.80 (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB) ...
      ```
-   - V čase 15:12:40 měřič stabilní echo potvrdil na hodnotě **-46.5 dB pod referencí**:
+   - At 15:12:40 the meter confirmed the steady echo at **-46.5 dB under the reference**:
      ```text
      [ApoLink] saving echo strength -46.5 dB under the reference
      [Chain] changed: echo not confirmed (at most -46.7 dB) -> -46.5 dB under the reference
      ```
-   - Hodnota se uložila do souboru `%APPDATA%\GamersEqualizer\echo_strength_cache.json` (`-465`).
+   - The value went into `%APPDATA%\GamersEqualizer\echo_strength_cache.json` (`-465`).
 
-3. **Přepnutí výstupního zařízení (izolace zařízení a ochrana proti falešné detekci):**
-   - V čase 15:12:52 došlo k přepnutí výstupu na jiné zařízení:
-     - Naměřená síla echa předchozího zařízení se okamžitě vynulovala (`echo -> not measured`).
-     - Nové zpoždění bylo změřeno a uzamčeno (5.1 ms -> 4.9 ms -> 4.8 ms).
-     - Při přehrávání s lidskou řečí (hlas v 61 % bloků) korelace dosahovala pouze 0.59 až 0.80 (pod prahem 0.90):
+3. **Output device switched (devices kept apart, no false detection):**
+   - At 15:12:52 the output was switched to another device:
+     - The echo strength measured on the previous device was dropped at once (`echo -> not measured`).
+     - A new delay was measured and locked (5.1 ms -> 4.9 ms -> 4.8 ms).
+     - With human speech playing (voice in 61 % of the blocks) the correlation reached only 0.59 to 0.80 (under the 0.90 threshold):
        ```text
        [Chain] 10 s: ... echo not confirmed (at most -35.9 dB under the reference), fit 0.77 x 0.82 ...
        ```
-     - Měřič bezpečně podržel stav jako nepotvrzený (`<`), záložní odhad `fallback` zůstal na -40.0 dB a do cache se neuložila žádná falešná hodnota.
+     - The meter kept the state unconfirmed (`<`), the fallback estimate stayed at -40.0 dB and no false value went into the cache.
 
-4. **Návrat na původní zařízení (Warm start / Persistence):**
-   - V čase 15:14:01 došlo k přepnutí zpět na původní reproduktory:
+4. **Back on the first device (warm start / persistence):**
+   - At 15:14:01 the output was switched back to the first speakers:
      ```text
      [ApoLink] cached echo delay for this mic/output: 1.0 ms
      [ApoLink] remembered echo strength for this mic/output: -46.5 dB under the reference
      [ApoLink] reference output switched: the APO measures the echo delay again
      [Chain] changed: AEC delay 5.0 ms -> 1.0 ms, delay from cache off -> on, echo not confirmed -> -46.5 dB under the reference
      ```
-   - Zapamatovaná síla echa (-46.5 dB) i zpoždění (1.0 ms) byly okamžitě obnoveny v čase 0 s bez čekání na nové měření.
+   - The remembered echo strength (-46.5 dB) and delay (1.0 ms) were back at 0 s, without waiting for a new measurement.
+
+Review notes (added when the branch went to main):
+- In step 2 the 10 s summary still shows a bound although the correlation and the slope already pass. The third condition, a reference level spread of at least 2 dB in the quieter half of the windows, is not in the log, so a log alone cannot say why an echo with a passing fit is not confirmed yet.
+- An echo of -46.5 dB leaves the fallback estimate at -40 dB (strength - 3 dB is under the -40 dB floor). This run therefore did not exercise a fallback above -40 dB; only test C of milestone 48 did, on captures with `micscale=12`.
+- The test machine is left with a debug-capture APO installed; rebuild without `-DebugCapture` before packaging.
 
 ---
 
-### 2. Analýza zachyceného capture balíčku (`test_data/private/captures/20261110-141406`)
+### 2. The capture taken during the run (`test_data/private/captures/20261110-141406`)
 
-Záznam pořízen pomocí `cargo run --release -p gamersequalizer-apo --example debug_capture -- 30`:
-- Celková délka: 3000 bloků (30.0 sekund na 48 kHz).
-- Zpoždění echa: naprosto stabilní, přesně **45 vzorků** (~0.94 ms) po celou dobu nahrávky (0 odchylek).
-- `double_talk`: 0 bloků (žádné nežádoucí zamrzání filtru).
-- `input_clips`: 0 (žádný clipping ani limitace na vstupu).
-- `ERLE`: průměrně **5.5 dB** (max **6.7 dB**) během přehrávání reference.
-- Zátěž DSP: průměr 1.5–6 %, špičkově 4–10 % (včetně režijních zápisů ladicích dat do sdílené paměti).
+Recorded with `cargo run --release -p gamersequalizer-apo --example debug_capture -- 30`:
+- Length: 3000 blocks (30.0 seconds at 48 kHz).
+- Echo delay: steady at exactly **45 samples** (~0.94 ms) for the whole capture (0 deviations).
+- `double_talk`: 0 blocks (the filter was never frozen needlessly).
+- `input_clips`: 0 (no clipping or limiting at the input).
+- `ERLE`: **5.5 dB** on average (max **6.7 dB**) while the reference played.
+- DSP load: 1.5-6 % on average, 4-10 % at peaks (including the cost of writing the debug data into shared memory).
 
-Úrovně RMS jednotlivých fází řetězce:
+RMS level of each chain stage:
 
-| Soubor                | Fáze zpracování                             | Úroveň RMS |
-| :-------------------- | :------------------------------------------ | ---------: |
-| `01_mic_raw.wav`      | Vstup mikrofonu z audiodg                   | -42.3 dBFS |
-| `02_ref_at_mic.wav`   | Reference reproduktorů (loopback)           | -19.5 dBFS |
-| `03_ref_aec.wav`      | Reference zarovnaná o zpoždění do AEC3      | -19.5 dBFS |
-| `04_after_aec.wav`    | Signál po potlačení echa (AEC3)             | -42.9 dBFS |
-| `05_after_denoise.wav`| Po neuronovém odšumovači a šumové bráně     | -43.1 dBFS |
-| `06_after_eq.wav`     | Po parametrickém EQ hlasu                   | -43.1 dBFS |
-| `07_after_leveler.wav`| Po učícím se hlasovém leveleru              | -25.8 dBFS |
-| `08_out.wav`          | Výstup z APO po limiteru (odchozí mikrofon) | -31.8 dBFS |
+| File                   | Stage                                              |  RMS level |
+| :--------------------- | :------------------------------------------------- | ---------: |
+| `01_mic_raw.wav`       | Mic input from audiodg                             | -42.3 dBFS |
+| `02_ref_at_mic.wav`    | Speaker reference (loopback)                       | -19.5 dBFS |
+| `03_ref_aec.wav`       | Reference shifted by the delay, as fed to AEC3     | -19.5 dBFS |
+| `04_after_aec.wav`     | After echo cancellation (AEC3)                     | -42.9 dBFS |
+| `05_after_denoise.wav` | After the neural denoiser and the noise gate       | -43.1 dBFS |
+| `06_after_eq.wav`      | After the parametric voice EQ                      | -43.1 dBFS |
+| `07_after_leveler.wav` | After the learning voice leveler                   | -25.8 dBFS |
+| `08_out.wav`           | APO output after volume and limiter (outgoing mic) | -31.8 dBFS |
 
-V tichých pauzách mezi řečí šumová brána a denoiser bezpečně stahují úroveň výstupu až na -100 až -110 dBFS, zatímco leveler zesiluje mluvené slovo na zřetelnou a vyrovnanou úroveň (-25.8 dBFS).
+In the quiet pauses between speech the noise gate and the denoiser pull the output down to -100 .. -110 dBFS, while the leveler brings the spoken word to a clear, even level (-25.8 dBFS).
 
 ---
 
-### 3. Závěr a stav větve `aec3-mic-gain`
+### 3. Conclusion and the state of branch `aec3-mic-gain`
 
-Živý test potvrdil kompletní funkčnost a stabilitu:
-1. Prahové pravidlo korelace (práh 0.90) spolehlivě potvrdilo reálné echo monitoru (-46.5 dB) a ignorovalo difúzní/sluchátkový odposlech.
-2. Persistence a přepínání zařízení v `ApoLink` funguje bezchybně a izolovaně pro každou dvojici (mikrofon, výstup).
-3. Sdílená paměť layoutu v19 je plně funkční v `audiodg.exe` bez pádů, přebuzení či zpoždění.
+The live test confirmed that everything works and is stable:
+1. The correlation rule (threshold 0.90) confirmed the real echo of the monitor (-46.5 dB) and ignored diffuse / headphone playback.
+2. Persistence and device switching in `ApoLink` work, separately for each (mic, output) pair.
+3. The v19 shared memory layout works inside `audiodg.exe` with no crash, clipping or delay.
+
+## Milestone 52: `aec3-mic-gain` goes to main: what it changed, what stays open (2026-11-10)
+
+Milestones 43-51 in short. Milestones 46, 48, 50 and 51 were first written in Czech and are
+translated above; their tables, traces and numbers are unchanged, with two corrections:
+milestone 46 counted 11 differing captures (7 with a moved fallback) where its own table and
+lists have 10 (6), and milestone 51 gave the slope range as 0.70..1.40 (the code has 0.7..1.3).
+
+**What the branch changed**
+
+- AEC3 gets the mic at call level: a gain taken from the leveler's learned level, 0..24 dB in
+  6 dB steps, taken back after AEC3 (milestone 43, checked on the captures in milestone 44).
+- Tuning chosen on 22 captures: `erle.max_l` 30, `erle.max_h` 10, `bands_in_limiting_gain` 0
+  (milestone 44).
+- Echo strength per (mic, output) pair: measured passively, confirmed only when the mic level
+  follows the reference level (correlation >= 0.9), remembered in `echo_strength_cache.json`
+  and used as AEC3's fallback estimate when the echo is stronger than 40 dB under the reference
+  (milestones 45 and 47, checked in 48, 50 and 51). The `[Chain]` log lines show all of it
+  (milestone 49).
+- Shared memory layout v19: the APO has to be reinstalled together with the app.
+
+**Open**
+
+- A fallback above -40 dB has not run live: the one echo confirmed live was -46.5 dB
+  (milestone 51).
+- At 0.9 the passive meter confirmed 2 of 11 speaker captures (milestone 50); on the others
+  nothing changes against milestone 44. A calibration signal played on request would measure
+  them: a proposal, not decided, in `docs/sidetone-zadani.md`, 7.2, on branch `sidetone`.
+- The log shows the fit but not the reference level spread (review note in milestone 51).
+- Nothing turns AEC3 off on headphones; the meter only refuses to confirm an echo there.
+- The filter length (`len=20` / `len=32`) is undecided and was not run through the denoiser
+  (milestone 44).
+- The echo cache key is the Windows default mic and the reference output, not the mic chosen
+  in the app.
+- Not measured: whether the loopback reference is taken before or after the Windows volume.
+  If before, a remembered "dB under the reference" stops holding when the user changes the
+  volume. Procedure: `docs/sidetone-implementace.md`, 4.5, on branch `sidetone`.
+- `window_report` prints `0.0` in `echo` / `left` for a capture with no echo-alone window
+  (`125717`, `144824` in milestone 46's table); read it as "no data".
+- `ECHO_BOUND_UNDER_DB` (3 dB) may be too eager, see the end of milestone 49.
