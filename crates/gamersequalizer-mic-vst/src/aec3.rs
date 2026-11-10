@@ -40,9 +40,12 @@ const MIC_GAIN_STEP_DB: f32 = 6.0;
 const MIC_GAIN_HYSTERESIS_DB: f32 = 1.5;
 /// Frames (10 ms) another step has to be wanted before the rebuild...
 const MIC_GAIN_LATCH_FRAMES: u32 = 200;
-/// ...which then waits for a frame this far under the loudest one since (a pause between
+/// ...which then waits for two frames this far under the loudest one since (a pause between
 /// words, so the silence is not heard), at most twice as long again.
 const MIC_GAIN_PAUSE_RATIO: f32 = 0.125;
+/// Frames after a start, a `reset` or a gap (`flush`) in which a new step is taken at once:
+/// little is learned yet, and the leveler's remembered level arrives a few blocks into a stream.
+const MIC_GAIN_FREE_FRAMES: u32 = 50;
 /// Peak the raised mic may reach inside AEC3: it clamps at 1.0, and takes 32700 / 32768 for
 /// a saturated capture.
 const MIC_PEAK_LIMIT: f32 = 0.9;
@@ -66,8 +69,10 @@ pub struct EchoCanceller3 {
   wanted_gain_db: f32,
   wanted_frames: u32,
   wanted_peak: f32,
-  /// No frame went through this AEC3 yet: a new gain costs nothing.
-  fresh: bool,
+  /// Frames left of `MIC_GAIN_FREE_FRAMES`.
+  free_frames: u32,
+  /// Peak of the previous mic frame.
+  last_peak: f32,
   /// Gain of the previous frame (a loud frame gets less, see `process_frame`).
   last_frame_gain: f32,
   /// Test-only overrides of `tuning` (`tests::apply_variant`).
@@ -92,7 +97,8 @@ impl EchoCanceller3 {
       wanted_gain_db: 0.0,
       wanted_frames: 0,
       wanted_peak: 0.0,
-      fresh: true,
+      free_frames: MIC_GAIN_FREE_FRAMES,
+      last_peak: 0.0,
       last_frame_gain: 1.0,
       #[cfg(test)]
       variant: String::new(),
@@ -105,7 +111,7 @@ impl EchoCanceller3 {
 
   /// Gain that brings the user's speech to a normal level (the leveler's boost, dB): the mic
   /// goes into AEC3 this much louder and comes out this much quieter again. Cheap to call every
-  /// block; AEC3 follows in 6 dB steps, at once before its first frame and after 2 s otherwise.
+  /// block; AEC3 follows in 6 dB steps, at once in its first 0.5 s and after 2 s otherwise.
   pub fn set_mic_gain_db(&mut self, gain_db: f32) {
     let want = if gain_db.is_finite() { gain_db.clamp(0.0, MAX_MIC_GAIN_DB) } else { 0.0 };
     if (want - self.wanted_gain_db).abs() >= MIC_GAIN_STEP_DB / 2.0 + MIC_GAIN_HYSTERESIS_DB {
@@ -147,6 +153,7 @@ impl EchoCanceller3 {
     self.in_len = 0;
     self.out_queue.clear();
     self.buffered = false;
+    self.free_frames = MIC_GAIN_FREE_FRAMES;
   }
 
   /// Start over (other speaker device, delay jump). Rebuilds AEC3: allocates, but only on
@@ -199,7 +206,7 @@ impl EchoCanceller3 {
       *s /= if i < from_last { self.last_frame_gain } else { gain };
     }
     self.last_frame_gain = gain;
-    self.fresh = false;
+    self.free_frames = self.free_frames.saturating_sub(1);
     self.out_queue.extend(self.out_frame.iter().copied());
     if let Some(erle) = self.apm.statistics().echo_return_loss_enhancement {
       self.erle_db = erle as f32;
@@ -208,20 +215,24 @@ impl EchoCanceller3 {
 
   /// Rebuild AEC3 for the wanted mic gain once it is due. `peak`: this frame's mic peak.
   fn follow_wanted_gain(&mut self, peak: f32) {
+    let last_peak = std::mem::replace(&mut self.last_peak, peak);
     if self.wanted_gain_db == self.mic_gain_db {
       (self.wanted_frames, self.wanted_peak) = (0, 0.0);
       return;
     }
     self.wanted_frames += 1;
     self.wanted_peak = self.wanted_peak.max(peak);
-    let pause = peak <= self.wanted_peak * MIC_GAIN_PAUSE_RATIO || self.wanted_frames >= 3 * MIC_GAIN_LATCH_FRAMES;
-    if self.fresh || (self.wanted_frames >= MIC_GAIN_LATCH_FRAMES && pause) {
+    // The old AEC3 still holds the end of the last frame, which is lost: that one counts too.
+    let pause =
+      peak.max(last_peak) <= self.wanted_peak * MIC_GAIN_PAUSE_RATIO || self.wanted_frames >= 3 * MIC_GAIN_LATCH_FRAMES;
+    if self.free_frames > 0 || (self.wanted_frames >= MIC_GAIN_LATCH_FRAMES && pause) {
       log::info!("[AEC3] mic gain {} -> {} dB", self.mic_gain_db, self.wanted_gain_db);
       self.rebuild();
     }
   }
 
-  /// New AEC3 for the wanted mic gain. Allocates: only on rare events (see `reset`).
+  /// New AEC3 for the wanted mic gain. Allocates on the audio thread like `reset`: at a stream's
+  /// start, and when the learned speech level moves by a step (once per 2 s at most).
   fn rebuild(&mut self) {
     self.mic_gain_db = self.wanted_gain_db;
     self.mic_gain = 10f32.powf(self.mic_gain_db / 20.0);
@@ -231,7 +242,7 @@ impl EchoCanceller3 {
     tests::apply_variant(&mut config, &self.variant, self.mic_gain);
     self.apm = build_apm(config);
     self.erle_db = 0.0;
-    (self.wanted_frames, self.wanted_peak, self.fresh) = (0, 0.0, true);
+    (self.wanted_frames, self.wanted_peak) = (0, 0.0);
   }
 }
 
@@ -489,20 +500,24 @@ mod tests {
   fn test_mic_gain_does_not_clip_a_shout() {
     let len = 2 * 48_000;
     let mic: Vec<f32> = (0..len).map(|n| if n >= 48_000 { 0.8 } else { 0.004 } * (n as f32 * 0.0393).sin()).collect();
-    let error = |gain_db: f32| {
+    let error = |gain_db: f32, block: usize| {
       let mut aec = EchoCanceller3::new();
       aec.set_mic_gain_db(gain_db);
-      let out = run(&mut aec, &vec![0.0; len], &mic, 480);
+      let out = run(&mut aec, &vec![0.0; len], &mic, block);
       assert_eq!(aec.mic_gain_db(), gain_db);
-      (48_000..len).map(|n| (out[n] - delayed(&mic, n, AEC3_LATENCY_SAMPLES)).abs()).fold(0.0f32, f32::max)
+      (48_000..out.len()).map(|n| (out[n] - delayed(&mic, n, aec.latency_samples())).abs()).fold(0.0f32, f32::max)
     };
-    let (plain, gained) = (error(0.0), error(24.0));
-    eprintln!("shout: worst sample error {plain:.4} without mic gain, {gained:.4} with 24 dB");
-    assert!(gained < plain + 0.02, "the shout is distorted: error {gained} (without mic gain {plain})");
+    // 441: blocks that don't line up with AEC3's frames.
+    for block in [480, 441] {
+      let (plain, gained) = (error(0.0, block), error(24.0, block));
+      eprintln!("shout, {block} samples: worst sample error {plain:.4} without mic gain, {gained:.4} with 24 dB");
+      assert!(gained < plain + 0.02, "the shout is distorted: error {gained} (without mic gain {plain})");
+    }
   }
 
-  /// The gain follows the request in 6 dB steps: at once before the first frame, then only
-  /// after the request held for 2 s (every change rebuilds AEC3), and not for a small move.
+  /// The gain follows the request in 6 dB steps: at once in the first 0.5 s (the leveler's
+  /// remembered level arrives a few blocks late), then only after the request held for 2 s
+  /// (every change rebuilds AEC3), and not for a small move.
   #[test]
   fn test_mic_gain_moves_in_steps_and_waits() {
     let mut aec = EchoCanceller3::new();
@@ -511,12 +526,47 @@ mod tests {
       aec.process_block(&[0.0; FRAME], &mut [0.0; FRAME]);
       aec.mic_gain_db()
     };
-    assert_eq!(frame(20.0), 18.0, "before the first frame: at once");
+    assert_eq!(frame(0.0), 0.0);
+    assert_eq!(frame(20.0), 18.0, "a few frames into the stream: at once");
     assert_eq!(frame(22.0), 18.0, "within the step's hysteresis");
+    assert_eq!((0..MIC_GAIN_FREE_FRAMES).map(|_| frame(20.0)).last(), Some(18.0));
     assert_eq!(frame(f32::NAN), 18.0, "a new step waits");
     assert_eq!((1..MIC_GAIN_LATCH_FRAMES).map(|_| frame(0.0)).last(), Some(0.0), "after 2 s");
     assert_eq!(frame(99.0), 0.0);
     assert_eq!((1..MIC_GAIN_LATCH_FRAMES).map(|_| frame(99.0)).last(), Some(MAX_MIC_GAIN_DB), "capped");
+  }
+
+  /// A new step costs 9 ms of silence, so it waits for a pause: two quiet frames in a row (the
+  /// old AEC3 still holds the end of the frame before), or 6 s of speech without one. After a
+  /// gap in the reference (`flush`) it is taken at once.
+  #[test]
+  fn test_mic_gain_step_waits_for_a_pause() {
+    let tone: Vec<f32> = (0..FRAME).map(|n| 0.1 * (n as f32 * 0.0393).sin()).collect();
+    let frame = |aec: &mut EchoCanceller3, want: f32, mic: &[f32]| {
+      aec.set_mic_gain_db(want);
+      aec.process_block(&[0.0; FRAME], &mut mic.to_vec());
+      aec.mic_gain_db()
+    };
+    let past_the_start = || {
+      let mut aec = EchoCanceller3::new();
+      for _ in 0..MIC_GAIN_FREE_FRAMES {
+        frame(&mut aec, 0.0, &tone);
+      }
+      aec
+    };
+    let mut aec = past_the_start();
+    assert!((0..MIC_GAIN_LATCH_FRAMES + 50).all(|_| frame(&mut aec, 12.0, &tone) == 0.0), "changed during speech");
+    assert_eq!(frame(&mut aec, 12.0, &[0.0; FRAME]), 0.0, "the frame before was still loud");
+    assert_eq!(frame(&mut aec, 12.0, &[0.0; FRAME]), 12.0, "second quiet frame");
+
+    let mut aec = past_the_start();
+    assert!((1..3 * MIC_GAIN_LATCH_FRAMES).all(|_| frame(&mut aec, 12.0, &tone) == 0.0), "changed during speech");
+    assert_eq!(frame(&mut aec, 12.0, &tone), 12.0, "no pause for 6 s");
+
+    let mut aec = past_the_start();
+    assert_eq!(frame(&mut aec, 12.0, &tone), 0.0);
+    aec.flush();
+    assert_eq!(frame(&mut aec, 12.0, &tone), 12.0, "after a gap");
   }
 
   /// Every debug capture through AEC3 (raw mic + the reference as the live chain fed it, the
@@ -674,7 +724,8 @@ mod tests {
     let (mut removed, mut left, mut erle_sum) = (Vec::new(), Vec::new(), 0.0f32);
     let (mut voice, mut loss, mut over6, mut over10, mut hf_loss) = (0usize, 0.0f32, 0usize, 0usize, 0.0f32);
     let (mut onsets, mut onset_loss) = (0usize, 0.0f32);
-    for (w, h) in heard.iter().enumerate().skip(COLD_WINDOWS) {
+    // `take`: the shifted output is short of the capture's last window.
+    for (w, h) in heard.iter().enumerate().take(out.len() / WINDOW).skip(COLD_WINDOWS) {
       let lost = level(mic, w) - level(out, w);
       match h {
         Heard::EchoAlone => {
@@ -848,20 +899,23 @@ mod tests {
   }
 
   /// What the chain hands to `set_mic_gain_db` at each 480-sample block of a capture, from its
-  /// `vars.tsv` as `plugin.rs` does: the leveler's gain less what its target is over the
-  /// default. 0 without the file or its columns, or with the leveler off.
+  /// `vars.tsv` as `plugin.rs` does (`VoiceLeveler::gain_to_default_db`): the leveler's default
+  /// target less the learned speech level and the input gain. 0 without the file or its
+  /// columns, before a level is learned, or with the leveler off.
   fn capture_gains(dir: &Path, samples: usize) -> Vec<f32> {
     let vars = std::fs::read_to_string(dir.join("vars.tsv")).unwrap_or_default();
     let mut lines = vars.lines();
     let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
     let column = |name: &str| header.iter().position(|h| *h == name);
-    let (frame, gain, on, target) =
-      (column("frame"), column("leveler_gain_db"), column("leveler_on"), column("leveler_target_db"));
+    let (frame, level, input, on) =
+      (column("frame"), column("leveler_level_db"), column("input_gain_db"), column("leveler_on"));
     let default_target = MIC_LEVELER_DEFAULT_TARGET_DB_X10 as f32 / 10.0;
     let mut rows = lines
       .map(|line| {
         let cell = |at: Option<usize>| at.and_then(|at| line.split('\t').nth(at)).and_then(|c| c.parse::<f32>().ok());
-        let wanted = cell(gain).unwrap_or(0.0) - (cell(target).unwrap_or(default_target) - default_target);
+        // NaN: no level learned yet.
+        let wanted =
+          cell(level).filter(|l| l.is_finite()).map_or(0.0, |l| default_target - l - cell(input).unwrap_or(0.0));
         (cell(frame).unwrap_or(0.0) as usize, if cell(on) == Some(0.0) { 0.0 } else { wanted })
       })
       .peekable();

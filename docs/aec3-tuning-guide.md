@@ -10,13 +10,15 @@ Příkazy jsou pro PowerShell, spouštěj je z kořene repa.
 | ----------------------------------------------------------- | ------------------------------------------------------- |
 | `aec3.rs`: zesílení mikrofonu do AEC3 (`set_mic_gain_db`)   | přeloženo a otestováno na Macu, jen na syntetice        |
 | `aec3.rs`: testy a `capture_tuning_report`                  | běží na Macu na dvou umělých „captures"                 |
-| `plugin.rs`: předání boostu leveleru do AEC (3 řádky)       | **psáno bez překladače**                                |
+| `plugin.rs`: předání zesílení z leveleru do AEC (2 řádky)   | **psáno bez překladače**                                |
+| `voice_leveler.rs`: `gain_to_default_db`                    | přeloženo na Macu                                       |
 | `ai_denoiser.rs`: `AEC_WAV` v `capture_replay_report`       | **psáno bez překladače**                                |
 | Cokoli na skutečných nahrávkách nebo naživo                 | **neověřeno**                                           |
 
 Co změna dělá: AEC3 má absolutní prahy úrovně a tichý mikrofon ho drží mimo lineární filtr. Pak
 tlumí hlas podle hlasitosti reference. Mikrofon se proto před AEC3 zesílí a za ním stejně
-zeslabí. Zesílení je boost leveleru v krocích po 6 dB (0-24 dB).
+zeslabí. Zesílení je to, co naučené úrovni řeči chybí do -24 dBFS (výchozí cíl leveleru),
+v krocích po 6 dB (0-24 dB). S vypnutým levelerem nebo před naučením úrovně je 0.
 
 ## 2. Přeložit a pustit testy
 
@@ -25,19 +27,19 @@ cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture
 cargo clippy --workspace --all-targets
 ```
 
-Čekaný výsledek: 13 testů projde, 3 jsou `ignored`. Hodnoty na Macu:
+Čekaný výsledek: 14 testů projde, 3 jsou `ignored`. Hodnoty na Macu:
 `quiet mic, no gain` hlas -5,4 dB a pásmo 4-8 kHz -19 dB; `quiet mic, 24 dB` -1,6 a -2,4 dB.
 
 Když se nepřeloží `plugin.rs`: záměr je jen tento a nic dalšího se měnit nemá. Před
 `self.run_aec(...)` se každý blok zavolá
 
 ```rust
-self.aec.set_mic_gain_db(leveler_boost_db - target_over_default_db);
+let aec_mic_gain_db = self.leveler.gain_to_default_db().filter(|_| leveler_on).unwrap_or(0.0);
+self.aec.set_mic_gain_db(aec_mic_gain_db);
 ```
 
-kde `leveler_boost_db` je `self.leveler.gain_db()` (0 při vypnutém leveleru) a
-`target_over_default_db` je `(leveler_target_x10 - MIC_LEVELER_DEFAULT_TARGET_DB_X10) / 10`.
-Řádek `let leveler_boost_db = ...` se kvůli tomu přesunul nad Stage 1; níž ho dál používá denoiser.
+`gain_to_default_db` je nový getter ve `voice_leveler.rs`: `DEFAULT_TARGET_DB` mínus naučená
+úroveň mínus vstupní zisk, `None` před naučením.
 
 ## 3. Základní měření
 
@@ -48,7 +50,8 @@ cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- -
 
 `CAP` omezí výběr (`$env:CAP = "20261109-130319,20261109-210655"`); bez něj jdou všechny captures.
 Varianty odděluje `;`. Prázdná varianta je AEC3 tak, jak je v kódu. `pregain=0` je chování před
-touto změnou. Bez `pregain=` se bere boost leveleru z `vars.tsv` nahrávky, stejně jako v řetězu.
+touto změnou. Bez `pregain=` se zesílení počítá z `vars.tsv` nahrávky stejně jako v řetězu
+(sloupce `leveler_level_db`, `input_gain_db`, `leveler_on`).
 
 Sloupce (okna 100 ms od 3. sekundy, tříděná Silerem na surovém mikrofonu):
 
@@ -83,7 +86,8 @@ Zapiš tabulku pro každou nahrávku a odpověz na tyto otázky:
 1. **Pomáhá zesílení?** Porovnej `pregain=0` a `(as built)` u nahrávek, kde `gain` > 0.
    Čekání: `voice`, `>6dB` a `4-8k` klesnou, `echo` a `left` se nezhorší o víc než 2 dB.
    `ERLE` u `pregain=0` kolem 0 a u `(as built)` několik dB potvrzuje příčinu z analýzy (3.1).
-2. **Kde je `gain` 0?** Leveler byl vypnutý nebo boost pod 4,5 dB. Tam se nic nemění a je to správně.
+2. **Kde je `gain` 0?** Leveler byl vypnutý, neměl naučenou úroveň, nebo řeči chybí do -24 dBFS
+   méně než 4,5 dB. Tam se nic nemění a je to správně.
 3. **Kolik umí lineární filtr?** `echo` v řádku `open`:
 
 | `open`: `echo`                     | Co to znamená                           | Další krok             |
@@ -107,7 +111,7 @@ Klíče (lze kombinovat mezerou, definice v `aec3::tests::apply_variant`):
 | `masks=<k>`    | prahy potlačovače krát k (větší = měkčí)                       | 1       |
 | `gain=<x>`     | záložní zisk echa (`default_gain`), jen když filtr neběží      | 0.01    |
 | `open`         | potlačovač průhledný (jen měření)                              | -       |
-| `pregain=<dB>` | pevné zesílení místo boostu z nahrávky                         | -       |
+| `pregain=<dB>` | pevné zesílení místo hodnoty z nahrávky                        | -       |
 
 Pořadí:
 
@@ -189,15 +193,16 @@ Co naživo poslouchat a nahrát (`-Apo -DebugCapture`, nikdy takové APO nebalit
 - **Řeč z reproduktorů** (podcast nebo hovor), střídavě ticho / mluvím já / obojí. Na výstupu
   nesmí být srozumitelná cizí řeč. Je to chybějící případ.
 - **Skok zesílení**: v logu řádky `[AEC3] mic gain X -> Y dB`. Každý skok znamená 9 ms ticha
-  a AEC3 se učí znovu. Má jich být pár po startu nebo po „Učit znovu", ne během hovoru. Když
-  cvakají ve slově, zvětši `MIC_GAIN_LATCH_FRAMES` nebo `MIC_GAIN_HYSTERESIS_DB`.
+  a AEC3 se učí znovu. Má být jeden v první půlvteřině streamu a pak pár po „Učit znovu",
+  ne během hovoru. Když cvakají ve slově, zvětši `MIC_GAIN_LATCH_FRAMES` nebo
+  `MIC_GAIN_HYSTERESIS_DB`. Skok také alokuje v audio vlákně: hlídej pozdní bloky v `[Chain]` logu.
 - **Výkřik** při tichém mikrofonu: nesmí být oříznutý ani zkreslený.
 - Sluchátka s hudbou a reproduktory s hudbou jako v milníku 36.
 
 ## 9. Návrat zpět a kdy se zastavit
 
 - Vypnutí celé změny: `MAX_MIC_GAIN_DB = 0.0` v `aec3.rs`. Chování je pak bit po bitu jako dřív
-  (test `test_mic_gain_moves_in_steps_and_waits` pak upravit nebo smazat).
+  (testy `test_mic_gain_*` a `test_quiet_mic_*` pak upravit nebo smazat).
 - Když `open` ukáže lineární ERLE kolem 0 dB i se zesílením, AEC3 filtr nepoužívá z jiného
   důvodu. Neladit dál potlačovač. Zapsat `ERLE`, `gain` a nahrávku do DEVLOGu; další kandidáti
   jsou v analýze: mono reference (3.6, C2) a transparent mode.

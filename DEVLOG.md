@@ -1606,13 +1606,16 @@ the captures: `docs/aec3-tuning-guide.md`.
   echo at -68 dBFS on the mic, room noise -76 dBFS, voice -46 dBFS. Voice -4.7 dB, its 4-8 kHz
   band -15 dB, 58 % of the loud 10 ms voice blocks cut by over 6 dB; AEC3's own ERLE estimate 0.2 dB.
 - **Change: `EchoCanceller3::set_mic_gain_db`.** The mic goes into AEC3 louder and comes out
-  quieter by the same gain. `plugin.rs` passes the leveler's boost less what the leveler's
-  target is over its default, i.e. the gain that brings the speech to about -24 dBFS.
+  quieter by the same gain. `plugin.rs` passes the gain that would bring the speech level the
+  leveler learned to the leveler's default target, -24 dBFS (`VoiceLeveler::gain_to_default_db`:
+  not the user's target, no boost limit; 0 with the leveler off or before a level is learned).
   - 6 dB steps (nearest, 1.5 dB hysteresis), 0..24 dB.
   - A step change rebuilds AEC3, because the fallback echo gain is scaled with it (0.01 x gain:
     the estimate stays where the captures had it). That costs the learned echo path and 430
-    samples of silence, so it waits until the request held for 2 s and then for a frame 18 dB
-    under the loudest since (6 s at most). Before the first frame it is applied at once.
+    samples of silence, so it waits until the request held for 2 s and then for two frames in
+    a row 18 dB under the loudest since (6 s at most). In the first 0.5 s after a start, a
+    reset or a gap in the reference it is applied at once: the leveler's remembered level
+    arrives a few blocks into the stream.
   - `sonora` clamps its float input and output at full scale and reads 32700 / 32768 as a
     saturated capture: a frame whose peak would pass 0.9 gets less gain for that frame (never
     under 1, so without a mic gain nothing changes).
@@ -1629,14 +1632,15 @@ the captures: `docs/aec3-tuning-guide.md`.
   -5.6 with 12 dB): the speech must stay around -20 dBFS inside AEC3.
 - **Tests** (`aec3.rs`): quiet mic regression (-5.4 / -19 dB without the gain, -1.6 / -2.4 dB
   with 24 dB), no harm at call levels, a shout 46 dB over the level does not clip, the step /
-  wait logic.
+  wait logic, the wait for a pause.
 - **`aec3::tests::capture_tuning_report`** (ignored): every capture through AEC3 once per
   variant (`VARIANTS`), 100 ms windows sorted by Silero on the raw mic, one line per variant:
   echo removed and left, voice lost, share lost over 6 / 10 dB, word onsets, 4-8 kHz band, AEC3's
   ERLE. Variants come from the test-only `apply_variant` (`open`, `masks=`, `erle=`, `hf=`,
   `len=`, `gain=`) without a rebuild; `WAV=1` writes the outputs, and
   `ai_denoiser::tests::capture_replay_report` takes one with `AEC_WAV`. `capture_export` and
-  `capture_replay_report` now use the capture's leveler gain as mic gain, as the chain does.
+  `capture_replay_report` now ask for the mic gain as the chain does, from the capture's
+  `leveler_level_db` and `input_gain_db`.
 - **Also seen synthetically, not changed** (for the captures to decide):
   - Where the linear filter works well (short room, it alone removes 40 dB), the suppressor adds
     nothing to the echo removed and costs the voice 6 dB (-7.8 dB against -1.9 dB with `open`).
@@ -1649,6 +1653,12 @@ the captures: `docs/aec3-tuning-guide.md`.
 - **Refuted synthetically:** that AEC3 reads the reference 20 ms late until its own delay
   estimator locks (`statistics().delay_ms` is 0 from the start; `default_delay` 1 and
   `use_external_delay_estimator` change nothing).
+- **Review (fresh context) before the push of the fixes:** the first version took the leveler's
+  boost less the target's distance from the default, which gave 6-12 dB of gain with the leveler
+  off or not yet learned and a target under the default, and too little with the boost at its
+  limit; and it applied the gain only before the very first frame, which the remembered level
+  misses. Both fixed as described above.
 - **Open:** all of it on the captures and live (rebuild and reinstall the APO). The rebuild at
-  a gain step is audible if it lands in speech. With the leveler off there is no mic gain. No
+  a gain step is audible if it lands in speech, and it allocates on the audio thread (as
+  `reset` always did; not timed). With the leveler off there is no mic gain. No
   capture has speech from the speakers. The reference is still a mono downmix.

@@ -407,11 +407,10 @@ impl GamersEqualizerPlugin {
     self.input_clips = self.input_clips.wrapping_add(self.clip_detector.count(mic_in));
 
     // Stage 1: Classical DSP Acoustic Echo Cancellation (NO AI)
-    // AEC3 gets the mic as loud as the leveler makes it at its default target (last block's
-    // gain): at a quiet mic's level it would duck the voice (`aec3.rs`, "Mic gain").
-    let leveler_boost_db = if leveler_on { self.leveler.gain_db() } else { 0.0 };
-    let target_over_default_db = (leveler_target_x10 - MIC_LEVELER_DEFAULT_TARGET_DB_X10) as f32 / 10.0;
-    self.aec.set_mic_gain_db(leveler_boost_db - target_over_default_db);
+    // AEC3 gets the mic at call level, by the speech level the leveler learned: at a quiet
+    // mic's level it would duck the voice (`aec3.rs`, "Mic gain"). Nothing learned: no gain.
+    let aec_mic_gain_db = self.leveler.gain_to_default_db().filter(|_| leveler_on).unwrap_or(0.0);
+    self.aec.set_mic_gain_db(aec_mic_gain_db);
     self.aec_ref_offset = None;
     self.aec_state = if aec_enabled {
       self.run_aec(frames, mic_qpc_hns)
@@ -436,6 +435,7 @@ impl GamersEqualizerPlugin {
     // The closed gate goes as far further down as the leveler lifts (last block's gain), so
     // pauses don't get louder with a quiet mic.
     self.pre_high_pass.process(mic);
+    let leveler_boost_db = if leveler_on { self.leveler.gain_db() } else { 0.0 };
     self.ai_denoiser.set_gate_floor_extra_db(leveler_boost_db);
     self.ai_denoiser.set_pre_gain_db(leveler_boost_db);
     self.ai_denoiser.process_samples(mic);

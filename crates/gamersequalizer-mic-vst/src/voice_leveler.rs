@@ -132,6 +132,13 @@ impl VoiceLeveler {
     (self.frames >= MIN_FRAMES && self.level_pow.is_finite()).then(|| 10.0 * self.level_pow.max(1e-12).log10())
   }
 
+  /// Gain (dB) that would bring the learned speech to `DEFAULT_TARGET_DB`, whatever the user's
+  /// target and the gain limits: how far the mic is from call level (the echo canceller's mic
+  /// gain). None until there is a level.
+  pub fn gain_to_default_db(&self) -> Option<f32> {
+    self.level_db().map(|level| DEFAULT_TARGET_DB - level - self.input_gain_db)
+  }
+
   /// Speech heard so far (ms, wraps): how long the user talked, for the automatic input gain.
   pub fn speech_ms(&self) -> u32 {
     self.speech_frames.wrapping_mul(10)
