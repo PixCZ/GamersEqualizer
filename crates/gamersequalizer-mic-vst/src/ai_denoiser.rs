@@ -2650,6 +2650,20 @@ pub(crate) mod tests {
       sp_loss / sp.max(1) as f32,
       sp_cut as f32 * 100.0 / sp.max(1) as f32
     );
+    let mut pauses: Vec<f32> = pairs
+      .iter()
+      .enumerate()
+      .skip(30)
+      .filter(|(t, _)| silero(*t) < 0.15)
+      .map(|(_, p)| p.1)
+      .collect();
+    pauses.sort_by(f32::total_cmp);
+    let p_len = pauses.len();
+    let p_median = pauses.get(p_len / 2).copied().unwrap_or(0.0);
+    let p_90 = pauses.get(p_len * 9 / 10).copied().unwrap_or(0.0);
+    eprintln!(
+      "PAUSES without voice {p_len}: median {p_median:.1} dBFS, 90th percentile {p_90:.1} dBFS"
+    );
   }
 
   #[derive(Debug)]

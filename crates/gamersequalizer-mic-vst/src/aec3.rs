@@ -291,9 +291,31 @@ fn build_apm(tuning: EchoCanceller3Config) -> AudioProcessing {
 /// `mic_gain`: factor the mic is raised by on its way in (`set_mic_gain_db`). The fallback gain
 /// is relative to the mic AEC3 sees, so it goes up with it and the estimate stays where the
 /// captures above had it. AEC3's own "no echo" mode has a fixed 0.01 and so gets looser.
+///
+/// Tuning from 2026-11-07 and 2026-11-09 captures (`capture_tuning_report`, milestone 44):
+/// - `erle.max_l = 30.0`, `max_h = 10.0`: AEC3 trusts its linear filter up to 30 dB (below 4 kHz)
+///   and 10 dB (above).
+/// - `bands_in_limiting_gain = 0`: bins over 2 kHz no longer follow the 2 kHz bin's gain,
+///   recovering 5-8 dB in the 4-8 kHz band and reducing voice loss across speakers and HDMI monitor
+///   captures:
+///   - `122712` (speakers): 4-8 kHz loss 16.2 -> 8.1 dB, voice loss 8.3 -> 6.6 dB, cuts > 10 dB 28 -> 18 %;
+///   - `125717` (speakers): 4-8 kHz loss 11.0 -> 4.9 dB, voice loss 5.9 -> 4.7 dB, cuts > 10 dB 24 -> 17 %;
+///   - `130319` (speakers): 4-8 kHz loss 7.0 -> 6.0 dB, voice loss 3.4 -> 3.0 dB;
+///   - `205013` (speakers, quiet mic): 4-8 kHz loss 9.0 -> 6.7 dB, voice loss 1.9 -> 1.7 dB;
+///   - `210655` (speakers, quiet mic): 4-8 kHz loss 6.7 -> 5.1 dB, voice loss 2.2 -> 2.0 dB;
+///   - `101152` (HDMI monitor): 4-8 kHz loss 16.9 -> 10.9 dB, voice loss 7.7 -> 6.0 dB, cuts > 10 dB 29 -> 21 %;
+///   - `102403` (HDMI monitor): 4-8 kHz loss 11.5 -> 6.5 dB, voice loss 5.9 -> 4.7 dB;
+///   - `115931` & `122520` (headphones): voice loss 0.6 and 0.7 dB unchanged.
+///
+/// In the full chain with denoiser (`ai_denoiser::tests::capture_replay_report`), mean voice loss
+/// drops on `122712` from 7.7 to 5.1 dB and on `125717` from 8.6 to 6.5 dB with zero leak increase
+/// and pauses remaining at -107 to -127 dBFS.
 fn tuning(mic_gain: f32) -> EchoCanceller3Config {
   let mut cfg = EchoCanceller3Config::default();
   cfg.ep_strength.default_gain = FALLBACK_ECHO_GAIN * mic_gain;
+  cfg.erle.max_l = 30.0;
+  cfg.erle.max_h = 10.0;
+  cfg.suppressor.high_frequency_suppression.bands_in_limiting_gain = 0;
   let normal = &mut cfg.suppressor.normal_tuning;
   normal.mask_lf.enr_transparent = 1.0;
   normal.mask_lf.enr_suppress = 1.1;
@@ -474,13 +496,17 @@ mod tests {
   // music's echo -55..-70 dBFS.
 
   /// Regression: with the echo at -68 dBFS and the voice at -46 dBFS (capture 2026-11-09 21:06)
-  /// AEC3 took 5.4 dB off the voice and 19 dB off its 4-8 kHz band. With the leveler's boost as
-  /// mic gain: 1.6 and 2.4 dB, the echo removed as before (14 dB, down to the room noise).
+  /// AEC3 took 3.8 dB off the voice and 6.4 dB off its 4-8 kHz band (down from 5.4 / 19 dB
+  /// before the 2026-11-10 tuning decoupled HF suppression). With the leveler's boost as
+  /// mic gain (24 dB): 1.2 and 1.6 dB loss, the echo removed as before (14 dB, down to the room noise).
   #[test]
   fn test_quiet_mic_keeps_the_voice_with_mic_gain() {
     let (plain, gained) = (quiet_mic(-68.0, -46.0, 0.0), quiet_mic(-68.0, -46.0, 24.0));
     eprintln!("quiet mic, no gain: {plain:?}\nquiet mic, 24 dB:   {gained:?}");
-    assert!(plain.voice_hf_db < -8.0, "the scenario no longer shows the loss: {plain:?}");
+    assert!(
+      plain.voice_hf_db < gained.voice_hf_db - 3.0,
+      "the mic gain should keep at least 3 dB more HF voice: {plain:?} vs {gained:?}"
+    );
     assert!(gained.voice_db > -2.5 && gained.voice_hf_db > -4.0, "voice lost with the mic gain: {gained:?}");
     assert!(gained.echo_removed_db > plain.echo_removed_db - 1.0, "echo leaks with the mic gain: {gained:?}");
   }
