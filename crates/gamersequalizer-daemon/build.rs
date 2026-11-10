@@ -1,11 +1,17 @@
-//! Embeds the app icon into the .exe (Explorer, shortcuts, Alt+Tab before the window sets its own).
-//! The .ico is generated from `src/app_icon.rs`, the same drawing the window and tray use.
+//! Embeds the app icon into the .exe (Explorer, shortcuts, Alt+Tab before the window sets its own)
+//! and its version resource. The .ico is generated from `src/app_icon.rs`, the same drawing the
+//! window and tray use.
 
 #[path = "src/app_icon.rs"]
 #[allow(dead_code)]
 mod app_icon;
+// Shared with the APO's build script; each uses one `FileKind`.
+#[path = "../build-support/version_info.rs"]
+#[allow(dead_code)]
+mod version_info;
 
 use std::path::PathBuf;
+use version_info::{FileKind, VersionInfo};
 
 /// Sizes Windows picks from: small icons, title/taskbar, Explorer "large" and "extra large" views.
 const ICO_SIZES: [u32; 5] = [16, 24, 32, 48, 256];
@@ -13,6 +19,13 @@ const ICO_SIZES: [u32; 5] = [16, 24, 32, 48, 256];
 fn main() {
   println!("cargo:rerun-if-changed=src/app_icon.rs");
   println!("cargo:rerun-if-changed=build.rs");
+  println!("cargo:rerun-if-changed=../build-support/version_info.rs");
+
+  // Short commit hash for the About card and the exe's product version.
+  let hash = version_info::git_hash();
+  println!("cargo:rustc-env=GAMERSEQUALIZER_GIT_HASH={hash}");
+  let version =
+    VersionInfo { kind: FileKind::App, description: "GamersEqualizer", internal_name: "gamersequalizer" }.rc(&hash);
 
   // Bootstrap tooling, not the running app: failing the build loudly is the right outcome.
   #[allow(clippy::expect_used)]
@@ -23,11 +36,11 @@ fn main() {
   {
     std::fs::write(&ico_path, ico_bytes()).expect("write app.ico");
     let ico = ico_path.to_string_lossy().replace('\\', "\\\\");
-    std::fs::write(&rc_path, format!("1 ICON \"{ico}\"\n")).expect("write app.rc");
+    std::fs::write(&rc_path, format!("{version}1 ICON \"{ico}\"\n")).expect("write app.rc");
   }
   embed_resource::compile(&rc_path, embed_resource::NONE).manifest_required().unwrap_or_else(|e| {
     // No resource compiler (no Windows SDK): build without the icon rather than fail.
-    println!("cargo:warning=exe icon not embedded: {e}");
+    println!("cargo:warning=exe icon and version not embedded: {e}");
   });
 }
 

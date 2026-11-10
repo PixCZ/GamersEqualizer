@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
-  eCapture, eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator,
-  ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+  eCapture, eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
+  IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
 use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_core::Interface;
 
 /// `QueryHardwareSupport` bit: the device applies the volume itself (endpointvolume.h; the
@@ -802,6 +802,7 @@ thread_local! {
   /// is dropped on any error (device removed, audio service restarted) and made fresh next time.
   static ENDPOINT_VOLUMES: RefCell<HashMap<String, IAudioEndpointVolume>> = RefCell::new(HashMap::new());
   static ENDPOINT_METERS: RefCell<HashMap<String, IAudioMeterInformation>> = RefCell::new(HashMap::new());
+  static SESSION_MANAGERS: RefCell<HashMap<String, IAudioSessionManager2>> = RefCell::new(HashMap::new());
 }
 
 /// Bound for the caches (a PC has a handful of endpoints; ids of unplugged ones pile up).
@@ -843,6 +844,30 @@ unsafe fn activate_endpoint<I: Interface>(device_id: &str) -> Option<I> {
   let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
   let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
   device.Activate::<I>(CLSCTX_ALL, None).ok()
+}
+
+/// Another process has a running stream on `device_id` (a microphone: an app records from this
+/// very device; an output: an app has a stream open, even a silent one). The audio engine then
+/// runs the device's effects. None = could not ask.
+pub fn endpoint_used_by_others(device_id: &str) -> Option<bool> {
+  // SAFETY: no arguments, cannot fail.
+  let own_pid = unsafe { GetCurrentProcessId() };
+  // SAFETY: COM calls on live interfaces.
+  with_endpoint(&SESSION_MANAGERS, device_id, |manager: &IAudioSessionManager2| unsafe {
+    let sessions = manager.GetSessionEnumerator()?;
+    for i in 0..sessions.GetCount()? {
+      let Ok(control) = sessions.GetSession(i) else { continue };
+      if control.GetState().ok() != Some(AudioSessionStateActive) {
+        continue;
+      }
+      // Our own streams (mic bridge, speaker loopback) don't count.
+      let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+      if control2.GetProcessId().is_ok_and(|pid| pid != own_pid) {
+        return Ok(true);
+      }
+    }
+    Ok(false)
+  })
 }
 
 pub fn get_endpoint_volume(device_id: &str) -> Option<(f32, bool)> {

@@ -21,9 +21,11 @@ impl ConsoleOwner {
   /// This process runs in the session at the console (cached for `CHECK_INTERVAL`).
   pub fn is_owner(&mut self) -> bool {
     if self.checked_at.is_none_or(|t| t.elapsed() >= CHECK_INTERVAL) {
+      // The first verdict is logged either way: "not at the console" is why nothing reaches the APO.
+      let first = self.checked_at.is_none();
       self.checked_at = Some(Instant::now());
       let owner = at_console();
-      if owner != self.owner {
+      if first || owner != self.owner {
         info!("[ConsoleOwner] {}", if owner { "this session is at the console: driving the APO" } else {
           "another session is at the console: leaving the APO alone"
         });
@@ -34,7 +36,8 @@ impl ConsoleOwner {
   }
 }
 
-fn at_console() -> bool {
+/// Uncached and without logging (for a check that only needs the answer).
+pub fn at_console() -> bool {
   let mut mine = 0u32;
   // SAFETY: plain Win32 queries with a valid out pointer.
   let (active, ok) = unsafe { (WTSGetActiveConsoleSessionId(), ProcessIdToSessionId(GetCurrentProcessId(), &mut mine)) };

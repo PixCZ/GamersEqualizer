@@ -116,7 +116,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
 
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::INFO, COLOR)), tr("About"));
-    ui.label(format!("GamersEqualizer {}", env!("CARGO_PKG_VERSION")));
+    ui.label(format!("GamersEqualizer {} ({})", env!("CARGO_PKG_VERSION"), env!("GAMERSEQUALIZER_GIT_HASH")));
     ui.label(format!("{}: {}", tr("Author"), env!("CARGO_PKG_AUTHORS")));
   });
 }

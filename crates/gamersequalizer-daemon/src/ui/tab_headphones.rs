@@ -658,10 +658,19 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
     state.headphones_ui.apo = Some((apo_install::check_flow(Flow::Render, device_id), Instant::now()));
   }
   let live = state.output_apo_live();
+  // The service saw sound play on this output while our effect processed nothing.
+  let run = super::apo_banner::run_status(state);
+  let not_running = run.is_some_and(|r| r.output_not_running.is_some());
+  let note = run.and_then(|r| super::apo_banner::newest_note(r, "Output EQ")).map(str::to_string);
   let Some((check, _)) = state.headphones_ui.apo.clone() else {
     return;
   };
   let (text, severity, button) = match check.status {
+    ApoStatus::Active if not_running => (
+      tr("The output EQ does NOT work on this device while sound plays: you hear it unprocessed.").to_string(),
+      Severity::Error,
+      None,
+    ),
     ApoStatus::Active if live => {
       let (rate, ch) = state.shm_header().map_or((0, 0), |h| {
         (
@@ -707,6 +716,9 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
   }
   theme::info_bar(ui, severity, |ui| {
     ui.label(text);
+    if let Some(note) = note.as_deref().filter(|_| not_running) {
+      ui.label(theme::caption(trf("Last report from Windows audio: {}", &[&note])));
+    }
     if let (Some(label), Some(_)) = (button, check.endpoint_guid.as_deref()) {
       if !check.can_install {
         ui.label(theme::caption(tr("(installer files not found next to the app)")));

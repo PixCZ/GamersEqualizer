@@ -14,8 +14,8 @@ use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_MULTI_SZ,
-  RRF_RT_REG_SZ,
+  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD,
+  RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
 };
 use windows::Win32::UI::Shell::{
   SHGetKnownFolderPath, ShellExecuteW, FOLDERID_ProgramFiles, FOLDERID_System, KF_FLAG_DEFAULT,
@@ -41,6 +41,16 @@ const FX_LIST_VALUES: [&str; 3] = [
   "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14",
   "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
 ];
+/// Processing modes each slot runs in (`PKEY_SFX/MFX/EFX_ProcessingModes_Supported_For_Streaming`).
+const FX_MODE_VALUES: [(&str, &str); 3] = [
+  ("SFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},5"),
+  ("MFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},6"),
+  ("EFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},7"),
+];
+/// `PKEY_AudioEndpoint_Disable_SysFx`: 1 = audio enhancements off for the device.
+const DISABLE_SYSFX_VALUE: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
+const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+const AUDIO_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
 /// ShellExecute returns a value > 32 on success.
 const SHELL_EXECUTE_OK: isize = 32;
 
@@ -132,6 +142,47 @@ fn endpoint_args(targets: &[(Flow, &str)]) -> Result<String, String> {
     parts.push(format!("{}:{guid}", flow.as_str()));
   }
   Ok(parts.join(","))
+}
+
+/// One log line with what decides whether Windows runs effects on this endpoint: its effect
+/// lists, the processing modes of each slot and the audio enhancements switch.
+pub fn describe_endpoint(flow: Flow, guid: &str) -> String {
+  let root = format!("{}\\{guid}", endpoints_root(flow));
+  let fx_key = format!("{root}\\FxProperties");
+  let list = |value: &str| read_string_value(&fx_key, value).map(|l| one_line(&l)).unwrap_or_default();
+  let slots: Vec<String> =
+    ["SFX", "MFX", "EFX"].iter().zip(FX_LIST_VALUES).map(|(slot, value)| format!("{slot} [{}]", list(value))).collect();
+  let modes: Vec<String> =
+    FX_MODE_VALUES.iter().map(|&(slot, value)| format!("{slot} modes [{}]", list(value))).collect();
+  let off = |key: &str| read_dword_value(key, DISABLE_SYSFX_VALUE).map_or_else(|| "-".to_string(), |v| v.to_string());
+  let props_key = format!("{root}\\Properties");
+  format!(
+    "{} {guid}: {}; {}; enhancements-off flag: FxProperties {}, Properties {}",
+    flow.as_str(),
+    slots.join(", "),
+    modes.join(", "),
+    off(fx_key.as_str()),
+    off(props_key.as_str())
+  )
+}
+
+/// One log line: Windows build, the APO signature check switch, the installed DLL's build time.
+pub fn describe_system() -> String {
+  let text = |value: &str| read_string_value(WINDOWS_VERSION_KEY, value).map(|v| one_line(&v)).unwrap_or_default();
+  let ubr = read_dword_value(WINDOWS_VERSION_KEY, "UBR").map_or_else(|| "?".to_string(), |v| v.to_string());
+  let protected =
+    read_dword_value(AUDIO_KEY, "DisableProtectedAudioDG").map_or_else(|| "-".to_string(), |v| v.to_string());
+  let dll = installed_dll().and_then(|p| file_stamp(&p)).map_or_else(|| "missing".to_string(), |(_, t)| format_time(t));
+  format!(
+    "Windows {} build {}.{ubr}; DisableProtectedAudioDG {protected}; installed APO DLL {dll}",
+    text("DisplayVersion"),
+    text("CurrentBuild")
+  )
+}
+
+/// A REG_MULTI_SZ read by `read_string_value` on one line: "a | b".
+fn one_line(value: &str) -> String {
+  value.split('\n').filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" | ")
 }
 
 /// Is this flow's APO in the effect lists of any endpoint (also unplugged ones)? Tells a new
@@ -397,6 +448,28 @@ fn read_string_value(key: &str, value: &str) -> Option<String> {
       .ok()?;
     Some(String::from_utf16_lossy(&buf).replace('\0', "\n"))
   }
+}
+
+fn read_dword_value(key: &str, value: &str) -> Option<u32> {
+  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
+  let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+  let mut data = 0u32;
+  let mut size = std::mem::size_of::<u32>() as u32;
+  // SAFETY: the out buffer is a local u32 of the size passed.
+  unsafe {
+    RegGetValueW(
+      HKEY_LOCAL_MACHINE,
+      PCWSTR(key_w.as_ptr()),
+      PCWSTR(value_w.as_ptr()),
+      RRF_RT_REG_DWORD,
+      None,
+      Some(&mut data as *mut u32 as *mut _),
+      Some(&mut size),
+    )
+    .ok()
+    .ok()?;
+  }
+  Some(data)
 }
 
 #[cfg(test)]

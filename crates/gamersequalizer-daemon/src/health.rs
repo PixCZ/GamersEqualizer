@@ -7,7 +7,10 @@
 //! - the selected microphone is not the Windows default,
 //! - the output EQ is on other outputs but not on the one in use (a new sound card / headset:
 //!   our effect is installed per device),
-//! - an app records while the microphone is muted, at 0 % or turned off (checked every second).
+//! - an app records while the microphone is muted, at 0 % or turned off (checked every second),
+//! - the registry lists our effect on the device in use, but Windows does not run it (an
+//!   antivirus blocking the DLL, audio enhancements off): the device is in use and the effect's
+//!   heartbeat in shared memory stands still (checked every second, `RunWatch`).
 //!
 //! Each new problem also shows a Windows notification (`notify`), at most once per
 //! `NOTIFY_COOLDOWN` per problem, and not while the app's window is in front.
@@ -20,20 +23,29 @@
 //! deliberate switch in Windows itself is flagged once too; "Keep" accepts it. The window's own banner
 //! (`ui/apo_banner.rs`) still checks the mic problems on its own.
 
+use crate::apo_notes::{self, ApoNote};
 use crate::i18n::{tr, trf};
 use crate::mic_usage::{self, Silenced};
 use crate::output_eq::settings::write_atomic;
 use crate::win_audio::apo_install::{self, ApoStatus, Flow};
 use crate::win_audio::dolby_atmos::{active_format, spatial_status, SpatialAudioStatus, SpatialFormat};
-use crate::win_audio::shell;
+use crate::win_audio::{chatmix, console_owner, shell};
 use crate::win_audio::{AudioEndpointInfo, WinAudioSystem};
+use gamersequalizer_common::shm::ShmHeader;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 const FILE: &str = "health.json";
+/// The service's verdict on our effects really running, read by the window (`RunStatus`).
+const RUN_FILE: &str = "run_status.json";
+/// APO notes handed to the window.
+const NOTES_FOR_WINDOW: usize = 5;
+/// How often the Application log is queried for new APO notes.
+const NOTES_INTERVAL: Duration = Duration::from_secs(30);
 /// Device enumeration + one spatial-audio activation + a few registry reads.
 const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Windows switching to an output plugged in this recently is the user's choice (plugging in a
@@ -48,6 +60,13 @@ const MIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const NOTIFY_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// Recording apps named in a title; more become "+N".
 const MAX_APPS_IN_TITLE: usize = 2;
+/// "Installed but not running" after this many more mic checks (1 s apart) with the device in
+/// use than idle, and no heartbeat from our effect. Room for the APO link to find the mapping (2 s).
+const NOT_RUNNING_CHECKS: u32 = 10;
+/// Output peak (0..1) that counts as "sound is playing", about -66 dBFS. An open stream alone
+/// is not enough: a loopback recorder (OBS desktop audio) keeps one open through silence, when
+/// Windows does not run the output effects.
+const OUTPUT_PLAYING_PEAK: f32 = 0.0005;
 
 /// What the checks learned; survives restarts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -88,6 +107,8 @@ pub struct Snapshot {
   pub apo: Option<(ApoStatus, String)>,
   /// Output EQ status on the output in use, and whether it is on any output at all.
   pub out_apo: Option<(ApoStatus, bool)>,
+  /// The output the output EQ runs on (Master, else the default).
+  pub output: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +122,8 @@ pub enum Issue {
   OutputProcessing { device_name: String, key: String },
   /// `apps` already joined for display.
   MicSilenced { why: Silenced, apps: String, mic_id: Option<String> },
+  /// Our effect is listed on the device but did not run while it was in use. `key` ignores it.
+  NotRunning { flow: Flow, device_name: String, key: String },
 }
 
 /// What a menu item under an issue does.
@@ -128,6 +151,18 @@ pub struct Confirmer {
   seen: Vec<(Issue, u32)>,
 }
 
+/// Did Windows really run the effect the registry lists on a device? audiodg may skip it, and
+/// only the effect's own heartbeat tells. One strike per check with the device in use and the
+/// heartbeat standing still, one taken back per idle check (the warning goes away when nothing
+/// uses the device, so a fixed cause doesn't keep it shown); any heartbeat clears them all.
+#[derive(Debug, Default)]
+struct RunWatch {
+  /// (device id, name): our effect is listed on it.
+  target: Option<(String, String)>,
+  heartbeat: Option<u32>,
+  strikes: u32,
+}
+
 /// Runs the checks from the service loop and applies fixes.
 pub struct HealthMonitor {
   memory: HealthMemory,
@@ -140,9 +175,54 @@ pub struct HealthMonitor {
   mic_confirmer: Confirmer,
   mic_shown: Vec<Issue>,
   mic_checked_at: Option<Instant>,
+  mic_run: RunWatch,
+  out_run: RunWatch,
   /// Everything last returned by `tick` (tells new problems for the log and notifications).
   announced: Vec<Issue>,
   notified_at: HashMap<String, Instant>,
+  /// `[ApoCheck]` lines last logged (logged again only when they change).
+  described: Vec<String>,
+  /// Newest APO notes from the Application log, newest first, and when they were read.
+  notes: Vec<ApoNote>,
+  notes_read_at: Option<Instant>,
+  /// Last `run_status.json` written; None = not written in this run yet.
+  run_status: Option<RunStatus>,
+}
+
+/// What the service found about our effects really running, for the window
+/// (`run_status.json` next to `health.json`): header, Mic tab and notification say the same.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunStatus {
+  /// Device the mic effect is listed on but did not run on while an app recorded from it.
+  pub mic_not_running: Option<String>,
+  /// Same for the output EQ while sound played.
+  pub output_not_running: Option<String>,
+  /// Newest notes from inside audiodg (`apo_notes`), newest first, "time text".
+  pub apo_notes: Vec<String>,
+}
+
+impl RunStatus {
+  /// Missing or unreadable -> nothing known (the window then claims nothing either way).
+  pub fn load(dir: &Path) -> Self {
+    std::fs::read_to_string(dir.join(RUN_FILE))
+      .ok()
+      .and_then(|text| serde_json::from_str(&text).ok())
+      .unwrap_or_default()
+  }
+
+  pub fn path(dir: &Path) -> PathBuf {
+    dir.join(RUN_FILE)
+  }
+
+  fn save(&self, dir: &Path) {
+    let path = dir.join(RUN_FILE);
+    let result =
+      serde_json::to_string_pretty(self).map_err(std::io::Error::other).and_then(|json| write_atomic(&path, &json));
+    if let Err(e) = result {
+      warn!("[Health] could not save {}: {e}", path.display());
+    }
+  }
 }
 
 impl Issue {
@@ -174,6 +254,12 @@ impl Issue {
       Issue::MicSilenced { why: Silenced::NoMicrophone, apps, .. } => {
         trf("{} is recording, but no microphone is turned on", &[apps])
       }
+      Issue::NotRunning { flow: Flow::Capture, device_name, .. } => {
+        trf("Microphone processing does not work on \"{}\"", &[device_name])
+      }
+      Issue::NotRunning { flow: Flow::Render, device_name, .. } => {
+        trf("Output EQ does not work on \"{}\"", &[device_name])
+      }
     }
   }
 
@@ -193,6 +279,13 @@ impl Issue {
         "A new sound device? Your headphone correction and EQ are not applied on it. Open GamersEqualizer to set it up.",
       ),
       Issue::MicSilenced { .. } => tr("Nobody hears you. Fix it from the GamersEqualizer icon in the notification area."),
+      // Only what was seen: it processed nothing. Why is in the log ([ApoNote], [ApoLink]).
+      Issue::NotRunning { flow: Flow::Capture, .. } => tr(
+        "It is installed, but processed nothing while apps recorded: they get the raw microphone. The reason is in the app's log.",
+      ),
+      Issue::NotRunning { flow: Flow::Render, .. } => {
+        tr("It is installed, but processed nothing while sound played. The reason is in the app's log.")
+      }
     }
   }
 
@@ -202,7 +295,9 @@ impl Issue {
       Issue::OutputChanged { current_id, .. } => format!("output:{current_id}"),
       Issue::SpatialOff { device_id, .. } => format!("spatial:{device_id}"),
       Issue::SpatialChanged { device_id, current, .. } => format!("spatial_format:{device_id}:{}", current.id),
-      Issue::MicProcessing { key, .. } | Issue::OutputProcessing { key, .. } => key.clone(),
+      Issue::MicProcessing { key, .. } | Issue::OutputProcessing { key, .. } | Issue::NotRunning { key, .. } => {
+        key.clone()
+      }
       Issue::NotDefaultMic { mic_id, .. } => not_default_mic_key(mic_id),
       Issue::MicSilenced { .. } => "mic_silenced".to_string(),
     }
@@ -236,6 +331,11 @@ impl Issue {
       ],
       Issue::OutputProcessing { key, .. } => vec![
         (tr("Set up in GamersEqualizer...").to_string(), Fix::OpenWindow),
+        (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
+      ],
+      // The audio enhancements switch is in the device's sound settings.
+      Issue::NotRunning { key, .. } => vec![
+        (tr("Open sound settings...").to_string(), Fix::OpenSoundSettings),
         (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
       ],
       // Transient: no "Ignore"; it goes away when the recording stops.
@@ -413,6 +513,39 @@ impl Confirmer {
   }
 }
 
+impl RunWatch {
+  /// Watch `target` from now on; another device (or none) starts over.
+  fn watch(&mut self, target: Option<(String, String)>) {
+    if self.target.as_ref().map(|t| &t.0) != target.as_ref().map(|t| &t.0) {
+      *self = Self { target, ..Self::default() };
+    }
+  }
+
+  /// One check: `in_use` = another app has a running stream on the device, `heartbeat` = the
+  /// effect's counter.
+  fn update(&mut self, flow: Flow, in_use: bool, heartbeat: u32) -> Option<Issue> {
+    let (id, name) = self.target.as_ref()?;
+    match self.heartbeat.replace(heartbeat) {
+      Some(previous) if previous != heartbeat => self.strikes = 0,
+      Some(_) if in_use => self.strikes = self.strikes.saturating_add(1),
+      Some(_) => self.strikes = self.strikes.saturating_sub(1),
+      // First look: no evidence either way.
+      None => {}
+    }
+    (self.strikes >= NOT_RUNNING_CHECKS).then(|| Issue::NotRunning {
+      flow,
+      device_name: name.clone(),
+      key: format!("not_running:{flow:?}:{id}"),
+    })
+  }
+}
+
+/// (id, name) of the device when the registry lists our effect on it as current.
+fn run_target(status: Option<&ApoStatus>, id: Option<&str>, devices: &[AudioEndpointInfo]) -> Option<(String, String)> {
+  let id = id.filter(|_| status == Some(&ApoStatus::Active))?;
+  Some((id.to_string(), name_of(devices, id)))
+}
+
 impl HealthMonitor {
   pub fn new(dir: &Path) -> Self {
     let path = dir.join(FILE);
@@ -426,19 +559,30 @@ impl HealthMonitor {
       mic_confirmer: Confirmer::default(),
       mic_shown: Vec::new(),
       mic_checked_at: None,
+      mic_run: RunWatch::default(),
+      out_run: RunWatch::default(),
       announced: Vec::new(),
       notified_at: HashMap::new(),
+      described: Vec::new(),
+      notes: Vec::new(),
+      notes_read_at: None,
+      run_status: None,
     }
   }
 
-  /// Mic recording check every `MIC_CHECK_INTERVAL`, the rest every `CHECK_INTERVAL`; returns
-  /// all issues when the shown list changed (and notifies the new ones).
-  pub fn tick(&mut self, win_audio: &WinAudioSystem) -> Option<Vec<Issue>> {
+  /// Mic recording and "effect really runs" checks every `MIC_CHECK_INTERVAL`, the rest every
+  /// `CHECK_INTERVAL`; returns all issues when the shown list changed (and notifies the new
+  /// ones). `shm`: the service's own mapping, where the APO link mirrors the effects' heartbeats.
+  pub fn tick(&mut self, win_audio: &WinAudioSystem, shm: Option<&ShmHeader>) -> Option<Vec<Issue>> {
     let mut changed = false;
     if self.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
-      let found = mic_silenced_issue(win_audio.endpoint_lock.get_default_capture_id());
-      let shown = self.mic_confirmer.update(found.into_iter().collect());
+      let mut found: Vec<Issue> =
+        mic_silenced_issue(win_audio.endpoint_lock.get_default_capture_id()).into_iter().collect();
+      if let Some(h) = shm {
+        found.extend(self.not_running(h));
+      }
+      let shown = self.mic_confirmer.update(found);
       if shown != self.mic_shown {
         self.mic_shown = shown;
         changed = true;
@@ -448,6 +592,7 @@ impl HealthMonitor {
       self.checked_at = Some(Instant::now());
       changed |= self.full_check(win_audio);
     }
+    self.publish_run_status();
     if !changed {
       return None;
     }
@@ -482,7 +627,12 @@ impl HealthMonitor {
       self.file_mtime = on_disk;
     }
 
-    let (issues, changed) = evaluate(&mut self.memory, &snapshot(win_audio));
+    let snap = snapshot(win_audio);
+    let mic = snap.selected_mic.as_deref().or(snap.default_mic.as_deref());
+    self.mic_run.watch(run_target(snap.apo.as_ref().map(|(s, _)| s), mic, &snap.mics));
+    self.out_run.watch(run_target(snap.out_apo.as_ref().map(|(s, _)| s), snap.output.as_deref(), &snap.outputs));
+    self.log_apo_state(mic, snap.output.as_deref());
+    let (issues, changed) = evaluate(&mut self.memory, &snap);
     if changed {
       self.save();
     }
@@ -492,6 +642,81 @@ impl HealthMonitor {
     }
     self.shown = shown;
     true
+  }
+
+  /// Logs what decides whether Windows runs our effects (`[ApoCheck]`: system, the devices in
+  /// use) and new notes from inside audiodg (`[ApoNote]`), each only when it changes, so a
+  /// tester's log tells it without a diagnostic script.
+  fn log_apo_state(&mut self, mic: Option<&str>, output: Option<&str>) {
+    let mut lines = vec![apo_install::describe_system()];
+    for (flow, id) in [(Flow::Capture, mic), (Flow::Render, output)] {
+      if let Some(guid) = id.and_then(apo_install::endpoint_guid_of) {
+        lines.push(apo_install::describe_endpoint(flow, &guid));
+      }
+    }
+    for line in lines.iter().filter(|l| !self.described.contains(*l)) {
+      info!("[ApoCheck] {line}");
+    }
+    self.described = lines;
+
+    // A query scans the whole Application log: not every check.
+    if self.notes_read_at.is_some_and(|t| t.elapsed() < NOTES_INTERVAL) {
+      return;
+    }
+    self.notes_read_at = Some(Instant::now());
+    // Unreadable this time: keep the last ones (else they would be logged again next time).
+    let Some(notes) = apo_notes::newest() else {
+      return;
+    };
+    // Oldest first, so the log reads in order.
+    for note in notes.iter().rev().filter(|n| !self.notes.contains(*n)) {
+      info!("[ApoNote] {} {}", note.time, note.text);
+    }
+    self.notes = notes;
+  }
+
+  /// Writes `run_status.json` when the verdict or the notes changed.
+  fn publish_run_status(&mut self) {
+    let not_running = |wanted: Flow| {
+      self.mic_shown.iter().find_map(|issue| match issue {
+        Issue::NotRunning { flow, device_name, .. } if *flow == wanted => Some(device_name.clone()),
+        _ => None,
+      })
+    };
+    let status = RunStatus {
+      mic_not_running: not_running(Flow::Capture),
+      output_not_running: not_running(Flow::Render),
+      apo_notes: self.notes.iter().take(NOTES_FOR_WINDOW).map(|n| format!("{} {}", n.time, n.text)).collect(),
+    };
+    if self.run_status.as_ref() != Some(&status) {
+      status.save(self.dir());
+      self.run_status = Some(status);
+    }
+  }
+
+  /// Effects the registry lists on the device in use that Windows did not run while it was in
+  /// use. The heartbeats are the APO link's mirror; it only mirrors at the console (another
+  /// Windows user drives the APO then), so elsewhere there is no verdict.
+  fn not_running(&mut self, h: &ShmHeader) -> Vec<Issue> {
+    if !console_owner::at_console() {
+      return Vec::new();
+    }
+    // A stream on that very device, not "some app records somewhere" (a webcam mic in OBS).
+    let in_use = |watch: &RunWatch| {
+      watch.target.as_ref().and_then(|(id, _)| chatmix::endpoint_used_by_others(id)).unwrap_or(false)
+    };
+    // "Everything off": the mic chain publishes no telemetry on purpose.
+    let mic_in_use = !h.master_bypass.load(Ordering::Relaxed) && in_use(&self.mic_run);
+    let playing = self
+      .out_run
+      .target
+      .as_ref()
+      .and_then(|(id, _)| chatmix::get_endpoint_peak(id))
+      .is_some_and(|peak| peak > OUTPUT_PLAYING_PEAK);
+    let out_in_use = playing && in_use(&self.out_run);
+    let mic = self.mic_run.update(Flow::Capture, mic_in_use, h.aec_telemetry_seq.load(Ordering::Acquire));
+    let out = self.out_run.update(Flow::Render, out_in_use, h.out_apo_blocks.load(Ordering::Relaxed));
+    mic.into_iter().chain(out).filter(|issue| !self.memory.ignored.contains(&issue.notify_key())).collect()
   }
 
   /// Runs a menu fix, then checks again on the next tick.
@@ -568,6 +793,7 @@ fn snapshot(win_audio: &WinAudioSystem) -> Snapshot {
     default_mic,
     apo: Some((check.status, check.bundled_version.unwrap_or_default())),
     out_apo: Some((out_status, out_anywhere)),
+    output,
   }
 }
 
@@ -786,6 +1012,66 @@ mod tests {
     let _ = std::fs::remove_dir_all(&dir);
   }
 
+  #[test]
+  fn effect_listed_but_silent_while_in_use_is_flagged() {
+    let mut watch = RunWatch::default();
+    watch.watch(Some(("mic".into(), "MIC".into())));
+    assert_eq!(watch.update(Flow::Capture, true, 5), None, "the first look is no evidence");
+    for _ in 1..NOT_RUNNING_CHECKS {
+      assert_eq!(watch.update(Flow::Capture, true, 5), None);
+    }
+    let issue = watch.update(Flow::Capture, true, 5).unwrap();
+    assert_eq!(issue.notify_key(), "not_running:Capture:mic");
+    assert_eq!(watch.update(Flow::Capture, false, 5), None, "an idle check takes a strike back");
+    assert!(watch.update(Flow::Capture, true, 5).is_some(), "in use again: shown again");
+    assert_eq!(watch.update(Flow::Capture, true, 6), None, "a heartbeat clears it");
+    for _ in 1..NOT_RUNNING_CHECKS {
+      assert_eq!(watch.update(Flow::Capture, true, 6), None, "and the count starts over");
+    }
+  }
+
+  #[test]
+  fn short_idle_gaps_do_not_hide_a_silent_effect() {
+    let mut watch = RunWatch::default();
+    watch.watch(Some(("out".into(), "OUT".into())));
+    watch.update(Flow::Render, true, 0);
+    // In use 2 checks, idle 1: one net strike per 3 checks.
+    let mut flagged = false;
+    for check in 0..(3 * NOT_RUNNING_CHECKS) {
+      flagged |= watch.update(Flow::Render, check % 3 != 2, 0).is_some();
+    }
+    assert!(flagged);
+  }
+
+  #[test]
+  fn running_effect_or_unlisted_device_is_not_flagged() {
+    let mut watch = RunWatch::default();
+    watch.watch(Some(("out".into(), "OUT".into())));
+    for beat in 0..30 {
+      assert_eq!(watch.update(Flow::Render, true, beat), None);
+    }
+    // Registry no longer lists it (outdated, removed): nothing to watch.
+    watch.watch(None);
+    for _ in 0..30 {
+      assert_eq!(watch.update(Flow::Render, true, 0), None);
+    }
+    assert_eq!(run_target(Some(&ApoStatus::Outdated), Some("out"), &[dev("out")]), None);
+    assert_eq!(run_target(Some(&ApoStatus::Active), Some("out"), &[dev("out")]), Some(("out".into(), "OUT".into())));
+  }
+
+  #[test]
+  fn another_device_starts_the_count_over() {
+    let mut watch = RunWatch::default();
+    watch.watch(Some(("usb".into(), "USB".into())));
+    for _ in 0..NOT_RUNNING_CHECKS {
+      watch.update(Flow::Capture, true, 1);
+    }
+    watch.watch(Some(("usb".into(), "USB".into())));
+    assert!(watch.update(Flow::Capture, true, 1).is_some(), "same device: strikes kept");
+    watch.watch(Some(("jack".into(), "JACK".into())));
+    assert_eq!(watch.update(Flow::Capture, true, 1), None);
+  }
+
   fn snap(default_output: &str, outputs: &[&str]) -> Snapshot {
     Snapshot {
       at: Instant::now(),
@@ -798,6 +1084,7 @@ mod tests {
       default_mic: None,
       apo: None,
       out_apo: None,
+      output: None,
     }
   }
 

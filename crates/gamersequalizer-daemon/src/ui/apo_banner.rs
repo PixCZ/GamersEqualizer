@@ -8,11 +8,12 @@
 //! degraded; the bar stays until the problem is gone.
 
 use egui::{RichText, Ui};
-use std::time::{Duration, Instant};
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant, SystemTime};
 
 use super::state::AppState;
 use super::theme::{self, Severity};
-use crate::health::{Fix, Issue};
+use crate::health::{Fix, Issue, RunStatus};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus};
 use crate::win_audio::WinAudioSystem;
@@ -33,6 +34,10 @@ pub struct ApoBanner {
   /// An app records while the mic is muted / at 0 % / off (`Issue::MicSilenced`).
   mic_silenced: Option<Issue>,
   mic_checked_at: Option<Instant>,
+  /// The service's verdict on our effects really running (`run_status.json`) and the file's
+  /// modification time when read.
+  run: RunStatus,
+  run_mtime: Option<SystemTime>,
 }
 
 enum Problem {
@@ -47,6 +52,12 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
     let default_mic = win_audio.endpoint_lock.get_default_capture_id();
     state.apo_banner.mic_silenced = crate::health::mic_silenced_issue(default_mic);
     state.apo_banner.mic_checked_at = Some(Instant::now());
+    // The service rewrites it only when its verdict changes.
+    let mtime = std::fs::metadata(RunStatus::path(state.storage.base_dir())).and_then(|m| m.modified()).ok();
+    if mtime != state.apo_banner.run_mtime {
+      state.apo_banner.run = RunStatus::load(state.storage.base_dir());
+      state.apo_banner.run_mtime = mtime;
+    }
   }
   let banner = &state.apo_banner;
   if banner.checked_at.is_some_and(|t| t.elapsed() < RECHECK_INTERVAL) {
@@ -156,6 +167,20 @@ pub fn set_default_mic(state: &mut AppState, win_audio: &WinAudioSystem, mic_id:
   banner.checked_at = None;
 }
 
+/// The service's verdict on our effects really running; None while the service is not running
+/// (the file then describes an old run).
+pub fn run_status(state: &AppState) -> Option<&RunStatus> {
+  let service = state.shm_header().is_some_and(|h| h.daemon_active.load(Ordering::Relaxed));
+  service.then_some(&state.apo_banner.run)
+}
+
+/// Newest note from inside audiodg about `prefix` ("Mic chain", "Output EQ"; any case), shown
+/// under a "does not work" line: the reason in the APO's own words (English, diagnostic).
+pub fn newest_note<'a>(run: &'a RunStatus, prefix: &str) -> Option<&'a str> {
+  let prefix = prefix.to_lowercase();
+  run.apo_notes.iter().find(|note| note.to_lowercase().contains(&prefix)).map(String::as_str)
+}
+
 /// True when the selected mic is the Windows default (or nothing is known yet).
 pub fn selected_mic_is_default(state: &AppState) -> bool {
   match (state.selected_mic_endpoint_id.as_deref(), state.apo_banner.default_mic_id.as_deref()) {
@@ -165,15 +190,35 @@ pub fn selected_mic_is_default(state: &AppState) -> bool {
 }
 
 /// One-line status for the Mic tab, also when everything is fine (the bar then hides).
-pub fn render_apo_status_line(ui: &mut Ui, state: &AppState) {
+/// "Installed" comes from the registry; "running" only from the effect's own telemetry.
+/// shortcut: the telemetry is shared with the in-process bridge (Sonar / VB-Cable mic), so with
+/// a virtual mic "running" may be the bridge; a per-path counter in the mapping would tell them apart.
+pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
+  let live = state.mic_dsp_live();
+  let run = run_status(state);
+  let not_running = run.is_some_and(|r| r.mic_not_running.is_some());
+  let note = run.and_then(|r| newest_note(r, "Mic chain")).map(str::to_string);
   let Some(check) = state.apo_banner.check.as_ref() else {
     return;
   };
   let version = check.installed_version.as_deref().unwrap_or("?");
   let (text, severity) = match check.status {
-    ApoStatus::Active => {
-      (trf("Windows mic effect installed and active on this microphone (build {})", &[&version]), Severity::Success)
+    // The service saw apps record from this mic while our effect processed nothing. "Does not
+    // work", not "Windows does not run it": the APO may run and only pass audio through.
+    ApoStatus::Active if not_running => (
+      trf("The mic effect does NOT work on this microphone (build {}): apps get the raw microphone", &[&version]),
+      Severity::Error,
+    ),
+    ApoStatus::Active if live => {
+      (trf("Windows mic effect installed and running on this microphone (build {})", &[&version]), Severity::Success)
     }
+    ApoStatus::Active => (
+      trf(
+        "Windows mic effect installed on this microphone (build {}); it runs while an app uses the microphone",
+        &[&version],
+      ),
+      Severity::Success,
+    ),
     ApoStatus::NoMicrophone => (tr("No microphone found").to_string(), Severity::Warning),
     ApoStatus::NotInstalled => {
       (tr("Windows mic effect not installed (see the message at the top)").to_string(), Severity::Warning)
@@ -186,6 +231,9 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &AppState) {
     }
   };
   theme::status_line(ui, severity, &text);
+  if let Some(note) = note.filter(|_| not_running) {
+    theme::status_line(ui, Severity::Info, &trf("Last report from Windows audio: {}", &[&note]));
+  }
 }
 
 fn problems(state: &AppState) -> Vec<Problem> {

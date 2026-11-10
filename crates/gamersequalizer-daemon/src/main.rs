@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+pub mod apo_notes;
 pub mod app_icon;
 pub mod app_log;
 pub mod autostart;
@@ -56,7 +57,11 @@ fn main() {
 
 /// Headless background audio service (runs on Windows boot or detached)
 fn run_background_daemon() {
-  info!("[GamersEqualizer] Initializing headless background service (< 4 MB RAM)...");
+  info!(
+    "[GamersEqualizer] Initializing headless background service, version {} ({})...",
+    env!("CARGO_PKG_VERSION"),
+    env!("GAMERSEQUALIZER_GIT_HASH")
+  );
 
   // Single-instance daemon guard via named Win32 mutex
   let mutex_name = w!(r"Local\GamersEqualizer_Daemon_Mutex");
@@ -164,7 +169,10 @@ fn run_background_daemon() {
       Some(tray::TrayAction::Fix(fix)) => health.apply(&fix, &win_audio),
       None => {}
     }
-    if let Some(issues) = health.tick(&win_audio) {
+    // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop);
+    // the header is only read through atomics.
+    let header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
+    if let Some(issues) = health.tick(&win_audio, header) {
       tray_host.set_issues(issues);
     }
 

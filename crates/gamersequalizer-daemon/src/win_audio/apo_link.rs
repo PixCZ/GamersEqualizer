@@ -39,6 +39,8 @@ const LEVEL_RESET_QUIET: Duration = Duration::from_secs(2);
 pub struct ApoLink {
   shm: Option<SharedMemoryClient>,
   last_open_try: Option<Instant>,
+  /// Why the last open of the APO mapping failed (logged once per distinct reason).
+  open_error: Option<String>,
   last_sync: Instant,
   last_apo_seq: u32,
   render_id: Option<String>,
@@ -80,6 +82,7 @@ impl ApoLink {
     Self {
       shm: None,
       last_open_try: None,
+      open_error: None,
       last_sync: Instant::now(),
       last_apo_seq: 0,
       render_id: None,
@@ -158,11 +161,21 @@ impl ApoLink {
   fn sync(&mut self, local: &SharedMemoryClient, tap_active: bool) {
     if self.shm.is_none() && self.last_open_try.is_none_or(|t| t.elapsed() >= OPEN_RETRY) {
       self.last_open_try = Some(Instant::now());
-      // Fails until the APO has run once since boot / audio restart: expected, not logged.
-      if let Ok(shm) = SharedMemoryClient::open_existing(APO_SHM_NAME) {
-        info!("[ApoLink] connected to the microphone APO");
-        self.last_apo_seq = shm.layout().header.aec_telemetry_seq.load(Ordering::Acquire);
-        self.shm = Some(shm);
+      match SharedMemoryClient::open_existing(APO_SHM_NAME) {
+        Ok(shm) => {
+          info!("[ApoLink] connected to the microphone APO");
+          self.open_error = None;
+          self.last_apo_seq = shm.layout().header.aec_telemetry_seq.load(Ordering::Acquire);
+          self.shm = Some(shm);
+        }
+        // Expected until an APO has run since boot / audio restart, so logged once per reason
+        // (0x80070002: no APO created it, 0x80070005: access denied): a log then shows why it
+        // never connects.
+        Err(e) if self.open_error.as_deref() != Some(e.as_str()) => {
+          info!("[ApoLink] APO not reachable yet: {e}");
+          self.open_error = Some(e);
+        }
+        Err(_) => {}
       }
     }
     let Some(apo) = self.shm.as_ref() else {

@@ -268,16 +268,22 @@ fn master_switch(ui: &mut Ui, state: &mut AppState) {
      noise suppression, EQ, boost). OFF = what you would hear without this app.",
   );
   let mut v = on;
-  let (title, detail) = if on {
-    (tr("Sound adjustments on"), tr("Headphone & game EQ, mic filters"))
-  } else {
-    (tr("Sound adjustments off"), tr("You hear the original sound, as without the app"))
-  };
+  // The switch is what the user wants; whether Windows really runs it is the service's verdict.
+  let broken: Vec<String> = super::apo_banner::run_status(state)
+    .map(|r| [r.mic_not_running.as_ref(), r.output_not_running.as_ref()].into_iter().flatten().cloned().collect())
+    .unwrap_or_default();
   let p = theme::palette(ui);
+  let (title, detail, color) = if on && !broken.is_empty() {
+    (tr("Sound adjustments on, but they do not work"), trf("Not working on: {}", &[&broken.join(", ")]), p.err)
+  } else if on {
+    (tr("Sound adjustments on"), tr("Headphone & game EQ, mic filters").to_string(), p.text)
+  } else {
+    (tr("Sound adjustments off"), tr("You hear the original sound, as without the app").to_string(), p.warn)
+  };
   let clicked = ui.add(theme::Toggle(&mut v)).on_hover_text(hint).clicked();
   ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.label(theme::strong(title, 14.0).color(if on { p.text } else { p.warn })).on_hover_text(hint);
+    ui.label(theme::strong(title, 14.0).color(color)).on_hover_text(hint);
     ui.label(theme::caption(detail)).on_hover_text(hint);
   });
   if clicked {

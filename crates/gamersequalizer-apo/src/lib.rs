@@ -42,8 +42,10 @@
   clippy::indexing_slicing
 )]
 
+mod event_log;
 mod rate_bridge;
 
+use event_log::Level;
 use std::ffi::c_void;
 use std::mem::{offset_of, size_of};
 use std::ptr::{addr_of_mut, null_mut};
@@ -215,6 +217,9 @@ struct MicProcessor {
   /// audio from before it.
   was_live: bool,
   timing: CallTiming,
+  /// Blocks the engine handed over / the chain processed, for the note when the stream stops.
+  blocks: u64,
+  processed: u64,
 }
 
 /// How regularly the audio engine calls the mic APO (debug log): an app gets its data late
@@ -589,27 +594,37 @@ unsafe extern "system" fn cfg_lock_for_process(
   if input.is_null() {
     return E_POINTER;
   }
-  let Some(format) = (*input).pFormat.as_ref().and_then(uncompressed_format).filter(is_supported_format) else {
+  let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
+  let Some(format) = offered.filter(is_supported_format) else {
+    let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
+    let text =
+      format!("{}: stream format not supported ({what}); Windows runs the stream without it", st.kind.friendly_name());
+    event_log::note(Level::Warning, &text, &text);
     return APOERR_FORMAT_NOT_SUPPORTED;
   };
 
   st.channels.store(format.dwSamplesPerFrame, Ordering::Release);
   let rate = format.fFramesPerSecond;
   st.rate.store(rate as u32, Ordering::Release);
+  let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
   let processor = match st.kind {
     ApoKind::Mic => MicProcessor::create(rate as u32).map(|p| Processor::Mic(Box::new(p))),
     ApoKind::Output => {
-      let shm = SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL)).ok();
-      OutputProcessor::create(shm, rate, format.dwSamplesPerFrame).map(Processor::Output)
+      OutputProcessor::create(shared_memory(st.kind), rate, format.dwSamplesPerFrame).map(Processor::Output)
     }
-    ApoKind::Stream => {
-      let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
-      SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL))
-        .ok()
-        .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
-        .map(Processor::Stream)
-    }
+    ApoKind::Stream => shared_memory(st.kind)
+      .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
+      .map(Processor::Stream),
   };
+  let (level, outcome) =
+    if processor.is_some() { (Level::Info, "started") } else { (Level::Warning, "no chain, passes audio through") };
+  let text = format!(
+    "{}: stream {}, mode {:?}: {outcome}",
+    st.kind.friendly_name(),
+    describe_format(&format),
+    GUID::from_u128(mode)
+  );
+  event_log::note(level, &text, &text);
   if let Ok(mut slot) = st.processor.lock() {
     // Replacing drops a previous processor: keep a destructor panic inside this DLL.
     let old = std::mem::replace(&mut *slot, processor);
@@ -625,11 +640,36 @@ unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -> HRESULT {
     return APOERR_ALREADY_UNLOCKED;
   }
   if let Ok(mut slot) = st.processor.lock() {
+    if let Some(Processor::Mic(mic)) = slot.as_ref() {
+      mic.note_stop();
+    }
     // Dropping may run arbitrary DSP destructors: keep a panic inside this DLL.
     let old = slot.take();
     let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
   }
   S_OK
+}
+
+/// The Global mapping, created or opened. Without it the effect passes audio through and the
+/// app never connects, so a failure is noted in the Application log.
+fn shared_memory(kind: ApoKind) -> Option<SharedMemoryClient> {
+  match SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL)) {
+    Ok(shm) => Some(shm),
+    Err(e) => {
+      let text = format!("{}: shared memory {APO_SHM_NAME} unavailable ({e})", kind.friendly_name());
+      event_log::note(Level::Warning, &text, &text);
+      None
+    }
+  }
+}
+
+/// "48000 Hz, 2 ch, float 4 bytes" for the Application log notes.
+fn describe_format(format: &UNCOMPRESSEDAUDIOFORMAT) -> String {
+  let float = if format.guidFormatType == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT { "float" } else { "not float" };
+  format!(
+    "{} Hz, {} ch, {float} {} bytes",
+    format.fFramesPerSecond, format.dwSamplesPerFrame, format.dwBytesPerSampleContainer
+  )
 }
 
 impl ApoKind {
@@ -909,13 +949,24 @@ impl MicProcessor {
   /// Opens/creates the Global mapping and builds the chain for a `rate` Hz stream (resampled
   /// to 48 kHz unless it already is). None (pass-through) on an unsupported rate or failure.
   fn create(rate: u32) -> Option<Self> {
-    let bridge = match RateBridge::for_rate(rate) {
-      Some(built) => Some(built.ok()?),
-      None if rate == REF_SAMPLE_RATE => None,
-      None => return None,
+    let refuse = |why: String| {
+      let text = format!("Mic chain: {why}; passes audio through");
+      event_log::note(Level::Warning, &text, &text);
     };
-    catch_unwind(AssertUnwindSafe(move || {
-      let shm = SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL)).ok();
+    let bridge = match RateBridge::for_rate(rate) {
+      Some(Ok(bridge)) => Some(bridge),
+      Some(Err(e)) => {
+        refuse(format!("resampler for {rate} Hz failed ({e})"));
+        return None;
+      }
+      None if rate == REF_SAMPLE_RATE => None,
+      None => {
+        refuse(format!("{rate} Hz is not supported"));
+        return None;
+      }
+    };
+    let built = catch_unwind(AssertUnwindSafe(move || {
+      let shm = shared_memory(ApoKind::Mic);
       let mut plugin = GamersEqualizerPlugin::with_shm(REF_SAMPLE_RATE as f32, shm);
       plugin.preload_selected_model();
       #[cfg(feature = "debug-capture")]
@@ -933,13 +984,38 @@ impl MicProcessor {
         follow_owner: true,
         was_live: false,
         timing: CallTiming::default(),
+        blocks: 0,
+        processed: 0,
       }
-    }))
-    .ok()
+    }));
+    if built.is_err() {
+      refuse("building the chain panicked".to_string());
+    }
+    built.ok()
+  }
+
+  /// Application-log note when the stream stops: did the chain really run, and if not, why.
+  /// Keyed by the reason, so each reason is written once per audiodg run.
+  fn note_stop(&self) {
+    let why = if self.failed {
+      "the chain failed and passed audio through from then on"
+    } else if self.blocks == 0 {
+      "no audio blocks arrived"
+    } else if self.processed > 0 {
+      "processed"
+    } else if self.plugin.shm_header().is_none() {
+      "no shared memory, passed audio through"
+    } else {
+      "GamersEqualizer did not drive it (not running for the user at the console), passed audio through"
+    };
+    let level = if self.processed > 0 { Level::Info } else { Level::Warning };
+    let text = format!("Mic chain: stream stopped after {} blocks, {} processed: {why}", self.blocks, self.processed);
+    event_log::note(level, &format!("mic stop: {why}"), &text);
   }
 
   /// In place on interleaved `buf`: first channel through the chain, result to all channels.
   fn process(&mut self, buf: &mut [f32], channels: usize, qpc_hns: Option<u64>) {
+    self.blocks += 1;
     if self.failed || channels == 0 {
       return;
     }
@@ -953,7 +1029,7 @@ impl MicProcessor {
     let now = Instant::now();
     self.timing.note(now, frames, self.clock.rate, self.plugin.shm_header());
     // Nobody's settings to apply (app not running for the user at the console): the raw mic.
-    let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, .. } = self;
+    let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, processed, .. } = self;
     if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, now)) {
       if std::mem::replace(was_live, false) {
         plugin.pause();
@@ -993,6 +1069,7 @@ impl MicProcessor {
       *failed = true;
       return;
     }
+    *processed += 1;
     for (frame, &sample) in buf.chunks_exact_mut(channels).zip(output.iter()) {
       frame.fill(sample);
     }

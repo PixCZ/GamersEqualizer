@@ -1,6 +1,7 @@
 [package]
 name = "gamersequalizer-apo"
 version = "0.1.0"
+authors = ["Jiří Němec"]
 edition = "2021"
 description = "Prototype capture APO (gain only) loaded by audiodg on a physical microphone"
 
@@ -18,6 +19,10 @@ gamersequalizer-common = { path = "../gamersequalizer-common" }
 gamersequalizer-mic-vst = { path = "../gamersequalizer-mic-vst" }
 # Already in the build through deep_filter; resamples the mic chain at non-48 kHz rates.
 rubato = "5"
+
+[build-dependencies]
+# Version resource in the DLL; the daemon already builds with it.
+embed-resource = "3.0.12"
 
 [lints]
 workspace = true
