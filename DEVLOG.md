@@ -1809,3 +1809,74 @@ To evaluate whether this was an artifact of the cold replay start, tests were ru
     (`silero < 0.15`), calculating median and 90th percentile dBFS.
 - All 14 unignored AEC3 tests and full crate unit test suite pass with 0 failures.
 
+
+## Milestone 45: Echo strength measured per output; AEC3's fallback follows a strong echo; all of it in the debug log (2026-11-10)
+
+Written on the Mac like milestone 43: `aec3.rs`, `shm.rs` and the pure part of `chain_log.rs`
+compiled and tested there, `plugin.rs`, `apo_link.rs` and `aec_delay_cache.rs` edited without a
+compiler. Not run on a capture, not heard live. Shared memory layout v18: the APO has to be
+reinstalled.
+
+**Why.** `ep_strength.default_gain` = 0.01 says "the echo is 40 dB under the reference". That
+is what AEC3 takes for the echo while it has no usable linear filter (a start, a reset, an echo
+path change), and it was chosen on one desk: echoes 37-50 dB under the reference. Synthetic,
+echo 20 dB under the reference (a laptop's speakers next to its mic): the first 0.4 s after a
+start come out whole (-38.0 -> -38.8 dBFS); with a fallback that fits, at -58.9 dBFS. After
+that the linear filter has it either way.
+
+- **`EchoMeter` (`aec3.rs`)**: echo strength = how many dB under the reference its echo reaches
+  the raw mic. 100 ms windows in which the reference is over -30 dBFS: mic power over reference
+  power. The user's voice only ever adds to a window, so the estimate is the low quartile of
+  the last 128 such windows (12.8 s), first after 50 of them (5 s). The reported value moves
+  in steps of 2 dB or more.
+  - The mic's noise adds as well. Where the reference pauses (10 windows under -70 dBFS in the
+    last 25.6 s), the noise is the low quartile of the mic in those pauses and is taken off.
+  - Where it never pauses (game audio), the 5th percentile of all mic windows stands in. That
+    may be a quiet moment of the echo itself, so nothing is taken off; it only tells which
+    windows say nothing (within 3 dB of it).
+  - When over 60 % of the quieter half of the windows say nothing, the value is a bound ("the
+    echo is under this"; 40 % to stop being one). Every doubt ends there, and a bound keeps
+    AEC3 at -40 dB, as before there was a meter.
+- **Fallback follows it**: `max(-40, strength - 3)` dB in 6 dB steps, 0 dB at most, never for
+  a bound. -40 dB stays for every echo weaker than about 32 dB under the reference, which is
+  every capture so far, so their results do not change. A step rebuilds AEC3 through the mic
+  gain's latch (2 s, then a pause, 6 s at most; free in the first 0.5 s).
+- **Remembered per mic and output** (`%APPDATA%\GamersEqualizer\echo_strength_cache.json`, next
+  to the delay cache, same key): the daemon hands it to the APO (`aec_cached_echo_db_x10`), so
+  from the second session on the fallback is right from the first frame; saved when the
+  measured value moved by 2 dB, at most every 10 s. A bound is not saved and drops what was
+  remembered (the echo is gone: a strong one from before would start every stream ducking the
+  voice). A speaker switch forgets the measurement and takes the new output's remembered
+  value. One shared memory field carries both kinds (negative: measured, positive: a bound),
+  so the daemon cannot pair a value with the wrong kind. Shortcut: APO path only.
+- **Debug log** (the Log page's "Save debug to disk"; a tester's log is enough, no capture):
+  - `[Chain] start: ... echo -43.5 dB under the reference (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB) ...`
+  - `[Chain] changed: echo not measured -> -21.5 dB under the reference, AEC fallback echo -40.0 -> -22.0`
+  - `[Chain] changed: echo -43.5 dB under the reference -> within the mic's noise (under -58.0 dB)`
+  - the same three values in the 10 s summary, after the ERLE;
+  - `[ApoLink] remembered echo strength for this mic/output: ...` / `saving echo strength ...`.
+- **`capture_tuning_report`**: two more columns, `strength` (`<`: a bound) and `fallb`.
+- **Tests**: with a louder voice in 40 % of the windows the meter reads -20.0 / -50.0 dB for
+  echoes 20 / 50 dB under a reference that starts after 2 s, -20.1 / -49.6 dB under one that
+  plays from the start, 4.9 dB for an echo 5 dB over the reference (fallback 0 dB), and a
+  bound (-58 / -60 dB) for an echo 80 dB under or none at all; a remembered strong echo is
+  suppressed from the first frame (first 0.4 s: mic -38.8, not remembered -40.2, remembered
+  -82.7 dBFS); the log lines.
+- **Review (fresh context) found, all fixed above:** with a reference that never paused the
+  first version took the mic's noise for a strong echo (noise -55 dBFS, reference -28 dBFS: "-27
+  dB") and the daemon would have remembered it; the fallback could step to +2 dB; a remembered
+  strong echo was never dropped; value and kind were two fields. Fixing the first showed two
+  more: a guessed noise taken off made the first estimate 2-3 dB low (a step and back), and
+  the bound flag of a single window flipped the fallback to -40 dB and back.
+- **Not done: switching the AEC off when there is no echo** (headphones). With the mic gain the
+  headphone captures lose 0.6 / 0.7 dB of voice in AEC3 (milestone 44), so there is little to
+  win, and the detector ("within the mic's noise") has not seen a real machine. The log now
+  shows what it would decide; switch on it once logs from more setups agree with it.
+- **Open:** all of it on Windows. What the meter reads on the captures (the report's `strength`
+  column against the levels in milestones 36 and 42: about -37 dB for `130319`, -50 dB for
+  `210655`, a bound for the headphone captures). A strong echo's first session pays one rebuild
+  5-11 s after the audio starts. The meter needs a reference over -30 dBFS: quiet game audio
+  measures nothing and keeps -40 dB. A talker in over 75 % of the windows for 13 s reads as a
+  stronger echo. The cache key is the Windows default mic, like the delay's, not always the
+  mic in use. Not known: whether the loopback reference is taken before the Windows speaker
+  volume; if so, the strength moves with the volume and a remembered one fits only that volume.

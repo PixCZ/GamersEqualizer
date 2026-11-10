@@ -31,6 +31,8 @@ const DELAY_SAVE_MIN_CHANGE: usize = 48;
 /// Voice leveler: save the learned level when it moved by 0.5 dB, at most every 10 s.
 const LEVEL_SAVE_MIN_CHANGE_X10: i32 = 5;
 const LEVEL_SAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Echo strength: save what the APO measured when it moved by 2 dB, at most every 10 s.
+const ECHO_SAVE_MIN_CHANGE_X10: i32 = 20;
 /// After "Learn again", the APO still reports the old level for a moment: don't save it back.
 const LEVEL_RESET_QUIET: Duration = Duration::from_secs(2);
 
@@ -44,6 +46,10 @@ pub struct ApoLink {
   cache_key: Option<String>,
   last_key_check: Option<Instant>,
   saved_delay: Option<usize>,
+  /// Echo strength remembered for the same key (dB x 10 under the reference).
+  echo_cache_path: PathBuf,
+  saved_echo: Option<i32>,
+  last_echo_save: Option<Instant>,
   /// Bumped on every reference output switch (`aec_reference_seq`); the APO then drops the
   /// old device's delay lock. `reference_switch_pending`: bump once the new key is loaded.
   reference_seq: u32,
@@ -81,6 +87,9 @@ impl ApoLink {
       cache_key: None,
       last_key_check: None,
       saved_delay: None,
+      echo_cache_path: aec_delay_cache::echo_path(),
+      saved_echo: None,
+      last_echo_save: None,
       reference_seq: 0,
       reference_switch_pending: false,
       capture_id: None,
@@ -214,7 +223,8 @@ impl ApoLink {
     }
   }
 
-  /// Hand the remembered delay to the APO; save a delay the APO measured itself.
+  /// Hand the remembered delay and echo strength to the APO; save what the APO measured itself.
+  /// Shortcut: APO path only (the in-process bridge measures the echo strength anew each time).
   fn sync_delay_cache(&mut self) {
     if self.last_key_check.is_none_or(|t| t.elapsed() >= KEY_CHECK_INTERVAL) {
       self.last_key_check = Some(Instant::now());
@@ -235,6 +245,13 @@ impl ApoLink {
         if let Some(d) = self.saved_delay {
           info!("[ApoLink] cached echo delay for this mic/output: {:.1} ms", d as f32 / 48.0);
         }
+        self.saved_echo = key.as_deref().and_then(|k| aec_delay_cache::load_level(&self.echo_cache_path, k));
+        if let Some(e) = self.saved_echo {
+          info!(
+            "[ApoLink] remembered echo strength for this mic/output: {:.1} dB under the reference",
+            e as f32 / 10.0
+          );
+        }
         self.cache_key = key;
       }
     }
@@ -243,6 +260,7 @@ impl ApoLink {
     };
     let h = &apo.layout().header;
     h.aec_cached_delay_samples.store(self.saved_delay.unwrap_or(0) as u32, Ordering::Relaxed);
+    h.aec_cached_echo_db_x10.store(self.saved_echo.unwrap_or(0), Ordering::Relaxed);
     // After the cached delay (the key was reloaded on the switch), so the APO reads both together.
     if std::mem::take(&mut self.reference_switch_pending) {
       self.reference_seq = self.reference_seq.wrapping_add(1);
@@ -256,6 +274,25 @@ impl ApoLink {
       return;
     }
     let locked = AecState::from_u32(h.aec_state.load(Ordering::Relaxed)) == AecState::Locked;
+    // Echo strength the APO measured (negative), remembered like the delay. A bound (positive:
+    // the echo is within the mic's noise now) is not kept, and drops what was remembered: a
+    // strong echo from before would start every stream with a fallback that ducks the voice.
+    let echo = h.aec_echo_db_x10.load(Ordering::Relaxed);
+    let moved = self.saved_echo.is_none_or(|s| (s - echo).abs() >= ECHO_SAVE_MIN_CHANGE_X10);
+    let due = self.last_echo_save.is_none_or(|t| t.elapsed() >= LEVEL_SAVE_INTERVAL);
+    if let (Some(key), true) = (self.cache_key.as_deref(), locked && due) {
+      if echo < 0 && moved {
+        info!("[ApoLink] saving echo strength {:.1} dB under the reference", echo as f32 / 10.0);
+        aec_delay_cache::save_level(&self.echo_cache_path, key, echo);
+        self.saved_echo = Some(echo);
+        self.last_echo_save = Some(Instant::now());
+      } else if echo > 0 && self.saved_echo.is_some() {
+        info!("[ApoLink] the echo is within the mic's noise now: forgetting the remembered strength");
+        aec_delay_cache::forget_level(&self.echo_cache_path, key);
+        self.saved_echo = None;
+        self.last_echo_save = Some(Instant::now());
+      }
+    }
     let delay_us = h.aec_delay_us.load(Ordering::Relaxed);
     if !locked || delay_us == 0 || h.aec_delay_from_cache.load(Ordering::Relaxed) {
       return;

@@ -17,6 +17,11 @@
 //! filter only on mic blocks over -56 dBFS). A quiet mic keeps it off its linear filter, and it
 //! then ducks the voice by the reference's level. So the mic is raised on its way in and lowered
 //! again on its way out (`set_mic_gain_db`), like DeepFilterNet's pre-gain.
+//!
+//! Echo strength: how much quieter than the reference its echo reaches the mic depends on the
+//! speakers, their volume and the mic (headset: no echo, laptop: almost as loud as the
+//! reference). It is measured next to AEC3 (`EchoMeter`), and AEC3's fallback echo estimate
+//! follows a strong echo instead of assuming one 40 dB down.
 
 use sonora::config::{EchoCanceller, EchoCanceller3Config, MaxProcessingRate, Pipeline, TransparentModeType};
 use sonora::{AudioProcessing, Config, StreamConfig};
@@ -49,8 +54,28 @@ const MIC_GAIN_FREE_FRAMES: u32 = 50;
 /// Peak the raised mic may reach inside AEC3: it clamps at 1.0, and takes 32700 / 32768 for
 /// a saturated capture.
 const MIC_PEAK_LIMIT: f32 = 0.9;
-/// `ep_strength.default_gain` at mic gain 0 dB, see `tuning`.
-const FALLBACK_ECHO_GAIN: f32 = 0.01;
+/// AEC3's fallback echo estimate while it cannot use its linear filter (a start, a reset, an
+/// echo path change): the reference this many dB down (`ep_strength.default_gain`, see
+/// `tuning`). The lowest it goes: what the captures were tuned with...
+const FALLBACK_ECHO_DB: f32 = -40.0;
+/// ...and with a stronger echo measured, this far under it: -40 dB was 3 dB under the strongest
+/// echo of those captures and removed it, 13 dB under leaked (milestone 42).
+const FALLBACK_UNDER_ECHO_DB: f32 = 3.0;
+/// Echo strength is measured in windows of this many frames (100 ms)...
+const ECHO_WINDOW_FRAMES: u32 = 10;
+/// ...in which the reference is this loud (mean square; -30 dBFS): under it the mic's noise
+/// would read as an echo. Under `REF_SILENT_POWER` (-70 dBFS) the window has no echo.
+const REF_LOUD_POWER: f32 = 1e-3;
+const REF_SILENT_POWER: f32 = 1e-7;
+/// The last windows kept: 12.8 s of loud reference, 25.6 s of any kind for the mic's noise.
+/// How many it takes for a first estimate (5 s), and how many without a reference for the
+/// noise to be measured in them.
+const ECHO_WINDOWS: usize = 128;
+const MIC_WINDOWS: usize = 256;
+const ECHO_MIN_WINDOWS: usize = 50;
+const NOISE_MIN_WINDOWS: usize = 10;
+/// The reported echo strength moves only by this much (dB), so a log shows steps, not jitter.
+const ECHO_REPORT_STEP_DB: f32 = 2.0;
 
 pub struct EchoCanceller3 {
   apm: AudioProcessing,
@@ -75,15 +100,41 @@ pub struct EchoCanceller3 {
   last_peak: f32,
   /// Gain of the previous frame (a loud frame gets less, see `process_frame`).
   last_frame_gain: f32,
+  echo: EchoMeter,
+  /// Fallback echo estimate AEC3 was built for (dB re the reference) and the step asked for.
+  fallback_db: f32,
+  wanted_fallback_db: f32,
   /// Test-only overrides of `tuning` (`tests::apply_variant`).
   #[cfg(test)]
   variant: String,
 }
 
+/// Echo strength: how many dB under the reference its echo reaches the raw mic. Per 100 ms
+/// window with a loud reference: mic power over reference power. The user's voice only adds
+/// to a window, so the estimate is a low quartile of the last windows, not their mean.
+///
+/// The mic's noise adds too. Where the reference pauses, the noise is measured in the pauses
+/// and taken off. Where it never does (game audio), the quietest mic windows stand in for it:
+/// they may be echo themselves, so nothing is taken off, they only tell which windows say
+/// nothing (within 3 dB of them). Every doubt ends as "a bound", and AEC3 then keeps its
+/// lowest fallback, as before there was a meter.
+struct EchoMeter {
+  /// The window being filled: reference energy, mic energy, frames.
+  window: (f32, f32, u32),
+  /// (reference power, mic power) of the last loud-reference windows.
+  loud: [(f32, f32); ECHO_WINDOWS],
+  loud_count: usize,
+  /// Mic power of the last windows of any kind, and whether the reference was silent in it.
+  mic: [(f32, bool); MIC_WINDOWS],
+  mic_count: usize,
+  /// What is reported (see `ECHO_REPORT_STEP_DB`); a remembered value until one is measured.
+  shown: Option<(f32, bool)>,
+}
+
 impl EchoCanceller3 {
   pub fn new() -> Self {
     Self {
-      apm: build_apm(tuning(1.0)),
+      apm: build_apm(tuning(1.0, 10f32.powf(FALLBACK_ECHO_DB / 20.0))),
       in_ref: vec![0.0; FRAME],
       in_mic: vec![0.0; FRAME],
       in_len: 0,
@@ -100,6 +151,9 @@ impl EchoCanceller3 {
       free_frames: MIC_GAIN_FREE_FRAMES,
       last_peak: 0.0,
       last_frame_gain: 1.0,
+      echo: EchoMeter::new(),
+      fallback_db: FALLBACK_ECHO_DB,
+      wanted_fallback_db: FALLBACK_ECHO_DB,
       #[cfg(test)]
       variant: String::new(),
     }
@@ -114,14 +168,37 @@ impl EchoCanceller3 {
   /// block; AEC3 follows in 6 dB steps, at once in its first 0.5 s and after 2 s otherwise.
   pub fn set_mic_gain_db(&mut self, gain_db: f32) {
     let want = if gain_db.is_finite() { gain_db.clamp(0.0, MAX_MIC_GAIN_DB) } else { 0.0 };
-    if (want - self.wanted_gain_db).abs() >= MIC_GAIN_STEP_DB / 2.0 + MIC_GAIN_HYSTERESIS_DB {
-      self.wanted_gain_db = (want / MIC_GAIN_STEP_DB).round() * MIC_GAIN_STEP_DB;
-    }
+    self.wanted_gain_db = stepped(want, self.wanted_gain_db);
   }
 
   /// Mic gain AEC3 runs with right now (dB).
   pub fn mic_gain_db(&self) -> f32 {
     self.mic_gain_db
+  }
+
+  /// Echo strength: how many dB under the reference its echo reaches the mic, and whether that
+  /// is only an upper bound (the echo is within the mic's noise). None until measured (5 s of
+  /// loud reference) or remembered. Moves in steps of 2 dB or more.
+  pub fn echo_strength_db(&self) -> Option<(f32, bool)> {
+    self.echo.shown
+  }
+
+  /// Echo strength remembered for this mic and output: used until one is measured here.
+  pub fn seed_echo_strength_db(&mut self, db: f32) {
+    if db.is_finite() && self.echo.loud_count < ECHO_MIN_WINDOWS {
+      self.echo.shown = Some((db, false));
+    }
+  }
+
+  /// Other speakers: what was measured is theirs no more.
+  pub fn forget_echo_strength(&mut self) {
+    self.echo = EchoMeter::new();
+    self.wanted_fallback_db = FALLBACK_ECHO_DB;
+  }
+
+  /// Fallback echo estimate AEC3 runs with right now: the reference this many dB down.
+  pub fn fallback_echo_db(&self) -> f32 {
+    self.fallback_db
   }
 
   /// Process a block in place. `ref_block` must be delay-aligned to `mic_block`.
@@ -183,6 +260,14 @@ impl EchoCanceller3 {
   }
 
   fn process_frame(&mut self) {
+    self.echo.push(&self.in_ref, &self.in_mic);
+    if let Some((echo_db, bound)) = self.echo.shown {
+      // An echo within the mic's noise needs no more than the lowest estimate.
+      let want = if bound { FALLBACK_ECHO_DB } else { (echo_db - FALLBACK_UNDER_ECHO_DB).clamp(FALLBACK_ECHO_DB, 0.0) };
+      // `min`: the steps count from -40 dB and would end at +2.
+      let steps = stepped(want - FALLBACK_ECHO_DB, self.wanted_fallback_db - FALLBACK_ECHO_DB);
+      self.wanted_fallback_db = (steps + FALLBACK_ECHO_DB).min(0.0);
+    }
     let peak = self.in_mic.iter().fold(0.0f32, |p, s| p.max(s.abs()));
     self.follow_wanted_gain(peak);
     // A shout must not clip inside AEC3: that frame gets less gain (never under 1, so without
@@ -213,10 +298,11 @@ impl EchoCanceller3 {
     }
   }
 
-  /// Rebuild AEC3 for the wanted mic gain once it is due. `peak`: this frame's mic peak.
+  /// Rebuild AEC3 for the wanted mic gain and fallback echo estimate once it is due. `peak`:
+  /// this frame's mic peak.
   fn follow_wanted_gain(&mut self, peak: f32) {
     let last_peak = std::mem::replace(&mut self.last_peak, peak);
-    if self.wanted_gain_db == self.mic_gain_db {
+    if self.wanted_gain_db == self.mic_gain_db && self.wanted_fallback_db == self.fallback_db {
       (self.wanted_frames, self.wanted_peak) = (0, 0.0);
       return;
     }
@@ -226,23 +312,117 @@ impl EchoCanceller3 {
     let pause =
       peak.max(last_peak) <= self.wanted_peak * MIC_GAIN_PAUSE_RATIO || self.wanted_frames >= 3 * MIC_GAIN_LATCH_FRAMES;
     if self.free_frames > 0 || (self.wanted_frames >= MIC_GAIN_LATCH_FRAMES && pause) {
-      log::info!("[AEC3] mic gain {} -> {} dB", self.mic_gain_db, self.wanted_gain_db);
+      log::info!(
+        "[AEC3] mic gain {} -> {} dB, fallback echo {} -> {} dB",
+        self.mic_gain_db,
+        self.wanted_gain_db,
+        self.fallback_db,
+        self.wanted_fallback_db
+      );
       self.rebuild();
     }
   }
 
-  /// New AEC3 for the wanted mic gain. Allocates on the audio thread like `reset`: at a stream's
-  /// start, and when the learned speech level moves by a step (once per 2 s at most).
+  /// New AEC3 for the wanted mic gain and fallback echo estimate. Allocates on the audio thread
+  /// like `reset`: at a stream's start, and when the learned speech level or the measured echo
+  /// strength moves by a step (once per 2 s at most).
   fn rebuild(&mut self) {
     self.mic_gain_db = self.wanted_gain_db;
     self.mic_gain = 10f32.powf(self.mic_gain_db / 20.0);
+    self.fallback_db = self.wanted_fallback_db;
     #[allow(unused_mut)] // only the tests change it
-    let mut config = tuning(self.mic_gain);
+    let mut config = tuning(self.mic_gain, 10f32.powf(self.fallback_db / 20.0));
     #[cfg(test)]
     tests::apply_variant(&mut config, &self.variant, self.mic_gain);
     self.apm = build_apm(config);
     self.erle_db = 0.0;
     (self.wanted_frames, self.wanted_peak) = (0, 0.0);
+  }
+}
+
+impl EchoMeter {
+  fn new() -> Self {
+    Self {
+      window: (0.0, 0.0, 0),
+      loud: [(0.0, 0.0); ECHO_WINDOWS],
+      loud_count: 0,
+      mic: [(0.0, false); MIC_WINDOWS],
+      mic_count: 0,
+      shown: None,
+    }
+  }
+
+  /// One frame of the reference as AEC3 gets it and of the raw mic.
+  fn push(&mut self, refs: &[f32], mic: &[f32]) {
+    let energy = |x: &[f32]| x.iter().map(|s| s * s).sum::<f32>();
+    self.window = (self.window.0 + energy(refs), self.window.1 + energy(mic), self.window.2 + 1);
+    if self.window.2 < ECHO_WINDOW_FRAMES {
+      return;
+    }
+    let samples = (self.window.2 as usize * FRAME) as f32;
+    let (ref_power, mic_power) = (self.window.0 / samples, self.window.1 / samples);
+    self.window = (0.0, 0.0, 0);
+    if let Some(slot) = self.mic.get_mut(self.mic_count % MIC_WINDOWS) {
+      *slot = (mic_power, ref_power < REF_SILENT_POWER);
+    }
+    self.mic_count += 1;
+    if ref_power >= REF_LOUD_POWER {
+      if let Some(slot) = self.loud.get_mut(self.loud_count % ECHO_WINDOWS) {
+        *slot = (ref_power, mic_power);
+      }
+      self.loud_count += 1;
+      self.estimate();
+    }
+  }
+
+  /// The mic's noise power and whether it was measured without a reference: then a low
+  /// quartile of those windows (the user talks in some). Else the 5th percentile of all
+  /// windows, which may be a quiet moment of the echo. None until there are a few.
+  fn noise_power(&self) -> Option<(f32, bool)> {
+    let filled = self.mic_count.min(MIC_WINDOWS);
+    let silent = self.mic.iter().take(filled).filter(|w| w.1).count();
+    let measured = silent >= NOISE_MIN_WINDOWS;
+    if !measured && filled < ECHO_MIN_WINDOWS {
+      return None;
+    }
+    // The windows that don't count go to the end.
+    let mut sorted = self.mic.map(|(power, silent)| if measured && !silent { f32::INFINITY } else { power });
+    let sorted = sorted.get_mut(..filled)?;
+    sorted.sort_unstable_by(f32::total_cmp);
+    let at = if measured { silent / 4 } else { filled / 20 };
+    sorted.get(at).map(|&power| (power, measured))
+  }
+
+  /// A low quartile of the last loud-reference windows: the voice only ever adds to one.
+  fn estimate(&mut self) {
+    let filled = self.loud_count.min(ECHO_WINDOWS);
+    if filled < ECHO_MIN_WINDOWS {
+      return;
+    }
+    // A mic within 3 dB of its noise (or a noise not known yet) says only "the echo is under
+    // this": an upper bound.
+    let noise = self.noise_power();
+    let mut sorted = self.loud.map(|(ref_power, mic_power)| {
+      let bound = noise.is_none_or(|(n, _)| mic_power <= 2.0 * n);
+      let echo_power = match noise {
+        Some((n, true)) if !bound => mic_power - n,
+        _ => mic_power,
+      };
+      (10.0 * (echo_power.max(1e-12) / ref_power.max(1e-12)).log10(), bound)
+    });
+    let sorted = sorted.get_mut(..filled).unwrap_or_default();
+    sorted.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let Some(&(db, _)) = sorted.get(filled / 4) else { return };
+    // A bound when most of the quieter half says nothing (60 %; 40 % to stop being one). Not
+    // the quartile window's own flag: with a reference that never pauses, a few windows are
+    // always near the quietest, and the flag flipped with whichever the quartile landed on.
+    let lower = sorted.get(..filled / 2).unwrap_or_default();
+    let bounds = lower.iter().filter(|w| w.1).count();
+    let was_bound = self.shown.is_some_and(|s| s.1);
+    let bound = bounds * 5 > lower.len() * if was_bound { 2 } else { 3 };
+    if self.shown.is_none_or(|(shown, was_bound)| (shown - db).abs() >= ECHO_REPORT_STEP_DB || was_bound != bound) {
+      self.shown = Some((db, bound));
+    }
   }
 }
 
@@ -291,6 +471,9 @@ fn build_apm(tuning: EchoCanceller3Config) -> AudioProcessing {
 /// `mic_gain`: factor the mic is raised by on its way in (`set_mic_gain_db`). The fallback gain
 /// is relative to the mic AEC3 sees, so it goes up with it and the estimate stays where the
 /// captures above had it. AEC3's own "no echo" mode has a fixed 0.01 and so gets looser.
+/// `fallback_gain`: that fallback at mic gain 0 dB, 0.01 unless a stronger echo was measured
+/// (`FALLBACK_ECHO_DB`). Synthetic, echo 20 dB under the reference: with 0.01 the first 0.4 s
+/// after a start pass whole (-38.0 -> -38.8 dBFS), with 0.1 they come out at -58.9 dBFS.
 ///
 /// Tuning from 2026-11-07 and 2026-11-09 captures (`capture_tuning_report`, milestone 44):
 /// - `erle.max_l = 30.0`, `max_h = 10.0`: AEC3 trusts its linear filter up to 30 dB (below 4 kHz)
@@ -310,9 +493,9 @@ fn build_apm(tuning: EchoCanceller3Config) -> AudioProcessing {
 /// In the full chain with denoiser (`ai_denoiser::tests::capture_replay_report`), mean voice loss
 /// drops on `122712` from 7.7 to 5.1 dB and on `125717` from 8.6 to 6.5 dB with zero leak increase
 /// and pauses remaining at -107 to -127 dBFS.
-fn tuning(mic_gain: f32) -> EchoCanceller3Config {
+fn tuning(mic_gain: f32, fallback_gain: f32) -> EchoCanceller3Config {
   let mut cfg = EchoCanceller3Config::default();
-  cfg.ep_strength.default_gain = FALLBACK_ECHO_GAIN * mic_gain;
+  cfg.ep_strength.default_gain = fallback_gain * mic_gain;
   cfg.erle.max_l = 30.0;
   cfg.erle.max_h = 10.0;
   cfg.suppressor.high_frequency_suppression.bands_in_limiting_gain = 0;
@@ -322,6 +505,16 @@ fn tuning(mic_gain: f32) -> EchoCanceller3Config {
   normal.mask_hf.enr_transparent = 0.3;
   normal.mask_hf.enr_suppress = 0.5;
   cfg
+}
+
+/// `current`, unless `want` is half a step plus the hysteresis away from it: then the step
+/// nearest to `want` (dB, steps counted from 0).
+fn stepped(want: f32, current: f32) -> f32 {
+  if (want - current).abs() >= MIC_GAIN_STEP_DB / 2.0 + MIC_GAIN_HYSTERESIS_DB {
+    (want / MIC_GAIN_STEP_DB).round() * MIC_GAIN_STEP_DB
+  } else {
+    current
+  }
 }
 
 fn finite(x: f32) -> f32 {
@@ -361,6 +554,9 @@ mod tests {
     echo_removed_db: f32,
     voice_db: f32,
     voice_hf_db: f32,
+    /// Echo strength and AEC3's fallback echo estimate at the end.
+    echo_strength_db: Option<(f32, bool)>,
+    fallback_db: f32,
   }
 
   /// Echo only, white noise through a short two-tap path.
@@ -517,6 +713,9 @@ mod tests {
     let (plain, gained) = (quiet_mic(-40.0, -30.0, 0.0), quiet_mic(-40.0, -30.0, 6.0));
     eprintln!("call levels, no gain: {plain:?}\ncall levels, 6 dB:    {gained:?}");
     assert!((gained.voice_db - plain.voice_db).abs() < 1.0, "voice: {plain:?} -> {gained:?}");
+    // The strength measured agrees with the one remembered: no step, no rebuild on the way.
+    assert_eq!((plain.fallback_db, gained.fallback_db), (-22.0, -22.0), "{plain:?} / {gained:?}");
+    assert!(plain.echo_strength_db.is_some_and(|(db, bound)| !bound && (db + 22.0).abs() < 3.0), "{plain:?}");
     assert!(gained.echo_removed_db > plain.echo_removed_db - 1.0, "echo: {plain:?} -> {gained:?}");
   }
 
@@ -595,6 +794,64 @@ mod tests {
     assert_eq!(frame(&mut aec, 12.0, &tone), 12.0, "after a gap");
   }
 
+  // Echo strength (2026-11-10): no capture has an echo stronger than 37 dB under the reference.
+
+  /// The meter finds how far under the reference the echo is, past the user's voice (in 40 % of
+  /// the windows, louder than the echo) and the mic's noise, with music that starts after 2 s
+  /// or plays from the start (game audio never pauses). An echo within the noise, or no echo
+  /// at all, is reported as a bound. Only a strong echo moves AEC3's fallback estimate off
+  /// -40 dB, and never over 0 dB.
+  #[test]
+  fn test_echo_strength_is_measured_past_voice_and_noise() {
+    // (echo under the reference, music starts at, fallback in the end)
+    let scenes = [
+      (-20.0f32, 2usize, -22.0f32),
+      (-50.0, 2, -40.0),
+      (-80.0, 2, -40.0),
+      (-20.0, 0, -22.0),
+      (-50.0, 0, -40.0),
+      (-200.0, 0, -40.0),
+      (5.0, 2, 0.0),
+    ];
+    for (echo_db, music_at, fallback_db) in scenes {
+      let (far, mic) = echo_scene(echo_db, 14, music_at);
+      let mut aec = EchoCanceller3::new();
+      run(&mut aec, &far, &mic, 480);
+      let (measured, bound) = aec.echo_strength_db().expect("an estimate after 12 s of music");
+      eprintln!("echo {echo_db} dB, music from {music_at} s: measured {measured:.1} dB (bound: {bound})");
+      if echo_db > -60.0 {
+        assert!(!bound && (measured - echo_db).abs() < 3.0, "{echo_db} dB measured as {measured} (bound: {bound})");
+      } else {
+        // Under -76 dBFS of noise (or no echo): all it can say is "under the noise".
+        assert!(bound && measured < -50.0, "{echo_db} dB measured as {measured} (bound: {bound})");
+      }
+      assert_eq!(aec.fallback_echo_db(), fallback_db, "echo {echo_db} dB, music from {music_at} s");
+    }
+  }
+
+  /// A laptop-like echo, 20 dB under the reference: with the fixed -40 dB fallback the first
+  /// 0.4 s of a stream pass whole (AEC3 has no filter yet); with the strength remembered for
+  /// these speakers they are suppressed from the first frame.
+  #[test]
+  fn test_remembered_strong_echo_is_suppressed_from_the_start() {
+    let (far, mic) = echo_scene(-20.0, 3, 2);
+    // The music starts at 2 s.
+    let start = 2 * 48_000 + 4_800 + AEC3_LATENCY_SAMPLES..2 * 48_000 + 24_000;
+    let mut plain = EchoCanceller3::new();
+    let plain_db = energy_db(&run(&mut plain, &far, &mic, 480)[start.clone()]);
+    let mut seeded = EchoCanceller3::new();
+    seeded.seed_echo_strength_db(-20.0);
+    let seeded_db = energy_db(&run(&mut seeded, &far, &mic, 480)[start.clone()]);
+    eprintln!(
+      "strong echo, first 0.4 s: mic {:.1}, out {plain_db:.1}, remembered {seeded_db:.1} dBFS",
+      energy_db(&mic[start])
+    );
+    assert_eq!(seeded.fallback_echo_db(), -22.0);
+    assert!(seeded_db < plain_db - 10.0, "remembered {seeded_db} dBFS, not remembered {plain_db} dBFS");
+    seeded.forget_echo_strength();
+    assert_eq!(seeded.echo_strength_db(), None, "other speakers: nothing known");
+  }
+
   /// Every debug capture through AEC3 (raw mic + the reference as the live chain fed it, the
   /// capture's leveler gain as mic gain):
   /// per 5 s levels, and `test_data/private/aec_ab/<capture>_{mic,aec3}.wav` for listening and
@@ -666,7 +923,9 @@ mod tests {
   ///
   /// 100 ms windows from 3 s on (the replay starts cold; AEC3's initial phase is 2.5 s),
   /// sorted by Silero on the raw mic (`sort_windows`). Columns:
-  /// mic gain at the end; while the echo is alone: dB removed (median window) and the output
+  /// mic gain at the end; the echo strength measured (dB under the reference, `<`: only a
+  /// bound, the echo is within the mic's noise) and the fallback echo estimate at the end;
+  /// while the echo is alone: dB removed (median window) and the output
   /// level only every tenth window is over (dBFS: what is left for the denoiser); voice
   /// windows: mean level lost mic -> output (dB), share that lost over 6 and over 10 dB, loss
   /// in the first window of a word, loss of the 4-8 kHz band; AEC3's own ERLE estimate while
@@ -695,7 +954,7 @@ mod tests {
       let heard = sort_windows(&mic, &refs);
       let count = |h: Heard| heard.iter().skip(COLD_WINDOWS).filter(|x| **x == h).count();
       eprintln!("\n{name}: {} voice windows, {} with the echo alone", count(Heard::Voice), count(Heard::EchoAlone));
-      eprintln!("  {:<30} gain   echo   left  voice  >6dB >10dB  onset  4-8k   ERLE", "variant");
+      eprintln!("  {:<30} gain  strength fallb   echo   left  voice  >6dB >10dB  onset  4-8k   ERLE", "variant");
       for (place, variant) in variants.split(';').enumerate() {
         let gains = match variant.split_whitespace().find_map(|t| t.strip_prefix("pregain=")) {
           Some(db) => vec![db.parse().expect("pregain=<dB>"); mic.len().div_ceil(480)],
@@ -706,7 +965,13 @@ mod tests {
         aec.rebuild();
         let (out, erle) = run_gained(&mut aec, &refs, &mic, &gains);
         let label = if variant.trim().is_empty() { "(as built)" } else { variant.trim() };
-        eprintln!("  {label:<30} {:4.0} {}", aec.mic_gain_db(), window_report(&mic, &out, &erle, &heard));
+        let strength = match aec.echo_strength_db() {
+          Some((db, true)) => format!("<{db:.0}"),
+          Some((db, false)) => format!("{db:.0}"),
+          None => "-".into(),
+        };
+        let report = window_report(&mic, &out, &erle, &heard);
+        eprintln!("  {label:<30} {:4.0}  {strength:>8} {:5.0} {report}", aec.mic_gain_db(), aec.fallback_echo_db());
         if std::env::var("WAV").is_ok() {
           let _ = std::fs::create_dir_all(base.join("aec_ab"));
           write_wav(&base.join("aec_ab").join(format!("{name}_v{place}.wav")), &out);
@@ -815,7 +1080,8 @@ mod tests {
 
   /// 16 s at the levels of a quiet mic: a music-like far end at -18 dBFS, its echo through a
   /// short room at `echo_db` on the mic, room noise at -76 dBFS, a voice at `voice_db` from 8
-  /// to 12 s; the chain asks for `mic_gain_db`. Echo removed over 4-8 s, voice over 8-12 s.
+  /// to 12 s; the chain asks for `mic_gain_db` and remembers the echo strength. Echo removed
+  /// over 4-8 s, voice over 8-12 s.
   fn quiet_mic(echo_db: f32, voice_db: f32, mic_gain_db: f32) -> QuietMic {
     let len = 16 * 48_000;
     let far = at_level(&music_like(len, 7), -18.0);
@@ -827,12 +1093,34 @@ mod tests {
     let mic: Vec<f32> = (0..len).map(|n| echo[n] + voice[n] + room[n]).collect();
     let mut aec = EchoCanceller3::new();
     aec.set_mic_gain_db(mic_gain_db);
+    // As in every session after the first on these speakers: without it a strong echo
+    // rebuilds AEC3 in the middle of the measurement.
+    aec.seed_echo_strength_db(echo_db + 18.0);
     let out = run(&mut aec, &far, &mic, 480);
     QuietMic {
       echo_removed_db: energy_db(&mic[alone.clone()]) - energy_db(&out[alone]),
       voice_db: projection_db(&voice, &out, both.clone()),
       voice_hf_db: projection_db(&high_pass(&voice, 4_000.0), &high_pass(&out, 4_000.0), both),
+      echo_strength_db: aec.echo_strength_db(),
+      fallback_db: aec.fallback_echo_db(),
     }
+  }
+
+  /// `secs` of a mic: room noise (-76 dBFS), from `music_at` s music (-18 dBFS) whose echo is
+  /// `echo_db` under it, and a voice at -30 dBFS in two of every five seconds. (reference, mic)
+  fn echo_scene(echo_db: f32, secs: usize, music_at: usize) -> (Vec<f32>, Vec<f32>) {
+    let len = secs * 48_000;
+    let music = at_level(&music_like(len, 7), -18.0);
+    let far: Vec<f32> = music.iter().enumerate().map(|(n, &m)| if n < music_at * 48_000 { 0.0 } else { m }).collect();
+    let (voice, room) = (at_level(&voice_like(len, 3), -30.0), at_level(&noise(len, 9), -76.0));
+    let gain = 10f32.powf(echo_db / 20.0);
+    let mic = (0..len)
+      .map(|n| {
+        let talking = n >= 3 * 48_000 && (n / 48_000) % 5 < 2;
+        delayed(&far, n, PRE_DELAY_SAMPLES) * gain + room[n] + if talking { voice[n] } else { 0.0 }
+      })
+      .collect();
+    (far, mic)
   }
 
   /// `x` scaled to an RMS level (dBFS).

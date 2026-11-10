@@ -2,7 +2,7 @@
 //! goes live, one line per tick listing every switch or device/volume change (old -> new), and a
 //! summary of the automatically adjusting values every 10 s. Together with `[Leveler]`,
 //! `[MicGain]`, `[DSP]` and `[Mic]` it lets a log reconstruct what the chain did without the audio.
-//! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v17).
+//! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v18).
 
 use super::chatmix::{get_endpoint_volume, ChatMixController};
 use super::endpoint_lock::EndpointLockManager;
@@ -53,6 +53,11 @@ pub struct DspSnapshot {
   pub aec_delay_us: u32,
   pub aec_from_cache: bool,
   pub double_talk: bool,
+  /// Echo strength (`aec_echo_db_x10`: negative measured, 0 none, positive a bound), AEC3's
+  /// fallback echo estimate and the mic gain into AEC3 (dB x 10).
+  pub echo_x10: i32,
+  pub fallback_echo_x10: i32,
+  pub aec_mic_gain_x10: i32,
   pub gate_db: i32,
   pub strength_permille: u32,
   pub eq_version: u32,
@@ -122,6 +127,9 @@ impl DspSnapshot {
       aec_delay_us: h.aec_delay_us.load(r),
       aec_from_cache: h.aec_delay_from_cache.load(r),
       double_talk: h.aec_double_talk.load(r),
+      echo_x10: h.aec_echo_db_x10.load(r),
+      fallback_echo_x10: h.aec_fallback_echo_db_x10.load(r),
+      aec_mic_gain_x10: h.aec_mic_gain_db_x10.load(r),
       gate_db: h.noise_gate_threshold_db.load(r),
       strength_permille: h.ai_voice_strength_permille.load(r),
       eq_version: h.mic_eq_version.load(r),
@@ -236,7 +244,8 @@ impl ChainLog {
     };
     let c = &now.ctx;
     Some(format!(
-      "{:.0} s: mic {} dBFS, out {} dBFS, ref {} dBFS, ERLE {:.1} dB, voice {voice} of {blocks} blocks, \
+      "{:.0} s: mic {} dBFS, out {} dBFS, ref {} dBFS, ERLE {:.1} dB, echo {} (AEC fallback echo {} dB, \
+       AEC mic gain {} dB), voice {voice} of {blocks} blocks, \
        prob max in {:.2} out {:.2} Silero {:.2}, gate min {} dB floor {} dB, DF pre-gain {} dB, rescue {} blocks, quiet {} ms, \
        leveler gain {} dB level {} dBFS speech {} ms, input gain {} dB, limiter min {} dB, \
        Windows mic volume {} (default device {}), automatic level {}, clips {}, load avg {:.1} % peak {:.1} %, \
@@ -246,6 +255,9 @@ impl ChainLog {
       level(d.out_level_x10),
       level(d.ref_level_x10),
       d.erle_x10 as f32 / 10.0,
+      echo(d),
+      db(d.fallback_echo_x10),
+      db(d.aec_mic_gain_x10),
       iv.in_max as f32 / 1000.0,
       iv.out_max as f32 / 1000.0,
       iv.soft_max as f32 / 1000.0,
@@ -294,6 +306,9 @@ fn changes(prev: &ChainSnapshot, now: &ChainSnapshot) -> Vec<String> {
   diff("AEC", aec(p), aec(n));
   diff("AEC delay", ms(p.aec_delay_us), ms(n.aec_delay_us));
   diff("delay from cache", on_off(p.aec_from_cache), on_off(n.aec_from_cache));
+  diff("echo", echo(p), echo(n));
+  diff("AEC fallback echo", db(p.fallback_echo_x10), db(n.fallback_echo_x10));
+  diff("AEC mic gain", db(p.aec_mic_gain_x10), db(n.aec_mic_gain_x10));
   diff("gate", gate(p.gate_db), gate(n.gate_db));
   diff("strength", pct(p.strength_permille), pct(n.strength_permille));
   diff("voice EQ", format!("v{}", p.eq_version), format!("v{}", n.eq_version));
@@ -320,7 +335,8 @@ fn state(s: &ChainSnapshot) -> String {
   format!(
     "mic in use {}, Windows default mic {}, Windows mic volume {} (default device {}), mute {}, automatic level {}, \
      mic wish {} %, model {} (running {}, limit {}), strength {}, gate {}, voice EQ v{}, AEC {} delay {} \
-     (from cache {}, double talk {}), {}, clips {}, late blocks {}",
+     (from cache {}, double talk {}), echo {} (AEC fallback echo {} dB, AEC mic gain {} dB), {}, clips {}, \
+     late blocks {}",
     device(&c.mic_name, &c.mic_id),
     device(&c.default_name, &c.default_id),
     volume(c.mic_volume_pct),
@@ -338,6 +354,9 @@ fn state(s: &ChainSnapshot) -> String {
     ms(d.aec_delay_us),
     on_off(d.aec_from_cache),
     on_off(d.double_talk),
+    echo(d),
+    db(d.fallback_echo_x10),
+    db(d.aec_mic_gain_x10),
     flags.join(", "),
     d.clips,
     d.overruns,
@@ -366,6 +385,15 @@ fn aec(d: &DspSnapshot) -> String {
     format!("on {:?}", AecState::from_u32(d.aec_state))
   } else {
     "off".to_string()
+  }
+}
+
+/// Echo strength: how far under the reference its echo reaches the mic.
+fn echo(d: &DspSnapshot) -> String {
+  match d.echo_x10 {
+    0 => "not measured".to_string(),
+    v if v > 0 => format!("within the mic's noise (under {:.1} dB)", -v as f32 / 10.0),
+    v => format!("{:.1} dB under the reference", v as f32 / 10.0),
   }
 }
 
@@ -461,6 +489,20 @@ mod tests {
     assert!(line.contains("running DeepFilterNet -> RnNoise"), "{line}");
     assert!(line.contains("Windows mic volume 50 % -> 62 %"), "{line}");
     assert_eq!(line.lines().count(), 1);
+  }
+
+  #[test]
+  fn echo_strength_and_what_follows_it_are_logged_as_they_change() {
+    let mut log = started();
+    let mut now = snap();
+    (now.dsp.echo_x10, now.dsp.fallback_echo_x10, now.dsp.aec_mic_gain_x10) = (-215, -220, 120);
+    let line = log.observe(now.clone()).unwrap();
+    assert!(line.contains("echo not measured -> -21.5 dB under the reference"), "{line}");
+    assert!(line.contains("AEC fallback echo +0.0 -> -22.0"), "{line}");
+    assert!(line.contains("AEC mic gain +0.0 -> +12.0"), "{line}");
+    now.dsp.echo_x10 = 580;
+    let line = log.observe(now).unwrap();
+    assert!(line.contains("-> within the mic's noise (under -58.0 dB)"), "{line}");
   }
 
   #[test]

@@ -1,7 +1,8 @@
 //! Small per-device caches in `%APPDATA%\GamersEqualizer`, so the mic chain starts where it left off
 //! after a restart instead of re-learning from scratch:
 //! - the measured echo delay per (microphone, speaker output) pair,
-//! - the voice leveler's learned speech level per microphone (dB x 10).
+//! - the voice leveler's learned speech level per microphone (dB x 10),
+//! - the measured echo strength per (microphone, speaker output) pair (dB x 10 under the reference).
 
 use log::warn;
 use serde::de::DeserializeOwned;
@@ -12,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "aec_delay_cache.json";
 const LEVELER_FILE_NAME: &str = "voice_level_cache.json";
+const ECHO_FILE_NAME: &str = "echo_strength_cache.json";
 
 /// `%APPDATA%\GamersEqualizer\aec_delay_cache.json`
 pub fn default_path() -> PathBuf {
@@ -21,6 +23,12 @@ pub fn default_path() -> PathBuf {
 /// `%APPDATA%\GamersEqualizer\voice_level_cache.json`, keyed by microphone id.
 pub fn leveler_path() -> PathBuf {
   app_dir().join(LEVELER_FILE_NAME)
+}
+
+/// `%APPDATA%\GamersEqualizer\echo_strength_cache.json`, keyed like the delay (`key`). The
+/// same kind of map as the voice levels: read and written with `load_level` / `save_level`.
+pub fn echo_path() -> PathBuf {
+  app_dir().join(ECHO_FILE_NAME)
 }
 
 pub fn key(capture_id: &str, render_id: &str) -> String {

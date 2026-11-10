@@ -78,6 +78,8 @@ pub struct GamersEqualizerPlugin {
   aec_state: AecState,
   /// Last `aec_cached_delay_samples` seen in shared memory (warm start when it changes).
   cached_delay_seen: u32,
+  /// Last `aec_cached_echo_db_x10` seen in shared memory (0 = none).
+  cached_echo_seen: i32,
   /// Last `aec_reference_seq` seen: when it changes, the speaker output was switched.
   reference_seq_seen: u32,
   /// The chain did not run on the last block(s) (master bypass, or the APO passed through):
@@ -182,6 +184,7 @@ impl GamersEqualizerPlugin {
       tap_frames: Vec::with_capacity(2048),
       aec_state: AecState::Disabled,
       cached_delay_seen: 0,
+      cached_echo_seen: 0,
       reference_seq_seen: 0,
       paused: false,
       aec_idle: false,
@@ -334,6 +337,7 @@ impl GamersEqualizerPlugin {
     let mut denoise_retry_seq = 0;
     let mut eq_version = None;
     let mut cached_delay = 0u32;
+    let mut cached_echo_x10 = 0;
     let mut reference_seq = self.reference_seq_seen;
     let mut leveler_on = true;
     let mut input_gain_x10 = 0;
@@ -348,6 +352,7 @@ impl GamersEqualizerPlugin {
       // Acquire before the cached delay: the daemon stores the new output's delay first.
       reference_seq = header.aec_reference_seq.load(Ordering::Acquire);
       cached_delay = header.aec_cached_delay_samples.load(Ordering::Relaxed);
+      cached_echo_x10 = header.aec_cached_echo_db_x10.load(Ordering::Relaxed);
       aec_enabled = header.aec_enabled.load(Ordering::Relaxed);
       ai_strength = header.ai_voice_strength_permille.load(Ordering::Relaxed) as f32 / 1000.0;
       gate_db = header.noise_gate_threshold_db.load(Ordering::Relaxed) as f32;
@@ -371,8 +376,11 @@ impl GamersEqualizerPlugin {
       self.reference_seq_seen = reference_seq;
       log::info!("[AEC] speaker output changed: echo delay and filter start over");
       self.delay_estimator.forget_lock();
+      // Before the reset, which rebuilds AEC3 for what is known of the echo.
+      self.aec.forget_echo_strength();
       self.aec.reset();
       self.cached_delay_seen = 0;
+      self.cached_echo_seen = 0;
     }
 
     // Delay remembered from an earlier session (daemon cache): only as a warm start, a delay
@@ -382,6 +390,15 @@ impl GamersEqualizerPlugin {
       if cached_delay > 0 && self.delay_estimator.current_delay().is_none() {
         log::info!("[AEC] warm start with cached echo delay {:.1} ms", cached_delay as f32 / 48.0);
         self.delay_estimator.set_cached_delay(cached_delay as usize);
+      }
+    }
+
+    // Echo strength remembered for this mic and output: AEC3's fallback echo estimate is right
+    // from the first frame, until the strength is measured in this session.
+    if cached_echo_x10 != self.cached_echo_seen {
+      self.cached_echo_seen = cached_echo_x10;
+      if cached_echo_x10 != 0 {
+        self.aec.seed_echo_strength_db(cached_echo_x10 as f32 / 10.0);
       }
     }
 
@@ -675,6 +692,18 @@ impl GamersEqualizerPlugin {
     let conf_permille = (((conf - MIN_PEAK_RATIO) / span).clamp(0.0, 1.0) * 1000.0) as u32;
     h.aec_confidence_permille.store(conf_permille, Ordering::Relaxed);
 
+    // 0 = no echo strength yet: a measured one is negative (-0.1 dB at most), a bound positive.
+    let echo_x10 = self.aec.echo_strength_db().map_or(0, |(db, bound)| {
+      let x10 = ((db * 10.0).round() as i32).clamp(-1200, -1);
+      if bound {
+        -x10
+      } else {
+        x10
+      }
+    });
+    h.aec_echo_db_x10.store(echo_x10, Ordering::Relaxed);
+    h.aec_fallback_echo_db_x10.store((self.aec.fallback_echo_db() * 10.0).round() as i32, Ordering::Relaxed);
+    h.aec_mic_gain_db_x10.store((self.aec.mic_gain_db() * 10.0).round() as i32, Ordering::Relaxed);
     h.aec_double_talk.store(self.aec.is_double_talk(), Ordering::Relaxed);
     h.aec_ref_level_db_x10.store(db_x10(self.ref_rms), Ordering::Relaxed);
     h.aec_mic_level_db_x10.store(db_x10(self.mic_rms), Ordering::Relaxed);

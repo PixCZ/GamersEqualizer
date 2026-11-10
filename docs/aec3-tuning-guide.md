@@ -1,7 +1,8 @@
 # AEC3: návod na doladění podle nahrávek
 
 Pro agenta (Antigravity) na Windows stroji, kde jsou `test_data/private/captures/`.
-Souvislosti: `docs/mic-aec3-voice-analysis.md` (proč), DEVLOG milník 43 (co se změnilo).
+Souvislosti: `docs/mic-aec3-voice-analysis.md` (proč), DEVLOG milníky 43-45 (co se změnilo).
+Kapitoly 2-10 jsou hotové (milník 44). Aktuální úkol je **kapitola 11** (síla echa, milník 45).
 Příkazy jsou pro PowerShell, spouštěj je z kořene repa.
 
 ## 1. Stav: co je hotové a co není ověřené
@@ -58,6 +59,8 @@ Sloupce (okna 100 ms od 3. sekundy, tříděná Silerem na surovém mikrofonu):
 | Sloupec | Význam                                                               | Lepší je    |
 | ------- | -------------------------------------------------------------------- | ----------- |
 | `gain`  | zesílení mikrofonu na konci (dB)                                     | -           |
+| `strength` | změřená síla echa: kolik dB pod referencí je echo na mikrofonu (`<`: jen horní mez, echo je v šumu) | - |
+| `fallb` | záložní odhad echa v AEC3 na konci (dB pod referencí, -40 = beze změny) | -        |
 | `echo`  | o kolik dB ubylo echo, když hraje samo (medián oken)                 | víc         |
 | `left`  | hladina výstupu, kterou překročí jen každé desáté okno s echem (dBFS)| níž         |
 | `voice` | průměrná ztráta úrovně v oknech s hlasem, mic -> výstup (dB)         | míň         |
@@ -217,3 +220,102 @@ Co naživo poslouchat a nahrát (`-Apo -DebugCapture`, nikdy takové APO nebalit
   `statistics().delay_ms` je 0 od začátku.
 - Ladit podle syntetických testů. Jsou to regresní testy; hodnoty se volí podle nahrávek.
 - Balit APO postavené s `-DebugCapture`.
+
+## 11. Síla echa (milník 45)
+
+Co přibylo: AEC3 dosud předpokládalo, že echo je o 40 dB slabší než reference. Teď se síla echa
+měří (`EchoMeter` v `aec3.rs`), pamatuje pro dvojici mikrofon + výstup a záložní odhad AEC3 ji
+následuje, když je echo silnější. Všechno se vypisuje do debug logu. Sdílená paměť má layout
+v18, takže **APO je potřeba přeinstalovat**.
+
+| Část                                                   | Stav                                     |
+| ------------------------------------------------------ | ---------------------------------------- |
+| `aec3.rs` (měřič, záložní odhad, testy)                | přeloženo a otestováno na Macu           |
+| `shm.rs` (5 nových polí, v18)                          | přeloženo a otestováno na Macu           |
+| `chain_log.rs` (řádky logu, test)                      | čistá část přeložena a otestována na Macu |
+| `plugin.rs`, `apo_link.rs`, `aec_delay_cache.rs`       | **psáno bez překladače**                 |
+
+### 11.1 Přeložit
+
+```powershell
+cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture
+cargo test -p gamersequalizer-common
+cargo test -p gamersequalizer-daemon chain_log
+cargo clippy --workspace --all-targets
+```
+
+Čekaný výsledek: 16 testů `aec3::` projde (3 `ignored`). Když se nepřeloží soubory psané naslepo,
+záměr je:
+
+- `plugin.rs`: číst `aec_cached_echo_db_x10` z hlavičky; když se změní a není 0, zavolat
+  `self.aec.seed_echo_strength_db(x10 / 10)`; při přepnutí výstupu (`reference_seq`) zavolat
+  `self.aec.forget_echo_strength()` (před `self.aec.reset()`) a vynulovat `cached_echo_seen`;
+  v `publish_telemetry` zapsat `aec_echo_db_x10` (0 = nic, změřená hodnota záporná a nejvýš -1,
+  horní mez kladná), `aec_fallback_echo_db_x10`, `aec_mic_gain_db_x10`.
+- `apo_link.rs`: při změně klíče (mikrofon|výstup) načíst hodnotu z `echo_strength_cache.json`,
+  zapisovat ji do `aec_cached_echo_db_x10` vedle `aec_cached_delay_samples` (před zvýšením
+  `aec_reference_seq`). Když je AEC `Locked` a od posledního zápisu uběhlo 10 s: zápornou
+  (změřenou) hodnotu uložit, pokud se pohnula o 2 dB; při kladné (mez) zapamatovanou smazat.
+
+### 11.2 Co měřič čte na nahrávkách
+
+```powershell
+$env:VARIANTS = ""
+cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+```
+
+Do DEVLOGu tabulku: nahrávka, `strength`, `fallb`, a pro kontrolu úroveň echa a reference
+z dřívějších milníků. Čekání:
+
+| Nahrávka                  | Čekaná `strength`                    | Čekaný `fallb` |
+| ------------------------- | ------------------------------------ | -------------- |
+| `130319` (reproduktory)   | kolem -37                            | -40            |
+| `210655` (reproduktory)   | kolem -50                            | -40            |
+| `115931`, `122520` (sluchátka) | mez (`<...`) nebo pod -50       | -40            |
+| nahrávky bez reference    | `-`                                  | -40            |
+
+Když je `fallb` u některé nahrávky jiný než -40, změní se její čísla proti milníku 44: zapiš
+oba řádky a rozhodni podle kritérií z kapitoly 6. Když měřič čte něco výrazně jiného, než říká
+úroveň echa v pauzách (rozdíl přes 5 dB), zastav se a zapiš to. Nelaď konstanty měřiče.
+
+Sloupec ukazuje hodnotu na konci nahrávky. Replay startuje bez zapamatované hodnoty, takže
+u silného echa obsahuje jednu přestavbu AEC3 uprostřed (naživo jen v první relaci na daném výstupu).
+
+### 11.3 Naživo a z logu
+
+Na stránce Log zapnout „Ukládat debug na disk". Stačí obyčejný build, nahrávka není potřeba.
+V logu hledat:
+
+```text
+[Chain] start: ... echo -43.5 dB under the reference (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB) ...
+[Chain] changed: echo not measured -> -21.5 dB under the reference, AEC fallback echo -40.0 -> -22.0
+[Chain] changed: echo -43.5 dB under the reference -> within the mic's noise (under -58.0 dB)
+[Chain] 10 s: ... ERLE 7.9 dB, echo -43.5 dB under the reference (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB), ...
+[ApoLink] saving echo strength -43.5 dB under the reference
+[ApoLink] remembered echo strength for this mic/output: -43.5 dB under the reference
+```
+
+Co z logu od testera vyčíst:
+
+| V logu                                             | Znamená                                              |
+| -------------------------------------------------- | ---------------------------------------------------- |
+| `echo ... dB under the reference`                  | síla echa na jeho sestavě; čím blíž k 0, tím hůř     |
+| `within the mic's noise`                           | echo není měřitelné (sluchátka)                      |
+| `echo not measured` i po minutě hudby              | reference je tišší než -30 dBFS, nebo AEC neběží     |
+| `forgetting the remembered strength`               | echo zmizelo (sluchátka, ztlumeno): cache se smazala |
+| `AEC fallback echo` jiné než -40.0                 | echo je silnější než asi 32 dB pod referencí         |
+| `echo` skáče o víc než 6 dB tam a zpět             | měřič je nestabilní: poslat log, nelaď naslepo       |
+| `AEC mic gain` se mění víckrát za minutu           | zesílení kmitá: zvětšit `MIC_GAIN_HYSTERESIS_DB`     |
+| `ERLE` kolem 0 při hrající hudbě                   | AEC3 nepoužívá lineární filtr                        |
+
+Naživo vyzkoušet: reproduktory nahlas (síla echa má stoupnout a po pár sekundách se objeví
+`saving echo strength`), ztlumit reproduktory (má klesnout; když neklesne, loopback se bere až
+za hlasitostí Windows a je to dobrá zpráva), přepnout výstup na sluchátka (po
+přepnutí `not measured`, pak mez nebo nízká hodnota), restart aplikace (`remembered echo
+strength` a hodnota v řádku `start:`).
+
+### 11.4 Co není hotové
+
+AEC se na sluchátkách samo nevypíná. Se zesílením mikrofonu ztrácí sluchátkové nahrávky v AEC3
+0,6-0,7 dB hlasu (milník 44), takže zisk by byl malý, a detektor „echo je v šumu" ještě neviděl
+skutečný stroj. Nejdřív posbírat logy z kroku 11.3; vypínat až podle nich.

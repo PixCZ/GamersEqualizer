@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v17";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v18";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v17";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v18";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 17;
+pub const SHM_VERSION: u32 = 18;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -303,6 +303,19 @@ pub struct ShmHeader {
   pub mic_quiet_ms: AtomicU32,
   /// Lowest peak limiter gain over the last ~250 ms, dB x 10 (0 = no reduction).
   pub mic_limiter_gain_min_db_x10: AtomicI32,
+
+  // --- v18: echo strength, i.e. how many dB under the reference its echo reaches the mic ---
+  /// Daemon -> DSP: the strength remembered for this mic and output, dB x 10 (0 = none). Like
+  /// `aec_cached_delay_samples`, stored before `aec_reference_seq` is bumped.
+  pub aec_cached_echo_db_x10: AtomicI32,
+  /// DSP -> daemon: the strength measured, or still the remembered one, dB x 10: negative
+  /// (-1 at most); 0 = none yet; positive = only a bound, the echo is within the mic's noise
+  /// and under minus this value. One field, so the daemon never pairs a value with the wrong kind.
+  pub aec_echo_db_x10: AtomicI32,
+  /// DSP -> daemon: AEC3's fallback echo estimate now, dB x 10 under the reference (-400 unless
+  /// a stronger echo was measured), and the mic gain into AEC3 now, dB x 10.
+  pub aec_fallback_echo_db_x10: AtomicI32,
+  pub aec_mic_gain_db_x10: AtomicI32,
 }
 
 /// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
@@ -518,6 +531,10 @@ impl Default for ShmHeader {
       mic_chain_flags: AtomicU32::new(0),
       mic_quiet_ms: AtomicU32::new(0),
       mic_limiter_gain_min_db_x10: AtomicI32::new(0),
+      aec_cached_echo_db_x10: AtomicI32::new(0),
+      aec_echo_db_x10: AtomicI32::new(0),
+      aec_fallback_echo_db_x10: AtomicI32::new(0),
+      aec_mic_gain_db_x10: AtomicI32::new(0),
     };
     h.init_defaults();
     h
@@ -703,6 +720,9 @@ impl ShmHeader {
     self.mic_chain_flags.store(src.mic_chain_flags.load(r), r);
     self.mic_quiet_ms.store(src.mic_quiet_ms.load(r), r);
     self.mic_limiter_gain_min_db_x10.store(src.mic_limiter_gain_min_db_x10.load(r), r);
+    self.aec_echo_db_x10.store(src.aec_echo_db_x10.load(r), r);
+    self.aec_fallback_echo_db_x10.store(src.aec_fallback_echo_db_x10.load(r), r);
+    self.aec_mic_gain_db_x10.store(src.aec_mic_gain_db_x10.load(r), r);
     self.aec_state.store(src.aec_state.load(r), r);
     self.aec_delay_us.store(src.aec_delay_us.load(r), r);
     self.aec_raw_delay_us.store(src.aec_raw_delay_us.load(r), r);
