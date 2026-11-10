@@ -388,11 +388,12 @@ fn aec(d: &DspSnapshot) -> String {
   }
 }
 
-/// Echo strength: how far under the reference its echo reaches the mic.
+/// Echo strength: how far under the reference its echo reaches the mic. Not confirmed: no
+/// echo was seen following the reference, the bound may be the user's voice.
 fn echo(d: &DspSnapshot) -> String {
   match d.echo_x10 {
     0 => "not measured".to_string(),
-    v if v > 0 => format!("within the mic's noise (under {:.1} dB)", -v as f32 / 10.0),
+    v if v > 0 => format!("not confirmed (at most {:.1} dB under the reference)", -v as f32 / 10.0),
     v => format!("{:.1} dB under the reference", v as f32 / 10.0),
   }
 }
@@ -502,7 +503,7 @@ mod tests {
     assert!(line.contains("AEC mic gain +0.0 -> +12.0"), "{line}");
     now.dsp.echo_x10 = 580;
     let line = log.observe(now).unwrap();
-    assert!(line.contains("-> within the mic's noise (under -58.0 dB)"), "{line}");
+    assert!(line.contains("-> not confirmed (at most -58.0 dB under the reference)"), "{line}");
   }
 
   #[test]

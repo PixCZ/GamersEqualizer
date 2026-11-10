@@ -274,24 +274,17 @@ impl ApoLink {
       return;
     }
     let locked = AecState::from_u32(h.aec_state.load(Ordering::Relaxed)) == AecState::Locked;
-    // Echo strength the APO measured (negative), remembered like the delay. A bound (positive:
-    // the echo is within the mic's noise now) is not kept, and drops what was remembered: a
-    // strong echo from before would start every stream with a fallback that ducks the voice.
+    // Echo strength the APO confirmed (negative), remembered like the delay. Not a bound
+    // (positive): that may be the user's voice. A remembered strength the echo no longer
+    // reaches comes back lowered by the APO, as a negative value, and replaces it here.
     let echo = h.aec_echo_db_x10.load(Ordering::Relaxed);
     let moved = self.saved_echo.is_none_or(|s| (s - echo).abs() >= ECHO_SAVE_MIN_CHANGE_X10);
     let due = self.last_echo_save.is_none_or(|t| t.elapsed() >= LEVEL_SAVE_INTERVAL);
-    if let (Some(key), true) = (self.cache_key.as_deref(), locked && due) {
-      if echo < 0 && moved {
-        info!("[ApoLink] saving echo strength {:.1} dB under the reference", echo as f32 / 10.0);
-        aec_delay_cache::save_level(&self.echo_cache_path, key, echo);
-        self.saved_echo = Some(echo);
-        self.last_echo_save = Some(Instant::now());
-      } else if echo > 0 && self.saved_echo.is_some() {
-        info!("[ApoLink] the echo is within the mic's noise now: forgetting the remembered strength");
-        aec_delay_cache::forget_level(&self.echo_cache_path, key);
-        self.saved_echo = None;
-        self.last_echo_save = Some(Instant::now());
-      }
+    if let (Some(key), true) = (self.cache_key.as_deref(), locked && echo < 0 && moved && due) {
+      info!("[ApoLink] saving echo strength {:.1} dB under the reference", echo as f32 / 10.0);
+      aec_delay_cache::save_level(&self.echo_cache_path, key, echo);
+      self.saved_echo = Some(echo);
+      self.last_echo_save = Some(Instant::now());
     }
     let delay_us = h.aec_delay_us.load(Ordering::Relaxed);
     if !locked || delay_us == 0 || h.aec_delay_from_cache.load(Ordering::Relaxed) {

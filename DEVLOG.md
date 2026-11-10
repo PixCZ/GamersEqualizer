@@ -2014,3 +2014,59 @@ Stopy nahrávek s více než jednou změnou:
 
 ### 5. Shrnutí a doporučení
 - **Závěr**: Neprošel Test A ani Test B: měřič síly echa na reálných nahrávkách výrazně kolísá, plete si lidský hlas a šum mikrofonu se silným echem (zejména na sluchátkách a při promluvách do hudby) a neoprávněně přestavuje záložní odhad AEC3 (`fallback`), což vede k opakovaným zbytečným rebuildům filtru a degradaci zvuku; živý test s instalací APO v tomto stavu nemá smysl provádět, dokud člověk neupraví parametry či logiku měřiče echa.
+
+## Milestone 47: The echo meter took the voice for an echo; it now needs the mic to follow the reference (2026-11-10)
+
+Answer to milestone 46 (the first run on the captures, both tests failed; nothing needed fixing
+to compile). Written on the Mac again: `aec3.rs`, `shm.rs`, the pure part of `chain_log.rs`
+compiled and tested, `apo_link.rs` edited without a compiler, nothing run on a capture.
+Second round on the captures: `docs/aec3-echo-strength-test.md`, to be written up as milestone 48.
+
+- **What was wrong.** Milestone 45's meter rested on "the user's voice only adds to a window,
+  so a low quartile of the windows is the echo". On the captures the voice is in more than
+  three quarters of the windows for 13 s at a time, and far louder than the echo:
+  - headphones with no echo, a voice at -40 dBFS over music at -28 dBFS: "-31 dB" (`115931`),
+  - speech over music with no window of echo alone: "-22 dB", "-31 dB" (`144824`, `125717`),
+  - a -50 dB echo climbing to "-33 dB" while the user talked (`205013`),
+  - 10-18 changes per capture and the fallback stepping up and back (`091611`, `100150`,
+    `101152`, `162331`): every step a rebuild of AEC3 in the middle of speech.
+  The low quartile is a bound (the echo is no stronger), not the echo. The synthetic tests of
+  milestone 45 had the voice in 40 % of the windows and did not show it.
+- **New rule: an echo follows the reference, a voice does not.** Where the echo is what the mic
+  hears, the mic's level goes up and down with the reference's, window by window. The meter
+  fits the mic's level against the reference's (both in dB) over the half of the windows
+  quietest for their reference (where a voice is least) and confirms an echo only with a
+  correlation of 0.9 or more, a slope of 0.7-1.3 and a reference whose level moves by 2 dB
+  (standard deviation) in those windows.
+  - Confirmed: the strength is the low quartile, as before, and only now may move the fallback.
+  - Not confirmed: the meter reports the bound, and AEC3 stays at -40 dB as before there was a
+    meter. This is what a voice, a noise, or a reference with a flat level end as.
+  - A confirmed (or remembered) strength never goes up without a new confirmation; it comes
+    down when the bound falls 3 dB under it (speakers turned down, headphones on).
+  - The mic's noise is no longer estimated or taken off (`MIC_WINDOWS`, the pauses of the
+    reference: gone). A weak echo reads up to 3 dB high, which changes nothing: the fallback
+    only acts over about -32 dB.
+- **Log and cache follow**: `[Chain]` says `not confirmed (at most X dB under the reference)`
+  instead of "within the mic's noise"; the daemon saves only confirmed values and no longer
+  drops a remembered one on a bound (the APO lowers it itself and reports the lowered value).
+- **Synthetic, the cases of milestone 46 added** (20 s each; fit = correlation x slope):
+
+| Scene                                                        | Reported             | Fit         | Fallback |
+| ------------------------------------------------------------ | -------------------- | ----------- | -------- |
+| echo -20 dB, voice in 40 % of the windows                    | -20.0 dB             | 1.00 x 1.01 | -22 dB   |
+| echo -50 dB, voice in 40 %                                   | -49.4 dB             | 1.00 x 0.85 | -40 dB   |
+| echo -80 dB (under the noise), voice in 40 %                 | bound -58.1 dB       | 0.26 x 0.01 | -40 dB   |
+| no echo, voice all the time over the music (headphones)      | bound -16.5 dB       | 0.56 x 0.75 | -40 dB   |
+| echo -50 dB, then a voice 20 dB louder that never pauses     | -49.2 dB (no climb)  | 0.56 x 0.75 | -40 dB   |
+| echo -20 dB, then a voice that never pauses                  | -20.1 dB (stays)     | 0.86 x 1.32 | -22 dB   |
+| echo 5 dB over the reference                                 | 4.9 dB               | 1.00 x 1.02 | 0 dB     |
+
+  The 0.56 of the voice alone is this test's doing: the synthetic music beats at 2 Hz and the
+  synthetic voice at 4 Hz, so their levels are not independent. A real voice should fit worse.
+- **`capture_echo_report`**: a `fit` column, and the fit at every confirmed value in the trace.
+- **Not known, and the reason for the second round:** whether a real echo in a real room
+  reaches a correlation of 0.9 over 100 ms windows (reverb smears the level; the windows are
+  not aligned to the echo's delay). If not, the meter never confirms and the fallback never
+  moves: nothing is gained, nothing is lost against milestone 44. The report prints the fit, so
+  the threshold can be set from the captures instead of guessed. A strong echo under a voice
+  that never pauses is not confirmed until the user stops for a few seconds.

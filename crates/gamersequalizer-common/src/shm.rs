@@ -308,9 +308,10 @@ pub struct ShmHeader {
   /// Daemon -> DSP: the strength remembered for this mic and output, dB x 10 (0 = none). Like
   /// `aec_cached_delay_samples`, stored before `aec_reference_seq` is bumped.
   pub aec_cached_echo_db_x10: AtomicI32,
-  /// DSP -> daemon: the strength measured, or still the remembered one, dB x 10: negative
-  /// (-1 at most); 0 = none yet; positive = only a bound, the echo is within the mic's noise
-  /// and under minus this value. One field, so the daemon never pairs a value with the wrong kind.
+  /// DSP -> daemon: the strength confirmed, or still the remembered one, dB x 10: negative
+  /// (-1 at most); 0 = none yet; positive = only a bound: no echo was seen following the
+  /// reference, there is at most one minus this value under it (it may be the user's voice).
+  /// One field, so the daemon never pairs a value with the wrong kind.
   pub aec_echo_db_x10: AtomicI32,
   /// DSP -> daemon: AEC3's fallback echo estimate now, dB x 10 under the reference (-400 unless
   /// a stronger echo was measured), and the mic gain into AEC3 now, dB x 10.

@@ -1,8 +1,12 @@
 # Síla echa: test na nahrávkách
 
 Pro agenta (Antigravity) na Windows stroji s `test_data/private/captures/`. Větev `aec3-mic-gain`,
-poslední commit (report `capture_echo_report` je až v něm). Co se testuje a proč: DEVLOG milník 45. Příkazy jsou pro PowerShell
-z kořene repa.
+poslední commit. Příkazy jsou pro PowerShell z kořene repa.
+
+**Druhé kolo.** První kolo (milník 46) neprošlo: měřič bral hlas za echo. Měřič je přepsaný
+(milník 47): sílu echa teď uzná jen tehdy, když úroveň mikrofonu sleduje úroveň reference
+okno po okně („potvrzeno"). Jinak hlásí jen horní mez a AEC3 nechá na -40 dB. Tenhle návod je
+upravený pro nový měřič: projdi ho celý znovu a výsledky zapiš jako milník 48.
 
 Co test **je**: ověření měřiče síly echa a toho, co z něj plyne, na existujících nahrávkách.
 Co **není**: živý test (instalace APO, log od testera). Ten přijde potom a dělá ho člověk.
@@ -13,7 +17,7 @@ Co **není**: živý test (instalace APO, log od testera). Ten přijde potom a d
   Když něco nevyjde, zapiš čísla a zastav se. Rozhodnutí o změně udělá člověk.
 - Smíš opravit chyby překladu v souborech psaných bez překladače. Záměr je v
   `docs/aec3-tuning-guide.md`, kapitola 11.1. Každou takovou opravu vyjmenuj v DEVLOGu.
-- Výsledky zapiš do `DEVLOG.md` jako milník 46, commitni a pushni na `aec3-mic-gain`. Nemerguj.
+- Výsledky zapiš do `DEVLOG.md` jako milník 48, commitni a pushni na `aec3-mic-gain`. Nemerguj.
 
 ## 0. Přeložit a pustit testy
 
@@ -29,9 +33,9 @@ cargo clippy --workspace --all-targets
 Čekaný výsledek: `aec3::` 16 passed, 4 ignored. Z výpisu si zkontroluj tyto řádky (hodnoty z Macu):
 
 ```text
-echo -20 dB, music from 2 s: measured -20.0 dB (bound: false)
-echo -50 dB, music from 0 s: measured -49.6 dB (bound: false)
-echo -200 dB, music from 0 s: measured -60.5 dB (bound: true)
+echo -20 dB, music from 2 s: -20.0 dB (bound: false), fit 1.00 x 1.01
+echo -50 dB, music from 0 s: -49.6 dB (bound: false), fit 1.00 x 0.85
+echo -200 dB, music from 0 s: -16.5 dB (bound: true), fit 0.56 x 0.75
 strong echo, first 0.4 s: mic -38.8, out -40.2, remembered -82.7 dBFS
 ```
 
@@ -39,8 +43,8 @@ Odchylka do 0,5 dB je v pořádku (jiný procesor, jiné SIMD). Větší zapiš.
 
 ## 1. Test A: kde se nic měnit nemělo, nic se nezměnilo
 
-Síla echa je na všech dosavadních nahrávkách slabší než asi 32 dB pod referencí, takže záložní
-odhad má zůstat na -40 dB a výsledky AEC3 mají být stejné jako v milníku 44.
+Záložní odhad má zůstat na -40 dB všude, kde měřič nepotvrdí echo silnější než asi 32 dB pod
+referencí. Výsledky AEC3 pak mají být stejné jako v milníku 44.
 
 ```powershell
 $env:VARIANTS = ""
@@ -55,7 +59,10 @@ Porovnej s řádky „winner" v tabulce milníku 44 (sloupce `echo`, `left`, `vo
 | ---------------------------------------------------- | ------------------------------------------ |
 | `fallb` -40 a čísla shodná (do 0,1 dB / 1 bodu %)    | prošlo                                     |
 | `fallb` -40 a čísla jiná                             | **neprošlo**: zapiš nahrávku a oba řádky   |
-| `fallb` jiný než -40                                 | zapiš; ta nahrávka má silnější echo, než se čekalo. Pokračuj testem B, tam se ukáže, jestli měřič čte správně |
+| `fallb` jiný než -40                                 | zapiš oba řádky; jestli je to oprávněné, rozhodne test B |
+
+Jiný `fallb` než -40 se dá čekat nejvýš u `101152` a `102403` (monitor přes HDMI, `check` kolem
+-29 a -28 dB v milníku 46). Jinde by to byla chyba.
 
 ## 2. Test B: čte měřič správně?
 
@@ -69,34 +76,46 @@ echa, záložní odhad a zesílení mikrofonu. Totéž by ukázal debug log.
 
 | Sloupec | Význam                                                                                |
 | ------- | ------------------------------------------------------------------------------------- |
-| `meter` | co čte měřič na konci, dB pod referencí; `<` = jen horní mez (echo je v šumu mikrofonu) |
-| `check` | totéž jinou cestou: medián (úroveň mikrofonu - úroveň reference) v oknech, kde Silero slyší jen echo a reference je nad -30 dBFS. Šum se neodečítá, takže u slabého echa vychází výš než `meter` |
+| `meter` | co hlásí měřič na konci, dB pod referencí; `<` = nepotvrzeno, jen horní mez (může to být hlas) |
+| `fit`   | jak dobře úroveň mikrofonu sleduje úroveň reference na konci: korelace x sklon. Potvrzeno je od 0.90 a sklonu 0.7-1.3 |
+| `check` | totéž jinou cestou: medián (úroveň mikrofonu - úroveň reference) v oknech, kde Silero slyší jen echo a reference je nad -30 dBFS |
 | `fallb` | záložní odhad echa v AEC3 na konci (dB pod referencí)                                 |
 | `start` | o kolik dB ubylo echo v prvních 0,1-0,5 s hlasité reference, kdy AEC3 ještě nemá filtr |
 | ostatní | jako v `capture_tuning_report`, od 3. sekundy                                         |
 
-Kritéria:
+Každá nahrávka dostane jeden ze tří verdiktů:
 
-| Nahrávky                                   | Prošlo, když                                                         |
-| ------------------------------------------ | -------------------------------------------------------------------- |
-| reproduktory a monitor (hudba hraje)       | `meter` není mez a platí `check - 6 <= meter <= check + 2`           |
-| `210655`                                   | navíc `meter` kolem -50 (echo -68 dBFS, hudba -18 dBFS, milník 42)   |
-| sluchátka (`115931`, `122520`)             | `meter` je mez (`<...`), nebo je pod -50                             |
-| bez reference                              | `meter` je `-`                                                       |
-| všechny                                    | `fallb` je -40, pokud `meter` není nad -33                           |
+| Verdikt          | Kdy                                                                                 |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| **prošlo**       | potvrzeno (`meter` bez `<`) a `check - 6 <= meter <= check + 2`; nebo bez reference a `meter` je `-` |
+| **nepotvrzeno**  | `meter` je mez (`<...`) a `fallb` je -40. Není to chyba: AEC3 se chová jako dřív. Zapiš `fit` |
+| **NEPROŠLO**     | cokoli z tabulky níž                                                                |
 
-Stopa (`trace`):
+Co je chyba:
 
-- První `echo ...` se smí objevit nejdřív po 5 s hlasité reference.
-- Při stálé hlasitosti nejvýš 2 další změny za 30 s. Víc znamená, že měřič kolísá.
-- Žádné střídání „echo X" a „echo within the noise" tam a zpět.
-- Žádný řádek `fallback`, pokud `meter` není nad -33.
+| Nahrávky                                        | NEPROŠLO, když                                                  |
+| ----------------------------------------------- | --------------------------------------------------------------- |
+| sluchátka (`115931`, `122520`)                  | `meter` je potvrzený (bez `<`)                                   |
+| řeč do hudby bez oken s echem (`124950`, `125717`, `144824`) | `fallb` není -40                                   |
+| reproduktory a monitor                          | potvrzeno, ale `meter > check + 2` nebo `meter < check - 6`     |
+| `205013`, `210655`                              | potvrzeno a `meter` nad -45                                     |
+| všechny                                         | `fallb` není -40, ačkoli `meter` je mez nebo je pod -33         |
 
-Zvlášť se podívej na nahrávky, kde se hodně mluví do hudby (`125717` od 12. s, `130319`:
-hlas asi 6,4-10,4 s, 16,5-20,3 s, 26,6-30 s). Hlášená síla echa během řeči **nesmí stoupnout
-o 4 dB a víc**. Kdyby stoupla, měřič bere hlas za echo: zapiš čas a hodnoty.
+Stopa (`trace`), chyba je:
 
-Když test B neprojde, **zastav se** a zapiš tabulku a stopy. Test C pak nemá smysl.
+- potvrzená hodnota (`echo X (fit ...)`) během řeči **stoupne o 4 dB a víc** (hlas asi:
+  `130319` 6,4-10,4 s, 16,5-20,3 s, 26,6-30 s; `125717` od 12. s; `205013` 9-29 s),
+- víc než 3 změny potvrzené hodnoty za nahrávku,
+- víc než jedna změna `fallback` za nahrávku.
+
+Řádek `no echo confirmed (at most X)` se smí měnit libovolně: je to jen horní mez a nic neřídí.
+
+U nahrávek s verdiktem „nepotvrzeno", které **mají** okna s echem o samotě (reproduktory,
+monitor), zapiš do tabulky `fit`. Podle těch čísel se rozhodne, jestli je práh 0.90 pro skutečné
+místnosti moc přísný. Sám ho neměň.
+
+Když je aspoň jedna nahrávka NEPROŠLO, **zastav se** a zapiš tabulku a stopy. Test C pak nemá
+smysl. Samá „prošlo" a „nepotvrzeno" znamenají pokračovat.
 
 ## 3. Test C: silné echo, nasimulované z nahrávek
 
@@ -114,6 +133,10 @@ cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --i
 
 Názvy složek uprav podle skutečných. Když report u scény napíše „samples of the scaled mic are
 over full scale", použij pro tu nahrávku `micscale=12` (případně 6) a zapiš, které to byly.
+
+Test C má smysl jen pro nahrávky, které v testu B vyšly „prošlo" (potvrzeno): `micscale` na
+tom, jestli mikrofon sleduje referenci, nic nemění. U ostatních zapiš jen „nepotvrzeno, test C
+nic neukáže".
 
 Čtyři scény a co znamenají:
 
@@ -143,12 +166,12 @@ neporovnávej: obsahuje přestavbu AEC3 uprostřed nahrávky.
 Pokud u některé nahrávky vyjde `fallb` -40 i s `micscale=20` (echo je pořád slabší než 32 dB pod
 referencí), přidej pro ni `micscale=30`, pokud se nepřebudí.
 
-## 4. Co zapsat do DEVLOGu (milník 46)
+## 4. Co zapsat do DEVLOGu (milník 48)
 
 1. Které soubory se nepřeložily a co jsi v nich opravil.
 2. Test A: verdikt; nahrávky, které se liší, s oběma řádky.
-3. Test B: tabulka nahrávka / `meter` / `check` / `fallb` / verdikt, a stopy tam, kde je víc než
-   jedna změna.
+3. Test B: tabulka nahrávka / `meter` / `fit` / `check` / `fallb` / verdikt (prošlo, nepotvrzeno,
+   NEPROŠLO), a stopy tam, kde je víc než jedna změna.
 4. Test C: pro každou nahrávku čtyři řádky a stopy, pod tím verdikt podle sedmi kritérií.
 5. Jedna věta na konec: prošlo všechno / neprošlo X, a co z toho plyne pro živý test.
 

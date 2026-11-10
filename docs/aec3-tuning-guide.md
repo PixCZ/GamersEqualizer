@@ -274,7 +274,7 @@ z dřívějších milníků. Čekání:
 | ------------------------- | ------------------------------------ | -------------- |
 | `130319` (reproduktory)   | kolem -37                            | -40            |
 | `210655` (reproduktory)   | kolem -50                            | -40            |
-| `115931`, `122520` (sluchátka) | mez (`<...`) nebo pod -50       | -40            |
+| `115931`, `122520` (sluchátka) | mez (`<...`)                    | -40            |
 | nahrávky bez reference    | `-`                                  | -40            |
 
 Když je `fallb` u některé nahrávky jiný než -40, změní se její čísla proti milníku 44: zapiš
@@ -292,7 +292,7 @@ V logu hledat:
 ```text
 [Chain] start: ... echo -43.5 dB under the reference (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB) ...
 [Chain] changed: echo not measured -> -21.5 dB under the reference, AEC fallback echo -40.0 -> -22.0
-[Chain] changed: echo -43.5 dB under the reference -> within the mic's noise (under -58.0 dB)
+[Chain] changed: echo not measured -> not confirmed (at most -35.0 dB under the reference)
 [Chain] 10 s: ... ERLE 7.9 dB, echo -43.5 dB under the reference (AEC fallback echo -40.0 dB, AEC mic gain +18.0 dB), ...
 [ApoLink] saving echo strength -43.5 dB under the reference
 [ApoLink] remembered echo strength for this mic/output: -43.5 dB under the reference
@@ -303,9 +303,8 @@ Co z logu od testera vyčíst:
 | V logu                                             | Znamená                                              |
 | -------------------------------------------------- | ---------------------------------------------------- |
 | `echo ... dB under the reference`                  | síla echa na jeho sestavě; čím blíž k 0, tím hůř     |
-| `within the mic's noise`                           | echo není měřitelné (sluchátka)                      |
+| `not confirmed (at most X dB ...)`                 | žádné echo, které by sledovalo referenci; X je jen horní mez a může to být hlas (sluchátka, řeč do hudby) |
 | `echo not measured` i po minutě hudby              | reference je tišší než -30 dBFS, nebo AEC neběží     |
-| `forgetting the remembered strength`               | echo zmizelo (sluchátka, ztlumeno): cache se smazala |
 | `AEC fallback echo` jiné než -40.0                 | echo je silnější než asi 32 dB pod referencí         |
 | `echo` skáče o víc než 6 dB tam a zpět             | měřič je nestabilní: poslat log, nelaď naslepo       |
 | `AEC mic gain` se mění víckrát za minutu           | zesílení kmitá: zvětšit `MIC_GAIN_HYSTERESIS_DB`     |
