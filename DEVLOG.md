@@ -2334,3 +2334,20 @@ Z celkových 22 nahrávek má 15 nahrávek referenci (7 nahrávek bez reference 
 - Jakékoliv snížení prahu (0.80, 0.70, 0.60, 0.50) vede k falešné detekci echa na nahrávce `124950` (hlas do hudby je mylně potvrzen jako echo na -28 dB a přenastavuje fallback na -34 dB) a na nahrávce `101152` (dozvuk místnosti způsobí dvojí přestavení fallbacku -40 -> -34 -> -40 dB).
 - V souladu se zásadou z milníku 49 (_"A wrong confirmation is what milestone 46 was; a missed one costs nothing against milestone 44"_): je nesrovnatelně bezpečnější nechat nahrávky se slabším či difúzním echem na výchozím odhadu -40 dB (kde AEC3 funguje optimálně), než snížením prahu riskovat falešné odhady echa z lidského hlasu a rozbití potlačení echa.
 - Konstanta `ECHO_FIT_MIN_CORRELATION` v kódu zůstává beze změny na hodnotě **0.90**.
+
+---
+
+## Milestone 53: Audio Engine Periods for Sidetone (2026-11-10)
+
+Measured shared-mode engine periods on the default microphone and default output via `period_probe` (`IAudioClient3::GetSharedModeEnginePeriod`).
+
+| Device     | Endpoint ID                                                 | Rate (Hz) | Default Frames | Default (ms) | Min Frames | Min (ms) | Max Frames | Step |
+| :--------- | :---------------------------------------------------------- | --------: | -------------: | -----------: | ---------: | -------: | ---------: | ---: |
+| Microphone | `{0.0.1.00000000}.{cf0a2270-1885-4dd6-82a5-f636e9efadd5}`  |     48000 |            480 |        10.00 |        480 |    10.00 |        480 |  480 |
+| Output     | `{0.0.0.00000000}.{b45cef56-a56b-49b0-88c0-4af057026718}`  |     48000 |            480 |        10.00 |        480 |    10.00 |        480 |  480 |
+
+### Observations
+- Both endpoints operate at 48000 Hz with a fixed period of 480 frames (10.00 ms).
+- Minimum engine period equals default period (10.00 ms); low-latency mode with shorter periods is not exposed by these drivers.
+- In shared mode, the sidetone latency budget starts with 10 ms mic engine period + 10 ms render engine period (plus ring queue margin).
+
