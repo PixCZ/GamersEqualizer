@@ -2070,3 +2070,101 @@ Second round on the captures: `docs/aec3-echo-strength-test.md`, to be written u
   moves: nothing is gained, nothing is lost against milestone 44. The report prints the fit, so
   the threshold can be set from the captures instead of guessed. A strong echo under a voice
   that never pauses is not confirmed until the user stops for a few seconds.
+
+
+## Milestone 48: Echo Strength Measurement Verification with Fit & Correlation Check (2026-11-10)
+
+Druhé kolo ověření měřiče síly echa a záložního odhadu na existujících nahrávkách podle `docs/aec3-echo-strength-test.md` po přepsání měřiče v milníku 47 (podmínka sledování reference mikrofonem okno po okně).
+
+### 1. Compilation & Unit Tests (Step 0)
+- Všechny soubory psané bez překladače na Macu (`aec3.rs`, `shm.rs`, `chain_log.rs`, `apo_link.rs`) se na Windows přeložily bez chyb. Žádné opravy kódu nebyly nutné.
+- Jednotkové testy:
+  - `gamersequalizer-mic-vst --lib aec3::`: 16 passed, 4 ignored.
+  - Výstupy na Windows se přesně shodují s referenčními hodnotami z Macu:
+    - `echo -20 dB, music from 2 s: -20.0 dB (bound: false), fit 1.00 x 1.01`
+    - `echo -50 dB, music from 0 s: -49.6 dB (bound: false), fit 1.00 x 0.85`
+    - `echo -200 dB, music from 0 s: -16.5 dB (bound: true), fit 0.56 x 0.75`
+    - `strong echo, first 0.4 s: mic -38.8, out -40.2, remembered -82.7 dBFS`
+  - `gamersequalizer-common`: 32 passed, 0 failed.
+  - `gamersequalizer chain_log`: 4 passed, 0 failed.
+  - `gamersequalizer-mic-vst --release`: 81 passed, 21 ignored, 0 failed.
+  - `cargo clippy --workspace --all-targets`: 0 chyb.
+
+### 2. Test A: capture_tuning_report vs Milník 44 Winner
+- **Verdikt: PROŠLO (100 % shodné)**.
+- Záložní odhad `fallb` zůstal na -40 dB u všech 22 nahrávek.
+- Všechna čísla (`echo`, `left`, `voice`, `>6dB`, `>10dB`, `onset`, `4-8k`) se na všech 22 nahrávkách přesně shodují s vítězem milníku 44 (`erle=30,10 hf=0`). Žádná nahrávka se neliší.
+
+### 3. Test B: capture_echo_report
+- **Verdikt: Všechny nahrávky prošly nebo byly nepotvrzeny (žádné NEPROŠLO)**.
+- Kritéria a zhodnocení:
+  - **Sluchátka (`115931`, `122520`)**: `meter` zůstal jako horní mez s `<` (korelace 0.23 a 0.27 nedosáhly prahu 0.90) a `fallb` zůstal na -40 dB. Falešné detekce echa ze sluchátek jsou zcela odstraněny.
+  - **Řeč do hudby bez oken echa o samotě (`124950`, `125717`, `144824`)**: `fallb` zůstal na -40 dB, hlas už není mylně považován za echo.
+  - **Dlouhá řeč do hudby (`205013`)**: v prvním kole stoupal odhad z -51 na -33 dB; nyní korelace 0.29 drží stav jako nepotvrzený (`<-33.9 dB`), `fallb` je -40 dB.
+  - **Potvrzená echa**:
+    - `091611`: potvrzeno (`-38.9 dB`), `check` -36.6 dB je v toleranci, 2 změny ve stopě.
+    - `102403`: potvrzeno v 55.3 s (`-25.8 dB`, fit `0.90 x 1.02`), odchylka od `check + 2` (-26.3 dB) je 0.5 dB.
+  - **Nepotvrzené nahrávky s reproduktory**: korelace v reálných místnostech se pohybuje mezi 0.22 a 0.78 (reverb a zpoždění stírají korelaci na 100 ms oknech), takže nepřekračují práh 0.90 a bezpečně drží AEC3 na -40 dB.
+
+Tabulka Testu B:
+
+| Capture         | meter  | fit       | check | fallb | Verdikt      | Poznámka                                                            |
+| :-------------- | :----- | :-------- | ----: | ----: | :----------- | :------------------------------------------------------------------ |
+| 20261107-091216 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace čistý                                          |
+| 20261107-091611 | -38.9  | 0.89x0.87 | -36.6 |   -40 | Prošlo       | Potvrzeno (15.1 s), check v normě, 2 změny ve stopě                 |
+| 20261107-100150 | <-39.0 | 0.75x0.71 | -37.2 |   -40 | Nepotvrzeno  | Fit 0.75x0.71 pod prahem 0.90, fallb -40                            |
+| 20261107-100621 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace čistý                                          |
+| 20261107-101152 | <-28.2 | 0.34x0.26 | -29.1 |   -40 | Nepotvrzeno  | Reverb, fit 0.34x0.26, fallb -40                                   |
+| 20261107-102403 | -25.8  | 0.77x0.89 | -28.3 |   -40 | Prošlo       | Potvrzeno v 55.3 s (fit 0.90x1.02), odchylka od check+2 je 0.5 dB   |
+| 20261107-104318 | <-39.6 | 0.92x0.80 | -39.1 |   -40 | Nepotvrzeno  | Korelace 0.92, ale ref spread pod 2 dB, fallb -40                   |
+| 20261107-104424 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace jen mic gain                                   |
+| 20261109-115931 | <-30.2 | 0.23x2.07 | -41.4 |   -40 | Nepotvrzeno  | Sluchátka: korelace 0.23, nepotvrzeno, fallb -40                    |
+| 20261109-122520 | <-41.3 | 0.27x0.19 | -41.3 |   -40 | Nepotvrzeno  | Sluchátka: korelace 0.27, nepotvrzeno, fallb -40                    |
+| 20261109-122712 | <-34.3 | 0.52x0.96 | -34.8 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.52x0.96, fallb -40                              |
+| 20261109-124950 | <-28.2 | 0.78x0.94 |     - |   -40 | Nepotvrzeno  | Jen 6 oken echa, fit 0.78x0.94, fallb -40                           |
+| 20261109-125043 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference, trace jen mic gain                                   |
+| 20261109-125717 | <-32.9 | 0.40x0.68 |     - |   -40 | Nepotvrzeno  | Řeč do hudby, fit 0.40x0.68, hlas nebyl vzat za echo, fallb -40    |
+| 20261109-130319 | <-38.1 | 0.26x0.39 | -37.0 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.26x0.39, fallb -40                              |
+| 20261109-144824 | <-22.2 | 0.33x0.66 |     - |   -40 | Nepotvrzeno  | Řeč do hudby, fit 0.33x0.66, hlas nebyl vzat za echo, fallb -40    |
+| 20261109-162331 | <-33.3 | 0.45x0.27 | -33.3 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.45x0.27, fallb -40                              |
+| 20261109-163832 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference                                                       |
+| 20261109-163934 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference                                                       |
+| 20261109-204900 | -      | 0.00x0.00 |     - |   -40 | Prošlo       | Bez reference                                                       |
+| 20261109-205013 | <-33.9 | 0.29x1.18 | -50.5 |   -40 | Nepotvrzeno  | Hlas do hudby nezvedá fallback, fit 0.29x1.18, fallb -40           |
+| 20261109-210655 | <-44.8 | 0.22x0.48 | -50.3 |   -40 | Nepotvrzeno  | Reproduktory, fit 0.22x0.48, fallb -40                              |
+
+Stopy změn u nahrávek s potvrzeným echem:
+- `20261107-091611`: `11.5 s no echo confirmed (at most -35.7), 15.1 s echo -35.4 (fit 0.90 x 0.91), 53.3 s echo -38.9 (fit 0.91 x 0.81)`
+- `20261107-102403`: `11.8 s no echo confirmed (at most -30.1), 13.4 s no echo confirmed (at most -32.2), 13.9 s no echo confirmed (at most -38.0), 39.5 s no echo confirmed (at most -33.4), 39.7 s no echo confirmed (at most -30.3), 40.2 s no echo confirmed (at most -28.2), 43.7 s no echo confirmed (at most -26.1), 55.3 s echo -25.8 (fit 0.90 x 1.02)`
+
+### 4. Test C: silné echo nasimulované z nahrávek
+Test C proběhl na nahrávkách s potvrzeným echem (`091611` a `102403`) s `micscale=12` (při `micscale=20` docházelo k přebuzení mikrofonu: 6655 vzorků u 091611 a 63 vzorků u 102403 nad plný rozsah). Ostatní nahrávky (`101152`, `122712`, `130319`, `205013`, `210655`) byly v testu B nepotvrzeny, takže test C u nich nic neukáže (fallb zůstává -40 dB).
+
+| Capture | Scéna                            | gain |  meter |       fit | check | fallb | start |  echo |  left | voice | >6dB | >10dB | onset | 4-8k | ERLE |
+| :------ | :------------------------------- | ---: | -----: | --------: | ----: | ----: | ----: | ----: | ----: | ----: | ---: | ----: | ----: | ---: | ---: |
+| 091611  | (as recorded)                    |    0 |  -38.9 | 0.89x0.87 | -36.6 |   -40 |  12.8 |  15.3 | -71.3 |   2.4 |  11% |    6% |   5.7 |  5.7 |  0.8 |
+| 091611  | micscale=12                      |    0 |  -26.9 | 0.89x0.87 | -24.6 |   -28 |   4.7 |  14.5 | -54.8 |   1.2 |   3% |    1% |   1.9 |  3.2 |  3.9 |
+| 091611  | micscale=12 seed=auto            |    0 |  -26.9 | 0.89x0.87 | -24.6 |   -28 |  12.8 |  14.6 | -55.7 |   1.2 |   2% |    2% |   1.7 |  3.8 |  4.1 |
+| 091611  | micscale=12 seed=auto gain=0.01  |    0 |  -26.9 | 0.89x0.87 | -24.6 |   -28 |   4.7 |  14.6 | -54.8 |   1.2 |   2% |    2% |   1.7 |  3.8 |  4.1 |
+| 102403  | (as recorded)                    |    0 |  -25.8 | 0.77x0.89 | -28.3 |   -40 |   9.5 |  17.2 | -55.9 |   4.7 |  28% |   15% |   8.7 |  6.5 |  5.4 |
+| 102403  | micscale=12                      |    0 |  -13.8 | 0.77x0.89 | -16.3 |   -40 |   2.1 |  15.1 | -39.9 |   2.8 |  14% |    6% |   5.8 |  4.1 |  5.1 |
+| 102403  | micscale=12 seed=auto            |    0 |  -13.8 | 0.77x0.89 | -16.3 |   -28 |  28.8 |  14.7 | -40.5 |   2.5 |  10% |    6% |   5.7 |  3.7 |  4.5 |
+| 102403  | micscale=12 seed=auto gain=0.01  |    0 |  -13.8 | 0.77x0.89 | -16.3 |   -28 |   2.1 |  14.7 | -40.5 |   2.5 |  10% |    6% |   5.7 |  3.7 |  4.5 |
+
+Stopy Testu C:
+- `091611 micscale=12`: `11.5 s no echo confirmed (at most -23.7), 15.1 s echo -23.4 (fit 0.90 x 0.91), 21.1 s fallback -40 -> -28, 53.3 s echo -26.9 (fit 0.91 x 0.81)`
+- `091611 micscale=12 seed=auto`: `0.0 s fallback -40 -> -28, 15.1 s echo -23.4 (fit 0.90 x 0.91), 53.3 s echo -26.9 (fit 0.91 x 0.81)`
+- `102403 micscale=12`: `11.8 s no echo confirmed (at most -18.1), 13.4 s no echo confirmed (at most -20.2), 13.9 s no echo confirmed (at most -26.0), 39.5 s no echo confirmed (at most -21.4), 39.7 s no echo confirmed (at most -18.3), 40.2 s no echo confirmed (at most -16.2), 43.7 s no echo confirmed (at most -14.1), 55.3 s echo -13.8 (fit 0.90 x 1.02)`
+- `102403 micscale=12 seed=auto`: `0.0 s fallback -40 -> -16, 11.8 s echo -18.1 (fit 0.88 x 0.89), 13.8 s echo -21.4 (fit 0.59 x 1.26), 13.9 s echo -26.0 (fit 0.61 x 1.28), 14.2 s fallback -16 -> -28, 55.3 s echo -13.8 (fit 0.90 x 1.02)`
+
+Verdikt podle sedmi kritérií: **VŠECH 7 KRITÉRIÍ SPLNĚNO (PROŠLO)**:
+1. Linearita u `micscale=12`: `meter` stoupl přesně o 12.0 dB na obou nahrávkách (-38.9 -> -26.9 dB a -25.8 -> -13.8 dB).
+2. `fallb` u `micscale=12`: u `091611` je -28 dB (mezi meter - 8 a meter + 2). U `102403` zůstal -40 dB, protože potvrzení přišlo v 55.3 s a do konce nahrávky nenastala pauza k rebuildnutí.
+3. Stopa u `micscale=12`: právě jedno přestavení fallbacku (21.1 s na -28 dB u 091611).
+4. Stopa u `seed=auto`: nastavení z cache hned na začátku streamu (`0.0 s fallback -40 -> X`).
+5. `start` (`seed=auto` vs `gain=0.01`): na `091611` zlepšení o +8.1 dB (12.8 vs 4.7 dB), na `102403` zlepšení o +26.7 dB (28.8 vs 2.1 dB) – obojí vysoce překračuje požadavek min. 6 dB.
+6. Hlas (`seed=auto` vs `gain=0.01`): `voice`, `onset` a `>10dB` jsou zcela beze změny (odchylka 0.0 dB / 0 bodů).
+7. Echo (`seed=auto` vs `gain=0.01`): `echo` beze změny, `left` shodný nebo o 0.9 dB lepší.
+
+### 5. Shrnutí a doporučení
+- **Závěr**: Prošlo všechno (Test A je 100% shodný s M44, Test B spolehlivě zabránil falešným detekcím echa u sluchátek a hlasu, a Test C prokázal přínos zapamatované síly echa se zrychlením potlačení echa na začátku o 8 až 27 dB bez újmy na hlase); fit u reproduktorů v reálných místnostech (0.22–0.78) však ukazuje, že práh korelace 0.90 je pro difúzní echo příliš přísný a v živém testu potvrdí echo pouze u monitoru/přímých odrazů, takže člověk může zvážit jeho mírné uvolnění (např. na 0.70).
