@@ -6,7 +6,9 @@ use super::state::AppState;
 use super::theme::{self, icons};
 use crate::app_log::{self, LineLevel, LogLine};
 use crate::i18n::{tk, tr, trf};
+use crate::output_eq::autoeq::downloads_dir;
 use egui::{Color32, RichText, Ui};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -57,6 +59,8 @@ pub struct LogView {
   layout_job: egui::text::LayoutJob,
   /// Remembers theme so switching dark/light updates line colors in the cached layout.
   dark_mode: Option<bool>,
+  /// Result of the last "Save a copy to send": where it went, or why it failed.
+  saved: Option<String>,
 }
 
 impl Default for LogView {
@@ -77,6 +81,7 @@ impl Default for LogView {
       buffer: String::new(),
       layout_job: egui::text::LayoutJob::default(),
       dark_mode: None,
+      saved: None,
     }
   }
 }
@@ -137,6 +142,16 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     if ui.button(format!("📂  {}", tr("Open log folder"))).clicked() {
       open_folder();
     }
+    let save = ui.button(tr("Save a copy to send")).on_hover_text(tr(
+      "Copies the log into your Downloads folder and shows it there. The log itself sits in a hidden folder and \
+       keeps changing while the app runs, so a browser or a messenger may refuse to upload it.",
+    ));
+    if save.clicked() {
+      view.saved = Some(match save_copy() {
+        Ok(path) => trf("Saved: {}", &[&path.display()]),
+        Err(e) => trf("The copy could not be saved: {}", &[&e]),
+      });
+    }
     if !view.at_end
       && ui
         .button(format!("⬇  {}", tr("Newest")))
@@ -146,6 +161,9 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
       view.jump_to_end = true;
     }
   });
+  if let Some(saved) = view.saved.as_deref() {
+    ui.label(RichText::new(saved).small());
+  }
   if let Some(e) = view.error.as_deref() {
     ui.label(RichText::new(trf("Log file not readable yet: {}", &[&e])).color(theme::palette(ui).warn));
   }
@@ -231,6 +249,21 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   let has_selection = out.inner.cursor_range.is_some_and(|r| r.primary != r.secondary);
   let is_pointer_down = out.inner.response.is_pointer_button_down_on();
   view.selecting = has_selection || is_pointer_down;
+}
+
+/// Copies the log to Downloads under a new, time-stamped name and shows it in Explorer: a
+/// file that does not change and sits where upload dialogs start.
+fn save_copy() -> Result<PathBuf, String> {
+  let dir = downloads_dir().ok_or("no Downloads folder")?;
+  let name = format!("GamersEqualizer-log-{}.txt", jiff::Zoned::now().strftime("%Y%m%d-%H%M%S"));
+  let target = dir.join(name);
+  std::fs::copy(app_log::log_path(), &target).map_err(|e| e.to_string())?;
+  let select: Vec<u16> = format!("/select,\"{}\"", target.display()).encode_utf16().chain(std::iter::once(0)).collect();
+  // SAFETY: both strings are NUL-terminated and outlive the call.
+  unsafe {
+    ShellExecuteW(None, w!("open"), w!("explorer.exe"), PCWSTR(select.as_ptr()), None, SW_SHOWNORMAL);
+  }
+  Ok(target)
 }
 
 fn open_folder() {
