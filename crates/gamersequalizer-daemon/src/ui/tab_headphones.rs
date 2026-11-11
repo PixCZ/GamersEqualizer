@@ -56,10 +56,6 @@ struct Candidate {
 #[derive(Default)]
 pub struct HeadphonesUi {
   pub filter: String,
-  /// Profile the user clicked "Delete" on, waiting for "Yes".
-  pub confirm_delete: Option<(OutputLayer, String)>,
-  /// Result of the last delete (where the file went, or the error).
-  pub notice: Option<String>,
   wizard_open: Option<bool>,
   step: Step,
   /// Step to return to from Review.
@@ -123,9 +119,12 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
 
   theme::card(ui, |ui| {
     my_headphones_row(ui, state);
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| super::profile_bar::render_output_buttons(ui, state, OutputLayer::Headphone));
+    super::profile_bar::render_output_notice(ui, state, OutputLayer::Headphone);
     if state.output_eq.headphone_profile().is_some() {
       ui.add_space(4.0);
-      super::tab_eq::volume_and_delete_row(ui, state, OutputLayer::Headphone);
+      super::tab_eq::volume_row(ui, state, OutputLayer::Headphone);
     }
   });
 
@@ -142,6 +141,7 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
       changed = band_editor(ui, "hp_eq", &mut profile.bands, MAX_OUT_EQ_BANDS / 2, COLOR, &[], height);
     } else {
       response_plot(ui, "hp_response", &[], COLOR, height);
+      ui.label(theme::caption(tr("Select a headphone profile above, click \"Add from AutoEQ…\", or click \"New…\".")));
     }
     if changed {
       state.apply_output_eq();
@@ -177,10 +177,11 @@ fn my_headphones_row(ui: &mut Ui, state: &mut AppState) {
       }
     }
     if let Some(choice) = picked {
+      state.out_eq_unsaved = None;
       state.output_eq_do(|eq, shm| eq.select_headphone(choice, shm));
     }
     if ui
-      .button(format!("➕  {}", tr("Add headphones")))
+      .button(theme::with_icon(icons::HEADPHONES, tr("Add from AutoEQ…")))
       .on_hover_text(tr("Step-by-step: get the correction for your model from AutoEQ"))
       .clicked()
     {
@@ -439,7 +440,7 @@ fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     ui.label(tr("Name:"));
     ui.add(egui::TextEdit::singleline(&mut candidate.name).desired_width(280.0));
   });
-  let exists = state.output_eq.headphone_profiles.iter().any(|p| p.name == candidate.name.trim());
+  let exists = state.output_eq.layer_profile_exists(OutputLayer::Headphone, &candidate.name);
   if exists {
     theme::status_line(ui, Severity::Warning, tr("A profile with this name exists and will be replaced."));
   }

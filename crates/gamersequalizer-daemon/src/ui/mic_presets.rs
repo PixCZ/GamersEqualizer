@@ -23,7 +23,7 @@ const LOW_CUT_SLOPE_DB: u8 = 48;
 const HIGH_CUT_SLOPE_DB: u8 = 24;
 /// The user's own presets, next to the Sonar imports (`profiles/mic`), never mixed with them.
 const USER_DIR: &str = "mic_user";
-const SHARE_HEADER: &str = "# GamersEqualizer microphone preset";
+const SHARE_HEADER: &str = "# GamersEqualizer EQ preset";
 const SHARE_NAME_PREFIX: &str = "# Name:";
 
 /// The default when no saved mic EQ exists: cut what is not voice, change nothing else.
@@ -95,7 +95,15 @@ pub fn check_new_name(list: &[MicPreset], name: &str) -> NameCheck {
   if name.is_empty() {
     return NameCheck::Empty;
   }
-  match find(list, name) {
+  let sanitized = ProfileStorage::sanitize_filename(name);
+  let hit = find(list, name).or_else(|| {
+    list.iter().find(|p| {
+      p.profile.name.eq_ignore_ascii_case(name)
+        || (p.source == PresetSource::User
+          && ProfileStorage::sanitize_filename(&p.profile.name).eq_ignore_ascii_case(&sanitized))
+    })
+  });
+  match hit {
     None => NameCheck::Ok,
     Some(p) if p.source == PresetSource::User => NameCheck::Overwrite,
     Some(p) => NameCheck::Taken(p.source),
@@ -138,6 +146,10 @@ pub fn to_share_text(profile: &ParametricProfile) -> String {
 }
 
 pub fn from_share_text(text: &str) -> Result<SharedPreset, String> {
+  from_share_text_for(text, MAX_EQ_BANDS)
+}
+
+pub fn from_share_text_for(text: &str, max_slots: usize) -> Result<SharedPreset, String> {
   let name = text
     .lines()
     .map(str::trim)
@@ -151,10 +163,9 @@ pub fn from_share_text(text: &str) -> Result<SharedPreset, String> {
     notes.push(trf("{} lines were not understood and are skipped.", &[&parsed.skipped]));
   }
   let mut bands = collapse_slopes(&parsed.bands);
-  if slots_used(&bands) > MAX_EQ_BANDS {
-    notes
-      .push(trf("Too many filters for the microphone EQ (room for {}): the last ones are dropped.", &[&MAX_EQ_BANDS]));
-    while slots_used(&bands) > MAX_EQ_BANDS {
+  if slots_used(&bands) > max_slots {
+    notes.push(trf("Too many filters (room for {}): the last ones are dropped.", &[&max_slots]));
+    while slots_used(&bands) > max_slots {
       bands.pop();
     }
   }

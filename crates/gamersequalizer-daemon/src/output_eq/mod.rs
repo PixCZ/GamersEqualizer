@@ -52,6 +52,36 @@ const PREAMP_RANGE_DB: (f32, f32) = (-30.0, 12.0);
 /// Deleted profiles are moved here (recoverable), not removed.
 const DELETED_DIR: &str = "_deleted";
 
+/// Which layer of the output EQ a profile / edit belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputLayer {
+  Headphone,
+  Game,
+  Chat,
+  Media,
+}
+
+impl OutputLayer {
+  /// The stream channel of a chat / media layer.
+  pub fn bus(self) -> Option<StreamBus> {
+    match self {
+      OutputLayer::Chat => Some(StreamBus::Chat),
+      OutputLayer::Media => Some(StreamBus::Media),
+      OutputLayer::Headphone | OutputLayer::Game => None,
+    }
+  }
+
+  /// Profile storage category for game / chat / media (None = headphones folder).
+  pub fn vad(self) -> Option<VadType> {
+    match self {
+      OutputLayer::Headphone => None,
+      OutputLayer::Game => Some(VadType::Game),
+      OutputLayer::Chat => Some(VadType::Chat),
+      OutputLayer::Media => Some(VadType::Media),
+    }
+  }
+}
+
 /// A foreground app seen recently, for "assign this app to a profile".
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecentApp {
@@ -191,6 +221,53 @@ impl OutputEq {
     list.iter_mut().find(|p| p.name == name)
   }
 
+  pub fn layer_profiles(&self, layer: OutputLayer) -> &[ParametricProfile] {
+    match layer {
+      OutputLayer::Headphone => &self.headphone_profiles,
+      OutputLayer::Game => &self.game_profiles,
+      OutputLayer::Chat => &self.chat_profiles,
+      OutputLayer::Media => &self.media_profiles,
+    }
+  }
+
+  pub fn layer_profile_name(&self, layer: OutputLayer) -> Option<&str> {
+    match layer {
+      OutputLayer::Headphone => self.headphone_profile_name(),
+      OutputLayer::Game => self.game_profile_name(),
+      OutputLayer::Chat => self.bus_profile_name(StreamBus::Chat),
+      OutputLayer::Media => self.bus_profile_name(StreamBus::Media),
+    }
+  }
+
+  pub fn layer_profile(&self, layer: OutputLayer) -> Option<&ParametricProfile> {
+    match layer {
+      OutputLayer::Headphone => self.headphone_profile(),
+      OutputLayer::Game => self.game_profile(),
+      OutputLayer::Chat => self.bus_profile(StreamBus::Chat),
+      OutputLayer::Media => self.bus_profile(StreamBus::Media),
+    }
+  }
+
+  pub fn layer_profile_mut(&mut self, layer: OutputLayer) -> Option<&mut ParametricProfile> {
+    match layer {
+      OutputLayer::Headphone => self.headphone_profile_mut(),
+      OutputLayer::Game => self.game_profile_mut(),
+      OutputLayer::Chat => self.bus_profile_mut(StreamBus::Chat),
+      OutputLayer::Media => self.bus_profile_mut(StreamBus::Media),
+    }
+  }
+
+  /// True when a profile in `layer` already uses this name (or the same file on Windows).
+  pub fn layer_profile_exists(&self, layer: OutputLayer, name: &str) -> bool {
+    let trimmed = name.trim();
+    !trimmed.is_empty() && self.layer_profiles(layer).iter().any(|p| same_profile_slot(&p.name, trimmed))
+  }
+
+  /// Executable name of the currently detected game when known from recent foreground events.
+  pub fn active_game_exe(&self, label: &str) -> Option<String> {
+    self.recent_apps.iter().find(|a| a.label == label).map(|a| a.exe_name.clone())
+  }
+
   /// Headphone + channel profile curves, volume change and peak after it, i.e. what a
   /// paired chat/media app sounds like.
   pub fn bus_result(&self, bus: StreamBus) -> (CombinedEngineResult, f32, f32) {
@@ -259,10 +336,87 @@ impl OutputEq {
     self.apply(shm);
   }
 
+  /// Save the active profile's edits in `layer` (after a slider is released).
+  pub fn save_layer_profile(&mut self, layer: OutputLayer, shm: Option<&ShmHeader>) {
+    match layer {
+      OutputLayer::Headphone => self.save_headphone_profile(shm),
+      OutputLayer::Game => self.save_game_profile(shm),
+      OutputLayer::Chat => self.save_bus_profile(StreamBus::Chat, shm),
+      OutputLayer::Media => self.save_bus_profile(StreamBus::Media, shm),
+    }
+  }
+
+  pub fn delete_layer_profile(
+    &mut self,
+    layer: OutputLayer,
+    name: &str,
+    shm: Option<&ShmHeader>,
+  ) -> Result<PathBuf, String> {
+    match layer {
+      OutputLayer::Headphone => self.delete_headphone_profile(name, shm),
+      OutputLayer::Game => self.delete_game_profile(name, shm),
+      OutputLayer::Chat => self.delete_bus_profile(StreamBus::Chat, name, shm),
+      OutputLayer::Media => self.delete_bus_profile(StreamBus::Media, name, shm),
+    }
+  }
+
+  /// Add or replace a profile in `layer` and select it right away.
+  pub fn add_layer_profile(
+    &mut self,
+    layer: OutputLayer,
+    mut profile: ParametricProfile,
+    active_game_exe: Option<&str>,
+    shm: Option<&ShmHeader>,
+  ) -> Result<(), String> {
+    let name = profile.name.trim().to_string();
+    if name.is_empty() {
+      return Err("profile name cannot be empty".into());
+    }
+    profile.name = name.clone();
+    for b in &mut profile.bands {
+      b.clamp_parameters();
+    }
+    if let Some(vad) = layer.vad() {
+      profile.vad_type = vad;
+      self.storage.save_profile(&profile).map_err(|e| e.to_string())?;
+    } else {
+      self.save_headphone_to_disk(&profile)?;
+    }
+
+    let list = match layer {
+      OutputLayer::Headphone => &mut self.headphone_profiles,
+      OutputLayer::Game => &mut self.game_profiles,
+      OutputLayer::Chat => &mut self.chat_profiles,
+      OutputLayer::Media => &mut self.media_profiles,
+    };
+    list.retain(|p| !same_profile_slot(&p.name, &name));
+    list.push(profile);
+    list.sort_by_key(|p| p.name.to_lowercase());
+
+    match layer {
+      OutputLayer::Headphone => self.select_headphone(Some(name), shm),
+      OutputLayer::Game => {
+        if let Some(exe) = active_game_exe {
+          self.bind_exe(exe, Some(name), shm);
+        } else if self.active_game.as_ref().is_none_or(|g| g.profile.is_empty()) {
+          self.settings.fallback_game_profile = Some(name);
+          self.save_settings(shm);
+        } else {
+          self.save_settings(shm);
+        }
+      }
+      OutputLayer::Chat => self.select_bus_profile(StreamBus::Chat, Some(name), shm),
+      OutputLayer::Media => self.select_bus_profile(StreamBus::Media, Some(name), shm),
+    }
+    Ok(())
+  }
+
   /// Save the active headphone profile's edits (after a slider is released).
   pub fn save_headphone_profile(&mut self, shm: Option<&ShmHeader>) {
     if let Some(p) = self.headphone_profile().cloned() {
-      self.save_headphone(&p);
+      if let Err(e) = self.save_headphone_to_disk(&p) {
+        warn!("[OutputEq] {e}");
+      }
     }
     self.notify(shm);
   }
@@ -324,11 +478,9 @@ impl OutputEq {
 
   /// Add or replace a headphone profile (AutoEQ import) and use it on the current output.
   pub fn add_headphone_profile(&mut self, profile: ParametricProfile, shm: Option<&ShmHeader>) {
-    self.save_headphone(&profile);
-    self.headphone_profiles.retain(|p| p.name != profile.name);
-    self.headphone_profiles.push(profile.clone());
-    self.headphone_profiles.sort_by_key(|p| p.name.to_lowercase());
-    self.select_headphone(Some(profile.name), shm);
+    if let Err(e) = self.add_layer_profile(OutputLayer::Headphone, profile, None, shm) {
+      warn!("[OutputEq] could not add headphone profile: {e}");
+    }
   }
 
   pub fn select_headphone(&mut self, name: Option<String>, shm: Option<&ShmHeader>) {
@@ -521,15 +673,12 @@ impl OutputEq {
     }
   }
 
-  fn save_headphone(&self, profile: &ParametricProfile) {
+  fn save_headphone_to_disk(&self, profile: &ParametricProfile) -> Result<(), String> {
     let dir = self.storage.get_headphones_directory();
     let path = dir.join(format!("{}.json", ProfileStorage::sanitize_filename(&profile.name)));
-    let result = serde_json::to_string_pretty(profile)
-      .map_err(std::io::Error::other)
-      .and_then(|json| settings::write_atomic(&path, &json));
-    if let Err(e) = result {
-      warn!("[OutputEq] could not save {}: {e}", path.display());
-    }
+    serde_json::to_string_pretty(profile)
+      .map_err(|e| e.to_string())
+      .and_then(|json| settings::write_atomic(&path, &json).map_err(|e| format!("could not save {}: {e}", path.display())))
   }
 
   fn move_to_deleted(&self, path: &std::path::Path) -> Result<PathBuf, String> {
@@ -600,6 +749,12 @@ impl OutputEq {
     let own_preamp = self.volume_change(hp, own).1;
     (stages, own_preamp - out_preamp_db)
   }
+}
+
+/// True when two profile names occupy the same file on Windows (case-insensitive, sanitized).
+fn same_profile_slot(a: &str, b: &str) -> bool {
+  a.eq_ignore_ascii_case(b)
+    || ProfileStorage::sanitize_filename(a).eq_ignore_ascii_case(&ProfileStorage::sanitize_filename(b))
 }
 
 /// Mean gain (dB) of the combined curve over the loudness band.
@@ -793,6 +948,43 @@ mod tests {
     owner.output_device = None;
     owner.tick(true, Some("dev-2".into()), Some(&h));
     assert_eq!(owner.headphone_profile_name(), None, "headphone profile is per output device");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn layer_add_save_and_delete_works_across_all_output_layers() {
+    let (mut eq, dir) = engine("layers_crud");
+    let h = header();
+    assert!(eq.add_layer_profile(OutputLayer::Chat, ParametricProfile::new("   ", VadType::Chat), None, None).is_err());
+
+    let mut chat = ParametricProfile::new("Discord", VadType::Chat);
+    chat.bands.push(BiquadBand { frequency: 2000.0, gain_db: 2.5, ..BiquadBand::default() });
+    eq.add_layer_profile(OutputLayer::Chat, chat, None, Some(&h)).unwrap();
+    assert_eq!(eq.layer_profile_name(OutputLayer::Chat), Some("Discord"));
+    assert!(eq.layer_profile_exists(OutputLayer::Chat, "discord"));
+
+    eq.layer_profile_mut(OutputLayer::Chat).unwrap().gain_db = -1.5;
+    eq.save_layer_profile(OutputLayer::Chat, Some(&h));
+
+    let media = ParametricProfile::new("Music", VadType::Media);
+    eq.add_layer_profile(OutputLayer::Media, media, None, Some(&h)).unwrap();
+    assert_eq!(eq.layer_profile_name(OutputLayer::Media), Some("Music"));
+
+    // Game without active game selects as fallback; with active game exe binds that exe.
+    let fallback = ParametricProfile::new("General", VadType::Game);
+    eq.add_layer_profile(OutputLayer::Game, fallback, None, Some(&h)).unwrap();
+    assert_eq!(eq.settings.fallback_game_profile.as_deref(), Some("General"));
+
+    let game_custom = ParametricProfile::new("My CS2", VadType::Game);
+    eq.add_layer_profile(OutputLayer::Game, game_custom, Some("cs2.exe"), Some(&h)).unwrap();
+    assert_eq!(eq.settings.bindings.get("cs2.exe").map(String::as_str), Some("My CS2"));
+
+    let reloaded = OutputEq::new(ProfileStorage::new(&dir));
+    assert_eq!(reloaded.layer_profile(OutputLayer::Chat).unwrap().gain_db, -1.5);
+    assert!(reloaded.layer_profile_exists(OutputLayer::Media, "Music"));
+
+    eq.delete_layer_profile(OutputLayer::Chat, "Discord", Some(&h)).unwrap();
+    assert_eq!(eq.layer_profile_name(OutputLayer::Chat), None);
     let _ = std::fs::remove_dir_all(&dir);
   }
 }

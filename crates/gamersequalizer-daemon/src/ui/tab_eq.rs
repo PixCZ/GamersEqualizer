@@ -77,8 +77,16 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
 
   // Graph: the game profile (editable dots) over the headphone correction and the sum.
   theme::card(ui, |ui| {
+    ui.horizontal_wrapped(|ui| {
+      ui.label(tr("Profile"));
+      let current = state.output_eq.game_profile_name().map(tr).unwrap_or_else(|| tr("None (no game EQ)"));
+      ui.label(theme::strong(current, 14.0));
+      super::profile_bar::render_output_buttons(ui, state, OutputLayer::Game);
+    });
+    super::profile_bar::render_output_notice(ui, state, OutputLayer::Game);
     if state.output_eq.game_profile().is_some() {
-      volume_and_delete_row(ui, state, OutputLayer::Game);
+      ui.add_space(4.0);
+      volume_row(ui, state, OutputLayer::Game);
       ui.add_space(4.0);
     }
     let r = &state.output_eq.result;
@@ -147,13 +155,14 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
         let c = theme::adapt(ui, GAME_COLOR);
         theme::icon_label(ui, icons::GAME, 16.0, c, theme::strong(trf("Detected: {}", &[&game.label]), 14.0));
         // The exe of the active game, to bind it.
-        let exe = state.output_eq.recent_apps.iter().find(|a| a.label == game.label).map(|a| a.exe_name.clone());
+        let exe = state.output_eq.active_game_exe(&game.label);
         ui.label(tr("→ profile:"));
         let current = (!game.profile.is_empty()).then_some(game.profile.as_str());
         if let Some(exe) = exe {
           if let Some(choice) =
             profile_picker(ui, "active_game_profile", current, &refs, tr("(none)"), &mut filter, 240.0)
           {
+            state.out_eq_unsaved = None;
             state.output_eq_do(|eq, shm| eq.bind_exe(&exe, Some(choice.unwrap_or_default()), shm));
           }
         } else {
@@ -164,6 +173,7 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
           .on_hover_text(tr("Forget the detected game until it comes to the foreground again"))
           .clicked()
         {
+          state.out_eq_unsaved = None;
           state.output_eq_do(|eq, shm| eq.clear_active_game(shm));
         }
       }
@@ -184,6 +194,7 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
       &mut filter,
       240.0,
     ) {
+      state.out_eq_unsaved = None;
       state.output_eq.settings.fallback_game_profile = choice;
       state.output_eq_do(|eq, shm| eq.save_settings(shm));
     }
@@ -238,26 +249,12 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
   state.headphones_ui.filter = filter;
 }
 
-/// Volume of the shown profile, the loudness-matching switch, the resulting volume change,
-/// and "Delete" with a confirmation. Used by the Headphones, Game, Chat and Media tabs.
-pub fn volume_and_delete_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer) {
-  let name = match layer {
-    OutputLayer::Headphone => state.output_eq.headphone_profile_name(),
-    OutputLayer::Game => state.output_eq.game_profile_name(),
-    OutputLayer::Chat => state.output_eq.bus_profile_name(StreamBus::Chat),
-    OutputLayer::Media => state.output_eq.bus_profile_name(StreamBus::Media),
-  }
-  .map(str::to_string)
-  .unwrap_or_default();
-
+/// Volume of the shown profile, the loudness-matching switch, and the resulting volume change.
+/// Used by the Headphones, Game, Chat and Media tabs.
+pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer) {
   ui.horizontal_wrapped(|ui| {
     ui.label(tr("Volume of this profile"));
-    let profile = match layer {
-      OutputLayer::Headphone => state.output_eq.headphone_profile_mut(),
-      OutputLayer::Game => state.output_eq.game_profile_mut(),
-      OutputLayer::Chat => state.output_eq.bus_profile_mut(StreamBus::Chat),
-      OutputLayer::Media => state.output_eq.bus_profile_mut(StreamBus::Media),
-    };
+    let profile = state.output_eq.layer_profile_mut(layer);
     let mut changed = false;
     if let Some(p) = profile {
       changed = ui
@@ -303,49 +300,6 @@ pub fn volume_and_delete_row(ui: &mut Ui, state: &mut AppState, layer: OutputLay
     ));
   }
   ui.label(theme::caption(summary));
-
-  // Delete with confirmation.
-  let pending = state.headphones_ui.confirm_delete.clone().filter(|(l, _)| *l == layer);
-  match pending {
-    None => {
-      if ui.button(format!("🗑  {}", tr("Delete this profile"))).clicked() {
-        state.headphones_ui.confirm_delete = Some((layer, name.clone()));
-        state.headphones_ui.notice = None;
-      }
-    }
-    Some((_, target)) => {
-      theme::info_bar(ui, Severity::Warning, |ui| {
-        let mut text =
-          trf("Delete \"{}\"? The file moves to profiles\\_deleted and can be restored from there.", &[&tr(&target)]);
-        if layer != OutputLayer::Headphone && SonarDbReader::default_db_exists() {
-          text.push(' ');
-          text.push_str(tr("\"Import from Sonar DB\" brings Sonar presets back."));
-        }
-        ui.label(text);
-        ui.horizontal(|ui| {
-          if ui.add(theme::accent_button(ui, tr("Yes, delete"))).clicked() {
-            let result = state.output_eq_do(|eq, shm| match layer {
-              OutputLayer::Headphone => eq.delete_headphone_profile(&target, shm),
-              OutputLayer::Game => eq.delete_game_profile(&target, shm),
-              OutputLayer::Chat => eq.delete_bus_profile(StreamBus::Chat, &target, shm),
-              OutputLayer::Media => eq.delete_bus_profile(StreamBus::Media, &target, shm),
-            });
-            state.headphones_ui.notice = Some(match result {
-              Ok(path) => trf("Deleted \"{}\" (moved to {}).", &[&target, &path.display()]),
-              Err(e) => trf("Could not delete \"{}\": {}", &[&target, &e]),
-            });
-            state.headphones_ui.confirm_delete = None;
-          }
-          if ui.button(tr("Cancel")).clicked() {
-            state.headphones_ui.confirm_delete = None;
-          }
-        });
-      });
-    }
-  }
-  if let Some(notice) = state.headphones_ui.notice.as_deref() {
-    ui.label(RichText::new(notice).small());
-  }
 }
 
 fn reimport_sonar(state: &mut AppState) {
@@ -419,11 +373,11 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
     )));
     ui.add_space(4.0);
 
-    // Profile picker; none = flat (headphone correction only).
+    // Profile picker + shared profile actions; none = flat (headphone correction only).
     let names: Vec<String> = state.output_eq.bus_profiles(bus).iter().map(|p| p.name.clone()).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let mut filter = std::mem::take(&mut state.headphones_ui.filter);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
       ui.label(tr("Profile"));
       let current = state.output_eq.bus_profile_name(bus).map(str::to_string);
       if let Some(choice) = profile_picker(
@@ -433,17 +387,20 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
         &refs,
         tr("Flat (headphone correction only)"),
         &mut filter,
-        280.0,
+        260.0,
       ) {
+        state.out_eq_unsaved = None;
         state.output_eq_do(|eq, shm| eq.select_bus_profile(bus, choice, shm));
       }
+      super::profile_bar::render_output_buttons(ui, state, layer);
     });
     state.headphones_ui.filter = filter;
+    super::profile_bar::render_output_notice(ui, state, layer);
   });
 
   theme::card(ui, |ui| {
     if state.output_eq.bus_profile(bus).is_some() {
-      volume_and_delete_row(ui, state, layer);
+      volume_row(ui, state, layer);
       ui.add_space(4.0);
     }
     let (result, preamp, _) = state.output_eq.bus_result(bus);
@@ -464,6 +421,7 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
         (tr("Combined (what you hear)"), combined.as_slice(), COMBINED_COLOR, 2.2),
       ];
       curves_plot(ui, "bus_eq_plot", &generate_log_frequencies(), &curves, Some(preamp), height);
+      ui.label(theme::caption(tr("No profile selected (flat). Pick one above or click \"New…\" to create one.")));
     }
     legend(
       ui,

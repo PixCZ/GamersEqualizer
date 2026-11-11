@@ -5,7 +5,6 @@ use super::tab_mic::render_tab_mic;
 use super::tab_mixer::render_tab_mixer;
 use crate::win_audio::WinAudioSystem;
 use eframe::egui;
-use gamersequalizer_common::streams::StreamBus;
 use std::time::{Duration, Instant};
 
 /// How often the window checks that the background service still runs (one mutex open).
@@ -80,17 +79,9 @@ impl eframe::App for GamersEqualizerApp {
     self.state.output_eq_do(|eq, shm| eq.tick(owner, output, shm));
     self.state.active_game_name = self.state.output_eq.active_game.as_ref().map(|g| g.label.clone());
     // Save an output EQ band edit once the slider is released, not on every drag frame.
-    if self.state.out_eq_unsaved.is_some() && !ctx.input(|i| i.pointer.any_down()) {
-      match self.state.out_eq_unsaved.take() {
-        Some(super::state::OutputLayer::Headphone) => self.state.output_eq_do(|eq, shm| eq.save_headphone_profile(shm)),
-        Some(super::state::OutputLayer::Game) => self.state.output_eq_do(|eq, shm| eq.save_game_profile(shm)),
-        Some(super::state::OutputLayer::Chat) => {
-          self.state.output_eq_do(|eq, shm| eq.save_bus_profile(StreamBus::Chat, shm))
-        }
-        Some(super::state::OutputLayer::Media) => {
-          self.state.output_eq_do(|eq, shm| eq.save_bus_profile(StreamBus::Media, shm))
-        }
-        None => {}
+    if !ctx.input(|i| i.pointer.any_down()) {
+      if let Some(layer) = self.state.out_eq_unsaved.take() {
+        self.state.output_eq_do(|eq, shm| eq.save_layer_profile(layer, shm));
       }
     }
 

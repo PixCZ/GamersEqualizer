@@ -729,7 +729,7 @@ fn model_name(m: DenoiseModel) -> String {
 fn eq_section(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::EQUALIZER, EQ_COLOR)), tr("Stage 3: Voice parametric EQ"));
-    super::mic_preset_bar::render_preset_bar(ui, state);
+    super::profile_bar::render_mic_bar(ui, state);
     ui.label(theme::caption(tr(
       "Applied after noise suppression, before the boost/limiter. Changes are live and kept across restarts; \"Save as…\" keeps them as a named preset.",
     )));

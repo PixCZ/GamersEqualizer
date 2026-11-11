@@ -1,4 +1,4 @@
-use crate::output_eq::OutputEq;
+pub use crate::output_eq::{OutputEq, OutputLayer};
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
@@ -112,25 +112,6 @@ pub enum ActiveTab {
 /// How long the double-talk indicator stays visible after the last detection.
 const DOUBLE_TALK_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputLayer {
-  Headphone,
-  Game,
-  Chat,
-  Media,
-}
-
-impl OutputLayer {
-  /// The stream channel of a chat / media layer.
-  pub fn bus(self) -> Option<StreamBus> {
-    match self {
-      OutputLayer::Chat => Some(StreamBus::Chat),
-      OutputLayer::Media => Some(StreamBus::Media),
-      OutputLayer::Headphone | OutputLayer::Game => None,
-    }
-  }
-}
-
 pub struct AppState {
   pub active_tab: ActiveTab,
   pub endpoints: Vec<AudioEndpointInfo>,
@@ -166,7 +147,7 @@ pub struct AppState {
   apo_view_tried: Option<std::time::Instant>,
 
   pub available_mic_profiles: Vec<super::mic_presets::MicPreset>,
-  pub mic_preset_ui: super::mic_preset_bar::MicPresetUi,
+  pub profile_bar: super::profile_bar::ProfileBarUi,
 
   // Shared Memory handle to VST / Daemon
   shm_handle: Option<HANDLE>,
@@ -240,7 +221,7 @@ impl AppState {
       apo_view: None,
       apo_view_tried: None,
       available_mic_profiles,
-      mic_preset_ui: Default::default(),
+      profile_bar: Default::default(),
       shm_handle,
       shm_ptr,
       storage,
