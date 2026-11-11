@@ -83,7 +83,8 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
 
 - Installed layout: the installer (one admin prompt) copies the exe to `%ProgramFiles%\GamersEqualizer\`
   next to `apo\gamersequalizer_apo.dll`. A copy started from elsewhere then starts the installed one
-  (`handover_target` in `apo_install.rs`), and "start with Windows" points there. A dev build
+  (`handover_target` in `apo_install.rs`), and "start with Windows" points there. A newer copy ends
+  an older running one first (`takeover.rs`), so an update is "unpack, start, click Update". A dev build
   (`target\<profile>\`) runs in place and is never installed. User data stays in `%APPDATA%\GamersEqualizer`.
 
 - `scripts/package.ps1`: final build from scratch (`dist` + `apo-dist` profiles, fat LTO, minutes; verifies

@@ -179,7 +179,11 @@ pub fn run_status(state: &AppState) -> Option<&RunStatus> {
 /// under a "does not work" line: the reason in the APO's own words (English, diagnostic).
 pub fn newest_note<'a>(run: &'a RunStatus, prefix: &str) -> Option<&'a str> {
   let prefix = prefix.to_lowercase();
-  let about = |note: &&String| note.to_lowercase().contains(&prefix);
+  // Not the installer's own lines ("installer: Target: ... Mic Chain (EFX)"): same source.
+  let about = |note: &&String| {
+    let note = note.to_lowercase();
+    note.contains(&prefix) && !note.contains(" installer: ")
+  };
   let notes = &run.apo_notes;
   // Sound settings also create our effects, only to list them: what audiodg did comes first.
   let from_audiodg = notes.iter().filter(about).find(|note| note.to_lowercase().contains("audiodg"));
@@ -391,5 +395,8 @@ mod tests {
     let run = RunStatus { apo_notes: vec![settings.to_string()], ..Default::default() };
     assert_eq!(newest_note(&run, "mic chain"), Some(settings));
     assert_eq!(newest_note(&run, "Output EQ"), None);
+    let installer = "2026-11-11T12:26:29Z installer: Target: Microphone Array: GamersEqualizer Mic Chain (MFX)";
+    let run = RunStatus { apo_notes: vec![installer.to_string()], ..Default::default() };
+    assert_eq!(newest_note(&run, "Mic chain"), None, "what the installer printed is not a report from audiodg");
   }
 }
