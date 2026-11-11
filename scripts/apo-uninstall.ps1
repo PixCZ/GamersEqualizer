@@ -5,23 +5,26 @@
 
 .DESCRIPTION
   Removes our CLSIDs from every capture/render endpoint's effect lists (other effects stay
-  and original String vs MultiString registry value kinds are preserved), unregisters the COM
-  classes and APOs, deletes the config key, the installed DLL and the installed app (once it
-  has exited), and restarts the Windows Audio service.
-  -RestoreBackup <file.json | file.reg | dir> additionally restores exact pre-install
-  FxProperties values from backups made by apo-install.ps1: JSON backups are restored directly
-  via .NET RegistryKey (SetValue + QueryValues), avoiding the reg.exe import ACL failure on
-  TrustedInstaller-owned FxProperties subkeys; legacy .reg files without JSON fallback still
-  attempt reg.exe import.
-  -RemoveBackups also deletes those backups (%ProgramFiles%\GamersEqualizer\apo-backup, and
-  the .reg files older versions left in %ProgramData%\GamersEqualizer); the app's
+  and original String vs MultiString registry value kinds are preserved), cleans up any
+  Default-only streaming mode values on touched endpoints where the slot now has no effects
+  left, unregisters the COM classes and APOs, deletes the config key, the installed DLL,
+  the installed app (once it has exited) and any temporary scripts in
+  %LOCALAPPDATA%\GamersEqualizer\scripts, and restarts the Windows Audio service.
+  Does not require any backup folder to run cleanly.
+  -RestoreBackup <file.json | file.reg | dir> optionally restores exact pre-install
+  FxProperties values if manual/legacy backups exist: JSON backups are restored directly via
+  .NET RegistryKey (SetValue + QueryValues); legacy .reg files attempt reg.exe import.
+  -RemoveBackups also deletes any legacy backups (%ProgramFiles%\GamersEqualizer\apo-backup,
+  and the .reg files older versions left in %ProgramData%\GamersEqualizer); the app's
   "Uninstall from Windows" button passes it.
 #>
 param(
   [string]$RestoreBackup,
   [switch]$RemoveBackups,
   # Started by the app: keep the window open on errors, briefly on success.
-  [switch]$FromApp
+  [switch]$FromApp,
+  # Passed by the app so UAC under another admin account still cleans the caller's staged scripts.
+  [string]$ScriptDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,6 +51,27 @@ $BackupDir = Join-Path $ProgramDir 'apo-backup'
 # folder), so it is never deleted recursively: only our .reg files, and not through a link.
 $LegacyBackupRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'GamersEqualizer'
 $MmDevices = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
+$FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
+$NullGuid = '{00000000-0000-0000-0000-000000000000}'
+$SlotEffectValues = @{
+  SFX = @("$FxGuid,13", "$FxGuid,5", "$FxGuid,1")
+  MFX = @("$FxGuid,14", "$FxGuid,6")
+  EFX = @("$FxGuid,15", "$FxGuid,7", "$FxGuid,2")
+}
+$ModesGuid = '{d3993a3f-99c2-4402-b5ec-a92a0367664b}'
+$DefaultProcessingMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
+$ModeValues = @{ SFX = "$ModesGuid,5"; MFX = "$ModesGuid,6"; EFX = "$ModesGuid,7" }
+
+function Read-FxGuids([Microsoft.Win32.RegistryKey]$regKey, [string]$valueName) {
+  $raw = $regKey.GetValue($valueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  if ($null -eq $raw) { return @() }
+  $out = New-Object System.Collections.Generic.List[string]
+  foreach ($item in @($raw)) {
+    $s = ([string]$item).Trim()
+    if ($s -and $s -ne $NullGuid) { $out.Add($s) }
+  }
+  $out.ToArray()
+}
 
 # FxProperties grants Administrators only SetValue + QueryValues (ReadKey); the PowerShell
 # registry provider asks for more and gets "access denied", so open via .NET RegistryKey.
@@ -68,6 +92,34 @@ function Set-FxValue([string]$subKey, [string]$name, [string[]]$value, [Microsof
     }
   }
   finally { $key.Dispose() }
+}
+
+# Only delete our own staged scripts, never through a junction/reparse point.
+function Remove-StagedScripts([string]$dirPath) {
+  if ([string]::IsNullOrWhiteSpace($dirPath)) { return $false }
+  $normPath = try { [IO.Path]::GetFullPath($dirPath).TrimEnd('\', '/') } catch { return $false }
+  $scriptsDir = Get-Item -LiteralPath $normPath -Force -ErrorAction SilentlyContinue
+  if (-not ($scriptsDir -is [IO.DirectoryInfo]) -or ($scriptsDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+  if ($scriptsDir.Name -ine 'scripts') { return $false }
+  $parentDir = $scriptsDir.Parent
+  if (-not $parentDir -or $parentDir.Name -ine 'GamersEqualizer' -or ($parentDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+  $removed = $false
+  foreach ($fileName in 'apo-install.ps1', 'apo-uninstall.ps1') {
+    $fileItem = Get-Item -LiteralPath (Join-Path $scriptsDir.FullName $fileName) -Force -ErrorAction SilentlyContinue
+    if (($fileItem -is [IO.FileInfo]) -and -not ($fileItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Remove-Item -LiteralPath $fileItem.FullName -Force -ErrorAction SilentlyContinue
+      $removed = $true
+    }
+  }
+  if (-not (Get-ChildItem -LiteralPath $scriptsDir.FullName -Force -ErrorAction SilentlyContinue)) {
+    Remove-Item -LiteralPath $scriptsDir.FullName -Force -ErrorAction SilentlyContinue
+    $removed = $true
+  }
+  if (-not (Get-ChildItem -LiteralPath $parentDir.FullName -Force -ErrorAction SilentlyContinue)) {
+    Remove-Item -LiteralPath $parentDir.FullName -Force -ErrorAction SilentlyContinue
+    $removed = $true
+  }
+  return $removed
 }
 
 function Restore-FxFromJson([string]$jsonFile) {
@@ -131,16 +183,34 @@ try {
       $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, $false)
       if ($null -eq $regKey) { continue }
       try {
+        $removedAny = $false
         foreach ($name in @($regKey.GetValueNames())) {
           if ($name -notlike '{*') { continue }
           $kind = $regKey.GetValueKind($name)
           if ($kind -ne [Microsoft.Win32.RegistryValueKind]::String -and $kind -ne [Microsoft.Win32.RegistryValueKind]::MultiString) { continue }
           $raw = $regKey.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-          $vals = @($raw | Where-Object { $null -ne $_ })
+          $vals = @($raw | Where-Object { $null -ne $_ } | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
           $rest = @($vals | Where-Object { $Clsids -notcontains $_ })
           if ($rest.Count -eq $vals.Count) { continue }
           Set-FxValue $subKey $name ([string[]]$rest) $kind
+          $removedAny = $true
           Write-Host "Removed from $flow $($ep.PSChildName) $name"
+        }
+        if ($removedAny -and -not $RestoreBackup) {
+          $slots = if ($flow -eq 'Capture') { @('MFX', 'EFX') } else { @('SFX', 'MFX', 'EFX') }
+          foreach ($slot in $slots) {
+            $hasEffects = $false
+            foreach ($fxName in $SlotEffectValues[$slot]) {
+              if (@(Read-FxGuids $regKey $fxName).Count -gt 0) { $hasEffects = $true; break }
+            }
+            if ($hasEffects) { continue }
+            $modeName = $ModeValues[$slot]
+            $modes = @(Read-FxGuids $regKey $modeName)
+            if ($modes.Count -eq 1 -and $modes[0] -ieq $DefaultProcessingMode) {
+              Set-FxValue $subKey $modeName @()
+              Write-Host "Removed empty $slot mode $modeName from $flow $($ep.PSChildName)"
+            }
+          }
         }
       }
       finally { $regKey.Dispose() }
@@ -216,5 +286,18 @@ foreach ($file in $InstalledExe, "$InstalledExe.new") {
   if (Test-Path $file) { Write-Warning "Could not delete $file (still running?); delete it by hand." }
 }
 if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
+
+$scriptDirs = New-Object 'System.Collections.Generic.List[string]'
+$localAppData = [Environment]::GetFolderPath('LocalApplicationData')
+if ($localAppData) { $scriptDirs.Add((Join-Path $localAppData 'GamersEqualizer\scripts')) }
+if ($ScriptDir) { $scriptDirs.Add($ScriptDir) }
+$seenScriptDirs = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+foreach ($dir in $scriptDirs) {
+  $normDir = try { [IO.Path]::GetFullPath($dir).TrimEnd('\', '/') } catch { $dir }
+  if ($seenScriptDirs.Add($normDir) -and (Remove-StagedScripts $normDir)) {
+    Write-Host "Removed temporary scripts in $normDir"
+  }
+}
+
 Write-Host 'Uninstalled.'
 if ($FromApp) { Start-Sleep -Seconds 3 }

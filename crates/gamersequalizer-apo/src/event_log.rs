@@ -17,8 +17,8 @@ use windows::Win32::System::EventLog::{
 };
 
 /// Bound per process run, so a long session cannot grow the list (or the log) forever. Roomy:
-/// render format queries come first and must not use up the budget before the mic starts.
-const MAX_NOTES: usize = 256;
+/// multi-device installs and render format queries must not use up the budget before streams start.
+const MAX_NOTES: usize = 512;
 const EVENT_ID: u32 = 1;
 
 static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());

@@ -57,6 +57,8 @@ const FX_MODE_VALUES: [(&str, &str); 3] = [
   ("MFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},6"),
   ("EFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},7"),
 ];
+const DEFAULT_PROCESSING_MODE: &str = "{c18e2f7e-933d-4965-b7d1-1eef228d2af3}";
+const NULL_GUID: &str = "{00000000-0000-0000-0000-000000000000}";
 /// Endpoint name ("Microphone Array") and its device ("Realtek(R) Audio") in `Properties`.
 const ENDPOINT_NAME_VALUE: &str = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
 const DEVICE_NAME_VALUE: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6";
@@ -378,7 +380,40 @@ fn one_line(value: &str) -> String {
 /// Is this flow's APO in the effect lists of any endpoint (also unplugged ones)? Tells a new
 /// sound card the user's effect is missing on apart from "never wanted it there".
 pub fn installed_on_any(flow: Flow) -> bool {
-  hklm_subkeys(&endpoints_root(flow)).iter().any(|guid| endpoint_has_apo(flow, guid))
+  hklm_subkeys(&endpoints_root(flow)).iter().any(|guid| endpoint_has_any_clsid(flow, guid))
+}
+
+/// Active physical endpoints in `endpoints` that have `FxProperties` and need installation,
+/// repair (`!endpoint_has_apo`), or update (`include_all`). Returns `(guid, name)` pairs.
+pub fn targets_to_install(
+  flow: Flow,
+  endpoints: &[super::AudioEndpointInfo],
+  include_all: bool,
+) -> Vec<(String, String)> {
+  let root = endpoints_root(flow);
+  let eligible: Vec<(&super::AudioEndpointInfo, String)> = endpoints
+    .iter()
+    .filter(|ep| !super::chatmix::is_virtual_endpoint(&ep.name.to_lowercase()))
+    .filter_map(|ep| {
+      let guid = endpoint_guid_of(&ep.id)?;
+      hklm_key_exists(&format!("{root}\\{guid}\\FxProperties")).then_some((ep, guid))
+    })
+    .filter(|(_, guid)| include_all || !endpoint_has_apo(flow, guid))
+    .collect();
+  dedup_target_guids(eligible.into_iter().map(|(ep, guid)| (guid, ep.name.clone())))
+}
+
+fn dedup_target_guids(items: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
+  let mut seen = Vec::<String>::new();
+  let mut out = Vec::new();
+  for (guid, name) in items {
+    let lower = guid.to_ascii_lowercase();
+    if !seen.contains(&lower) {
+      seen.push(lower);
+      out.push((guid, name));
+    }
+  }
+  out
 }
 
 /// Anything of ours left in the system: the installed DLL, a registered COM class, or one of
@@ -396,10 +431,22 @@ pub fn is_registered() -> bool {
     })
 }
 
+fn uninstall_args(script_dir: Option<&Path>) -> String {
+  let mut args = String::from("-RemoveBackups -FromApp");
+  if let Some(dir) = script_dir {
+    args.push_str(" -ScriptDir ");
+    args.push_str(&ps_quote(&dir.to_string_lossy()));
+  }
+  args
+}
+
 /// Starts the uninstall script elevated (UAC prompt): removes every APO class from every
-/// endpoint, the COM registration, the DLL and the install backups. Returns once launched.
+/// endpoint (plus Default-only streaming modes on emptied slots), the COM registration, the
+/// DLL, any legacy install backups and temporary scripts in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
+/// Returns once launched.
 pub fn launch_uninstall() -> Result<(), String> {
-  run_script_elevated(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT, "-RemoveBackups -FromApp", "uninstaller")
+  let args = uninstall_args(scripts_dir().as_deref());
+  run_script_elevated(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT, &args, "uninstaller")
 }
 
 /// `System32\WindowsPowerShell\v1.0\powershell.exe` from the known folder, never a bare
@@ -432,6 +479,10 @@ fn run_script_elevated(name: &str, content: &str, args: &str, what: &str) -> Res
   if result.0 as isize > SHELL_EXECUTE_OK {
     Ok(())
   } else {
+    remove_file_if_regular(&path);
+    if let Some(dir) = path.parent() {
+      prune_empty_script_dirs(dir);
+    }
     Err(format!("could not start the {what} (cancelled UAC prompt? code {})", result.0 as isize))
   }
 }
@@ -562,15 +613,54 @@ fn bundled_dll() -> Option<PathBuf> {
   dev.into_iter().chain([dir.join(DLL_NAME)]).find(|p| p.is_file())
 }
 
+fn scripts_dir() -> Option<PathBuf> {
+  let base = std::env::var_os("LOCALAPPDATA")?;
+  Some(PathBuf::from(base).join("GamersEqualizer").join("scripts"))
+}
+
 /// Writes a built-in script fresh before every run, so an old or edited copy is never used.
 /// The folder is user-writable; `run_script_elevated` checks the hash before running it.
 fn write_script(name: &str, content: &str) -> Result<PathBuf, String> {
-  let base = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-  let dir = PathBuf::from(base).join("GamersEqualizer").join("scripts");
+  let dir = scripts_dir().ok_or("LOCALAPPDATA is not set")?;
   std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
   let path = dir.join(name);
   std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
   Ok(path)
+}
+
+/// Removes temporary scripts staged in `%LOCALAPPDATA%\GamersEqualizer\scripts` and drops
+/// empty directories without deleting unrelated sibling folders (such as diagnostic logs).
+pub(crate) fn cleanup_staged_scripts() {
+  if let Some(dir) = scripts_dir() {
+    cleanup_staged_scripts_in(&dir);
+  }
+}
+
+fn cleanup_staged_scripts_in(dir: &Path) {
+  if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+    return;
+  }
+  for name in [SCRIPT_NAME, UNINSTALL_SCRIPT_NAME] {
+    remove_file_if_regular(&dir.join(name));
+  }
+  prune_empty_script_dirs(dir);
+}
+
+fn remove_file_if_regular(file: &Path) {
+  if std::fs::symlink_metadata(file).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file()) {
+    let _ = std::fs::remove_file(file);
+  }
+}
+
+fn prune_empty_script_dirs(dir: &Path) {
+  if std::fs::symlink_metadata(dir).is_ok_and(|m| !m.file_type().is_symlink()) {
+    let _ = std::fs::remove_dir(dir);
+  }
+  if let Some(parent) = dir.parent() {
+    if std::fs::symlink_metadata(parent).is_ok_and(|m| !m.file_type().is_symlink()) {
+      let _ = std::fs::remove_dir(parent);
+    }
+  }
 }
 
 fn hklm_subkeys(key: &str) -> Vec<String> {
@@ -637,9 +727,39 @@ fn endpoints_root(flow: Flow) -> String {
   format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\{}", flow.as_str())
 }
 
-fn endpoint_has_apo(flow: Flow, guid: &str) -> bool {
+fn endpoint_has_any_clsid(flow: Flow, guid: &str) -> bool {
   let lists = endpoint_fx_lists(flow, guid);
   flow.clsids().iter().all(|clsid| lists.iter().any(|list| list.contains(clsid)))
+}
+
+/// True only when all required CLSIDs sit in composite slots whose streaming modes include the
+/// Default processing mode and no non-null legacy values (`1/5/6/7`) shadow them.
+fn endpoint_has_apo(flow: Flow, guid: &str) -> bool {
+  let key = format!("{}\\{guid}\\FxProperties", endpoints_root(flow));
+  let slots = FX_LIST_VALUES.map(|n| read_string_value(&key, n));
+  let modes = FX_MODE_VALUES.map(|(_, n)| read_string_value(&key, n));
+  let legacy = FX_LEGACY_VALUES.map(|(_, n)| read_string_value(&key, n));
+  endpoint_fx_configured(flow, &slots, &modes, &legacy)
+}
+
+fn endpoint_fx_configured(
+  flow: Flow,
+  slots: &[Option<String>; 3],
+  modes: &[Option<String>; 3],
+  legacy: &[Option<String>; 4],
+) -> bool {
+  let has_shadowing_legacy =
+    legacy.iter().flatten().any(|raw| raw.split('\n').map(str::trim).any(|s| !s.is_empty() && !s.eq_ignore_ascii_case(NULL_GUID)));
+  if has_shadowing_legacy {
+    return false;
+  }
+  flow.clsids().iter().all(|clsid| {
+    slots.iter().zip(modes.iter()).any(|(slot, mode)| {
+      let has_clsid = slot.as_deref().is_some_and(|s| s.to_ascii_lowercase().contains(clsid));
+      let has_mode = mode.as_deref().is_some_and(|m| m.to_ascii_lowercase().contains(DEFAULT_PROCESSING_MODE));
+      has_clsid && has_mode
+    })
+  })
 }
 
 /// The endpoint's composite effect lists, lowercased. Only these: the install script writes
@@ -774,5 +894,86 @@ mod tests {
     assert_eq!(switch_arg("{cf0a-1}", false).unwrap(), "Capture:{cf0a-1}:MFX");
     assert_eq!(switch_arg("{cf0a-1}", true).unwrap(), "Capture:{cf0a-1}:EFX");
     assert!(switch_arg("{x' -Evil '}", false).is_err());
+  }
+
+  #[test]
+  fn endpoint_config_requires_default_mode_and_no_shadowing_legacy() {
+    let mode = Some("{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}".to_string());
+    // EPOS Capture before fix: ,15 has Mic Chain, modes,7 is missing -> incomplete.
+    assert!(!endpoint_fx_configured(
+      Flow::Capture,
+      &[None, None, Some(MIC_APO_CLSID.into())],
+      &[None, None, None],
+      &[None, None, None, None],
+    ));
+    // With modes,7 present -> ready (and MFX with modes,6 -> ready).
+    assert!(endpoint_fx_configured(
+      Flow::Capture,
+      &[None, None, Some(MIC_APO_CLSID.into())],
+      &[None, None, mode.clone()],
+      &[None, None, None, Some(NULL_GUID.into())],
+    ));
+    assert!(endpoint_fx_configured(
+      Flow::Capture,
+      &[None, Some(MIC_APO_CLSID.into()), None],
+      &[None, mode.clone(), None],
+      &[None, None, None, None],
+    ));
+    // Render with legacy ,5/,6 shadowing ,13/,14 -> incomplete even with modes!
+    assert!(!endpoint_fx_configured(
+      Flow::Render,
+      &[Some(STREAM_APO_CLSID.into()), None, Some(OUTPUT_APO_CLSID.into())],
+      &[mode.clone(), None, mode.clone()],
+      &[None, Some("{C9453E73-8C5C-4463-9984-AF8BAB2F5447}".into()), None, None],
+    ));
+    // Render cleanly migrated -> ready.
+    assert!(endpoint_fx_configured(
+      Flow::Render,
+      &[Some(STREAM_APO_CLSID.into()), None, Some(OUTPUT_APO_CLSID.into())],
+      &[mode.clone(), None, mode],
+      &[None, None, None, None],
+    ));
+  }
+
+  #[test]
+  fn dedup_target_guids_drops_case_duplicates_keeping_first() {
+    let out = dedup_target_guids([
+      ("{AAAA-1}".into(), "One".into()),
+      ("{aaaa-1}".into(), "One Dup".into()),
+      ("{BBBB-2}".into(), "Two".into()),
+    ]);
+    assert_eq!(out, vec![("{AAAA-1}".into(), "One".into()), ("{BBBB-2}".into(), "Two".into())]);
+  }
+
+  #[test]
+  fn uninstall_args_quotes_script_dir_and_fits_command_line() {
+    let args = uninstall_args(Some(Path::new(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts")));
+    assert_eq!(args, r"-RemoveBackups -FromApp -ScriptDir 'C:\Users\O''Neil\AppData\Local\GamersEqualizer\scripts'");
+    let b = elevated_bootstrap(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts\apo-uninstall.ps1", "ab", &args);
+    assert!(encode_command(&b).len() < 4096);
+  }
+
+  #[test]
+  fn cleanup_staged_scripts_removes_scripts_and_preserves_siblings() {
+    let root = std::env::temp_dir().join(format!("ge-script-clean-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let app = root.join("GamersEqualizer");
+    let scripts = app.join("scripts");
+    let logs = app.join("usb-apo-logs");
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(scripts.join(SCRIPT_NAME), "a").unwrap();
+    std::fs::write(scripts.join(UNINSTALL_SCRIPT_NAME), "b").unwrap();
+
+    cleanup_staged_scripts_in(&scripts);
+    assert!(!scripts.exists(), "empty scripts dir should be removed");
+    assert!(logs.exists(), "sibling dirs must stay untouched");
+
+    std::fs::remove_dir(&logs).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+    std::fs::write(scripts.join(UNINSTALL_SCRIPT_NAME), "c").unwrap();
+    cleanup_staged_scripts_in(&scripts);
+    assert!(!app.exists(), "empty parent GamersEqualizer dir should be removed");
+    let _ = std::fs::remove_dir_all(&root);
   }
 }

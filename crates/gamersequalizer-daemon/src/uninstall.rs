@@ -1,8 +1,10 @@
 //! "Uninstall from Windows" (Settings): removes everything the app registered in the system.
 //!
 //! - Microphone / output effects (APO) and the installed app: elevated
-//!   `scripts/apo-uninstall.ps1` takes our classes off every audio device, unregisters them and
-//!   deletes the DLL, the install backups and the app's exe in Program Files (once it exited).
+//!   `scripts/apo-uninstall.ps1` takes our classes off every audio device (and cleans up any
+//!   empty slot modes we added), unregisters them and deletes the DLL, any legacy install
+//!   backups, the app's exe in Program Files (once it exited) and any temporary scripts
+//!   staged in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
 //! - Start with Windows (`HKCU\...\Run`) and the notification registration (`notify.rs`).
 //! - Optionally the user's settings and profiles (`%APPDATA%\GamersEqualizer`, legacy
 //!   `%APPDATA%\OpenSonar`). This process and the background service keep files open there
@@ -32,6 +34,9 @@ pub fn uninstall_all(remove_user_data: bool) -> Result<(), String> {
   if apo_install::is_registered() {
     apo_install::launch_uninstall()?;
     info!("[Uninstall] APO uninstaller started");
+  } else {
+    // No elevated uninstaller ran; remove any previously staged scripts directly.
+    apo_install::cleanup_staged_scripts();
   }
   if let Err(e) = crate::autostart::set_autostart(false) {
     // Not fatal: the other parts still go; the user sees the entry in Task Manager > Startup.

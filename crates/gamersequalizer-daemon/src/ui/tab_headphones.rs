@@ -89,6 +89,11 @@ impl HeadphonesUi {
     self.step = Step::Choose;
     self.candidate = None;
   }
+
+  /// Re-read output APO status on the next frame (after switching outputs or installing).
+  pub fn recheck_apo(&mut self) {
+    self.apo = None;
+  }
 }
 
 pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
@@ -730,8 +735,8 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
         ))
         .clicked()
       {
-        // The setup card explains the prompt and adds the mic processing if that is missing too.
-        super::setup::open(state);
+        // The setup card explains the prompt and adds any missing connected devices in one go.
+        super::setup::open_for_output(state);
         state.headphones_ui.apo = None;
       }
     }

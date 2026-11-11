@@ -25,10 +25,14 @@ pub struct SetupUi {
   open: bool,
   /// Ticks the user changed from the default.
   choices: Vec<(Kind, bool)>,
-  /// Output EQ on the Master output, its name, and whether it is on any output at all.
+  /// Output EQ on the Master output, its name, and whether effects are on any device at all.
   output: Option<ApoCheck>,
   output_name: String,
   output_anywhere: bool,
+  mic_anywhere: bool,
+  /// Active physical `(guid, name)` devices missing/needing setup or update per flow.
+  mic_targets: Vec<(String, String)>,
+  output_targets: Vec<(String, String)>,
   checked_at: Option<Instant>,
   /// Installer started: the card waits for it and closes when nothing is left.
   launched: bool,
@@ -45,9 +49,9 @@ enum Kind {
 struct Item {
   kind: Kind,
   title: String,
-  detail: &'static str,
-  /// Endpoint GUID for an APO step (needs administrator rights); None for the others.
-  admin_target: Option<(Flow, String)>,
+  detail: String,
+  /// Endpoint GUIDs for an APO step (needs administrator rights); empty for the others.
+  admin_targets: Vec<(Flow, String)>,
 }
 
 /// Opens the card (a fix button somewhere asked for a system change).
@@ -57,6 +61,17 @@ pub fn open(state: &mut AppState) {
   setup.launched = false;
   setup.error = None;
   setup.checked_at = None;
+}
+
+/// Opens the card from the Headphones tab with Output EQ pre-ticked even if declined before.
+pub fn open_for_output(state: &mut AppState) {
+  open(state);
+  set_ticked(state, Kind::Output, true);
+}
+
+/// Check again on the next frame (active device or endpoint list changed).
+pub fn recheck(state: &mut AppState) {
+  state.setup.checked_at = None;
 }
 
 /// Re-reads the output EQ state every few seconds. Call once per frame after
@@ -74,6 +89,11 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
     .map(|e| e.name.clone())
     .unwrap_or_else(|| tr("Default output").to_string());
   state.setup.output_anywhere = apo_install::installed_on_any(Flow::Render);
+  state.setup.mic_anywhere = apo_install::installed_on_any(Flow::Capture);
+  let mic_outdated = super::apo_banner::mic_check(state).is_some_and(|c| c.status == ApoStatus::Outdated);
+  let include_all = mic_outdated || check.status == ApoStatus::Outdated;
+  state.setup.mic_targets = apo_install::targets_to_install(Flow::Capture, &state.capture_endpoints, include_all);
+  state.setup.output_targets = apo_install::targets_to_install(Flow::Render, &state.endpoints, include_all);
   state.setup.output = Some(check);
   state.setup.checked_at = Some(Instant::now());
 
@@ -133,16 +153,16 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
       if ui.checkbox(&mut on, item.title.as_str()).changed() {
         set_ticked(state, item.kind, on);
       }
-      let rights = if item.admin_target.is_some() {
-        tr("Needs administrator rights.")
-      } else {
+      let rights = if item.admin_targets.is_empty() {
         tr("No administrator rights needed.")
+      } else {
+        tr("Needs administrator rights.")
       };
       ui.indent(("setup_item", item.kind as u8), |ui| {
         ui.label(theme::caption(format!("{} {rights}", item.detail)));
       });
     }
-    let admin = list.iter().any(|i| i.admin_target.is_some() && ticked(state, i));
+    let admin = list.iter().any(|i| !i.admin_targets.is_empty() && ticked(state, i));
     if admin {
       ui.add_space(4.0);
       theme::inset_frame(ui).show(ui, |ui| {
@@ -209,7 +229,7 @@ fn run(state: &mut AppState, list: &[Item]) {
     }
   }
   let targets: Vec<(Flow, &str)> =
-    chosen.iter().filter_map(|i| i.admin_target.as_ref()).map(|(flow, guid)| (*flow, guid.as_str())).collect();
+    chosen.iter().flat_map(|i| i.admin_targets.iter().map(|(flow, guid)| (*flow, guid.as_str()))).collect();
   if !targets.is_empty() {
     if let Err(e) = apo_install::launch_install_many(&targets) {
       log::warn!("[Setup] install could not start: {e}");
@@ -235,40 +255,75 @@ fn finish(state: &mut AppState) {
   }
 }
 
-/// What is left to set up, in the order shown.
+/// What is left to set up, in the order shown. Each APO step bundles all active physical
+/// endpoints of that flow that still need setup/repair (or all of them when updating).
 fn items(state: &AppState) -> Vec<Item> {
   let mut list = Vec::new();
   if let Some(check) = super::apo_banner::mic_check(state) {
-    if let Some(guid) = needs_install(check) {
-      let title = match check.status {
-        ApoStatus::Outdated => tr("Update GamersEqualizer in Windows").to_string(),
-        _ => trf("Microphone processing on \"{}\"", &[&super::apo_banner::mic_in_use_name(state)]),
-      };
-      list.push(Item {
-        kind: Kind::Mic,
-        title,
-        detail: tr("Echo cancellation, noise suppression and EQ for Discord, games and every other app."),
-        admin_target: Some((Flow::Capture, guid)),
-      });
+    if check.can_install {
+      let mut targets = state.setup.mic_targets.clone();
+      if let Some(guid) = needs_install(check) {
+        if !targets.iter().any(|(g, _)| g.eq_ignore_ascii_case(&guid)) {
+          targets.push((guid, super::apo_banner::mic_in_use_name(state)));
+        }
+      }
+      let active_needs = needs_install(check).is_some();
+      if active_needs || (!targets.is_empty() && (state.setup.mic_anywhere || !state.prefs.setup_done)) {
+        let title = if check.status == ApoStatus::Outdated {
+          tr("Update GamersEqualizer in Windows").to_string()
+        } else if targets.len() == 1 {
+          let name = targets.first().map_or("", |(_, n)| n.as_str());
+          trf("Microphone processing on \"{}\"", &[&name])
+        } else {
+          trf("Microphone processing on {} connected devices", &[&targets.len()])
+        };
+        let base_detail = tr("Echo cancellation, noise suppression and EQ for Discord, games and every other app.");
+        let detail = detail_with_devices(base_detail, &targets);
+        let admin_targets = targets.into_iter().map(|(g, _)| (Flow::Capture, g)).collect();
+        list.push(Item { kind: Kind::Mic, title, detail, admin_targets });
+      }
     }
   }
-  if let Some(guid) = state.setup.output.as_ref().and_then(needs_install) {
-    list.push(Item {
-      kind: Kind::Output,
-      title: trf("Output EQ on \"{}\"", &[&state.setup.output_name]),
-      detail: tr("Headphone correction and the game, chat and media EQ on what you hear."),
-      admin_target: Some((Flow::Render, guid)),
-    });
+  if let Some(out_check) = state.setup.output.as_ref() {
+    if out_check.can_install {
+      let mut targets = state.setup.output_targets.clone();
+      if let Some(guid) = needs_install(out_check) {
+        if !targets.iter().any(|(g, _)| g.eq_ignore_ascii_case(&guid)) {
+          targets.push((guid, state.setup.output_name.clone()));
+        }
+      }
+      let active_needs = needs_install(out_check).is_some();
+      if active_needs || (!targets.is_empty() && (state.setup.output_anywhere || !state.prefs.setup_done)) {
+        let title = if targets.len() == 1 {
+          let name = targets.first().map_or("", |(_, n)| n.as_str());
+          trf("Output EQ on \"{}\"", &[&name])
+        } else {
+          trf("Output EQ on {} connected devices", &[&targets.len()])
+        };
+        let base_detail = tr("Headphone correction and the game, chat and media EQ on what you hear.");
+        let detail = detail_with_devices(base_detail, &targets);
+        let admin_targets = targets.into_iter().map(|(g, _)| (Flow::Render, g)).collect();
+        list.push(Item { kind: Kind::Output, title, detail, admin_targets });
+      }
+    }
   }
   if !state.prefs.setup_done && !state.autostart_enabled {
     list.push(Item {
       kind: Kind::Autostart,
       title: tr("Start with Windows").to_string(),
-      detail: tr("The background service starts when you sign in, so the effects get their settings."),
-      admin_target: None,
+      detail: tr("The background service starts when you sign in, so the effects get their settings.").to_string(),
+      admin_targets: Vec::new(),
     });
   }
   list
+}
+
+fn detail_with_devices(base: &str, targets: &[(String, String)]) -> String {
+  if targets.len() <= 1 {
+    return base.to_string();
+  }
+  let names = targets.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", ");
+  format!("{base} {}", trf("Devices: {}", &[&names]))
 }
 
 /// Endpoint GUID when this APO check calls for the installer.

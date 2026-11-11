@@ -19,10 +19,8 @@
     EFX does not start, and rolls back automatically on open failure or crash.
 
 .DESCRIPTION
-  - Backs up each endpoint's FxProperties values (typed JSON + .reg reference) to
-    %ProgramFiles%\GamersEqualizer\apo-backup:
-    keeps <ID>-FxProperties-original.{json,reg} (pristine state before GamersEqualizer) and
-    <ID>-FxProperties-previous.{json,reg} (state right before this run).
+  - Takes an in-memory snapshot of each endpoint's FxProperties values before changing anything
+    (no persistent backup folder on disk) so self-test failures roll back cleanly in memory.
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
   - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
   - Promotes any legacy single-CLSID values (,1 / ,5 / ,6 / ,7) into composite lists (,13 / ,14 / ,15)
@@ -30,7 +28,7 @@
     configured slot, and appends our CLSIDs.
   - Restarts the Windows Audio service once (all audio stops for a few seconds).
 
-  Undo: scripts\apo-uninstall.ps1 (optionally -RestoreBackup <file.json | dir>).
+  Undo: scripts\apo-uninstall.ps1.
 #>
 param(
   [string]$EndpointId,
@@ -63,7 +61,11 @@ trap {
   Start-Service Audiosrv -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
   $script:AudioStopped = $false
   if ($FromApp) {
-    Say "`nInstall failed: $_" Red
+    $loc = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) {
+      " (line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim()))"
+    }
+    else { '' }
+    Say "`nInstall failed: $_$loc" Red
     Read-Host 'Press Enter to close'
     exit 1
   }
@@ -123,12 +125,10 @@ $ApoInterfaces = @(
 if (-not $SourceDll) { $SourceDll = Join-Path $PSScriptRoot '..\target\apo\gamersequalizer_apo.dll' }
 # Known-folder lookup, not $env:ProgramFiles: the user can override that variable in
 # HKCU\Environment and this elevated process inherits it (DLL for audiodg in a user folder).
-# Backups live here too: under ProgramData any user can pre-create our folder (or a junction).
 $ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEqualizer'
 $InstallDir = Join-Path $ProgramDir 'apo'
 $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
 $InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
-$BackupDir = Join-Path $ProgramDir 'apo-backup'
 
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
@@ -168,45 +168,40 @@ function Read-FxList($rawValue) {
     $trimmed = $s.Trim()
     if ($trimmed -and -not ($res | Where-Object { $_ -ieq $trimmed })) { $res.Add($trimmed) }
   }
-  $res
+  return , $res
 }
 
-function Export-FxJson([string]$flow, [string]$id, [string]$jsonFile) {
+# Pre-flight ACL check + in-memory snapshot (Administrators have SetValue + QueryValues, not CreateSubKey).
+function Get-FxSnapshot([string]$flow, [string]$id) {
   $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
-  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, $false)
+  $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
   if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
   try {
     $records = New-Object System.Collections.Generic.List[object]
     foreach ($vn in ($key.GetValueNames() | Sort-Object)) {
       $val = $key.GetValue($vn, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-      $kind = [string]$key.GetValueKind($vn)
-      $encoded = switch ($kind) {
-        'Binary'      { [Convert]::ToBase64String([byte[]]$val) }
-        'MultiString' { [string[]]@($val | ForEach-Object { [string]$_ }) }
-        default       { $val }
-      }
+      $kind = $key.GetValueKind($vn)
       $records.Add([pscustomobject]@{
         Name  = [string]$vn
         Kind  = $kind
-        Value = $encoded
+        Value = $val
       })
     }
-    $payload = [pscustomobject]@{
-      Flow   = $flow
-      Id     = $id
-      Values = @($records.ToArray())
+    [pscustomobject]@{
+      Flow    = $flow
+      Id      = $id
+      Records = @($records.ToArray())
     }
-    ConvertTo-Json -InputObject $payload -Depth 5 | Set-Content $jsonFile -Encoding UTF8
   }
   finally { $key.Dispose() }
 }
 
 # Exact value-only restore via SetValue + QueryValues (reg.exe import fails on TrustedInstaller subkeys).
-function Restore-FxFromJson([string]$flow, [string]$id, [string]$jsonFile) {
-  $parsed = Get-Content $jsonFile -Raw -Encoding UTF8 | ConvertFrom-Json
-  $origRecords = @($parsed.Values | ForEach-Object { $_ })
+function Restore-FxSnapshot($snapshot) {
+  $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($snapshot.Flow)\$($snapshot.Id)\FxProperties"
+  $origRecords = @($snapshot.Records)
   $origNames = @($origRecords | ForEach-Object { [string]$_.Name })
-  $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
   $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
   $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
   if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
@@ -215,27 +210,29 @@ function Restore-FxFromJson([string]$flow, [string]$id, [string]$jsonFile) {
       if ($origNames -notcontains $cur) { $key.DeleteValue($cur, $false) }
     }
     foreach ($rec in $origRecords) {
-      $kind = [Microsoft.Win32.RegistryValueKind][Enum]::Parse([Microsoft.Win32.RegistryValueKind], [string]$rec.Kind)
+      $kind = [Microsoft.Win32.RegistryValueKind]$rec.Kind
       $valName = [string]$rec.Name
-      if ($kind -eq [Microsoft.Win32.RegistryValueKind]::Binary) {
-        [byte[]]$binVal = [Convert]::FromBase64String([string]$rec.Value)
-        $key.SetValue($valName, $binVal, $kind)
-      }
-      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::MultiString) {
-        [string[]]$multiVal = @($rec.Value | ForEach-Object { [string]$_ })
-        $key.SetValue($valName, $multiVal, $kind)
-      }
-      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) {
-        [int]$dwVal = [int]$rec.Value
-        $key.SetValue($valName, $dwVal, $kind)
-      }
-      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::QWord) {
-        [long]$qwVal = [long]$rec.Value
-        $key.SetValue($valName, $qwVal, $kind)
-      }
-      else {
-        [string]$strVal = [string]$rec.Value
-        $key.SetValue($valName, $strVal, $kind)
+      switch ($kind) {
+        ([Microsoft.Win32.RegistryValueKind]::Binary) {
+          [byte[]]$binVal = [byte[]]@()
+          if ($null -ne $rec.Value) { $binVal = [byte[]]@($rec.Value) }
+          $key.SetValue($valName, $binVal, $kind)
+        }
+        ([Microsoft.Win32.RegistryValueKind]::MultiString) {
+          [string[]]$multiVal = [string[]]@()
+          if ($null -ne $rec.Value) { $multiVal = [string[]]@($rec.Value | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) }
+          $key.SetValue($valName, $multiVal, $kind)
+        }
+        ([Microsoft.Win32.RegistryValueKind]::DWord) {
+          $key.SetValue($valName, [int]$rec.Value, $kind)
+        }
+        ([Microsoft.Win32.RegistryValueKind]::QWord) {
+          $key.SetValue($valName, [long]$rec.Value, $kind)
+        }
+        default {
+          [string]$strVal = if ($null -eq $rec.Value) { '' } else { [string]$rec.Value }
+          $key.SetValue($valName, $strVal, $kind)
+        }
       }
     }
   }
@@ -360,33 +357,33 @@ function Test-EnhancementsOff($job) {
 
 function Get-ApoNotesSince([datetime]$since) {
   try {
-    return @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'GamersEqualizer'; StartTime = $since } -ErrorAction Stop |
+    return , @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'GamersEqualizer'; StartTime = $since } -ErrorAction Stop |
       Select-Object -First 200 |
       ForEach-Object { "$($_.Properties[0].Value)" })
   }
-  catch { return @() }
+  catch { return , @() }
 }
 
 function Get-AudiodgCrashesSince([datetime]$since) {
   try {
-    return @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $since } -ErrorAction Stop |
+    return , @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $since } -ErrorAction Stop |
       Select-Object -First 20 |
       Where-Object { $_.Message -match 'audiodg\.exe' })
   }
-  catch { return @() }
+  catch { return , @() }
 }
 
-function Rollback-Job($job) {
-  $prevJson = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.json"
-  if (-not (Test-Path $prevJson)) {
-    Say "  Rollback warning: backup not found for $($job.Name) ($prevJson)." Yellow
-    return $false
+function Rollback-Job($job, [datetime]$sinceRestart) {
+  $snap = $script:FxSnapshots["$($job.Flow):$($job.Id)"]
+  if (-not $snap) {
+    Say "  Rollback warning: snapshot not found for $($job.Name)." Yellow
+    return $sinceRestart
   }
   Stop-Audio
-  try { Restore-FxFromJson $job.Flow $job.Id $prevJson }
-  finally { $null = Start-Audio }
-  Say "  Rolled back $($job.Name) to its exact previous FxProperties." Yellow
-  $true
+  try { Restore-FxSnapshot $snap }
+  finally { $started = Start-Audio }
+  Say "  Rolled back $($job.Name) to its exact pre-install FxProperties." Yellow
+  $started
 }
 
 # Probes one endpoint via `--probe-mic` or `--probe-render` and checks Application EventLog.
@@ -510,64 +507,12 @@ foreach ($job in $jobs) {
   Say "Target: $($job.Name) $($job.Id)`: $what"
 }
 
-# --- Backup -----------------------------------------------------------------------------
-# Keeps typed JSON value snapshots (restorable under Administrators SetValue/QueryValues ACLs)
-# plus .reg reference exports:
-#   <ID>-FxProperties-original.{json,reg} (pristine state before GamersEqualizer first touched it)
-#   <ID>-FxProperties-previous.{json,reg} (state right before the latest install/update)
-New-Item -ItemType Directory -Force $BackupDir | Out-Null
+# --- Snapshot (in-memory only, no disk backup) -------------------------------------------
+$FxSnapshots = @{}
 foreach ($job in $jobs) {
-  $regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
-  $origReg  = Join-Path $BackupDir "$($job.Id)-FxProperties-original.reg"
-  $prevReg  = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.reg"
-  $tmpReg   = Join-Path $BackupDir "$($job.Id)-FxProperties-tmp.reg"
-  $origJson = Join-Path $BackupDir "$($job.Id)-FxProperties-original.json"
-  $prevJson = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.json"
-  $tmpJson  = Join-Path $BackupDir "$($job.Id)-FxProperties-tmp.json"
-
-  if (-not (Test-Path $origReg)) {
-    $existing = @(Get-ChildItem -Path $BackupDir -File -Filter "$($job.Id)-FxProperties-*.reg" -ErrorAction SilentlyContinue |
-      Where-Object { $_.FullName -ne $prevReg -and $_.FullName -ne $tmpReg } | Sort-Object Name)
-    if ($existing.Count -gt 0) {
-      Copy-Item $existing[0].FullName $origReg -Force -ErrorAction SilentlyContinue
-    }
-  }
-
-  Export-FxJson $job.Flow $job.Id $tmpJson
-  & reg.exe export $regPath $tmpReg /y | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    Remove-Item $tmpReg, $tmpJson -Force -ErrorAction SilentlyContinue
-    throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed."
-  }
-  Move-Item $tmpJson $prevJson -Force
-  Move-Item $tmpReg $prevReg -Force
-
-  # Only create -original.json on genuinely untouched endpoints (neither -original file existed yet).
-  if (-not (Test-Path $origReg)) {
-    Copy-Item $prevReg $origReg -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Path $origJson)) {
-      Copy-Item $prevJson $origJson -Force -ErrorAction SilentlyContinue
-    }
-  }
-
-  Say "Backup: $prevJson"
+  $FxSnapshots["$($job.Flow):$($job.Id)"] = Get-FxSnapshot $job.Flow $job.Id
 }
-
-# Rotate and prune legacy timestamped .reg backups: keep only -original and -previous per endpoint.
-Get-ChildItem -Path $BackupDir -File -Filter '*-FxProperties-*.reg' -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -notlike '*-FxProperties-original.reg' -and $_.Name -notlike '*-FxProperties-previous.reg' } |
-  Group-Object { if ($_.Name -match '^(\{[a-f0-9-]+\})-FxProperties-') { $matches[1] } else { $_.Name } } |
-  ForEach-Object {
-    $id = $_.Name
-    $orig = Join-Path $BackupDir "$id-FxProperties-original.reg"
-    if (-not (Test-Path $orig)) {
-      $sorted = @($_.Group | Sort-Object Name)
-      if ($sorted.Count -gt 0) {
-        Copy-Item $sorted[0].FullName $orig -Force -ErrorAction SilentlyContinue
-      }
-    }
-    $_.Group | Remove-Item -Force -ErrorAction SilentlyContinue
-  }
+Say 'Pre-install snapshot captured in memory (no disk backup created).'
 
 # --- The app itself: staged and checked before anything changes ---------------------------
 # It moves next to its effects, unless it runs from there already or is a developer's build.
@@ -586,6 +531,7 @@ if ($installApp) {
 
 # --- Install (audio service stopped once, so audiodg releases an older DLL) ---------------
 Stop-Audio
+$installComplete = $false
 try {
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   # Staged and checked first: the source sits in a user-writable folder, audiodg loads the result.
@@ -647,6 +593,15 @@ try {
     Unblock-File $InstalledExe
     Say "App: $InstalledExe"
   }
+  $installComplete = $true
+}
+catch {
+  if (-not $installComplete -and $FxSnapshots) {
+    foreach ($snap in $FxSnapshots.Values) {
+      try { Restore-FxSnapshot $snap } catch { }
+    }
+  }
+  throw
 }
 finally {
   $audioStarted = Start-Audio
@@ -672,8 +627,8 @@ if ($ProbeCopy) {
     Stop-Audio
     try {
       foreach ($job in $jobs) {
-        $prevJson = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.json"
-        if (Test-Path $prevJson) { Restore-FxFromJson $job.Flow $job.Id $prevJson }
+        $snap = $FxSnapshots["$($job.Flow):$($job.Id)"]
+        if ($snap) { Restore-FxSnapshot $snap }
       }
     }
     finally { $audioStarted = Start-Audio }
@@ -682,18 +637,30 @@ if ($ProbeCopy) {
   }
 }
 
+function Test-ApoNoteStarted($res, [string]$className, [string]$guid, [string]$tailPattern) {
+  $clsPat = [regex]::Escape($className)
+  $idPat = [regex]::Escape($guid)
+  $all = @($res.Notes + $res.PreNotes)
+  if (@($all | Where-Object { $_ -match "$clsPat \[$idPat\]: $tailPattern" }).Count -gt 0) { return $true }
+  if (@($res.Notes | Where-Object { $_ -match "$clsPat`: $tailPattern" }).Count -gt 0) { return $true }
+  if (@($all | Where-Object { $_ -match "$clsPat \[\{[0-9a-f-]+\}\]:" }).Count -eq 0 -and
+      @($res.PreNotes | Where-Object { $_ -match "$clsPat`: $tailPattern" }).Count -gt 0) {
+    return $true
+  }
+  $false
+}
+
 foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   if (-not $ProbeCopy -or (Test-EnhancementsOff $job)) { continue }
   $slot = $job.Targets[0][1]
   Say "`nChecking $($job.Name): opening microphone for a few seconds..."
   $res = Invoke-EndpointProbe $job $audioStarted
   if (-not $res.OpenOk) {
-    $null = Rollback-Job $job
+    $audioStarted = Rollback-Job $job $audioStarted
     $selfTestFailed = $true
     continue
   }
-  $started = [bool]($res.Notes | Where-Object { $_ -match 'GamersEqualizer Mic Chain: (stream |refused a stream)' })
-  if ($started) {
+  if (Test-ApoNoteStarted $res 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)') {
     Say "  Works: Windows starts the mic effect ($slot)." Green
     continue
   }
@@ -702,12 +669,11 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   $audioStarted = Move-EndpointSlot $job 'Capture' $other
   $res2 = Invoke-EndpointProbe $job $audioStarted
   if (-not $res2.OpenOk) {
-    $null = Rollback-Job $job
+    $audioStarted = Rollback-Job $job $audioStarted
     $selfTestFailed = $true
     continue
   }
-  $started2 = [bool]($res2.Notes | Where-Object { $_ -match 'GamersEqualizer Mic Chain: (stream |refused a stream)' })
-  if ($started2) {
+  if (Test-ApoNoteStarted $res2 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)') {
     Say "  Works: Windows starts the mic effect ($other)." Green
     continue
   }
@@ -721,18 +687,17 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
 
 foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
   if (-not $ProbeCopy -or (Test-EnhancementsOff $job)) { continue }
-  $hasOut = ($job.Targets | Where-Object { $_[0] -eq 'Render' }).Count -gt 0
-  $hasStream = ($job.Targets | Where-Object { $_[0] -eq 'Stream' }).Count -gt 0
+  $hasOut = @($job.Targets | Where-Object { $_[0] -eq 'Render' }).Count -gt 0
+  $hasStream = @($job.Targets | Where-Object { $_[0] -eq 'Stream' }).Count -gt 0
   Say "`nChecking $($job.Name): opening silent output for a moment..."
   $res = Invoke-EndpointProbe $job $audioStarted
   if (-not $res.OpenOk) {
-    $null = Rollback-Job $job
+    $audioStarted = Rollback-Job $job $audioStarted
     $selfTestFailed = $true
     continue
   }
-  $allNotes = @($res.Notes + $res.PreNotes)
-  $outOk = -not $hasOut -or [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
-  $streamOk = -not $hasStream -or [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
+  $outOk = -not $hasOut -or (Test-ApoNoteStarted $res 'GamersEqualizer Output EQ' $job.Id 'stream .* started')
+  $streamOk = -not $hasStream -or (Test-ApoNoteStarted $res 'GamersEqualizer Stream EQ' $job.Id 'stream .* started')
   if ($outOk -and $streamOk) {
     Say '  Works: Windows starts the output effects.' Green
     continue
@@ -743,13 +708,12 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
     $audioStarted = Move-EndpointSlot $job 'Render' 'MFX'
     $res2 = Invoke-EndpointProbe $job $audioStarted
     if (-not $res2.OpenOk) {
-      $null = Rollback-Job $job
+      $audioStarted = Rollback-Job $job $audioStarted
       $selfTestFailed = $true
       continue
     }
-    $allNotes2 = @($res2.Notes + $res2.PreNotes)
-    $outOk2 = [bool]($allNotes2 | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
-    $streamOk2 = -not $hasStream -or [bool]($allNotes2 | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
+    $outOk2 = Test-ApoNoteStarted $res2 'GamersEqualizer Output EQ' $job.Id 'stream .* started'
+    $streamOk2 = -not $hasStream -or (Test-ApoNoteStarted $res2 'GamersEqualizer Stream EQ' $job.Id 'stream .* started')
     if ($outOk2 -and $streamOk2) {
       Say '  Works: Windows starts the output effects (Output EQ in MFX).' Green
       continue
@@ -767,7 +731,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
   }
 
   Say '  Windows did not start output effects: rolling back so the output stays untouched.' Red
-  $null = Rollback-Job $job
+  $audioStarted = Rollback-Job $job $audioStarted
   $selfTestFailed = $true
 }
 

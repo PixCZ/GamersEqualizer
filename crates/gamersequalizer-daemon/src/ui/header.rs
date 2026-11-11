@@ -198,6 +198,8 @@ pub fn select_output(state: &mut AppState, win_audio: &mut WinAudioSystem, id: S
     win_audio.endpoint_lock.lock_device(id);
   }
   state.spatial_checked_at = None;
+  state.headphones_ui.recheck_apo();
+  super::setup::recheck(state);
   win_audio.chatmix.sync_from_system();
 }
 

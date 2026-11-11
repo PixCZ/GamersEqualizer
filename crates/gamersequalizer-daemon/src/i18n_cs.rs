@@ -572,7 +572,10 @@ pub static CS: &[(&str, &str)] = &[
   ("The background service starts when you sign in, so the effects get their settings.", "Služba na pozadí se spustí po přihlášení, aby efekty dostaly svá nastavení."),
   ("Setup failed: {}", "Nastavení selhalo: {}"),
   ("Microphone processing on \"{}\"", "Zpracování mikrofonu na „{}“"),
+  ("Microphone processing on {} connected devices", "Zpracování mikrofonu na všech {} připojených zařízeních"),
   ("Output EQ on \"{}\"", "EQ výstupu na „{}“"),
+  ("Output EQ on {} connected devices", "EQ výstupu na všech {} připojených zařízeních"),
+  ("Devices: {}", "Zařízení: {}"),
   // --- health: notifications, new output, muted mic while recording ---
   ("Sound plays on another device now. The tray menu switches it back.", "Zvuk teď hraje na jiném zařízení. Nabídka v oznamovací oblasti ho přepne zpět."),
   ("Turn it back on in the sound settings; the tray menu opens them.", "Zapněte ho znovu v nastavení zvuku; nabídka v oznamovací oblasti ho otevře."),

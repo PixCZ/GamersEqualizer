@@ -62,6 +62,8 @@ pub(super) fn pick_mic(state: &mut AppState, win_audio: &mut WinAudioSystem, pic
   state.set_shm_selected_mic(pick.as_deref().unwrap_or_default());
   win_audio.chatmix.use_mic(pick);
   win_audio.mic_stream.set_input_device(win_audio.chatmix.mic_device_id.clone());
+  super::apo_banner::recheck(state);
+  super::setup::recheck(state);
 }
 
 fn leveler_section(ui: &mut Ui, state: &mut AppState) {

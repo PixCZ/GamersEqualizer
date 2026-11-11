@@ -51,7 +51,7 @@ use std::mem::{offset_of, size_of};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use gamersequalizer_common::biquad::BiquadCascade;
@@ -62,18 +62,19 @@ use gamersequalizer_mic_vst::{GamersEqualizerPlugin, SharedMemoryClient};
 use rate_bridge::RateBridge;
 use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, BOOL, GUID, HRESULT};
 use windows::Win32::Foundation::{
-  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, S_FALSE,
-  S_OK,
+  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, PROPERTYKEY,
+  S_FALSE, S_OK,
 };
 use windows::Win32::Media::Audio::Apo::{
-  APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
-  IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT, IAudioProcessingObjectRT_Vtbl,
-  IAudioProcessingObject_Vtbl, IAudioSystemEffects, IAudioSystemEffects_Vtbl, APOERR_ALREADY_UNLOCKED,
-  APOERR_APO_LOCKED, APOERR_FORMAT_NOT_SUPPORTED, APOERR_NUM_CONNECTIONS_INVALID, APO_CONNECTION_DESCRIPTOR,
-  APO_CONNECTION_PROPERTY, APO_CONNECTION_PROPERTY_V2, APO_FLAG, APO_FLAG_DEFAULT, APO_FLAG_INPLACE,
-  APO_REG_PROPERTIES, BUFFER_SILENT, BUFFER_VALID, UNCOMPRESSEDAUDIOFORMAT,
+  APOInitSystemEffects, APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject,
+  IAudioProcessingObjectConfiguration, IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT,
+  IAudioProcessingObjectRT_Vtbl, IAudioProcessingObject_Vtbl, IAudioSystemEffects, IAudioSystemEffects_Vtbl,
+  APOERR_ALREADY_UNLOCKED, APOERR_APO_LOCKED, APOERR_FORMAT_NOT_SUPPORTED, APOERR_NUM_CONNECTIONS_INVALID,
+  APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_CONNECTION_PROPERTY_V2, APO_FLAG, APO_FLAG_DEFAULT,
+  APO_FLAG_INPLACE, APO_REG_PROPERTIES, BUFFER_SILENT, BUFFER_VALID, UNCOMPRESSEDAUDIOFORMAT,
 };
-use windows::Win32::System::Com::{CoTaskMemAlloc, IClassFactory, IClassFactory_Impl};
+use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+use windows::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree, IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
@@ -94,6 +95,12 @@ pub const CLSID_STREAM_APO: GUID = GUID::from_u128(0x3c9a5e21_7d4f_4b8e_a1c6_5f2
 /// Known limit: every interactive user on the PC still shares one mapping (not supported for
 /// several users at once, see CTI-ME); per-user mappings would be the upgrade.
 const APO_SHM_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;;0x6;;;IU)";
+
+/// `PKEY_AudioEndpoint_GUID` (`{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E}, 4`): carried on
+/// `APOInitSystemEffects.pAPOEndpointProperties` in Windows Audio Engine (`audiodg.exe`).
+const PKEY_AUDIO_ENDPOINT_GUID: PROPERTYKEY =
+  PROPERTYKEY { fmtid: GUID::from_u128(0x1da5d803_d492_4edd_8c23_e0c0ffee7f0e), pid: 4 };
+static APO_INSTANCE_IDS: AtomicU32 = AtomicU32::new(1);
 
 const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 const MAX_CHANNELS: u32 = 32;
@@ -136,6 +143,9 @@ enum ApoKind {
 /// configuration and real-time methods from different threads.
 struct ApoState {
   kind: ApoKind,
+  instance_id: u32,
+  /// Endpoint GUID (`{...}`, lowercased) from `Initialize`, when Windows supplies it.
+  endpoint_tag: OnceLock<String>,
   locked: AtomicBool,
   channels: AtomicU32,
   /// Frames per second of the locked format (0 before LockForProcess).
@@ -243,6 +253,8 @@ struct MicProcessor {
   blocks: u64,
   processed: u64,
   count: MicChainCount,
+  endpoint_tag: Option<String>,
+  instance_id: u32,
 }
 
 /// How regularly the audio engine calls the mic APO (debug log): an app gets its data late
@@ -545,7 +557,9 @@ unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *co
   if st.locked.load(Ordering::Acquire) {
     return APOERR_APO_LOCKED;
   }
-  // Only the processing mode is used (stream table telemetry); the property stores are not.
+  if let Some(guid) = endpoint_guid_from_init(size, data) {
+    let _ = st.endpoint_tag.set(guid);
+  }
   let mode = processing_mode(size, data);
   if let Some(mode) = mode {
     st.mode.0.store((mode >> 64) as u64, Ordering::Relaxed);
@@ -553,7 +567,7 @@ unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *co
   }
   // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
   let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
-  note(Level::Info, format!("{}: initialized ({size}-byte init block, mode {mode})", st.kind.friendly_name()));
+  note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
   S_OK
 }
 
@@ -599,9 +613,9 @@ unsafe fn is_format_supported(
     Ok(_) => (Level::Info, "accepted".to_string()),
     Err(err) => (Level::Warning, format!("refused ({:?})", err.code())),
   };
-  let name = state::<OFF_APO>(this).kind.friendly_name();
+  let st = state::<OFF_APO>(this);
   let (requested_text, opposite_text) = (describe(requested), describe(opposite));
-  note(level, format!("{name}: {direction} format {requested_text} (other side {opposite_text}): {verdict}"));
+  note_for(st, level, format!("{direction} format {requested_text} (other side {opposite_text}): {verdict}"));
   match result {
     Ok(format) => {
       *supported = format.into_raw();
@@ -671,8 +685,7 @@ unsafe extern "system" fn cfg_lock_for_process(
     return APOERR_APO_LOCKED;
   }
   if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
-    let name = st.kind.friendly_name();
-    note(Level::Warning, format!("{name}: refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
+    note_for(st, Level::Warning, format!("refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
     return APOERR_NUM_CONNECTIONS_INVALID;
   }
   let input = *inputs;
@@ -682,9 +695,11 @@ unsafe extern "system" fn cfg_lock_for_process(
   let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
   let Some(format) = offered.filter(is_supported_format) else {
     let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
-    let text =
-      format!("{}: stream format not supported ({what}); Windows runs the stream without it", st.kind.friendly_name());
-    note(Level::Warning, text);
+    note_for(
+      st,
+      Level::Warning,
+      format!("stream format not supported ({what}); Windows runs the stream without it"),
+    );
     return APOERR_FORMAT_NOT_SUPPORTED;
   };
 
@@ -692,12 +707,13 @@ unsafe extern "system" fn cfg_lock_for_process(
   let rate = format.fFramesPerSecond;
   st.rate.store(rate as u32, Ordering::Release);
   let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
+  let tag = st.endpoint_tag.get().cloned();
   let processor = match st.kind {
-    ApoKind::Mic => MicProcessor::create(rate as u32).map(|p| Processor::Mic(Box::new(p))),
+    ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|p| Processor::Mic(Box::new(p))),
     ApoKind::Output => {
-      OutputProcessor::create(shared_memory(st.kind), rate, format.dwSamplesPerFrame).map(Processor::Output)
+      OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(Processor::Output)
     }
-    ApoKind::Stream => shared_memory(st.kind)
+    ApoKind::Stream => shared_memory(st)
       .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
       .map(Processor::Stream),
   };
@@ -707,13 +723,8 @@ unsafe extern "system" fn cfg_lock_for_process(
     Some(_) => "started".to_string(),
     None => "no chain, passes audio through".to_string(),
   };
-  let text = format!(
-    "{}: stream {}, mode {:?}: {outcome}",
-    st.kind.friendly_name(),
-    describe_format(&format),
-    GUID::from_u128(mode)
-  );
-  note(level, text);
+  let msg = format!("stream {}, mode {:?}: {outcome}", describe_format(&format), GUID::from_u128(mode));
+  note_for(st, level, msg);
   if let Ok(mut slot) = st.processor.lock() {
     // Replacing drops a previous processor: keep a destructor panic inside this DLL.
     let old = std::mem::replace(&mut *slot, processor);
@@ -741,15 +752,34 @@ unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -> HRESULT {
 
 /// The Global mapping, created or opened. Without it the effect passes audio through and the
 /// app never connects, so a failure is noted in the Application log.
-fn shared_memory(kind: ApoKind) -> Option<SharedMemoryClient> {
+fn shared_memory(st: &ApoState) -> Option<SharedMemoryClient> {
+  shared_memory_tagged(st.kind, st.endpoint_tag.get().map(String::as_str), st.instance_id)
+}
+
+fn shared_memory_tagged(kind: ApoKind, endpoint_tag: Option<&str>, instance_id: u32) -> Option<SharedMemoryClient> {
   match SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL)) {
     Ok(shm) => Some(shm),
     Err(e) => {
-      let text = format!("{}: shared memory {APO_SHM_NAME} unavailable ({e})", kind.friendly_name());
-      note(Level::Warning, text);
+      note_tagged(kind, endpoint_tag, instance_id, Level::Warning, format!("shared memory {APO_SHM_NAME} unavailable ({e})"));
       None
     }
   }
+}
+
+/// An Application log note scoped per endpoint GUID (or instance id fallback when Windows
+/// did not pass one): same format on multiple devices never suppresses another device's notes.
+fn note_for(st: &ApoState, level: Level, msg: String) {
+  note_tagged(st.kind, st.endpoint_tag.get().map(String::as_str), st.instance_id, level, msg);
+}
+
+fn note_tagged(kind: ApoKind, endpoint_tag: Option<&str>, instance_id: u32, level: Level, msg: String) {
+  let prefix = match endpoint_tag {
+    Some(tag) => format!("{} [{tag}]", kind.friendly_name()),
+    None => kind.friendly_name().to_string(),
+  };
+  let text = format!("{prefix}: {msg}");
+  let key = if endpoint_tag.is_some() { text.clone() } else { format!("#{instance_id}:{text}") };
+  event_log::note(level, &key, &text);
 }
 
 /// An Application log note keyed by its own text: each distinct text once per process.
@@ -797,6 +827,8 @@ impl ApoState {
   fn new(kind: ApoKind) -> Self {
     Self {
       kind,
+      instance_id: APO_INSTANCE_IDS.fetch_add(1, Ordering::Relaxed),
+      endpoint_tag: OnceLock::new(),
       locked: AtomicBool::new(false),
       channels: AtomicU32::new(1),
       rate: AtomicU32::new(0),
@@ -1078,10 +1110,9 @@ impl Drop for MicChainCount {
 impl MicProcessor {
   /// Opens/creates the Global mapping and builds the chain for a `rate` Hz stream (resampled
   /// to 48 kHz unless it already is). None (pass-through) on an unsupported rate or failure.
-  fn create(rate: u32) -> Option<Self> {
+  fn create(rate: u32, endpoint_tag: Option<String>, instance_id: u32) -> Option<Self> {
     let refuse = |why: String| {
-      let text = format!("Mic chain: {why}; passes audio through");
-      note(Level::Warning, text);
+      note_tagged(ApoKind::Mic, endpoint_tag.as_deref(), instance_id, Level::Warning, format!("{why}; passes audio through"));
     };
     let bridge = match RateBridge::for_rate(rate) {
       Some(Ok(bridge)) => Some(bridge),
@@ -1095,8 +1126,9 @@ impl MicProcessor {
         return None;
       }
     };
+    let shm_tag = endpoint_tag.clone();
     let built = catch_unwind(AssertUnwindSafe(move || {
-      let shm = shared_memory(ApoKind::Mic);
+      let shm = shared_memory_tagged(ApoKind::Mic, shm_tag.as_deref(), instance_id);
       let mut plugin = GamersEqualizerPlugin::with_shm(REF_SAMPLE_RATE as f32, shm);
       plugin.preload_selected_model();
       #[cfg(feature = "debug-capture")]
@@ -1117,6 +1149,8 @@ impl MicProcessor {
         blocks: 0,
         processed: 0,
         count: MicChainCount::new(),
+        endpoint_tag: shm_tag,
+        instance_id,
       }
     }));
     if built.is_err() {
@@ -1126,7 +1160,7 @@ impl MicProcessor {
   }
 
   /// Application-log note when the stream stops: did the chain really run, and if not, why.
-  /// Keyed by the reason, so each reason is written once per audiodg run.
+  /// Keyed per endpoint + reason, so each outcome is written once per endpoint per audiodg run.
   fn note_stop(&self) {
     let why = if self.failed {
       "the chain failed and passed audio through from then on"
@@ -1140,8 +1174,16 @@ impl MicProcessor {
       "GamersEqualizer did not drive it (not running for the user at the console), passed audio through"
     };
     let level = if self.processed > 0 { Level::Info } else { Level::Warning };
-    let text = format!("Mic chain: stream stopped after {} blocks, {} processed: {why}", self.blocks, self.processed);
-    event_log::note(level, &format!("mic stop: {why}"), &text);
+    let label = match &self.endpoint_tag {
+      Some(tag) => format!("Mic chain [{tag}]"),
+      None => "Mic chain".to_string(),
+    };
+    let text = format!("{label}: stream stopped after {} blocks, {} processed: {why}", self.blocks, self.processed);
+    let key = match &self.endpoint_tag {
+      Some(tag) => format!("mic stop:{tag}:{why}"),
+      None => format!("mic stop:#{}:{why}", self.instance_id),
+    };
+    event_log::note(level, &key, &text);
   }
 
   /// In place on interleaved `buf`: first channel through the chain, result to all channels.
@@ -1278,6 +1320,54 @@ fn frames_to_hns(frames: u64, rate: u32) -> i64 {
 // ---------------------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------------------
+
+/// Endpoint `{guid}` (lowercased) from `APOInitSystemEffects` / `APOInitSystemEffects2`.
+/// Reads `pAPOEndpointProperties` (`PKEY_AudioEndpoint_GUID`), falling back to `pDeviceCollection`.
+///
+/// # Safety
+/// `data` must point to `size` readable bytes or be null (audio engine contract).
+unsafe fn endpoint_guid_from_init(size: u32, data: *const u8) -> Option<String> {
+  if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects>() {
+    return None;
+  }
+  let init = data as *const APOInitSystemEffects;
+  let declared = std::ptr::addr_of!((*init).APOInit.cbSize).read_unaligned();
+  if (declared as usize) < size_of::<APOInitSystemEffects>() {
+    return None;
+  }
+  // Field reads only: `ManuallyDrop` borrows COM pointers without taking ownership or calling Release.
+  let props = std::ptr::addr_of!((*init).pAPOEndpointProperties).read_unaligned();
+  if let Some(store) = props.as_ref() {
+    if let Ok(val) = store.GetValue(&PKEY_AUDIO_ENDPOINT_GUID) {
+      if let Ok(pwstr) = PropVariantToStringAlloc(&val) {
+        let text = pwstr.to_string().ok();
+        CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
+        if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
+          return Some(guid);
+        }
+      }
+    }
+  }
+  let devices = std::ptr::addr_of!((*init).pDeviceCollection).read_unaligned();
+  if let Some(col) = devices.as_ref() {
+    if let Ok(dev) = col.Item(0) {
+      if let Ok(pwstr) = dev.GetId() {
+        let text = pwstr.to_string().ok();
+        CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
+        if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
+          return Some(guid);
+        }
+      }
+    }
+  }
+  None
+}
+
+fn normalize_endpoint_guid(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  let guid = trimmed.rsplit('.').next().unwrap_or(trimmed).trim();
+  (guid.starts_with('{') && guid.ends_with('}') && guid.len() > 2).then(|| guid.to_ascii_lowercase())
+}
 
 /// `AudioProcessingMode` of an APOInitSystemEffects2 block (or a newer one, which extends it).
 ///
@@ -1453,7 +1543,7 @@ mod tests {
   #[test]
   fn chain_writes_processed_mono_to_every_channel() {
     // In a user test process the Global mapping can't be created: the chain runs without it.
-    let mut processor = MicProcessor::create(48_000).unwrap();
+    let mut processor = MicProcessor::create(48_000, None, 1).unwrap();
     let input: Vec<f32> = (0..960).flat_map(|i| [((i as f32) * 0.05).sin() * 0.3, 0.9]).collect();
 
     // No daemon owns the mapping: the raw mic, untouched.
@@ -1474,7 +1564,7 @@ mod tests {
   fn chain_runs_at_other_mic_rates_instead_of_passing_through() {
     // 44.1 kHz USB mics, 16/8 kHz Bluetooth headsets, 96 kHz interfaces.
     for rate in [8_000u32, 16_000, 44_100, 96_000] {
-      let mut processor = MicProcessor::create(rate).unwrap();
+      let mut processor = MicProcessor::create(rate, None, 1).unwrap();
       processor.follow_owner = false;
       assert!(processor.bridge.is_some(), "{rate} Hz needs the resampling bridge");
       let frames = rate as usize / 100;
@@ -1490,8 +1580,8 @@ mod tests {
       }
       assert!(!processor.failed, "{rate} Hz");
     }
-    assert!(MicProcessor::create(48_000).unwrap().bridge.is_none());
-    assert!(MicProcessor::create(1_000).is_none(), "unsupported rates pass through");
+    assert!(MicProcessor::create(48_000, None, 1).unwrap().bridge.is_none());
+    assert!(MicProcessor::create(1_000, None, 1).is_none(), "unsupported rates pass through");
   }
 
   #[test]
@@ -1715,8 +1805,13 @@ mod tests {
     let data = &init as *const APOInitSystemEffects2 as *const u8;
     let size = size_of::<APOInitSystemEffects2>() as u32;
     assert_eq!(unsafe { processing_mode(size, data) }, Some(mode.to_u128()));
+    assert_eq!(unsafe { endpoint_guid_from_init(size, data) }, None);
     assert_eq!(unsafe { processing_mode(20, data) }, None);
+    assert_eq!(unsafe { endpoint_guid_from_init(20, data) }, None);
     assert_eq!(unsafe { processing_mode(size, std::ptr::null()) }, None);
+    assert_eq!(normalize_endpoint_guid("{0.0.0.00000000}.{42B05AAC-7B95-4CC8-8481-B940A20FE8BD}").as_deref(), Some("{42b05aac-7b95-4cc8-8481-b940a20fe8bd}"));
+    assert_eq!(normalize_endpoint_guid(" {CF0A2270-1885-4DD6-82A5-F636E9EFADD5} ").as_deref(), Some("{cf0a2270-1885-4dd6-82a5-f636e9efadd5}"));
+    assert_eq!(normalize_endpoint_guid("garbage"), None);
   }
 
   #[test]

@@ -427,8 +427,8 @@ function Invoke-MicProbe([string]$capId, [string]$label, [datetime]$sinceRestart
   foreach ($c in @($preEv.Crashes + $ev.Crashes)) { Say "    $c" Red }
   foreach ($n in $ev.Notes) { Say "    $n" }
   $allNotes = @($preEv.Notes + $ev.Notes)
-  $startedProbe = [bool]($ev.Notes | Where-Object { $_ -match 'GamersEqualizer Mic Chain: stream .* started' })
-  $startedAny   = [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Mic Chain: stream .* started' })
+  $startedProbe = [bool]($ev.Notes | Where-Object { $_ -match 'GamersEqualizer Mic Chain(?: \[[^\]]+\])?: stream .* started' })
+  $startedAny   = [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Mic Chain(?: \[[^\]]+\])?: stream .* started' })
   [pscustomobject]@{
     Ok           = ($p.ExitCode -eq 0 -and ($ev.Crashes.Count + $preEv.Crashes.Count) -eq 0)
     Started      = $startedProbe
@@ -467,12 +467,12 @@ function Invoke-RenderProbe([string]$renId, [string]$label, [datetime]$sinceRest
   foreach ($c in @($preEv.Crashes + $ev.Crashes)) { Say "    $c" Red }
   foreach ($n in $ev.Notes) { Say "    $n" }
   $allNotes  = @($preEv.Notes + $ev.Notes)
-  $outProbe  = [bool]($ev.Notes | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
-  $strProbe  = [bool]($ev.Notes | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
-  $outPre    = [bool]($preEv.Notes | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
-  $strPre    = [bool]($preEv.Notes | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
-  $outAny    = [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
-  $strAny    = [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
+  $outProbe  = [bool]($ev.Notes | Where-Object { $_ -match 'GamersEqualizer Output EQ(?: \[[^\]]+\])?: stream .* started' })
+  $strProbe  = [bool]($ev.Notes | Where-Object { $_ -match 'GamersEqualizer Stream EQ(?: \[[^\]]+\])?: stream .* started' })
+  $outPre    = [bool]($preEv.Notes | Where-Object { $_ -match 'GamersEqualizer Output EQ(?: \[[^\]]+\])?: stream .* started' })
+  $strPre    = [bool]($preEv.Notes | Where-Object { $_ -match 'GamersEqualizer Stream EQ(?: \[[^\]]+\])?: stream .* started' })
+  $outAny    = [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Output EQ(?: \[[^\]]+\])?: stream .* started' })
+  $strAny    = [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Stream EQ(?: \[[^\]]+\])?: stream .* started' })
   [pscustomobject]@{
     Ok               = ($null -eq $err -and ($ev.Crashes.Count + $preEv.Crashes.Count) -eq 0)
     OutStarted       = $outProbe
@@ -486,10 +486,12 @@ function Invoke-RenderProbe([string]$renId, [string]$label, [datetime]$sinceRest
 }
 
 # --- Verify prerequisites ---
-if (-not (Test-Path $ProbeExe)) { throw "Missing $ProbeExe" }
-foreach ($c in $GeClsids) {
-  if (-not (Test-Path "Registry::HKEY_CLASSES_ROOT\CLSID\$c\InprocServer32")) {
-    throw "COM registration missing for $c. Run normal app install first."
+if (-not $InspectOnly) {
+  if (-not (Test-Path $ProbeExe)) { throw "Missing $ProbeExe" }
+  foreach ($c in $GeClsids) {
+    if (-not (Test-Path "Registry::HKEY_CLASSES_ROOT\CLSID\$c\InprocServer32")) {
+      throw "COM registration missing for $c. Run normal app install first."
+    }
   }
 }
 

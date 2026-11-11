@@ -129,6 +129,9 @@ impl eframe::App for GamersEqualizerApp {
         self.win_audio.mic_stream.set_input_device(Some(id));
       }
       self.state.spatial_checked_at = None;
+      self.state.headphones_ui.recheck_apo();
+      super::apo_banner::recheck(&mut self.state);
+      super::setup::recheck(&mut self.state);
     }
     super::header::refresh_spatial(&mut self.state, &mut self.win_audio);
 
