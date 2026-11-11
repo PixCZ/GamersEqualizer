@@ -103,7 +103,7 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
   let nothing_left = items(state).is_empty();
   if nothing_left && !state.prefs.setup_done {
     // Set up before (older version, scripts) or nothing to do here: never show the card.
-    finish(state);
+    finish_setup(state, None);
   }
   if nothing_left && state.setup.launched {
     state.setup.open = false;
@@ -215,7 +215,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
     state.setup.launched = false;
     if first_run {
       // "Not now" on the first start: the health bar keeps offering the fixes.
-      finish(state);
+      finish_setup(state, None);
     }
   }
 }
@@ -243,14 +243,22 @@ fn run(state: &mut AppState, list: &[Item]) {
     state.setup.open = false;
   }
   state.setup.error = None;
-  finish(state);
+  finish_setup(state, Some(list));
   super::apo_banner::recheck(state);
   state.setup.checked_at = None;
 }
 
-fn finish(state: &mut AppState) {
-  if !state.prefs.setup_done {
-    state.prefs.setup_done = true;
+fn finish_setup(state: &mut AppState, list: Option<&[Item]>) {
+  let mut save = !state.prefs.setup_done;
+  state.prefs.setup_done = true;
+  if let Some(out_item) = list.and_then(|items| items.iter().find(|i| i.kind == Kind::Output)) {
+    let declined = !ticked(state, out_item);
+    if state.prefs.output_declined != declined {
+      state.prefs.output_declined = declined;
+      save = true;
+    }
+  }
+  if save {
     state.prefs.save();
   }
 }
@@ -336,12 +344,28 @@ fn ticked(state: &AppState, item: &Item) -> bool {
   if let Some((_, on)) = state.setup.choices.iter().find(|(k, _)| *k == item.kind) {
     return *on;
   }
-  // The output EQ is optional: offered ticked on the first start or where it is used already,
-  // unticked when the user declined it before (it is on no output yet).
-  item.kind != Kind::Output || !state.prefs.setup_done || state.setup.output_anywhere
+  item.kind != Kind::Output || default_output_ticked(state.setup.output_anywhere, state.prefs.output_declined)
+}
+
+/// Output EQ starts ticked unless the user explicitly unchecked it before and hasn't installed it
+/// on any output since. Keeping prefs across a full uninstall keeps both Mic and Output ticked.
+fn default_output_ticked(output_anywhere: bool, output_declined: bool) -> bool {
+  output_anywhere || !output_declined
 }
 
 fn set_ticked(state: &mut AppState, kind: Kind, on: bool) {
   state.setup.choices.retain(|(k, _)| *k != kind);
   state.setup.choices.push((kind, on));
+}
+
+#[cfg(test)]
+mod tests {
+  use super::default_output_ticked;
+
+  #[test]
+  fn output_starts_ticked_unless_explicitly_declined() {
+    assert!(default_output_ticked(false, false));
+    assert!(!default_output_ticked(false, true));
+    assert!(default_output_ticked(true, true));
+  }
 }

@@ -27,6 +27,8 @@ pub struct UiPrefs {
   pub theme: ThemePref,
   /// The first-run setup card was answered (set up or "Not now"); it no longer opens by itself.
   pub setup_done: bool,
+  /// The user explicitly unchecked Output EQ when applying setup.
+  pub output_declined: bool,
   #[serde(skip)]
   path: PathBuf,
 }
@@ -81,14 +83,18 @@ mod tests {
     let mut p = UiPrefs::load_or_default(&dir);
     p.language = LanguagePref::Czech;
     p.theme = ThemePref::Light;
+    p.output_declined = true;
     p.save();
     let loaded = UiPrefs::load_or_default(&dir);
-    assert_eq!((loaded.language, loaded.theme), (LanguagePref::Czech, ThemePref::Light));
+    assert_eq!((loaded.language, loaded.theme, loaded.output_declined), (LanguagePref::Czech, ThemePref::Light, true));
 
-    // A value from a newer version falls back instead of resetting everything.
-    std::fs::write(dir.join(FILE), r#"{"language":"Czech","theme":"HighContrast"}"#).unwrap();
+    // Existing files without `output_declined` default to false, and unknown enum values fall back.
+    std::fs::write(dir.join(FILE), r#"{"language":"Czech","theme":"HighContrast","setup_done":true}"#).unwrap();
     let loaded = UiPrefs::load_or_default(&dir);
-    assert_eq!((loaded.language, loaded.theme), (LanguagePref::Czech, ThemePref::System));
+    assert_eq!(
+      (loaded.language, loaded.theme, loaded.setup_done, loaded.output_declined),
+      (LanguagePref::Czech, ThemePref::System, true, false)
+    );
     let _ = std::fs::remove_dir_all(&dir);
   }
 }
