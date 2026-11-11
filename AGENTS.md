@@ -66,6 +66,9 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   audiodg runs the APO and prints the APO's own notes. The APO writes those to the Windows Application
   log (source `GamersEqualizer`, `gamersequalizer-apo/src/event_log.rs`); the service copies them into
   its log as `[ApoNote]`, logs device state as `[ApoCheck]`, and tells the window via `run_status.json`.
+- Mic effect slot: the installer puts the mic chain in EFX, then opens the mic briefly
+  (`gamersequalizer.exe --probe-mic {guid}`) and moves it to MFX when Windows did not start it there
+  (some notebook mic arrays). The Mic tab offers the same switch later ("Try another effect slot").
 
 ## Tester package
 

@@ -99,6 +99,12 @@ Rozhodnutí (stejně jako Equalizer APO, který má výchozí SFX/EFX a přepnut
   ho odebere, aby neběžel dvakrát. Bez slotu (aktualizace) ho nechá tam, kde je.
 - Omezení MFX: běží jen v režimech z `modes,6` (tady DEFAULT, RAW, SPEECH, COMMUNICATIONS). Aplikace v
   jiném režimu by dostala neupravený mikrofon.
+- Automaticky při instalaci (pořád jeden dotaz Windows): instalátor po restartu zvuku spustí
+  `gamersequalizer.exe --probe-mic {guid}`. Ten otevře mikrofon na 3 s jako běžná aplikace a instalátor
+  v protokolu čeká na „Mic Chain: stream …“. Když nepřijde, přesune efekt do druhého slotu, restartuje
+  zvuk a zkusí to znovu. Když nefunguje ani jeden, napíše to a okno nechá otevřené.
+- Hlášení „started“ u mikrofonu uvádí, kolik mikrofonních řetězců v audiodg právě běží. V MFX vzniká
+  jeden na každý režim, který se zrovna používá, takže je vidět, kdy běží dva najednou.
 
 Vývojové PC se týden jen uspává do hibernace, restart neproběhl. Než ho prohlásíme za referenci,
 je potřeba ho jednou opravdu restartovat (Restartovat, ne Vypnout: rychlé spuštění je taky

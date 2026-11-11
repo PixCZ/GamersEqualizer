@@ -11,6 +11,9 @@
     'Capture:{guid}:MFX' / ':EFX' moves the mic chain to that slot (the app's "try another
     effect slot"): some mic arrays never start an endpoint effect but run mode effects.
   The mic chain sits in ONE slot per microphone; without a slot it stays where it is (EFX first).
+  -ProbeExe (the app's exe, passed by the app): afterwards the microphone is opened for a few
+    seconds to check that Windows starts the mic chain; if not, it moves to the other slot
+    (EFX <-> MFX) and is checked once more.
 
 .DESCRIPTION
   - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup.
@@ -41,7 +44,13 @@ param(
   [ValidateSet('EFX', 'MFX', 'SFX')][string]$Slot,
   [ValidateSet('Capture', 'Render')][string]$Flow = 'Capture',
   # Render: skip the stream EQ (chat / media channels).
-  [switch]$NoStreamEq
+  [switch]$NoStreamEq,
+  # The app's exe: `--probe-mic {guid}` opens the microphone for the self-test after installing.
+  [string]$ProbeExe,
+  # SHA-256 (hex) the app computed: files from its user-writable folder are used only when the
+  # copy this elevated script makes hashes the same.
+  [string]$ProbeExeSha256,
+  [string]$SourceDllSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +119,115 @@ function Get-ActiveEndpoints([string]$flow) {
     $props = Get-ItemProperty "$($_.PSPath)\Properties" -ErrorAction SilentlyContinue
     [pscustomobject]@{ Id = $_.PSChildName; Name = "$($props.$NameProp) ($($props.$DeviceDescProp))" }
   }
+}
+
+# Appends $class to the endpoint's composite list for $slot, seeded from the legacy single value
+# so that effect is kept. The mic chain also leaves the other capture slot: in both, it could run twice.
+function Set-EffectSlot($job, [string]$class, [string]$slot) {
+  $clsid = $Classes[$class].Clsid
+  $value = $CompositeValues[$slot]
+  $fx = Get-ItemProperty (Join-Path $job.Key 'FxProperties')
+  $list = @()
+  if ($null -ne $fx.$value) { $list = @($fx.$value) }
+  else {
+    $legacy = $LegacyValues[$slot] | ForEach-Object { $fx.$_ } |
+      Where-Object { $null -ne $_ -and $_ -ne '{00000000-0000-0000-0000-000000000000}' } | Select-Object -First 1
+    if ($legacy) { $list = @($legacy) }
+  }
+  if (-not ($list | Where-Object { $_ -ieq $clsid })) { $list += $clsid }
+  $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
+  Set-FxValue $fxSubKey $value ([string[]]$list)
+  Write-Host "$($job.Name) $slot chain: $($list -join ' -> ')"
+  if ($class -ne 'Capture') { return }
+  $otherSlot = if ($slot -eq 'MFX') { 'EFX' } else { 'MFX' }
+  $otherValue = $CompositeValues[$otherSlot]
+  $before = @($fx.$otherValue | Where-Object { $_ })
+  $rest = @($before | Where-Object { $_ -ine $clsid })
+  if ($rest.Count -ne $before.Count) {
+    Set-FxValue $fxSubKey $otherValue ([string[]]$rest)
+    Write-Host "$($job.Name): removed from the $otherSlot chain"
+  }
+}
+
+# Elevated, so never run the exe in the user's folder: copy it where only administrators write
+# and use the copy when it hashes as the app said. False (check skipped) otherwise.
+# shortcut: the app hashes its exe file when it starts this script; same-user malware that had
+# swapped that file before passes. Upgrade: sign the exe and check the signature here.
+function Copy-ProbeExe {
+  if (-not ($ProbeExe -and $ProbeExeSha256 -and (Test-Path $ProbeExe))) {
+    Write-Host "`nMicrophone check skipped: the app did not pass its exe."
+    return $false
+  }
+  # The install is done: a failure here only skips the check, it is not "Install failed".
+  try {
+    Copy-Item $ProbeExe $ProbeCopy -Force
+    if ((Get-FileHash $ProbeCopy -Algorithm SHA256).Hash -ne $ProbeExeSha256) {
+      Remove-Item $ProbeCopy -Force
+      Write-Host "`nMicrophone check skipped: the app's exe changed after the app started this installer." -ForegroundColor Yellow
+      return $false
+    }
+  }
+  catch {
+    Write-Host "`nMicrophone check skipped: $_" -ForegroundColor Yellow
+    return $false
+  }
+  $true
+}
+
+# Audio enhancements off for the device (flag in either key, as the app reads it): Windows runs
+# no effect on it at all.
+function Test-EnhancementsOff($job) {
+  [bool](@('FxProperties', 'Properties') | Where-Object {
+      (Get-ItemProperty (Join-Path $job.Key $_) -ErrorAction SilentlyContinue).$DisableSysFxProp -eq 1 })
+}
+
+# 'started' when Windows started the mic chain for a stream since $since (LockForProcess notes
+# "Mic Chain: stream ..." in the Application log), 'not started', or $null when the microphone
+# could not be opened (busy, blocked, an error): then nothing is known and nothing moves.
+# shortcut: a note does not name its microphone, so one from another mic with our chain counts
+# too (errs towards "works"). Upgrade: put the endpoint id into the APO's notes.
+function Test-MicChain($job, [datetime]$since) {
+  # A just restarted audio service may not list the device yet.
+  Start-Sleep -Seconds 2
+  try {
+    # -NoNewWindow starts it directly (no shell, so no SmartScreen prompt for the unsigned exe).
+    $probe = Start-Process -FilePath $ProbeCopy -ArgumentList '--probe-mic', $job.Id -NoNewWindow -PassThru
+    # Windows PowerShell loses ExitCode unless the handle is opened before the process ends.
+    $null = $probe.Handle
+    # It reads the mic for 3 s; a hung one must not block the installer.
+    if (-not $probe.WaitForExit(20000)) {
+      $probe.Kill()
+      Write-Host '  The check did not finish in time.'
+      return $null
+    }
+  }
+  catch {
+    Write-Host "  The check could not start: $_"
+    return $null
+  }
+  if ($probe.ExitCode -ne 0) {
+    Write-Host '  The microphone could not be opened (busy or blocked; details in the app log).'
+    return $null
+  }
+  $iso = $since.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+  $xpath = "*[System[Provider[@Name='GamersEqualizer'] and TimeCreated[@SystemTime>='$iso']]]"
+  $notes = @(Get-WinEvent -LogName Application -FilterXPath $xpath -MaxEvents 200 -ErrorAction SilentlyContinue)
+  if ($notes | Where-Object { "$($_.Properties[0].Value)" -match 'GamersEqualizer Mic Chain: (stream |refused a stream)' }) {
+    return 'started'
+  }
+  'not started'
+}
+
+# Puts the mic chain into $slot (out of the other one), with audio stopped; returns when audio
+# started again, for Test-MicChain.
+function Move-MicChain($job, [string]$slot) {
+  Stop-Service Audiosrv -Force
+  try { Set-EffectSlot $job 'Capture' $slot }
+  finally {
+    $started = Get-Date
+    Start-Service Audiosrv
+  }
+  $started
 }
 
 # Capture keeps the slot it was moved to, so an update does not undo the move.
@@ -197,12 +315,18 @@ foreach ($job in $jobs) {
 Stop-Service Audiosrv -Force
 try {
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
-  Copy-Item $SourceDll $InstalledDll -Force
+  # Staged and checked first: the source sits in a user-writable folder, audiodg loads the result.
+  $stagedDll = "$InstalledDll.new"
+  Copy-Item $SourceDll $stagedDll -Force
+  if ($SourceDllSha256 -and (Get-FileHash $stagedDll -Algorithm SHA256).Hash -ne $SourceDllSha256) {
+    Remove-Item $stagedDll -Force
+    throw 'The DLL next to the app changed after the app checked it; nothing installed.'
+  }
+  Move-Item $stagedDll $InstalledDll -Force
   # A DLL from a downloaded ZIP carries the internet zone mark; drop it from the installed copy.
   Unblock-File $InstalledDll
 
   foreach ($job in $jobs) {
-    $fxKey = Join-Path $job.Key 'FxProperties'
     foreach ($target in $job.Targets) {
       $Clsid = $Classes[$target[0]].Clsid
       $FriendlyName = $Classes[$target[0]].Name
@@ -228,46 +352,53 @@ try {
         New-ItemProperty $apoKey -Name "APOInterface$i" -Value $ApoInterfaces[$i] -PropertyType String -Force | Out-Null
       }
 
-      # Append to the composite list; seed it from the legacy single value so that effect is kept.
-      $CompositeValue = $CompositeValues[$TargetSlot]
-      $fx = Get-ItemProperty $fxKey
-      $list = @()
-      if ($null -ne $fx.$CompositeValue) { $list = @($fx.$CompositeValue) }
-      else {
-        $legacy = $LegacyValues[$TargetSlot] | ForEach-Object { $fx.$_ } |
-          Where-Object { $null -ne $_ -and $_ -ne '{00000000-0000-0000-0000-000000000000}' } | Select-Object -First 1
-        if ($legacy) { $list = @($legacy) }
-      }
-      if (-not ($list | Where-Object { $_ -ieq $Clsid })) { $list += $Clsid }
-      $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
-      Set-FxValue $fxSubKey $CompositeValue ([string[]]$list)
-      Write-Host "$($job.Name) $TargetSlot chain: $($list -join ' -> ')"
-      # One mic chain per microphone: left in the other slot too, it could run twice.
-      if ($target[0] -eq 'Capture') {
-        $otherSlot = if ($TargetSlot -eq 'MFX') { 'EFX' } else { 'MFX' }
-        $otherValue = $CompositeValues[$otherSlot]
-        $before = @($fx.$otherValue | Where-Object { $_ })
-        $rest = @($before | Where-Object { $_ -ine $Clsid })
-        if ($rest.Count -ne $before.Count) {
-          Set-FxValue $fxSubKey $otherValue ([string[]]$rest)
-          Write-Host "$($job.Name): removed from the $otherSlot chain"
-        }
-      }
+      Set-EffectSlot $job $target[0] $TargetSlot
     }
   }
 }
 finally {
+  $audioStarted = Get-Date
   Start-Service Audiosrv
 }
 
 foreach ($job in $jobs) {
-  $sysFx = (Get-ItemProperty (Join-Path $job.Key 'Properties')).$DisableSysFxProp
-  if ($sysFx -eq 1) {
+  if (Test-EnhancementsOff $job) {
     Write-Warning "Audio enhancements are OFF for $($job.Name); turn them on (Settings > Sound > device > Audio enhancements), or the APO is not loaded."
   }
 }
 
+# --- Self-test: does Windows start the mic chain where it was put? ------------------------
+# Some mic arrays never start an endpoint effect (EFX) but run mode effects (MFX), or the
+# other way round, and nothing in the registry tells which in advance.
+$selfTestFailed = $false
+$ProbeCopy = Join-Path $InstallDir 'gamersequalizer-probe.exe'
+$micJobs = @($jobs | Where-Object { $_.Flow -eq 'Capture' })
+if ($micJobs.Count -gt 0 -and -not (Copy-ProbeExe)) { $micJobs = @() }
+foreach ($job in $micJobs) {
+  # Enhancements off: Windows runs no effect in either slot; the warning above says so.
+  if (Test-EnhancementsOff $job) { continue }
+  $slot = $job.Targets[0][1]
+  Write-Host "`nChecking $($job.Name): opening it for a few seconds..."
+  $result = Test-MicChain $job $audioStarted
+  if ($result -eq 'started') { Write-Host "  Works: Windows starts the mic effect ($slot)." -ForegroundColor Green }
+  if ($result -ne 'not started') { continue }
+  $other = if ($slot -eq 'MFX') { 'EFX' } else { 'MFX' }
+  Write-Host "  Windows did not start it in $slot; moving it to $other (audio restarts once more)..."
+  $audioStarted = Move-MicChain $job $other
+  $result = Test-MicChain $job $audioStarted
+  if ($result -eq 'started') { Write-Host "  Works: Windows starts the mic effect ($other)." -ForegroundColor Green }
+  # Unknown in $other, but $slot is known not to work: it stays in $other.
+  if ($result -ne 'not started') { continue }
+  # Neither works (or the check cannot see it): back where it was put, the default or the user's choice.
+  Write-Host "  Windows starts the mic effect neither in EFX nor in MFX: apps get the raw microphone." -ForegroundColor Red
+  Write-Host "  Putting it back in $slot. Run apo-diagnose.ps1 (next to the app) and send its output." -ForegroundColor Red
+  $audioStarted = Move-MicChain $job $slot
+  $selfTestFailed = $true
+}
+if (Test-Path $ProbeCopy) { Remove-Item $ProbeCopy -Force -ErrorAction SilentlyContinue }
+
 Write-Host ''
 Write-Host 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
 Write-Host 'Settings come from the GamersEqualizer app; keep it running.'
-if ($FromApp) { Start-Sleep -Seconds 3 }
+if ($FromApp -and $selfTestFailed) { Read-Host 'Press Enter to close' }
+elseif ($FromApp) { Start-Sleep -Seconds 3 }

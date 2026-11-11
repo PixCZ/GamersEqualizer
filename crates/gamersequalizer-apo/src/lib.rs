@@ -201,6 +201,13 @@ struct OutputProcessor {
 }
 
 /// The mic DSP chain plus its scratch buffers.
+/// Mic chains alive in this process: one per microphone in EFX, one per processing mode in
+/// use in MFX. The "started" note shows it, so two chains on one mic are visible.
+static MIC_CHAINS: AtomicU32 = AtomicU32::new(0);
+
+/// Counts one live mic chain in `MIC_CHAINS` for as long as it exists.
+struct MicChainCount;
+
 struct MicProcessor {
   plugin: GamersEqualizerPlugin,
   mono_in: Vec<f32>,
@@ -220,6 +227,7 @@ struct MicProcessor {
   /// Blocks the engine handed over / the chain processed, for the note when the stream stops.
   blocks: u64,
   processed: u64,
+  _count: MicChainCount,
 }
 
 /// How regularly the audio engine calls the mic APO (debug log): an app gets its data late
@@ -663,8 +671,12 @@ unsafe extern "system" fn cfg_lock_for_process(
       .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
       .map(Processor::Stream),
   };
-  let (level, outcome) =
-    if processor.is_some() { (Level::Info, "started") } else { (Level::Warning, "no chain, passes audio through") };
+  let level = if processor.is_some() { Level::Info } else { Level::Warning };
+  let outcome = match &processor {
+    Some(Processor::Mic(_)) => format!("started, mic chains running here: {}", MIC_CHAINS.load(Ordering::Relaxed)),
+    Some(_) => "started".to_string(),
+    None => "no chain, passes audio through".to_string(),
+  };
   let text = format!(
     "{}: stream {}, mode {:?}: {outcome}",
     st.kind.friendly_name(),
@@ -997,6 +1009,19 @@ impl OutputProcessor {
   }
 }
 
+impl MicChainCount {
+  fn new() -> Self {
+    MIC_CHAINS.fetch_add(1, Ordering::Relaxed);
+    Self
+  }
+}
+
+impl Drop for MicChainCount {
+  fn drop(&mut self) {
+    MIC_CHAINS.fetch_sub(1, Ordering::Relaxed);
+  }
+}
+
 impl MicProcessor {
   /// Opens/creates the Global mapping and builds the chain for a `rate` Hz stream (resampled
   /// to 48 kHz unless it already is). None (pass-through) on an unsupported rate or failure.
@@ -1038,6 +1063,7 @@ impl MicProcessor {
         timing: CallTiming::default(),
         blocks: 0,
         processed: 0,
+        _count: MicChainCount::new(),
       }
     }));
     if built.is_err() {

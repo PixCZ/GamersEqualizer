@@ -12,6 +12,7 @@ pub mod game_detector;
 pub mod leveler_log;
 pub mod loopback;
 pub mod mic_gain;
+pub mod mic_probe;
 pub mod mic_stream;
 pub mod policy_config;
 pub mod shell;

@@ -142,10 +142,32 @@ pub fn mic_in_mfx(guid: &str) -> bool {
   read_string_value(&key, MFX_LIST_VALUE).is_some_and(|list| list.to_ascii_lowercase().contains(MIC_APO_CLSID))
 }
 
+/// The elevated installer uses files from the app's (user-writable) folder only when its own
+/// copy hashes as given here: the DLL it installs and this exe, which it runs with
+/// `--probe-mic` to check that Windows starts the mic chain.
 fn launch_installer(endpoints: &str) -> Result<(), String> {
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
-  let args = format!("-Endpoint {} -SourceDll {} -FromApp", ps_quote(endpoints), ps_quote(&dll.to_string_lossy()));
+  let dll_hash = file_sha256(&dll)?;
+  let own_exe = std::env::current_exe().map_err(|e| e.to_string());
+  let probe = match own_exe.and_then(|exe| file_sha256(&exe).map(|hash| (hash, exe))) {
+    Ok((hash, exe)) => format!(" -ProbeExe {} -ProbeExeSha256 {hash}", ps_quote(&exe.to_string_lossy())),
+    Err(e) => {
+      log::warn!("[Setup] the installer skips the microphone check (own exe: {e})");
+      String::new()
+    }
+  };
+  let args = format!(
+    "-Endpoint {} -SourceDll {} -SourceDllSha256 {dll_hash}{probe} -FromApp",
+    ps_quote(endpoints),
+    ps_quote(&dll.to_string_lossy())
+  );
   run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer")
+}
+
+/// Hex SHA-256 of a file (the app's exe is tens of MB: read once per install).
+fn file_sha256(path: &Path) -> Result<String, String> {
+  let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+  sha256_hex(&data)
 }
 
 /// `Capture:{guid}:MFX`, or `:EFX` when it is in MFX already: the slot it moves to.

@@ -10,6 +10,9 @@ Spuštění
    klikni "Další informace" -> "Přesto spustit".
 3. V aplikaci se objeví lišta k instalaci efektů pro mikrofon / sluchátka. Klikni na ni
    a potvrď dotaz správce (UAC). Zvuk ve Windows na pár sekund vypadne, to je normální.
+   Instalátor pak na pár sekund otevře mikrofon (rozsvítí se ikona mikrofonu) a ověří, že
+   efekt běží. Když neběží, sám ho přepne na druhé místo a zkusí to znovu; když nejde ani
+   jedno, napíše to červeně a okno nechá otevřené.
    Aplikace, které měly otevřený mikrofon (Discord, hra), pak znovu otevři.
 4. Pokud aplikace hlásí, že efekt mikrofonu NEFUNGUJE (červeně na kartě Mikrofon):
    klikni na "Zkusit jiné zapojení efektu (správce)..." a potvrď dotaz správce. Některé
