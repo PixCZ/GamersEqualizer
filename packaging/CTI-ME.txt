@@ -10,6 +10,7 @@ Spuštění
    klikni "Další informace" -> "Přesto spustit".
 3. V aplikaci se objeví lišta k instalaci efektů pro mikrofon / sluchátka. Klikni na ni
    a potvrď dotaz správce (UAC). Zvuk ve Windows na pár sekund vypadne, to je normální.
+   Do okna instalátoru neklikej: klik ho pozastaví, dokud nestiskneš Enter.
    Instalátor pak na pár sekund otevře mikrofon (rozsvítí se ikona mikrofonu) a ověří, že
    efekt běží. Když neběží, sám ho přepne na druhé místo a zkusí to znovu; když nejde ani
    jedno, napíše to červeně a okno nechá otevřené.

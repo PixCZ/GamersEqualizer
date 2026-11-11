@@ -63,13 +63,48 @@ $ErrorActionPreference = 'Stop'
 trap {
   # A trap runs before `finally`; if the user closes this window at the prompt below, the
   # `finally` that restarts audio never runs. Start it here first (no-op when it is running).
-  Start-Service Audiosrv -ErrorAction SilentlyContinue
+  Start-Service Audiosrv -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+  $script:AudioStopped = $false
   if ($FromApp) {
-    Write-Host "`nInstall failed: $_" -ForegroundColor Red
+    Say "`nInstall failed: $_" Red
     Read-Host 'Press Enter to close'
     exit 1
   }
   break
+}
+
+# A click into this window starts the console's text selection, which pauses the script at its
+# next output until a key is pressed. So nothing is written to the window while Windows audio
+# is stopped (those lines are held and shown once it runs again): a paused window never leaves
+# the PC without sound.
+$AudioStopped = $false
+$Held = New-Object System.Collections.Generic.List[string]
+
+# One line for the window and for the app's log: the app's service copies Application-log
+# entries of this source into it ([ApoNote] ... installer: ...), so the log shows how far an
+# install got. The source is registered on the first entry; apo-uninstall.ps1 removes it.
+function Say([string]$text, [string]$color) {
+  if ($text.Trim()) {
+    try { [System.Diagnostics.EventLog]::WriteEntry('GamersEqualizer', "installer: $($text.Trim())") } catch { }
+  }
+  if ($script:AudioStopped) { $Held.Add($text) }
+  elseif ($color) { Write-Host $text -ForegroundColor $color }
+  else { Write-Host $text }
+}
+
+function Stop-Audio {
+  $script:AudioStopped = $true
+  Stop-Service Audiosrv -Force -WarningAction SilentlyContinue
+}
+
+# Returns when audio started (for Test-MicChain), then shows the held lines.
+function Start-Audio {
+  $started = Get-Date
+  Start-Service Audiosrv -WarningAction SilentlyContinue
+  $script:AudioStopped = $false
+  foreach ($line in $Held) { Write-Host $line }
+  $Held.Clear()
+  $started
 }
 
 # Must match CLSID_GAIN_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
@@ -144,7 +179,7 @@ function Set-EffectSlot($job, [string]$class, [string]$slot) {
   if (-not ($list | Where-Object { $_ -ieq $clsid })) { $list += $clsid }
   $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
   Set-FxValue $fxSubKey $value ([string[]]$list)
-  Write-Host "$($job.Name) $slot chain: $($list -join ' -> ')"
+  Say "$($job.Name) $slot chain: $($list -join ' -> ')"
   if ($class -ne 'Capture') { return }
   $otherSlot = if ($slot -eq 'MFX') { 'EFX' } else { 'MFX' }
   $otherValue = $CompositeValues[$otherSlot]
@@ -152,7 +187,7 @@ function Set-EffectSlot($job, [string]$class, [string]$slot) {
   $rest = @($before | Where-Object { $_ -ine $clsid })
   if ($rest.Count -ne $before.Count) {
     Set-FxValue $fxSubKey $otherValue ([string[]]$rest)
-    Write-Host "$($job.Name): removed from the $otherSlot chain"
+    Say "$($job.Name): removed from the $otherSlot chain"
   }
 }
 
@@ -164,7 +199,7 @@ function Set-EffectSlot($job, [string]$class, [string]$slot) {
 # swapped that file before passes. Upgrade: sign the exe and check the signature here.
 function Get-ProbeExe {
   if (-not ($AppExe -and $AppExeSha256 -and (Test-Path $AppExe))) {
-    Write-Host "`nMicrophone check skipped: the app did not pass its exe."
+    Say "`nMicrophone check skipped: the app did not pass its exe."
     return
   }
   # The install is done: a failure here only skips the check, it is not "Install failed".
@@ -175,12 +210,12 @@ function Get-ProbeExe {
     Copy-Item $AppExe $ProbeTemp -Force
     if ((Get-FileHash $ProbeTemp -Algorithm SHA256).Hash -ne $AppExeSha256) {
       Remove-Item $ProbeTemp -Force
-      Write-Host "`nMicrophone check skipped: the app's exe changed after the app started this installer." -ForegroundColor Yellow
+      Say "`nMicrophone check skipped: the app's exe changed after the app started this installer." Yellow
       return
     }
   }
   catch {
-    Write-Host "`nMicrophone check skipped: $_" -ForegroundColor Yellow
+    Say "`nMicrophone check skipped: $_" Yellow
     return
   }
   $ProbeTemp
@@ -209,16 +244,16 @@ function Test-MicChain($job, [datetime]$since) {
     # It reads the mic for 3 s; a hung one must not block the installer.
     if (-not $probe.WaitForExit(20000)) {
       $probe.Kill()
-      Write-Host '  The check did not finish in time.'
+      Say '  The check did not finish in time.'
       return $null
     }
   }
   catch {
-    Write-Host "  The check could not start: $_"
+    Say "  The check could not start: $_"
     return $null
   }
   if ($probe.ExitCode -ne 0) {
-    Write-Host '  The microphone could not be opened (busy or blocked; details in the app log).'
+    Say '  The microphone could not be opened (busy or blocked; details in the app log).'
     return $null
   }
   $iso = $since.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
@@ -233,12 +268,9 @@ function Test-MicChain($job, [datetime]$since) {
 # Puts the mic chain into $slot (out of the other one), with audio stopped; returns when audio
 # started again, for Test-MicChain.
 function Move-MicChain($job, [string]$slot) {
-  Stop-Service Audiosrv -Force
+  Stop-Audio
   try { Set-EffectSlot $job 'Capture' $slot }
-  finally {
-    $started = Get-Date
-    Start-Service Audiosrv
-  }
+  finally { $started = Start-Audio }
   $started
 }
 
@@ -307,9 +339,10 @@ else {
 if (-not (Test-Path $SourceDll)) {
   throw "DLL not found: $SourceDll. Build it first: cargo build --profile apo -p gamersequalizer-apo"
 }
+Say 'Do not click inside this window: a click pauses it until you press Enter.'
 foreach ($job in $jobs) {
   $what = ($job.Targets | ForEach-Object { "$($Classes[$_[0]].Name) ($($_[1]))" }) -join ', '
-  Write-Host "Target: $($job.Name) $($job.Id)`: $what"
+  Say "Target: $($job.Name) $($job.Id)`: $what"
 }
 
 # --- Backup -----------------------------------------------------------------------------
@@ -320,7 +353,7 @@ foreach ($job in $jobs) {
   $regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
   & reg.exe export $regPath $backupFile /y | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed." }
-  Write-Host "Backup: $backupFile"
+  Say "Backup: $backupFile"
 }
 
 # --- The app itself: staged and checked before anything changes ---------------------------
@@ -339,7 +372,7 @@ if ($installApp) {
 }
 
 # --- Install (audio service stopped once, so audiodg releases an older DLL) ---------------
-Stop-Service Audiosrv -Force
+Stop-Audio
 try {
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
   # Staged and checked first: the source sits in a user-writable folder, audiodg loads the result.
@@ -398,12 +431,11 @@ try {
     # The same bytes the user started and approved (hash checked above), now installed: without
     # the internet zone mark of the downloaded ZIP, like the DLL.
     Unblock-File $InstalledExe
-    Write-Host "App: $InstalledExe"
+    Say "App: $InstalledExe"
   }
 }
 finally {
-  $audioStarted = Get-Date
-  Start-Service Audiosrv
+  $audioStarted = Start-Audio
 }
 
 foreach ($job in $jobs) {
@@ -425,28 +457,28 @@ foreach ($job in $micJobs) {
   # Enhancements off: Windows runs no effect in either slot; the warning above says so.
   if (Test-EnhancementsOff $job) { continue }
   $slot = $job.Targets[0][1]
-  Write-Host "`nChecking $($job.Name): opening it for a few seconds..."
+  Say "`nChecking $($job.Name): opening it for a few seconds..."
   $result = Test-MicChain $job $audioStarted
-  if ($result -eq 'started') { Write-Host "  Works: Windows starts the mic effect ($slot)." -ForegroundColor Green }
+  if ($result -eq 'started') { Say "  Works: Windows starts the mic effect ($slot)." Green }
   if ($result -ne 'not started') { continue }
   $other = if ($slot -eq 'MFX') { 'EFX' } else { 'MFX' }
-  Write-Host "  Windows did not start it in $slot; moving it to $other (audio restarts once more)..."
+  Say "  Windows did not start it in $slot; moving it to $other (audio restarts once more)..."
   $audioStarted = Move-MicChain $job $other
   $result = Test-MicChain $job $audioStarted
-  if ($result -eq 'started') { Write-Host "  Works: Windows starts the mic effect ($other)." -ForegroundColor Green }
+  if ($result -eq 'started') { Say "  Works: Windows starts the mic effect ($other)." Green }
   # Unknown in $other, but $slot is known not to work: it stays in $other.
   if ($result -ne 'not started') { continue }
   # Neither works (or the check cannot see it): back where it was put, the default or the user's choice.
-  Write-Host "  Windows starts the mic effect neither in EFX nor in MFX: apps get the raw microphone." -ForegroundColor Red
-  Write-Host "  Putting it back in $slot. Send the app log (%APPDATA%\GamersEqualizer\logs\gamersequalizer.log)." -ForegroundColor Red
+  Say "  Windows starts the mic effect neither in EFX nor in MFX: apps get the raw microphone." Red
+  Say "  Putting it back in $slot. Send the app log (%APPDATA%\GamersEqualizer\logs\gamersequalizer.log)." Red
   $audioStarted = Move-MicChain $job $slot
   $selfTestFailed = $true
 }
 if (Test-Path $ProbeTemp) { Remove-Item $ProbeTemp -Force -ErrorAction SilentlyContinue }
 
-Write-Host ''
-Write-Host 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
-if ($installApp) { Write-Host "The app now runs from $InstalledExe; the folder it was started from can be deleted." }
-Write-Host 'Settings come from the GamersEqualizer app; keep it running.'
+Say ''
+Say 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
+if ($installApp) { Say "The app now runs from $InstalledExe; the folder it was started from can be deleted." }
+Say 'Settings come from the GamersEqualizer app; keep it running.'
 if ($FromApp -and $selfTestFailed) { Read-Host 'Press Enter to close' }
 elseif ($FromApp) { Start-Sleep -Seconds 3 }

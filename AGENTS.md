@@ -66,8 +66,12 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   tools. `[ApoCheck]`: Windows build, DLL, COM registration, every device with our effects (slots, state)
   and the devices in use. `[ApoNote]`: the APO's own notes from inside audiodg (Application log, source
   `GamersEqualizer`, `gamersequalizer-apo/src/event_log.rs`; each names the process and the DLL build)
-  plus audiodg crashes, Defender detections and Code Integrity events about our files. `[ApoLink]`: why
+  plus audiodg crashes, Defender detections and Code Integrity events about our files, and every line
+  the installer printed (`installer: ...`, written to the same event source). `[ApoLink]`: why
   the service cannot reach the APO. The window learns the verdict via `run_status.json`.
+- The installer writes nothing to its window while Windows audio is stopped (`Say` in
+  `apo-install.ps1` holds those lines): a click into a console window pauses the script at its next
+  output until a key is pressed, which once left a PC without sound.
 - Mic effect slot: the installer puts the mic chain in EFX, then opens the mic briefly
   (`gamersequalizer.exe --probe-mic {guid}`) and moves it to MFX when Windows did not start it there
   (some notebook mic arrays). The Mic tab offers the same switch later ("Try another effect slot").

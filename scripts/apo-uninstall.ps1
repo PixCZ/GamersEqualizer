@@ -115,6 +115,9 @@ finally {
   Start-Service Audiosrv
 }
 
+# The installer's notes for the app log registered this event source.
+try { [System.Diagnostics.EventLog]::DeleteEventSource('GamersEqualizer') } catch { }
+
 # The installed app started this and exits right after; its exe cannot go while it runs.
 foreach ($file in $InstalledExe, "$InstalledExe.new") {
   for ($try = 0; $try -lt 20 -and (Test-Path $file); $try++) {
