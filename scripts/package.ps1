@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Builds a portable ZIP for testers:
   target\package\GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>[-dirty][-fast].zip
@@ -23,7 +23,8 @@
   beyond the VCRUNTIME one). Never for testers' final builds.
 
   Portable ZIP, not a setup.exe: the app already installs/uninstalls its system parts itself.
-  Binaries are unsigned: testers see a SmartScreen prompt.
+  -Sign (or auto-detected secrets\GamersEqualizer-dev.pfx / $env:GAMERSEQUALIZER_PFX_PATH) signs
+  the binaries with Authenticode SHA256 and includes install-tester-cert.ps1 + .cer in the ZIP.
 
   Known limit: generic x86-64 code (no target-cpu=native / AVX2), on purpose — it must run on
   any tester PC. Upgrade only with a CPU check at startup.
@@ -31,9 +32,13 @@
 .EXAMPLE
   .\scripts\package.ps1          # final build for testers (from scratch, fat LTO, ~8 min)
   .\scripts\package.ps1 -Fast    # from the dev release build (also: dev-rebuild.ps1 -Package)
+  .\scripts\package.ps1 -Sign    # sign binaries using cert in secrets\ or Cert:\CurrentUser\My
 #>
 param(
-  [switch]$Fast
+  [switch]$Fast,
+  [switch]$Sign,
+  [switch]$NoSign,
+  [string]$PfxPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -149,6 +154,26 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item $exe $stage
 Copy-Item $dll $stage
 Copy-Item 'packaging\CTI-ME.txt' $stage
+
+# Sign staged binaries if -Sign was passed or PFX/cert is available (and not -NoSign)
+$resolvedPfx = if ($PfxPath) { $PfxPath } elseif ($env:GAMERSEQUALIZER_PFX_PATH) { $env:GAMERSEQUALIZER_PFX_PATH } else { Join-Path $root 'secrets\GamersEqualizer-dev.pfx' }
+$shouldSign = ($Sign -or (Test-Path $resolvedPfx)) -and -not $NoSign
+if ($shouldSign) {
+  $signScript = Join-Path $PSScriptRoot 'sign-binaries.ps1'
+  if (Test-Path $signScript) {
+    Write-Host "`nSigning staged binaries..." -ForegroundColor Cyan
+    $stagedBins = @((Join-Path $stage 'gamersequalizer.exe'), (Join-Path $stage 'gamersequalizer_apo.dll'))
+    $signParams = @{ Files = $stagedBins }
+    if (Test-Path $resolvedPfx) { $signParams.PfxPath = $resolvedPfx }
+    & $signScript @signParams
+
+    # Include public certificate and installer script for testers
+    $cerFile = Join-Path $root 'packaging\GamersEqualizer-dev.cer'
+    if (Test-Path $cerFile) { Copy-Item $cerFile $stage }
+    $certInstaller = Join-Path $root 'packaging\install-tester-cert.ps1'
+    if (Test-Path $certInstaller) { Copy-Item $certInstaller $stage }
+  }
+}
 
 # Fails loudly if static CRT linking (.cargo\config.toml) ever stops applying.
 foreach ($bin in 'gamersequalizer.exe', 'gamersequalizer_apo.dll') {
