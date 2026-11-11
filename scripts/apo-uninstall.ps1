@@ -7,8 +7,8 @@
   Removes our CLSID from every capture/render endpoint's effect lists (other effects stay),
   unregisters the COM class and APO, deletes the config key, the installed DLL and the
   installed app (once it has exited), and restarts the Windows Audio service.
-  -RestoreBackup <file.reg> additionally re-imports an FxProperties backup made by apo-install.ps1
-  (byte-for-byte original state of that endpoint).
+  -RestoreBackup <file.reg | dir> additionally re-imports an FxProperties backup made by apo-install.ps1
+  (byte-for-byte original state of endpoint(s); pass a file or the apo-backup directory).
   -RemoveBackups also deletes those backups (%ProgramFiles%\GamersEqualizer\apo-backup, and
   the .reg files older versions left in %ProgramData%\GamersEqualizer); the app's
   "Uninstall from Windows" button passes it.
@@ -82,8 +82,17 @@ try {
   }
 
   if ($RestoreBackup) {
-    & reg.exe import $RestoreBackup
-    if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed (exit $LASTEXITCODE)" } else { Write-Host "Restored $RestoreBackup" }
+    if ((Get-Item $RestoreBackup -ErrorAction SilentlyContinue) -is [System.IO.DirectoryInfo]) {
+      $files = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.reg' -ErrorAction SilentlyContinue)
+      if ($files.Count -eq 0) { $files = @(Get-ChildItem -Path $RestoreBackup -Filter '*.reg' -ErrorAction SilentlyContinue) }
+      foreach ($f in $files) {
+        & reg.exe import $f.FullName
+        if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed ($($f.Name), exit $LASTEXITCODE)" } else { Write-Host "Restored $($f.Name)" }
+      }
+    } else {
+      & reg.exe import $RestoreBackup
+      if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed (exit $LASTEXITCODE)" } else { Write-Host "Restored $RestoreBackup" }
+    }
   }
 
   $keys = @('HKLM:\SOFTWARE\GamersEqualizer')

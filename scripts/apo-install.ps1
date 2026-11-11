@@ -19,14 +19,16 @@
     is checked once more.
 
 .DESCRIPTION
-  - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup.
+  - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup:
+    keeps <ID>-FxProperties-original.reg (pristine state before GamersEqualizer) and
+    <ID>-FxProperties-previous.reg (state right before this run).
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
   - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
   - APPENDS our CLSIDs to each endpoint's composite effect lists (EFX / SFX). Existing
     Realtek/Microsoft effects stay in place and run before ours.
   - Restarts the Windows Audio service once (all audio stops for a few seconds).
 
-  Undo: scripts\apo-uninstall.ps1 (optionally -RestoreBackup <file.reg>).
+  Undo: scripts\apo-uninstall.ps1 (optionally -RestoreBackup <file.reg | dir>).
 
 .EXAMPLE
   .\apo-install.ps1                       # the only active microphone
@@ -346,15 +348,55 @@ foreach ($job in $jobs) {
 }
 
 # --- Backup -----------------------------------------------------------------------------
+# Keeps at most two .reg files per endpoint:
+#   <ID>-FxProperties-original.reg (state before GamersEqualizer was first installed)
+#   <ID>-FxProperties-previous.reg (state right before the latest install/update)
 New-Item -ItemType Directory -Force $BackupDir | Out-Null
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 foreach ($job in $jobs) {
-  $backupFile = Join-Path $BackupDir "$($job.Id)-FxProperties-$stamp.reg"
   $regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
-  & reg.exe export $regPath $backupFile /y | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed." }
-  Say "Backup: $backupFile"
+  $origFile = Join-Path $BackupDir "$($job.Id)-FxProperties-original.reg"
+  $prevFile = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.reg"
+  $tmpFile = Join-Path $BackupDir "$($job.Id)-FxProperties-tmp.reg"
+
+  # Seed original backup: if none exists yet, adopt the oldest existing backup for this endpoint
+  if (-not (Test-Path $origFile)) {
+    $existing = @(Get-ChildItem -Path $BackupDir -File -Filter "$($job.Id)-FxProperties-*.reg" -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -ne $prevFile -and $_.FullName -ne $tmpFile } | Sort-Object Name)
+    if ($existing.Count -gt 0) {
+      Copy-Item $existing[0].FullName $origFile -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  & reg.exe export $regPath $tmpFile /y | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    if (Test-Path $tmpFile) { Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue }
+    throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed."
+  }
+  Move-Item $tmpFile $prevFile -Force
+
+  # If this is the very first install (no prior backups), previous is the original state
+  if (-not (Test-Path $origFile)) {
+    Copy-Item $prevFile $origFile -Force -ErrorAction SilentlyContinue
+  }
+
+  Say "Backup: $prevFile"
 }
+
+# Rotate and prune legacy timestamped backups: keep only -original.reg and -previous.reg per endpoint.
+Get-ChildItem -Path $BackupDir -File -Filter '*-FxProperties-*.reg' -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -notlike '*-FxProperties-original.reg' -and $_.Name -notlike '*-FxProperties-previous.reg' } |
+  Group-Object { if ($_.Name -match '^(\{[a-f0-9-]+\})-FxProperties-') { $matches[1] } else { $_.Name } } |
+  ForEach-Object {
+    $id = $_.Name
+    $orig = Join-Path $BackupDir "$id-FxProperties-original.reg"
+    if (-not (Test-Path $orig)) {
+      $sorted = @($_.Group | Sort-Object Name)
+      if ($sorted.Count -gt 0) {
+        Copy-Item $sorted[0].FullName $orig -Force -ErrorAction SilentlyContinue
+      }
+    }
+    $_.Group | Remove-Item -Force -ErrorAction SilentlyContinue
+  }
 
 # --- The app itself: staged and checked before anything changes ---------------------------
 # It moves next to its effects, unless it runs from there already or is a developer's build.
