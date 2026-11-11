@@ -211,6 +211,15 @@ impl eframe::App for GamersEqualizerApp {
     self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
     self.state.save_audio_settings_if_changed(ctx.input(|i| i.pointer.any_down()));
 
+    // Bridge any egui output copy command to Windows clipboard
+    ctx.output(|o| {
+      for cmd in &o.commands {
+        if let egui::OutputCommand::CopyText(text) = cmd {
+          let _ = crate::win_clipboard::set_clipboard_text(text);
+        }
+      }
+    });
+
     // Continuous repaint for smooth meters while visible; minimized (or behind a fullscreen
     // game, which minimizes it) a slow tick is enough.
     ctx.request_repaint_after(if minimized { MINIMIZED_FRAME_INTERVAL } else { FRAME_INTERVAL });

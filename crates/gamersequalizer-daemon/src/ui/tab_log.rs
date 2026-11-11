@@ -53,6 +53,8 @@ pub struct LogView {
   shown_stale: bool,
   /// True while text is selected or being dragged. Holds reload still so the selection doesn't shift.
   selecting: bool,
+  /// Currently selected text in the log, if any.
+  selected_text: Option<String>,
   /// Combined text of all lines matching the filters.
   buffer: String,
   /// Cached layout job with severity colors.
@@ -78,6 +80,7 @@ impl Default for LogView {
       shown: Vec::new(),
       shown_stale: true,
       selecting: false,
+      selected_text: None,
       buffer: String::new(),
       layout_job: egui::text::LayoutJob::default(),
       dark_mode: None,
@@ -150,6 +153,22 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
       view.saved = Some(match save_copy() {
         Ok(path) => trf("Saved: {}", &[&path.display()]),
         Err(e) => trf("The copy could not be saved: {}", &[&e]),
+      });
+    }
+    let copy_label = if view.selected_text.is_some() {
+      tr("Copy selection")
+    } else {
+      tr("Copy all")
+    };
+    if ui
+      .button(format!("📋  {}", copy_label))
+      .on_hover_text(tr("Copies to the Windows clipboard (Ctrl+C)."))
+      .clicked()
+    {
+      let text = view.selected_text.as_deref().unwrap_or(&view.buffer);
+      view.saved = Some(match crate::win_clipboard::set_clipboard_text(text) {
+        Ok(()) => tr("Copied to clipboard.").to_string(),
+        Err(e) => trf("Copy failed: {}", &[&e]),
       });
     }
     if !view.at_end
@@ -246,9 +265,34 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   });
   let max_offset = (out.content_size.y - out.inner_rect.height()).max(0.0);
   view.at_end = out.state.unclamped_offset().y >= max_offset - BOTTOM_SLACK;
-  let has_selection = out.inner.cursor_range.is_some_and(|r| r.primary != r.secondary);
+  let (has_selection, selected_text) = match out.inner.cursor_range {
+    Some(range) if range.primary != range.secondary => (true, Some(range.slice_str(&view.buffer).to_string())),
+    _ => (false, None),
+  };
   let is_pointer_down = out.inner.response.is_pointer_button_down_on();
   view.selecting = has_selection || is_pointer_down;
+  view.selected_text = selected_text.clone();
+
+  out.inner.response.context_menu(|ui| {
+    if let Some(ref text) = selected_text {
+      if ui.button(tr("Copy selection")).clicked() {
+        let _ = crate::win_clipboard::set_clipboard_text(text);
+        ui.close();
+      }
+    }
+    if ui.button(tr("Copy all")).clicked() {
+      let _ = crate::win_clipboard::set_clipboard_text(&view.buffer);
+      ui.close();
+    }
+  });
+
+  let ctrl_c = ui.input(|i| i.modifiers.command_only() && i.key_pressed(egui::Key::C))
+    || ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+  if ctrl_c {
+    if let Some(ref text) = selected_text {
+      let _ = crate::win_clipboard::set_clipboard_text(text);
+    }
+  }
 }
 
 /// Copies the log to Downloads under a new, time-stamped name and shows it in Explorer: a

@@ -16,6 +16,7 @@ pub mod tray;
 pub mod ui;
 pub mod uninstall;
 pub mod win_audio;
+pub mod win_clipboard;
 
 use eframe::egui_wgpu::{self, wgpu};
 use log::{debug, error, info};
@@ -51,6 +52,16 @@ static HANDOVER_FAILED: AtomicBool = AtomicBool::new(false);
 const VOLUME_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 /// Window / taskbar icon resolution (Windows scales it down for the title bar).
 const WINDOW_ICON_SIZE: u32 = 64;
+
+/// Instruct NVIDIA Optimus driver to keep the discrete GPU sleeping and run on integrated graphics.
+#[allow(non_upper_case_globals)]
+#[no_mangle]
+pub static NvOptimusEnablement: u32 = 0x00000000;
+
+/// Instruct AMD PowerXpress / Enduro driver to prefer the integrated GPU for power saving.
+#[allow(non_upper_case_globals)]
+#[no_mangle]
+pub static AmdPowerXpressRequestHighPerformance: i32 = 0;
 
 fn main() {
   let args: Vec<String> = std::env::args().collect();
@@ -462,6 +473,7 @@ fn run_gui_mode() {
   }
   let mut wgpu_setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
   wgpu_setup.instance_descriptor.backends = wgpu_backends();
+  wgpu_setup.power_preference = wgpu::PowerPreference::LowPower;
   let wgpu_options =
     egui_wgpu::WgpuConfiguration { wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(wgpu_setup), ..Default::default() };
   let native_options = eframe::NativeOptions { viewport, wgpu_options, ..Default::default() };
@@ -581,7 +593,11 @@ fn wgpu_backends() -> wgpu::Backends {
   };
   let has_dx12_gpu = adapters.iter().any(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
   if has_dx12_gpu {
-    info!("[GamersEqualizer] graphics: DX12");
+    if let Some(igpu) = adapters.iter().find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu) {
+      info!("[GamersEqualizer] graphics: DX12 (low power, integrated GPU: {})", igpu.get_info().name);
+    } else {
+      info!("[GamersEqualizer] graphics: DX12 (low power)");
+    }
     wgpu::Backends::DX12
   } else {
     info!("[GamersEqualizer] graphics: no DX12 GPU, using Vulkan/GL");
