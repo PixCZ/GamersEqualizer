@@ -42,6 +42,15 @@ const MFX_LIST_VALUE: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14";
 /// Composite SFX/MFX/EFX effect lists in an endpoint's FxProperties.
 const FX_LIST_VALUES: [&str; 3] =
   ["{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", MFX_LIST_VALUE, "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15"];
+/// Legacy single-CLSID REG_SZ values that can shadow composite lists on Windows 11.
+const FX_LEGACY_VALUES: [(&str, &str); 4] = [
+  ("LFX", "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1"),
+  ("SFX", "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5"),
+  ("MFX", "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},6"),
+  ("EFX", "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},7"),
+];
+/// Optional endpoint-to-APO association (`PKEY_FX_Association`).
+const FX_ASSOC_VALUE: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},0";
 /// Processing modes each slot runs in (`PKEY_SFX/MFX/EFX_ProcessingModes_Supported_For_Streaming`).
 const FX_MODE_VALUES: [(&str, &str); 3] = [
   ("SFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},5"),
@@ -260,10 +269,16 @@ pub fn describe_endpoint(flow: Flow, guid: &str) -> String {
     ["SFX", "MFX", "EFX"].iter().zip(FX_LIST_VALUES).map(|(slot, value)| format!("{slot} [{}]", list(value))).collect();
   let modes: Vec<String> =
     FX_MODE_VALUES.iter().map(|&(slot, value)| format!("{slot} modes [{}]", list(value))).collect();
+  let legacy: Vec<String> = FX_LEGACY_VALUES
+    .iter()
+    .filter_map(|&(slot, value)| read_string_value(&fx_key, value).map(|v| format!("{slot} [{}]", one_line(&v))))
+    .collect();
+  let legacy_desc = if legacy.is_empty() { "none".to_string() } else { legacy.join(", ") };
+  let assoc = read_string_value(&fx_key, FX_ASSOC_VALUE).map(|v| one_line(&v)).unwrap_or_else(|| "-".to_string());
   let off = |key: &str| read_dword_value(key, DISABLE_SYSFX_VALUE).map_or_else(|| "-".to_string(), |v| v.to_string());
   let props_key = format!("{root}\\Properties");
   format!(
-    "{} {guid}: {}; {}; enhancements-off flag: FxProperties {}, Properties {}",
+    "{} {guid}: {}; {}; legacy: {legacy_desc}; assoc: {assoc}; enhancements-off flag: FxProperties {}, Properties {}",
     flow.as_str(),
     slots.join(", "),
     modes.join(", "),

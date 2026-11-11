@@ -66,10 +66,14 @@ pub static AmdPowerXpressRequestHighPerformance: i32 = 0;
 
 fn main() {
   let args: Vec<String> = std::env::args().collect();
-  // The installer (elevated) opens the mic briefly to see whether Windows starts our effect.
+  // The installer (elevated) opens endpoints briefly to see whether Windows starts our effects.
   if let Some(guid) = args.iter().position(|a| a == "--probe-mic").and_then(|i| args.get(i + 1)) {
     app_log::init("probe");
     std::process::exit(win_audio::mic_probe::run(guid));
+  }
+  if let Some(guid) = args.iter().position(|a| a == "--probe-render").and_then(|i| args.get(i + 1)) {
+    app_log::init("probe");
+    std::process::exit(win_audio::mic_probe::run_render(guid));
   }
   let is_daemon = args.iter().any(|a| a == "--daemon");
   app_log::init(if is_daemon { "service" } else { "ui" });

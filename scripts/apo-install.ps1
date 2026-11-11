@@ -14,28 +14,23 @@
   -AppExe (the app's exe, passed by the app): it is installed next to the effects
     (%ProgramFiles%\GamersEqualizer\gamersequalizer.exe; the app then continues from there and
     "start with Windows" points there), unless it runs from there already or -NoAppInstall (a
-    developer's build). Afterwards it opens the microphone for a few seconds to check that
-    Windows starts the mic chain; if not, the chain moves to the other slot (EFX <-> MFX) and
-    is checked once more.
+    developer's build). Afterwards it probes every installed Capture/Render endpoint for a few
+    seconds: ensures Windows starts the effects without audiodg crashes, tries MFX fallback if
+    EFX does not start, and rolls back automatically on open failure or crash.
 
 .DESCRIPTION
-  - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup:
-    keeps <ID>-FxProperties-original.reg (pristine state before GamersEqualizer) and
-    <ID>-FxProperties-previous.reg (state right before this run).
+  - Backs up each endpoint's FxProperties values (typed JSON + .reg reference) to
+    %ProgramFiles%\GamersEqualizer\apo-backup:
+    keeps <ID>-FxProperties-original.{json,reg} (pristine state before GamersEqualizer) and
+    <ID>-FxProperties-previous.{json,reg} (state right before this run).
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
   - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
-  - APPENDS our CLSIDs to each endpoint's composite effect lists (EFX / SFX). Existing
-    Realtek/Microsoft effects stay in place and run before ours.
+  - Promotes any legacy single-CLSID values (,1 / ,5 / ,6 / ,7) into composite lists (,13 / ,14 / ,15)
+    without dropping existing OEM effects, ensures the default processing mode is registered on each
+    configured slot, and appends our CLSIDs.
   - Restarts the Windows Audio service once (all audio stops for a few seconds).
 
-  Undo: scripts\apo-uninstall.ps1 (optionally -RestoreBackup <file.reg | dir>).
-
-.EXAMPLE
-  .\apo-install.ps1                       # the only active microphone
-  .\apo-install.ps1 -EndpointId '{cf0a2270-1885-4dd6-82a5-f636e9efadd5}'
-  .\apo-install.ps1 -Flow Render -EndpointId '{b45cef56-a56b-49b0-88c0-4af057026718}'
-  .\apo-install.ps1 -Flow Render -Slot SFX -EndpointId '{b45cef56-a56b-49b0-88c0-4af057026718}'
-  .\apo-install.ps1 -Endpoint 'Capture:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}','Render:{b45cef56-a56b-49b0-88c0-4af057026718}'
+  Undo: scripts\apo-uninstall.ps1 (optionally -RestoreBackup <file.json | dir>).
 #>
 param(
   [string]$EndpointId,
@@ -50,8 +45,8 @@ param(
   [ValidateSet('Capture', 'Render')][string]$Flow = 'Capture',
   # Render: skip the stream EQ (chat / media channels).
   [switch]$NoStreamEq,
-  # The app's exe: installed next to the effects, and `--probe-mic {guid}` opens the microphone
-  # for the self-test after installing.
+  # The app's exe: installed next to the effects, and `--probe-mic` / `--probe-render` test endpoints
+  # after installing.
   [string]$AppExe,
   # SHA-256 (hex) the app computed: files from its user-writable folder are used only when the
   # copy this elevated script makes hashes the same.
@@ -99,7 +94,7 @@ function Stop-Audio {
   Stop-Service Audiosrv -Force -WarningAction SilentlyContinue
 }
 
-# Returns when audio started (for Test-MicChain), then shows the held lines.
+# Returns when audio started (for probe / crash checks), then shows the held lines.
 function Start-Audio {
   $started = Get-Date
   Start-Service Audiosrv -WarningAction SilentlyContinue
@@ -137,25 +132,162 @@ $BackupDir = Join-Path $ProgramDir 'apo-backup'
 
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
-# Composite (Windows 11, REG_MULTI_SZ) and legacy (REG_SZ) value names per slot.
+$NullGuid = '{00000000-0000-0000-0000-000000000000}'
+# Fixed Microsoft Windows SDK PKEY_FX composite (Win10/11 REG_MULTI_SZ) and legacy (REG_SZ) slots.
 $CompositeValues = @{ SFX = "$FxGuid,13"; MFX = "$FxGuid,14"; EFX = "$FxGuid,15" }
 # Legacy SFX may also sit in the pre-Windows 8.1 pre-mix (LFX) value ,1.
 $LegacyValues = @{ SFX = @("$FxGuid,5", "$FxGuid,1"); MFX = @("$FxGuid,6"); EFX = @("$FxGuid,7") }
+# Fixed Microsoft Windows SDK PKEY_SFX/MFX/EFX_ProcessingModes_Supported_For_Streaming + DEFAULT mode.
+$ModesGuid = '{d3993a3f-99c2-4402-b5ec-a92a0367664b}'
+$DefaultProcessingMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
+$ModeValues = @{ SFX = "$ModesGuid,5"; MFX = "$ModesGuid,6"; EFX = "$ModesGuid,7" }
+
 $NameProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
 $DeviceDescProp = '{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
 $DisableSysFxProp = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'
 
-# FxProperties grants Administrators only SetValue + read; the registry provider (New-ItemProperty)
-# asks for more and gets "access denied", so open the key with exactly these rights.
+# FxProperties grants Administrators only SetValue + QueryValues (ReadKey); subkeys (Volatile /
+# Default / User) are owned by TrustedInstaller / Audiosrv. Open only with these exact rights.
 function Set-FxValue([string]$subKey, [string]$name, [string[]]$value) {
   $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
   $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
   if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
   try {
-    if ($value.Count -eq 0) { $key.DeleteValue($name, $false) }
-    else { $key.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::MultiString) }
+    [string[]]$clean = @($value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($clean.Count -eq 0) { $key.DeleteValue($name, $false) }
+    else { $key.SetValue($name, $clean, [Microsoft.Win32.RegistryValueKind]::MultiString) }
   }
   finally { $key.Dispose() }
+}
+
+function Read-FxList($rawValue) {
+  $res = New-Object System.Collections.Generic.List[string]
+  foreach ($item in @($rawValue)) {
+    $s = [string]$item
+    if ([string]::IsNullOrWhiteSpace($s)) { continue }
+    $trimmed = $s.Trim()
+    if ($trimmed -and -not ($res | Where-Object { $_ -ieq $trimmed })) { $res.Add($trimmed) }
+  }
+  $res
+}
+
+function Export-FxJson([string]$flow, [string]$id, [string]$jsonFile) {
+  $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, $false)
+  if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
+  try {
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($vn in ($key.GetValueNames() | Sort-Object)) {
+      $val = $key.GetValue($vn, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+      $kind = [string]$key.GetValueKind($vn)
+      $encoded = switch ($kind) {
+        'Binary'      { [Convert]::ToBase64String([byte[]]$val) }
+        'MultiString' { [string[]]@($val | ForEach-Object { [string]$_ }) }
+        default       { $val }
+      }
+      $records.Add([pscustomobject]@{
+        Name  = [string]$vn
+        Kind  = $kind
+        Value = $encoded
+      })
+    }
+    $payload = [pscustomobject]@{
+      Flow   = $flow
+      Id     = $id
+      Values = @($records.ToArray())
+    }
+    ConvertTo-Json -InputObject $payload -Depth 5 | Set-Content $jsonFile -Encoding UTF8
+  }
+  finally { $key.Dispose() }
+}
+
+# Exact value-only restore via SetValue + QueryValues (reg.exe import fails on TrustedInstaller subkeys).
+function Restore-FxFromJson([string]$flow, [string]$id, [string]$jsonFile) {
+  $parsed = Get-Content $jsonFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  $origRecords = @($parsed.Values | ForEach-Object { $_ })
+  $origNames = @($origRecords | ForEach-Object { [string]$_.Name })
+  $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
+  $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
+  if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
+  try {
+    foreach ($cur in @($key.GetValueNames())) {
+      if ($origNames -notcontains $cur) { $key.DeleteValue($cur, $false) }
+    }
+    foreach ($rec in $origRecords) {
+      $kind = [Microsoft.Win32.RegistryValueKind][Enum]::Parse([Microsoft.Win32.RegistryValueKind], [string]$rec.Kind)
+      $valName = [string]$rec.Name
+      if ($kind -eq [Microsoft.Win32.RegistryValueKind]::Binary) {
+        [byte[]]$binVal = [Convert]::FromBase64String([string]$rec.Value)
+        $key.SetValue($valName, $binVal, $kind)
+      }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::MultiString) {
+        [string[]]$multiVal = @($rec.Value | ForEach-Object { [string]$_ })
+        $key.SetValue($valName, $multiVal, $kind)
+      }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) {
+        [int]$dwVal = [int]$rec.Value
+        $key.SetValue($valName, $dwVal, $kind)
+      }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::QWord) {
+        [long]$qwVal = [long]$rec.Value
+        $key.SetValue($valName, $qwVal, $kind)
+      }
+      else {
+        [string]$strVal = [string]$rec.Value
+        $key.SetValue($valName, $strVal, $kind)
+      }
+    }
+  }
+  finally { $key.Dispose() }
+}
+
+function Ensure-ProcessingMode($job, [string]$fxSubKey, [string]$slot) {
+  $modeName = $ModeValues[$slot]
+  if (-not $modeName) { return }
+  $fx = Get-ItemProperty (Join-Path $job.Key 'FxProperties')
+  $modes = Read-FxList $fx.$modeName
+  if (-not ($modes | Where-Object { $_ -ieq $DefaultProcessingMode })) {
+    $modes.Add($DefaultProcessingMode)
+    Set-FxValue $fxSubKey $modeName ([string[]]$modes.ToArray())
+    Say "$($job.Name) $slot modes: $($modes -join ', ')"
+  }
+}
+
+# Windows 11 ignores composite lists (,13 / ,14 / ,15) when legacy REG_SZ values (,1 / ,5 / ,6 / ,7)
+# coexist on the same endpoint (e.g. Microsoft Audio Home Theater Effects on USB headsets/DACs).
+# Promote all non-empty legacy CLSIDs into composite lists + ensure their streaming modes + clear legacy.
+function Migrate-LegacySlots($job) {
+  $fx = Get-ItemProperty (Join-Path $job.Key 'FxProperties')
+  $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
+  foreach ($s in 'SFX', 'MFX', 'EFX') {
+    $found = New-Object System.Collections.Generic.List[string]
+    $presentNames = New-Object System.Collections.Generic.List[string]
+    foreach ($legacyName in $LegacyValues[$s]) {
+      $val = $fx.$legacyName
+      if ($null -eq $val) { continue }
+      $presentNames.Add($legacyName)
+      foreach ($entry in (Read-FxList $val)) {
+        if ($entry -ne $NullGuid -and -not ($found | Where-Object { $_ -ieq $entry })) {
+          $found.Add($entry)
+        }
+      }
+    }
+    if ($presentNames.Count -eq 0) { continue }
+    $compName = $CompositeValues[$s]
+    if ($found.Count -gt 0) {
+      $compList = Read-FxList $fx.$compName
+      foreach ($clsid in $found) {
+        if (-not ($compList | Where-Object { $_ -ieq $clsid })) { $compList.Add($clsid) }
+      }
+      Set-FxValue $fxSubKey $compName ([string[]]$compList.ToArray())
+      Ensure-ProcessingMode $job $fxSubKey $s
+      Say "$($job.Name) promoted legacy $($presentNames -join '/') -> $compName`: $($compList -join ' -> ')"
+    }
+    foreach ($legacyName in $presentNames) {
+      Set-FxValue $fxSubKey $legacyName @()
+    }
+  }
 }
 
 function Get-ActiveEndpoints([string]$flow) {
@@ -165,27 +297,23 @@ function Get-ActiveEndpoints([string]$flow) {
   }
 }
 
-# Appends $class to the endpoint's composite list for $slot, seeded from the legacy single value
-# so that effect is kept. The mic chain also leaves the other capture slot: in both, it could run twice.
-function Set-EffectSlot($job, [string]$class, [string]$slot) {
+# Appends $class to the endpoint's composite list for $slot and ensures its streaming modes entry.
+# Note: Migrate-LegacySlots has already moved any legacy REG_SZ values safely. Capture also leaves
+# the other slot (EFX <-> MFX), keeping any OEM effects there so it never runs twice.
+function Set-EffectSlot($job, [string]$class, [string]$slot, [switch]$RemoveFromOther) {
   $clsid = $Classes[$class].Clsid
   $value = $CompositeValues[$slot]
   $fx = Get-ItemProperty (Join-Path $job.Key 'FxProperties')
-  $list = @()
-  if ($null -ne $fx.$value) { $list = @($fx.$value) }
-  else {
-    $legacy = $LegacyValues[$slot] | ForEach-Object { $fx.$_ } |
-      Where-Object { $null -ne $_ -and $_ -ne '{00000000-0000-0000-0000-000000000000}' } | Select-Object -First 1
-    if ($legacy) { $list = @($legacy) }
-  }
-  if (-not ($list | Where-Object { $_ -ieq $clsid })) { $list += $clsid }
+  $list = Read-FxList $fx.$value
+  if (-not ($list | Where-Object { $_ -ieq $clsid })) { $list.Add($clsid) }
   $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
-  Set-FxValue $fxSubKey $value ([string[]]$list)
+  Set-FxValue $fxSubKey $value ([string[]]$list.ToArray())
   Say "$($job.Name) $slot chain: $($list -join ' -> ')"
-  if ($class -ne 'Capture') { return }
+  Ensure-ProcessingMode $job $fxSubKey $slot
+  if ($class -ne 'Capture' -and -not $RemoveFromOther) { return }
   $otherSlot = if ($slot -eq 'MFX') { 'EFX' } else { 'MFX' }
   $otherValue = $CompositeValues[$otherSlot]
-  $before = @($fx.$otherValue | Where-Object { $_ })
+  $before = Read-FxList $fx.$otherValue
   $rest = @($before | Where-Object { $_ -ine $clsid })
   if ($rest.Count -ne $before.Count) {
     Set-FxValue $fxSubKey $otherValue ([string[]]$rest)
@@ -193,7 +321,7 @@ function Set-EffectSlot($job, [string]$class, [string]$slot) {
   }
 }
 
-# The exe that opens the microphone for the self-test, or nothing (check skipped). Elevated, so
+# The exe that opens endpoints for the self-test, or nothing (check skipped). Elevated, so
 # never the exe in the user's folder: the installed app when it is the build the app hashed
 # (installed just now, or the app runs from there), else a temporary copy made where only
 # administrators write, used when it hashes as the app said.
@@ -201,7 +329,7 @@ function Set-EffectSlot($job, [string]$class, [string]$slot) {
 # swapped that file before passes. Upgrade: sign the exe and check the signature here.
 function Get-ProbeExe {
   if (-not ($AppExe -and $AppExeSha256 -and (Test-Path $AppExe))) {
-    Say "`nMicrophone check skipped: the app did not pass its exe."
+    Say "`nEndpoint check skipped: the app did not pass its exe."
     return
   }
   # The install is done: a failure here only skips the check, it is not "Install failed".
@@ -212,12 +340,12 @@ function Get-ProbeExe {
     Copy-Item $AppExe $ProbeTemp -Force
     if ((Get-FileHash $ProbeTemp -Algorithm SHA256).Hash -ne $AppExeSha256) {
       Remove-Item $ProbeTemp -Force
-      Say "`nMicrophone check skipped: the app's exe changed after the app started this installer." Yellow
+      Say "`nEndpoint check skipped: the app's exe changed after the app started this installer." Yellow
       return
     }
   }
   catch {
-    Say "`nMicrophone check skipped: $_" Yellow
+    Say "`nEndpoint check skipped: $_" Yellow
     return
   }
   $ProbeTemp
@@ -230,48 +358,83 @@ function Test-EnhancementsOff($job) {
       (Get-ItemProperty (Join-Path $job.Key $_) -ErrorAction SilentlyContinue).$DisableSysFxProp -eq 1 })
 }
 
-# 'started' when Windows started the mic chain for a stream since $since (LockForProcess notes
-# "Mic Chain: stream ..." in the Application log), 'not started', or $null when the microphone
-# could not be opened (busy, blocked, an error): then nothing is known and nothing moves.
-# shortcut: a note does not name its microphone, so one from another mic with our chain counts
-# too (errs towards "works"). Upgrade: put the endpoint id into the APO's notes.
-function Test-MicChain($job, [datetime]$since) {
-  # A just restarted audio service may not list the device yet.
-  Start-Sleep -Seconds 2
+function Get-ApoNotesSince([datetime]$since) {
+  try {
+    return @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'GamersEqualizer'; StartTime = $since } -ErrorAction Stop |
+      Select-Object -First 200 |
+      ForEach-Object { "$($_.Properties[0].Value)" })
+  }
+  catch { return @() }
+}
+
+function Get-AudiodgCrashesSince([datetime]$since) {
+  try {
+    return @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $since } -ErrorAction Stop |
+      Select-Object -First 20 |
+      Where-Object { $_.Message -match 'audiodg\.exe' })
+  }
+  catch { return @() }
+}
+
+function Rollback-Job($job) {
+  $prevJson = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.json"
+  if (-not (Test-Path $prevJson)) {
+    Say "  Rollback warning: backup not found for $($job.Name) ($prevJson)." Yellow
+    return $false
+  }
+  Stop-Audio
+  try { Restore-FxFromJson $job.Flow $job.Id $prevJson }
+  finally { $null = Start-Audio }
+  Say "  Rolled back $($job.Name) to its exact previous FxProperties." Yellow
+  $true
+}
+
+# Probes one endpoint via `--probe-mic` or `--probe-render` and checks Application EventLog.
+# Wait 2 s after Start-Audio before recording `$probeSince` so audiodg startup checks (Realtek
+# format probes etc.) do not count as this endpoint's stream start. Also checks EventID 1000
+# crashes of audiodg.exe since `$sinceRestart`.
+function Invoke-EndpointProbe($job, [datetime]$sinceRestart) {
+  $elapsed = ((Get-Date) - $sinceRestart).TotalSeconds
+  if ($elapsed -lt 2.0) { Start-Sleep -Milliseconds ([int]((2.0 - $elapsed) * 1000)) }
+  $earlyCrashes = Get-AudiodgCrashesSince $sinceRestart
+  if ($earlyCrashes.Count -gt 0) {
+    return [pscustomobject]@{ OpenOk = $false; Crashed = $true; Notes = @(); PreNotes = @() }
+  }
+  $preNotes = Get-ApoNotesSince $sinceRestart
+  $probeSince = Get-Date
+  $flag = if ($job.Flow -eq 'Capture') { '--probe-mic' } else { '--probe-render' }
   try {
     # -NoNewWindow starts it directly (no shell, so no SmartScreen prompt for the unsigned exe).
-    $probe = Start-Process -FilePath $ProbeCopy -ArgumentList '--probe-mic', $job.Id -NoNewWindow -PassThru
+    $probe = Start-Process -FilePath $ProbeCopy -ArgumentList $flag, $job.Id -NoNewWindow -PassThru
     # Windows PowerShell loses ExitCode unless the handle is opened before the process ends.
     $null = $probe.Handle
-    # It reads the mic for 3 s; a hung one must not block the installer.
     if (-not $probe.WaitForExit(20000)) {
       $probe.Kill()
-      Say '  The check did not finish in time.'
-      return $null
+      Say "  The $($job.Word) check did not finish in time." Red
+      return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Notes = @(); PreNotes = $preNotes }
     }
   }
   catch {
-    Say "  The check could not start: $_"
-    return $null
+    Say "  The check could not start: $_" Red
+    return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Notes = @(); PreNotes = $preNotes }
+  }
+  $crashes = Get-AudiodgCrashesSince $sinceRestart
+  $notes = Get-ApoNotesSince $probeSince
+  if ($crashes.Count -gt 0) {
+    Say "  audiodg.exe crashed during $($job.Word) test." Red
+    return [pscustomobject]@{ OpenOk = $false; Crashed = $true; Notes = $notes; PreNotes = $preNotes }
   }
   if ($probe.ExitCode -ne 0) {
-    Say '  The microphone could not be opened (busy or blocked; details in the app log).'
-    return $null
+    Say "  The $($job.Word) could not be opened cleanly (exit $($probe.ExitCode); details in the app log)." Red
+    return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Notes = $notes; PreNotes = $preNotes }
   }
-  $iso = $since.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
-  $xpath = "*[System[Provider[@Name='GamersEqualizer'] and TimeCreated[@SystemTime>='$iso']]]"
-  $notes = @(Get-WinEvent -LogName Application -FilterXPath $xpath -MaxEvents 200 -ErrorAction SilentlyContinue)
-  if ($notes | Where-Object { "$($_.Properties[0].Value)" -match 'GamersEqualizer Mic Chain: (stream |refused a stream)' }) {
-    return 'started'
-  }
-  'not started'
+  [pscustomobject]@{ OpenOk = $true; Crashed = $false; Notes = $notes; PreNotes = $preNotes }
 }
 
-# Puts the mic chain into $slot (out of the other one), with audio stopped; returns when audio
-# started again, for Test-MicChain.
-function Move-MicChain($job, [string]$slot) {
+# Puts an APO class into $slot (removing from the other of EFX/MFX), restarting Windows Audio once.
+function Move-EndpointSlot($job, [string]$class, [string]$slot) {
   Stop-Audio
-  try { Set-EffectSlot $job 'Capture' $slot }
+  try { Set-EffectSlot $job $class $slot -RemoveFromOther }
   finally { $started = Start-Audio }
   $started
 }
@@ -348,41 +511,49 @@ foreach ($job in $jobs) {
 }
 
 # --- Backup -----------------------------------------------------------------------------
-# Keeps at most two .reg files per endpoint:
-#   <ID>-FxProperties-original.reg (state before GamersEqualizer was first installed)
-#   <ID>-FxProperties-previous.reg (state right before the latest install/update)
+# Keeps typed JSON value snapshots (restorable under Administrators SetValue/QueryValues ACLs)
+# plus .reg reference exports:
+#   <ID>-FxProperties-original.{json,reg} (pristine state before GamersEqualizer first touched it)
+#   <ID>-FxProperties-previous.{json,reg} (state right before the latest install/update)
 New-Item -ItemType Directory -Force $BackupDir | Out-Null
 foreach ($job in $jobs) {
   $regPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
-  $origFile = Join-Path $BackupDir "$($job.Id)-FxProperties-original.reg"
-  $prevFile = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.reg"
-  $tmpFile = Join-Path $BackupDir "$($job.Id)-FxProperties-tmp.reg"
+  $origReg  = Join-Path $BackupDir "$($job.Id)-FxProperties-original.reg"
+  $prevReg  = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.reg"
+  $tmpReg   = Join-Path $BackupDir "$($job.Id)-FxProperties-tmp.reg"
+  $origJson = Join-Path $BackupDir "$($job.Id)-FxProperties-original.json"
+  $prevJson = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.json"
+  $tmpJson  = Join-Path $BackupDir "$($job.Id)-FxProperties-tmp.json"
 
-  # Seed original backup: if none exists yet, adopt the oldest existing backup for this endpoint
-  if (-not (Test-Path $origFile)) {
+  if (-not (Test-Path $origReg)) {
     $existing = @(Get-ChildItem -Path $BackupDir -File -Filter "$($job.Id)-FxProperties-*.reg" -ErrorAction SilentlyContinue |
-      Where-Object { $_.FullName -ne $prevFile -and $_.FullName -ne $tmpFile } | Sort-Object Name)
+      Where-Object { $_.FullName -ne $prevReg -and $_.FullName -ne $tmpReg } | Sort-Object Name)
     if ($existing.Count -gt 0) {
-      Copy-Item $existing[0].FullName $origFile -Force -ErrorAction SilentlyContinue
+      Copy-Item $existing[0].FullName $origReg -Force -ErrorAction SilentlyContinue
     }
   }
 
-  & reg.exe export $regPath $tmpFile /y | Out-Null
+  Export-FxJson $job.Flow $job.Id $tmpJson
+  & reg.exe export $regPath $tmpReg /y | Out-Null
   if ($LASTEXITCODE -ne 0) {
-    if (Test-Path $tmpFile) { Remove-Item $tmpFile -Force -ErrorAction SilentlyContinue }
+    Remove-Item $tmpReg, $tmpJson -Force -ErrorAction SilentlyContinue
     throw "Backup failed (reg export exit $LASTEXITCODE); nothing changed."
   }
-  Move-Item $tmpFile $prevFile -Force
+  Move-Item $tmpJson $prevJson -Force
+  Move-Item $tmpReg $prevReg -Force
 
-  # If this is the very first install (no prior backups), previous is the original state
-  if (-not (Test-Path $origFile)) {
-    Copy-Item $prevFile $origFile -Force -ErrorAction SilentlyContinue
+  # Only create -original.json on genuinely untouched endpoints (neither -original file existed yet).
+  if (-not (Test-Path $origReg)) {
+    Copy-Item $prevReg $origReg -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $origJson)) {
+      Copy-Item $prevJson $origJson -Force -ErrorAction SilentlyContinue
+    }
   }
 
-  Say "Backup: $prevFile"
+  Say "Backup: $prevJson"
 }
 
-# Rotate and prune legacy timestamped backups: keep only -original.reg and -previous.reg per endpoint.
+# Rotate and prune legacy timestamped .reg backups: keep only -original and -previous per endpoint.
 Get-ChildItem -Path $BackupDir -File -Filter '*-FxProperties-*.reg' -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -notlike '*-FxProperties-original.reg' -and $_.Name -notlike '*-FxProperties-previous.reg' } |
   Group-Object { if ($_.Name -match '^(\{[a-f0-9-]+\})-FxProperties-') { $matches[1] } else { $_.Name } } |
@@ -429,6 +600,7 @@ try {
   Unblock-File $InstalledDll
 
   foreach ($job in $jobs) {
+    Migrate-LegacySlots $job
     foreach ($target in $job.Targets) {
       $Clsid = $Classes[$target[0]].Clsid
       $FriendlyName = $Classes[$target[0]].Name
@@ -486,40 +658,128 @@ foreach ($job in $jobs) {
   }
 }
 
-# --- Self-test: does Windows start the mic chain where it was put? ------------------------
-# Some mic arrays never start an endpoint effect (EFX) but run mode effects (MFX), or the
-# other way round, and nothing in the registry tells which in advance.
+# --- Self-test & safe automatic rollback on open failure or audiodg crash -----------------
 $selfTestFailed = $false
 $ProbeTemp = Join-Path $InstallDir 'gamersequalizer-probe.exe'
-$ProbeCopy = $null
-$micJobs = @($jobs | Where-Object { $_.Flow -eq 'Capture' })
-if ($micJobs.Count -gt 0) { $ProbeCopy = Get-ProbeExe }
-if (-not $ProbeCopy) { $micJobs = @() }
-foreach ($job in $micJobs) {
-  # Enhancements off: Windows runs no effect in either slot; the warning above says so.
-  if (Test-EnhancementsOff $job) { continue }
+$ProbeCopy = Get-ProbeExe
+
+if ($ProbeCopy) {
+  # Immediate startup crash check: if Audiosrv startup already crashed audiodg, undo everything at once.
+  Start-Sleep -Seconds 2
+  $startupCrashes = Get-AudiodgCrashesSince $audioStarted
+  if ($startupCrashes.Count -gt 0) {
+    Say "`naudiodg.exe crashed right after restarting audio: rolling back all endpoint changes..." Red
+    Stop-Audio
+    try {
+      foreach ($job in $jobs) {
+        $prevJson = Join-Path $BackupDir "$($job.Id)-FxProperties-previous.json"
+        if (Test-Path $prevJson) { Restore-FxFromJson $job.Flow $job.Id $prevJson }
+      }
+    }
+    finally { $audioStarted = Start-Audio }
+    $selfTestFailed = $true
+    $jobs = @()
+  }
+}
+
+foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
+  if (-not $ProbeCopy -or (Test-EnhancementsOff $job)) { continue }
   $slot = $job.Targets[0][1]
-  Say "`nChecking $($job.Name): opening it for a few seconds..."
-  $result = Test-MicChain $job $audioStarted
-  if ($result -eq 'started') { Say "  Works: Windows starts the mic effect ($slot)." Green }
-  if ($result -ne 'not started') { continue }
+  Say "`nChecking $($job.Name): opening microphone for a few seconds..."
+  $res = Invoke-EndpointProbe $job $audioStarted
+  if (-not $res.OpenOk) {
+    $null = Rollback-Job $job
+    $selfTestFailed = $true
+    continue
+  }
+  $started = [bool]($res.Notes | Where-Object { $_ -match 'GamersEqualizer Mic Chain: (stream |refused a stream)' })
+  if ($started) {
+    Say "  Works: Windows starts the mic effect ($slot)." Green
+    continue
+  }
   $other = if ($slot -eq 'MFX') { 'EFX' } else { 'MFX' }
   Say "  Windows did not start it in $slot; moving it to $other (audio restarts once more)..."
-  $audioStarted = Move-MicChain $job $other
-  $result = Test-MicChain $job $audioStarted
-  if ($result -eq 'started') { Say "  Works: Windows starts the mic effect ($other)." Green }
-  # Unknown in $other, but $slot is known not to work: it stays in $other.
-  if ($result -ne 'not started') { continue }
-  # Neither works (or the check cannot see it): back where it was put, the default or the user's choice.
+  $audioStarted = Move-EndpointSlot $job 'Capture' $other
+  $res2 = Invoke-EndpointProbe $job $audioStarted
+  if (-not $res2.OpenOk) {
+    $null = Rollback-Job $job
+    $selfTestFailed = $true
+    continue
+  }
+  $started2 = [bool]($res2.Notes | Where-Object { $_ -match 'GamersEqualizer Mic Chain: (stream |refused a stream)' })
+  if ($started2) {
+    Say "  Works: Windows starts the mic effect ($other)." Green
+    continue
+  }
+  # Both slots opened cleanly with zero crashes, yet Windows started neither: restore target slot
+  # (keeps raw mic working cleanly and lets health diagnostics surface [ApoCheck] instead of looping).
   Say "  Windows starts the mic effect neither in EFX nor in MFX: apps get the raw microphone." Red
   Say "  Putting it back in $slot. Send the app log (%APPDATA%\GamersEqualizer\logs\gamersequalizer.log)." Red
-  $audioStarted = Move-MicChain $job $slot
+  $audioStarted = Move-EndpointSlot $job 'Capture' $slot
   $selfTestFailed = $true
 }
+
+foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
+  if (-not $ProbeCopy -or (Test-EnhancementsOff $job)) { continue }
+  $hasOut = ($job.Targets | Where-Object { $_[0] -eq 'Render' }).Count -gt 0
+  $hasStream = ($job.Targets | Where-Object { $_[0] -eq 'Stream' }).Count -gt 0
+  Say "`nChecking $($job.Name): opening silent output for a moment..."
+  $res = Invoke-EndpointProbe $job $audioStarted
+  if (-not $res.OpenOk) {
+    $null = Rollback-Job $job
+    $selfTestFailed = $true
+    continue
+  }
+  $allNotes = @($res.Notes + $res.PreNotes)
+  $outOk = -not $hasOut -or [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
+  $streamOk = -not $hasStream -or [bool]($allNotes | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
+  if ($outOk -and $streamOk) {
+    Say '  Works: Windows starts the output effects.' Green
+    continue
+  }
+  $outTarget = $job.Targets | Where-Object { $_[0] -eq 'Render' } | Select-Object -First 1
+  if ($hasOut -and -not $outOk -and $outTarget -and $outTarget[1] -eq 'EFX') {
+    Say '  Output EQ did not start in EFX; trying MFX (audio restarts once more)...'
+    $audioStarted = Move-EndpointSlot $job 'Render' 'MFX'
+    $res2 = Invoke-EndpointProbe $job $audioStarted
+    if (-not $res2.OpenOk) {
+      $null = Rollback-Job $job
+      $selfTestFailed = $true
+      continue
+    }
+    $allNotes2 = @($res2.Notes + $res2.PreNotes)
+    $outOk2 = [bool]($allNotes2 | Where-Object { $_ -match 'GamersEqualizer Output EQ: stream .* started' })
+    $streamOk2 = -not $hasStream -or [bool]($allNotes2 | Where-Object { $_ -match 'GamersEqualizer Stream EQ: stream .* started' })
+    if ($outOk2 -and $streamOk2) {
+      Say '  Works: Windows starts the output effects (Output EQ in MFX).' Green
+      continue
+    }
+    if ($outOk2 -or $streamOk2) {
+      Say "  Partial output effect start (Output EQ=$outOk2, Stream EQ=$streamOk2). Check the app log (%APPDATA%\GamersEqualizer\logs\gamersequalizer.log)." Yellow
+      $selfTestFailed = $true
+      continue
+    }
+  }
+  elseif ($outOk -or $streamOk) {
+    Say "  Partial output effect start (Output EQ=$outOk, Stream EQ=$streamOk). Check the app log (%APPDATA%\GamersEqualizer\logs\gamersequalizer.log)." Yellow
+    $selfTestFailed = $true
+    continue
+  }
+
+  Say '  Windows did not start output effects: rolling back so the output stays untouched.' Red
+  $null = Rollback-Job $job
+  $selfTestFailed = $true
+}
+
 if (Test-Path $ProbeTemp) { Remove-Item $ProbeTemp -Force -ErrorAction SilentlyContinue }
 
 Say ''
-Say 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
+if ($selfTestFailed) {
+  Say 'Completed with warnings/rollback on one or more endpoints. Send %APPDATA%\GamersEqualizer\logs\gamersequalizer.log if needed.' Yellow
+}
+else {
+  Say 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
+}
 if ($installApp) { Say "The app now runs from $InstalledExe; the folder it was started from can be deleted." }
 Say 'Settings come from the GamersEqualizer app; keep it running.'
 if ($FromApp -and $selfTestFailed) { Read-Host 'Press Enter to close' }

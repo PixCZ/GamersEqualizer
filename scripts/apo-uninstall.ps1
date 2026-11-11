@@ -1,14 +1,18 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-  Removes the prototype GamersEqualizer capture APO everywhere it was added.
+  Removes GamersEqualizer APOs everywhere they were added.
 
 .DESCRIPTION
-  Removes our CLSID from every capture/render endpoint's effect lists (other effects stay),
-  unregisters the COM class and APO, deletes the config key, the installed DLL and the
-  installed app (once it has exited), and restarts the Windows Audio service.
-  -RestoreBackup <file.reg | dir> additionally re-imports an FxProperties backup made by apo-install.ps1
-  (byte-for-byte original state of endpoint(s); pass a file or the apo-backup directory).
+  Removes our CLSIDs from every capture/render endpoint's effect lists (other effects stay
+  and original String vs MultiString registry value kinds are preserved), unregisters the COM
+  classes and APOs, deletes the config key, the installed DLL and the installed app (once it
+  has exited), and restarts the Windows Audio service.
+  -RestoreBackup <file.json | file.reg | dir> additionally restores exact pre-install
+  FxProperties values from backups made by apo-install.ps1: JSON backups are restored directly
+  via .NET RegistryKey (SetValue + QueryValues), avoiding the reg.exe import ACL failure on
+  TrustedInstaller-owned FxProperties subkeys; legacy .reg files without JSON fallback still
+  attempt reg.exe import.
   -RemoveBackups also deletes those backups (%ProgramFiles%\GamersEqualizer\apo-backup, and
   the .reg files older versions left in %ProgramData%\GamersEqualizer); the app's
   "Uninstall from Windows" button passes it.
@@ -45,17 +49,76 @@ $BackupDir = Join-Path $ProgramDir 'apo-backup'
 $LegacyBackupRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'GamersEqualizer'
 $MmDevices = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 
-# FxProperties grants Administrators only SetValue + read; the registry provider asks for more
-# and gets "access denied", so open the key with exactly these rights.
-function Set-FxValue([string]$subKey, [string]$name, [string[]]$value) {
+# FxProperties grants Administrators only SetValue + QueryValues (ReadKey); the PowerShell
+# registry provider asks for more and gets "access denied", so open via .NET RegistryKey.
+function Set-FxValue([string]$subKey, [string]$name, [string[]]$value, [Microsoft.Win32.RegistryValueKind]$kind = [Microsoft.Win32.RegistryValueKind]::MultiString) {
   $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
   $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
   if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
   try {
-    if ($value.Count -eq 0) { $key.DeleteValue($name, $false) }
-    else { $key.SetValue($name, $value, [Microsoft.Win32.RegistryValueKind]::MultiString) }
+    [string[]]$clean = @($value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($clean.Count -eq 0) {
+      $key.DeleteValue($name, $false)
+    }
+    elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::String) {
+      $key.SetValue($name, [string]$clean[0], [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    else {
+      $key.SetValue($name, $clean, [Microsoft.Win32.RegistryValueKind]::MultiString)
+    }
   }
   finally { $key.Dispose() }
+}
+
+function Restore-FxFromJson([string]$jsonFile) {
+  $parsed = Get-Content $jsonFile -Raw -Encoding UTF8 | ConvertFrom-Json
+  $flow = [string]$parsed.Flow
+  $id = [string]$parsed.Id
+  if (-not $flow -or -not $id) {
+    throw "Invalid JSON backup (missing Flow or Id): $jsonFile"
+  }
+  $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
+  if (-not (Test-Path "HKLM:\$subKey")) {
+    Write-Warning "Skipping backup for missing endpoint $flow $id ($($jsonFile | Split-Path -Leaf))"
+    return $null
+  }
+  $origRecords = @($parsed.Values | ForEach-Object { $_ })
+  $origNames = @($origRecords | ForEach-Object { [string]$_.Name })
+  $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
+  if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
+  try {
+    foreach ($cur in @($key.GetValueNames())) {
+      if ($origNames -notcontains $cur) { $key.DeleteValue($cur, $false) }
+    }
+    foreach ($rec in $origRecords) {
+      $kind = [Microsoft.Win32.RegistryValueKind][Enum]::Parse([Microsoft.Win32.RegistryValueKind], [string]$rec.Kind)
+      $valName = [string]$rec.Name
+      if ($kind -eq [Microsoft.Win32.RegistryValueKind]::Binary) {
+        [byte[]]$binVal = [Convert]::FromBase64String([string]$rec.Value)
+        $key.SetValue($valName, $binVal, $kind)
+      }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::MultiString) {
+        [string[]]$multiVal = @($rec.Value | ForEach-Object { [string]$_ })
+        $key.SetValue($valName, $multiVal, $kind)
+      }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::DWord) {
+        [int]$dwVal = [int]$rec.Value
+        $key.SetValue($valName, $dwVal, $kind)
+      }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::QWord) {
+        [long]$qwVal = [long]$rec.Value
+        $key.SetValue($valName, $qwVal, $kind)
+      }
+      else {
+        [string]$strVal = [string]$rec.Value
+        $key.SetValue($valName, $strVal, $kind)
+      }
+    }
+  }
+  finally { $key.Dispose() }
+  Write-Host "Restored $flow $id from $($jsonFile | Split-Path -Leaf)"
+  $id
 }
 
 if ($RestoreBackup -and -not (Test-Path $RestoreBackup)) { throw "Backup not found: $RestoreBackup" }
@@ -64,32 +127,49 @@ Stop-Service Audiosrv -Force
 try {
   foreach ($flow in 'Capture', 'Render') {
     foreach ($ep in Get-ChildItem (Join-Path $MmDevices $flow)) {
-      $fxKey = Join-Path $ep.PSPath 'FxProperties'
-      if (-not (Test-Path $fxKey)) { continue }
-      $fx = Get-ItemProperty $fxKey
-      foreach ($prop in $fx.PSObject.Properties) {
-        if ($prop.Name -notlike '{*') { continue }
-        # Drivers (Realtek, ...) also keep REG_DWORD / REG_BINARY values here: only string lists
-        # can hold our CLSIDs. `-notcontains` already ignores case.
-        if ($prop.Value -isnot [string] -and $prop.Value -isnot [string[]]) { continue }
-        $rest = @(@($prop.Value) | Where-Object { $Clsids -notcontains $_ })
-        if ($rest.Count -eq @($prop.Value).Count) { continue }
-        # An empty list deletes the value.
-        Set-FxValue "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$($ep.PSChildName)\FxProperties" $prop.Name ([string[]]$rest)
-        Write-Host "Removed from $flow $($ep.PSChildName) $($prop.Name)"
+      $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$($ep.PSChildName)\FxProperties"
+      $regKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, $false)
+      if ($null -eq $regKey) { continue }
+      try {
+        foreach ($name in @($regKey.GetValueNames())) {
+          if ($name -notlike '{*') { continue }
+          $kind = $regKey.GetValueKind($name)
+          if ($kind -ne [Microsoft.Win32.RegistryValueKind]::String -and $kind -ne [Microsoft.Win32.RegistryValueKind]::MultiString) { continue }
+          $raw = $regKey.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+          $vals = @($raw | Where-Object { $null -ne $_ })
+          $rest = @($vals | Where-Object { $Clsids -notcontains $_ })
+          if ($rest.Count -eq $vals.Count) { continue }
+          Set-FxValue $subKey $name ([string[]]$rest) $kind
+          Write-Host "Removed from $flow $($ep.PSChildName) $name"
+        }
       }
+      finally { $regKey.Dispose() }
     }
   }
 
   if ($RestoreBackup) {
     if ((Get-Item $RestoreBackup -ErrorAction SilentlyContinue) -is [System.IO.DirectoryInfo]) {
-      $files = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.reg' -ErrorAction SilentlyContinue)
-      if ($files.Count -eq 0) { $files = @(Get-ChildItem -Path $RestoreBackup -Filter '*.reg' -ErrorAction SilentlyContinue) }
-      foreach ($f in $files) {
-        & reg.exe import $f.FullName
-        if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed ($($f.Name), exit $LASTEXITCODE)" } else { Write-Host "Restored $($f.Name)" }
+      $restoredIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+      $jsonFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.json' -ErrorAction SilentlyContinue)
+      if ($jsonFiles.Count -eq 0) { $jsonFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-previous.json' -ErrorAction SilentlyContinue) }
+      foreach ($jf in $jsonFiles) {
+        $rid = Restore-FxFromJson $jf.FullName
+        if ($rid) { $null = $restoredIds.Add($rid) }
       }
-    } else {
+      # Fallback only for older installs that wrote .reg before JSON backups existed.
+      $regFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.reg' -ErrorAction SilentlyContinue)
+      if ($regFiles.Count -eq 0) { $regFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*.reg' -ErrorAction SilentlyContinue) }
+      foreach ($rf in $regFiles) {
+        if ($rf.Name -match '^(\{[a-f0-9-]+\})-FxProperties-' -and $restoredIds.Contains($matches[1])) { continue }
+        & reg.exe import $rf.FullName
+        if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed ($($rf.Name), exit $LASTEXITCODE) - FxProperties subkey ACLs often block reg.exe import" }
+        else { Write-Host "Restored $($rf.Name)" }
+      }
+    }
+    elseif ($RestoreBackup -like '*.json') {
+      $null = Restore-FxFromJson $RestoreBackup
+    }
+    else {
       & reg.exe import $RestoreBackup
       if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed (exit $LASTEXITCODE)" } else { Write-Host "Restored $RestoreBackup" }
     }
@@ -112,7 +192,7 @@ try {
     if ($legacy -and -not ($legacy.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
       $legacyDir = Get-Item (Join-Path $LegacyBackupRoot 'apo-backup') -Force -ErrorAction SilentlyContinue
       if ($legacyDir -and -not ($legacyDir.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        Get-ChildItem $legacyDir.FullName -File -Force -Filter '*-FxProperties-*.reg' | Remove-Item -Force
+        Get-ChildItem $legacyDir.FullName -File -Force -Filter '*-FxProperties-*' | Remove-Item -Force
         if (-not (Get-ChildItem $legacyDir.FullName -Force)) { Remove-Item $legacyDir.FullName -Force }
       }
       if (-not (Get-ChildItem $LegacyBackupRoot -Force)) { Remove-Item $LegacyBackupRoot -Force }
