@@ -8,8 +8,8 @@ use windows::Win32::System::EventLog::{
   EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender, EvtRenderEventXml, EVT_HANDLE,
 };
 
-/// Newest notes read per check.
-const MAX_NOTES: usize = 10;
+/// Newest notes read per check (every 30 s); a stream start writes several, so keep it roomy.
+const MAX_NOTES: usize = 100;
 /// How long EvtNext may wait for the (local) log, ms.
 const NEXT_TIMEOUT_MS: u32 = 1000;
 /// `ERROR_NO_MORE_ITEMS`: the query matched nothing (not a failure).

@@ -76,8 +76,12 @@ if (-not $found) { 'No device lists our effect: the install did not reach any de
 
 "`n== Is the DLL loaded in audiodg?"
 if ($admin) {
-  $loaded = tasklist /m $DllName 2>$null | Select-String -Pattern 'audiodg'
-  "audiodg has $DllName loaded: $([bool]$loaded)"
+  # Per process: capture and render may run in different audiodg instances.
+  $withDll = @(tasklist /m $DllName /fo csv /nh 2>$null | Select-String -Pattern '"audiodg' | ForEach-Object { ($_.Line -split '","')[1] })
+  foreach ($p in @(Get-Process audiodg -ErrorAction SilentlyContinue)) {
+    "audiodg pid $($p.Id) since $($p.StartTime): $DllName loaded: $($withDll -contains "$($p.Id)")"
+  }
+  if (-not (Get-Process audiodg -ErrorAction SilentlyContinue)) { 'audiodg is not running (no stream open)' }
 }
 else { 'unknown: run as administrator' }
 
@@ -124,9 +128,9 @@ $ci = Get-WinEvent -LogName 'Microsoft-Windows-CodeIntegrity/Operational' -MaxEv
 if ($ci) { $ci | Select-Object -First 5 | ForEach-Object { "$($_.TimeCreated) id $($_.Id): $($_.Message)" } }
 else { 'none' }
 
-"`n== Notes from inside audiodg (Application log, source GamersEqualizer, newest 20)"
+"`n== Notes from inside audiodg (Application log, source GamersEqualizer, newest 100)"
 # Written by APO builds that have this check (event_log.rs); older builds write none.
-$notes = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='GamersEqualizer']]]" -MaxEvents 20 -ErrorAction SilentlyContinue
+$notes = Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='GamersEqualizer']]]" -MaxEvents 100 -ErrorAction SilentlyContinue
 if ($notes) {
   $notes | Sort-Object TimeCreated | ForEach-Object { "$($_.TimeCreated) $($_.LevelDisplayName): $($_.Properties[0].Value)" }
 }

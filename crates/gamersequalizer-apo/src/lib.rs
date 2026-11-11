@@ -278,8 +278,8 @@ static APO_VTBL: IAudioProcessingObject_Vtbl = IAudioProcessingObject_Vtbl {
   GetLatency: apo_get_latency,
   GetRegistrationProperties: apo_get_registration_properties,
   Initialize: apo_initialize,
-  IsInputFormatSupported: apo_is_format_supported,
-  IsOutputFormatSupported: apo_is_format_supported,
+  IsInputFormatSupported: apo_is_input_format_supported,
+  IsOutputFormatSupported: apo_is_output_format_supported,
   GetInputChannelCount: apo_get_input_channel_count,
 };
 
@@ -319,6 +319,9 @@ pub unsafe extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *cons
   let Some(kind) = ApoKind::from_clsid(&*rclsid) else {
     return CLASS_E_CLASSNOTAVAILABLE;
   };
+  // Each step Windows takes towards a running effect is noted once, so the last note shows
+  // where it stopped (class -> instance -> initialized -> formats -> stream).
+  note(Level::Info, format!("{}: class requested", kind.friendly_name()));
   let factory: IClassFactory = GainApoFactory { kind }.into();
   factory.query(riid, ppv)
 }
@@ -343,13 +346,18 @@ impl IClassFactory_Impl for GainApoFactory_Impl {
     // SAFETY: both pointers checked non-null above; COM owns them.
     unsafe {
       *object = null_mut();
+      let name = self.kind.friendly_name();
       // An aggregated object may only be asked for its inner IUnknown.
       if outer.is_some() && *riid != IUnknown::IID {
+        note(Level::Warning, format!("{name}: refused an aggregated instance asked for {:?}", *riid));
         return Err(CLASS_E_NOAGGREGATION.into());
       }
       let inner = ApoObject::create(outer.map(|o| o.as_raw()), self.kind);
       let hr = inner_query_interface(inner, riid, object);
       inner_release(inner); // drop the creation reference; frees the object if QI failed
+      let how = if outer.is_some() { "aggregated" } else { "not aggregated" };
+      let level = if hr.is_ok() { Level::Info } else { Level::Warning };
+      note(level, format!("{name}: instance created ({how}): {hr:?}"));
       hr.ok()
     }
   }
@@ -500,15 +508,40 @@ unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *co
     return APOERR_APO_LOCKED;
   }
   // Only the processing mode is used (stream table telemetry); the property stores are not.
-  if let Some(mode) = processing_mode(size, data) {
+  let mode = processing_mode(size, data);
+  if let Some(mode) = mode {
     st.mode.0.store((mode >> 64) as u64, Ordering::Relaxed);
     st.mode.1.store(mode as u64, Ordering::Relaxed);
   }
+  // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
+  let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
+  note(Level::Info, format!("{}: initialized ({size}-byte init block, mode {mode})", st.kind.friendly_name()));
   S_OK
 }
 
-unsafe extern "system" fn apo_is_format_supported(
-  _this: *mut c_void,
+unsafe extern "system" fn apo_is_input_format_supported(
+  this: *mut c_void,
+  opposite: *mut c_void,
+  requested: *mut c_void,
+  supported: *mut *mut c_void,
+) -> HRESULT {
+  is_format_supported(this, "input", opposite, requested, supported)
+}
+
+unsafe extern "system" fn apo_is_output_format_supported(
+  this: *mut c_void,
+  opposite: *mut c_void,
+  requested: *mut c_void,
+  supported: *mut *mut c_void,
+) -> HRESULT {
+  is_format_supported(this, "output", opposite, requested, supported)
+}
+
+/// # Safety
+/// `this` is our IAudioProcessingObject pointer; the rest are the engine's COM pointers.
+unsafe fn is_format_supported(
+  this: *mut c_void,
+  direction: &str,
   opposite: *mut c_void,
   requested: *mut c_void,
   supported: *mut *mut c_void,
@@ -519,7 +552,19 @@ unsafe extern "system" fn apo_is_format_supported(
   *supported = null_mut();
   let opposite = IAudioMediaType::from_raw_borrowed(&opposite);
   let requested = IAudioMediaType::from_raw_borrowed(&requested);
-  match check_format(opposite, requested) {
+  let result = check_format(opposite, requested);
+  // A refused format drops the effect from the graph before it ever starts a stream.
+  let describe = |media: Option<&IAudioMediaType>| {
+    media.and_then(uncompressed_format).map_or_else(|| "none".to_string(), |f| describe_format(&f))
+  };
+  let (level, verdict) = match &result {
+    Ok(_) => (Level::Info, "accepted".to_string()),
+    Err(err) => (Level::Warning, format!("refused ({:?})", err.code())),
+  };
+  let name = state::<OFF_APO>(this).kind.friendly_name();
+  let (requested_text, opposite_text) = (describe(requested), describe(opposite));
+  note(level, format!("{name}: {direction} format {requested_text} (other side {opposite_text}): {verdict}"));
+  match result {
     Ok(format) => {
       *supported = format.into_raw();
       S_OK
@@ -588,6 +633,8 @@ unsafe extern "system" fn cfg_lock_for_process(
     return APOERR_APO_LOCKED;
   }
   if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
+    let name = st.kind.friendly_name();
+    note(Level::Warning, format!("{name}: refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
     return APOERR_NUM_CONNECTIONS_INVALID;
   }
   let input = *inputs;
@@ -599,7 +646,7 @@ unsafe extern "system" fn cfg_lock_for_process(
     let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
     let text =
       format!("{}: stream format not supported ({what}); Windows runs the stream without it", st.kind.friendly_name());
-    event_log::note(Level::Warning, &text, &text);
+    note(Level::Warning, text);
     return APOERR_FORMAT_NOT_SUPPORTED;
   };
 
@@ -624,7 +671,7 @@ unsafe extern "system" fn cfg_lock_for_process(
     describe_format(&format),
     GUID::from_u128(mode)
   );
-  event_log::note(level, &text, &text);
+  note(level, text);
   if let Ok(mut slot) = st.processor.lock() {
     // Replacing drops a previous processor: keep a destructor panic inside this DLL.
     let old = std::mem::replace(&mut *slot, processor);
@@ -657,10 +704,15 @@ fn shared_memory(kind: ApoKind) -> Option<SharedMemoryClient> {
     Ok(shm) => Some(shm),
     Err(e) => {
       let text = format!("{}: shared memory {APO_SHM_NAME} unavailable ({e})", kind.friendly_name());
-      event_log::note(Level::Warning, &text, &text);
+      note(Level::Warning, text);
       None
     }
   }
+}
+
+/// An Application log note keyed by its own text: each distinct text once per process.
+fn note(level: Level, text: String) {
+  event_log::note(level, &text, &text);
 }
 
 /// "48000 Hz, 2 ch, float 4 bytes" for the Application log notes.
@@ -951,7 +1003,7 @@ impl MicProcessor {
   fn create(rate: u32) -> Option<Self> {
     let refuse = |why: String| {
       let text = format!("Mic chain: {why}; passes audio through");
-      event_log::note(Level::Warning, &text, &text);
+      note(Level::Warning, text);
     };
     let bridge = match RateBridge::for_rate(rate) {
       Some(Ok(bridge)) => Some(bridge),

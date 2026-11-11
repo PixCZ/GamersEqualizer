@@ -178,7 +178,11 @@ pub fn run_status(state: &AppState) -> Option<&RunStatus> {
 /// under a "does not work" line: the reason in the APO's own words (English, diagnostic).
 pub fn newest_note<'a>(run: &'a RunStatus, prefix: &str) -> Option<&'a str> {
   let prefix = prefix.to_lowercase();
-  run.apo_notes.iter().find(|note| note.to_lowercase().contains(&prefix)).map(String::as_str)
+  let about = |note: &&String| note.to_lowercase().contains(&prefix);
+  let notes = &run.apo_notes;
+  // Sound settings also create our effects, only to list them: what audiodg did comes first.
+  let from_audiodg = notes.iter().filter(about).find(|note| note.to_lowercase().contains("audiodg"));
+  from_audiodg.or_else(|| notes.iter().find(about)).map(String::as_str)
 }
 
 /// True when the selected mic is the Windows default (or nothing is known yet).
@@ -331,5 +335,21 @@ fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem
     if let Some(id) = state.selected_mic_endpoint_id.clone() {
       set_default_mic(state, win_audio, &id);
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn newest_note_prefers_what_audiodg_did() {
+    let settings = "2026-11-11T07:30:00Z SystemSettings.exe pid 9: GamersEqualizer Mic Chain: class requested";
+    let audiodg = "2026-11-11T07:25:00Z audiodg.exe pid 6836: Mic chain: stream stopped after 0 blocks, 0 processed";
+    let run = RunStatus { apo_notes: vec![settings.to_string(), audiodg.to_string()], ..Default::default() };
+    assert_eq!(newest_note(&run, "Mic chain"), Some(audiodg));
+    let run = RunStatus { apo_notes: vec![settings.to_string()], ..Default::default() };
+    assert_eq!(newest_note(&run, "mic chain"), Some(settings));
+    assert_eq!(newest_note(&run, "Output EQ"), None);
   }
 }

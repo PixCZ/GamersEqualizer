@@ -59,6 +59,38 @@ při hraní zvuku, takže to nedokazuje, že běží APO na mikrofonu. Zbývá z
 připojila (`[ApoLink] connected`) a jestli při nahrávání přišla telemetrie mikrofonu
 (`[Mic] microphone processing started`).
 
+### Notebook autora (11. 11. ráno, build 10dd4cd s hlášeními z audiodg)
+
+Naměřeno (výstup skriptu + log služby):
+
+| Čas      | Co se stalo                                                                           |
+| -------- | ------------------------------------------------------------------------------------- |
+| 08:24:06 | aktualizace APO (nová DLL, restart zvuku)                                             |
+| 08:24:20 | audiodg pid 6836: `Output EQ` i `Stream EQ` „started“ (48 kHz, 2 ch, float)           |
+| 08:24:22 | Záznam zvuku nahrává z `Microphone Array` (`[Tray] microphone in use`)                |
+| 08:24:32 | služba správně hlásí `NotRunning { flow: Capture }` + upozornění Windows              |
+| potom    | od mikrofonního APO **žádné hlášení**: ani „started“, ani formát, ani paměť, ani stop |
+
+- Výstupní APO běží ve stejném audiodg a zapisovat do protokolu umí, takže mikrofonní APO se k
+  `LockForProcess` vůbec nedostalo. Windows ho buď pro capture graf nevytvořily, nebo ho vyřadily
+  už při vyjednávání formátu (tam build 10dd4cd nic nezapisoval).
+- Mikrofon: MFX = 3 APO Realteku (režimy DEFAULT, RAW, SPEECH, COMMUNICATIONS), EFX = Realtek + naše
+  (režimy DEFAULT + SPEECH). Dokumentace Microsoftu u `PKEY_EFX_ProcessingModes_Supported_For_Streaming`
+  povoluje pro EFX jen DEFAULT. Na vývojovém PC (kde to funguje) má mikrofon režimy jen DEFAULT + jeden
+  další a žádný RAW.
+- `mode 00000000-…` u výstupních APO: implementujeme jen `IAudioSystemEffects`, takže Windows
+  (hypotéza) předávají `APOInitSystemEffects` v1 bez režimu. Nový build zapisuje velikost bloku.
+
+Další krok (build po 10dd4cd): APO zapisuje každý krok, kterým ho Windows spouští: požadavek na
+třídu, vytvoření instance, `Initialize`, každý dotaz na vstupní a výstupní formát s odpovědí a
+odmítnutý `LockForProcess`. Poslední hlášení mikrofonu ukáže, kde se to zastaví. Skript vypisuje
+každý audiodg zvlášť. Pokus bez kompilace: přidat mikrofon i do slotu MFX
+(`apo-install.ps1 -Flow Capture -Slot MFX`) a podívat se, jestli pak přijde „Mic Chain: stream … started“.
+
+Vývojové PC se týden jen uspává do hibernace, restart neproběhl. Než ho prohlásíme za referenci,
+je potřeba ho jednou opravdu restartovat (Restartovat, ne Vypnout: rychlé spuštění je taky
+hibernace) a ověřit, že mikrofon funguje dál.
+
 ## 3. Z kódu
 
 - Sdílenou paměť `Global\GamersEqualizer_Apo_v19` vytváří APO v `LockForProcess`, a to každá ze tří tříd

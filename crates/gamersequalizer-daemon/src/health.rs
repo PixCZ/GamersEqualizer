@@ -43,7 +43,7 @@ const FILE: &str = "health.json";
 /// The service's verdict on our effects really running, read by the window (`RunStatus`).
 const RUN_FILE: &str = "run_status.json";
 /// APO notes handed to the window.
-const NOTES_FOR_WINDOW: usize = 5;
+const NOTES_FOR_WINDOW: usize = 40;
 /// How often the Application log is queried for new APO notes.
 const NOTES_INTERVAL: Duration = Duration::from_secs(30);
 /// Device enumeration + one spatial-audio activation + a few registry reads.

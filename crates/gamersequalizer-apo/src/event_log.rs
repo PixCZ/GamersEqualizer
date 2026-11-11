@@ -1,9 +1,10 @@
-//! Notes from inside audiodg to the Windows Application log (source `GamersEqualizer`): which
-//! stream an APO started on, and why it passes audio through unchanged. audiodg has no logger,
-//! and from outside an APO that silently passes audio through looks exactly like one Windows
-//! never loaded. `scripts/apo-diagnose.ps1` reads them.
+//! Notes from inside audiodg to the Windows Application log (source `GamersEqualizer`): each
+//! step Windows takes towards a running effect (class, instance, init, formats, stream) and why
+//! it passes audio through unchanged. audiodg has no logger, and from outside an APO that
+//! silently passes audio through looks exactly like one Windows never loaded.
+//! `scripts/apo-diagnose.ps1` reads them.
 //!
-//! Each distinct note once per audiodg run (a mic opened a hundred times adds one entry), at
+//! Each distinct note once per process run (a mic opened a hundred times adds one entry), at
 //! most `MAX_NOTES`. Never call this from the real-time path: it locks and makes system calls.
 //! The source is not registered, so Event Viewer adds "description not found" before the text;
 //! the text itself is the event's first string.
@@ -14,8 +15,9 @@ use windows::Win32::System::EventLog::{
   DeregisterEventSource, RegisterEventSourceW, ReportEventW, EVENTLOG_INFORMATION_TYPE, EVENTLOG_WARNING_TYPE,
 };
 
-/// Bound per audiodg run, so a long session cannot grow the list (or the log) forever.
-const MAX_NOTES: usize = 64;
+/// Bound per process run, so a long session cannot grow the list (or the log) forever. Roomy:
+/// render format queries come first and must not use up the budget before the mic starts.
+const MAX_NOTES: usize = 256;
 const EVENT_ID: u32 = 1;
 
 static WRITTEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -42,7 +44,10 @@ fn write(level: Level, text: &str) {
     Level::Info => EVENTLOG_INFORMATION_TYPE,
     Level::Warning => EVENTLOG_WARNING_TYPE,
   };
-  let text = HSTRING::from(format!("audiodg pid {}: {text}", std::process::id()));
+  // Normally audiodg.exe; Sound settings also create effects, only to list them.
+  let process = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+  let process = process.unwrap_or_else(|| "?".to_string());
+  let text = HSTRING::from(format!("{process} pid {}: {text}", std::process::id()));
   // SAFETY: NUL-terminated strings that outlive the calls; the handle is closed below.
   unsafe {
     let Ok(source) = RegisterEventSourceW(PCWSTR::null(), w!("GamersEqualizer")) else {
