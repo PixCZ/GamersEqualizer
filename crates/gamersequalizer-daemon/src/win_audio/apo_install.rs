@@ -29,6 +29,8 @@ const OUTPUT_APO_CLSID: &str = "{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}";
 const STREAM_APO_CLSID: &str = "{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}";
 const ALL_CLSIDS: [&str; 3] = [MIC_APO_CLSID, OUTPUT_APO_CLSID, STREAM_APO_CLSID];
 const DLL_NAME: &str = "gamersequalizer_apo.dll";
+/// The app itself, installed next to its effects: `%ProgramFiles%\GamersEqualizer\<this>`.
+const EXE_NAME: &str = "gamersequalizer.exe";
 /// The scripts are built into the exe, so a tester gets one exe + the DLL. Written out to
 /// `%LOCALAPPDATA%\GamersEqualizer\scripts` right before each elevated run.
 const SCRIPT_NAME: &str = "apo-install.ps1";
@@ -107,22 +109,69 @@ pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
   let bundled_stamp = bundled.as_deref().and_then(file_stamp);
   let endpoint_guid = capture_id.and_then(endpoint_guid_of);
 
+  let dll_outdated = installed_stamp.zip(bundled_stamp).is_some_and(|((_, installed_at), (_, b))| b > installed_at);
+  // The app itself is installed with its effects: a copy run from elsewhere (the unzipped
+  // folder) that is newer than the installed one, or the first with this feature, updates too.
+  let app = app_to_install();
   let status = match (&endpoint_guid, installed_stamp) {
     (None, _) => ApoStatus::NoMicrophone,
     (_, None) => ApoStatus::NotInstalled,
     // Only offer an update to a newer build, never a downgrade.
-    (Some(_), Some((_, installed_at))) if bundled_stamp.is_some_and(|(_, b)| b > installed_at) => ApoStatus::Outdated,
+    // The app's own update counts only where the effect is: elsewhere it would turn "not on
+    // this device" into "update", which installs the effect there.
+    (Some(guid), Some(_)) if dll_outdated || (app.is_some() && endpoint_has_apo(flow, guid)) => ApoStatus::Outdated,
     (Some(guid), Some(_)) if !endpoint_has_apo(flow, guid) => ApoStatus::NotOnThisMic,
     _ => ApoStatus::Active,
+  };
+  // What the "outdated" message shows: the DLL builds, or the app's when only that differs.
+  let (installed_at, bundled_at) = match app.filter(|_| !dll_outdated) {
+    Some((installed_app, this_app)) => (installed_app, Some(this_app)),
+    None => (installed_stamp.map(|(_, t)| t), bundled_stamp.map(|(_, t)| t)),
   };
 
   ApoCheck {
     status,
-    installed_version: installed_stamp.map(|(_, t)| format_time(t)),
-    bundled_version: bundled_stamp.map(|(_, t)| format_time(t)),
+    installed_version: installed_at.map(format_time),
+    bundled_version: bundled_at.map(format_time),
     endpoint_guid,
     can_install: bundled.is_some(),
   }
+}
+
+/// The installed app to start instead of this process: this exe runs from elsewhere (the
+/// unzipped folder, an old autostart entry) and the installed copy is the same build or
+/// newer. None in the dev tree, for the installed copy itself, and while the installed DLL is
+/// missing (removed by an antivirus, a half-done uninstall): the installed copy could not put
+/// it back, a copy from the ZIP can.
+pub fn handover_target() -> Option<PathBuf> {
+  let this = std::env::current_exe().ok()?;
+  let installed = installed_exe().filter(|_| installed_dll().is_some())?;
+  if same_path(&this, &installed) || in_dev_tree(this.parent()?) {
+    return None;
+  }
+  let (_, installed_at) = file_stamp(&installed)?;
+  let (_, this_at) = file_stamp(&this)?;
+  (installed_at >= this_at).then_some(installed)
+}
+
+/// The exe "start with Windows" should run: the installed copy once there is one.
+pub fn autostart_exe() -> Option<PathBuf> {
+  let this = std::env::current_exe().ok()?;
+  let installed = installed_exe().filter(|_| !this.parent().is_some_and(in_dev_tree));
+  Some(installed.unwrap_or(this))
+}
+
+/// This exe still has to be installed: (installed copy's build time if any, this exe's).
+/// None in the dev tree, for the installed copy itself and for an older or equal build.
+fn app_to_install() -> Option<(Option<SystemTime>, SystemTime)> {
+  let this = std::env::current_exe().ok()?;
+  let target = installed_exe_path()?;
+  if same_path(&this, &target) || in_dev_tree(this.parent()?) {
+    return None;
+  }
+  let (_, this_at) = file_stamp(&this)?;
+  let installed_at = file_stamp(&target).map(|(_, t)| t);
+  installed_at.is_none_or(|t| this_at > t).then_some((installed_at, this_at))
 }
 
 /// Starts the install script elevated for every (flow, endpoint GUID): one UAC prompt and one
@@ -156,15 +205,20 @@ fn launch_installer(endpoints: &str) -> Result<(), String> {
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
   let dll_hash = file_sha256(&dll)?;
   let own_exe = std::env::current_exe().map_err(|e| e.to_string());
-  let probe = match own_exe.and_then(|exe| file_sha256(&exe).map(|hash| (hash, exe))) {
-    Ok((hash, exe)) => format!(" -ProbeExe {} -ProbeExeSha256 {hash}", ps_quote(&exe.to_string_lossy())),
+  // The installer copies this exe next to the effects (not a dev build: that runs in place)
+  // and runs it with --probe-mic.
+  let app = match own_exe.and_then(|exe| file_sha256(&exe).map(|hash| (hash, exe))) {
+    Ok((hash, exe)) => {
+      let in_place = if exe.parent().is_some_and(in_dev_tree) { " -NoAppInstall" } else { "" };
+      format!(" -AppExe {} -AppExeSha256 {hash}{in_place}", ps_quote(&exe.to_string_lossy()))
+    }
     Err(e) => {
-      log::warn!("[Setup] the installer skips the microphone check (own exe: {e})");
+      log::warn!("[Setup] the installer skips the app copy and the microphone check (own exe: {e})");
       String::new()
     }
   };
   let args = format!(
-    "-Endpoint {} -SourceDll {} -SourceDllSha256 {dll_hash}{probe} -FromApp",
+    "-Endpoint {} -SourceDll {} -SourceDllSha256 {dll_hash}{app} -FromApp",
     ps_quote(endpoints),
     ps_quote(&dll.to_string_lossy())
   );
@@ -318,6 +372,7 @@ pub fn installed_on_any(flow: Flow) -> bool {
 /// with an effect Windows can't load.
 pub fn is_registered() -> bool {
   installed_dll().is_some()
+    || installed_exe().is_some()
     || ALL_CLSIDS.iter().any(|clsid| hklm_key_exists(&format!("SOFTWARE\\Classes\\CLSID\\{clsid}")))
     || [Flow::Capture, Flow::Render].into_iter().any(|flow| {
       hklm_subkeys(&endpoints_root(flow))
@@ -445,23 +500,50 @@ impl Flow {
   }
 }
 
-/// Known folder, not `%ProgramFiles%` (the user can override that variable).
+/// `%ProgramFiles%\GamersEqualizer` by known folder, not the variable (the user can override it).
+fn program_dir() -> Option<PathBuf> {
+  Some(known_folder(&FOLDERID_ProgramFiles)?.join("GamersEqualizer"))
+}
+
 fn installed_dll() -> Option<PathBuf> {
-  let path = known_folder(&FOLDERID_ProgramFiles)?.join("GamersEqualizer").join("apo").join(DLL_NAME);
+  let path = program_dir()?.join("apo").join(DLL_NAME);
   path.is_file().then_some(path)
 }
 
-/// In the dev tree (`target/<profile>/`, `Cargo.toml` next to `target`) the `target/apo` build
-/// first: `target/release` may hold a stale DLL from a plain `--release` build, which is not
-/// the unwinding `apo` profile. Otherwise only next to the exe (distribution): a portable exe
-/// in `Downloads\x\` must not pick up whatever sits in `Downloads\apo\`.
-fn bundled_dll() -> Option<PathBuf> {
-  let dir = exe_dir()?;
-  let in_dev_tree = dir.parent().is_some_and(|target| {
+/// Where the installer puts the app (whether or not it is there yet).
+fn installed_exe_path() -> Option<PathBuf> {
+  Some(program_dir()?.join(EXE_NAME))
+}
+
+fn installed_exe() -> Option<PathBuf> {
+  installed_exe_path().filter(|path| path.is_file())
+}
+
+/// `dir` is `target/<profile>/` of the source tree (`Cargo.toml` next to `target`): a
+/// developer's build, which runs in place and is never installed.
+fn in_dev_tree(dir: &Path) -> bool {
+  dir.parent().is_some_and(|target| {
     target.file_name().is_some_and(|n| n.eq_ignore_ascii_case("target"))
       && target.parent().is_some_and(|root| root.join("Cargo.toml").is_file())
-  });
-  let dev = in_dev_tree.then(|| dir.join("..").join("apo").join(DLL_NAME));
+  })
+}
+
+/// Windows paths compare without case.
+fn same_path(a: &Path, b: &Path) -> bool {
+  a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+}
+
+/// In the dev tree the `target/apo` build first: `target/release` may hold a stale DLL from a
+/// plain `--release` build, which is not the unwinding `apo` profile. The installed app
+/// reinstalls its installed DLL (a new device, another slot). Otherwise only next to the exe
+/// (the unzipped folder): an exe in `Downloads\x\` must not pick up whatever sits in
+/// `Downloads\apo\`.
+fn bundled_dll() -> Option<PathBuf> {
+  let dir = exe_dir()?;
+  if installed_exe_path().is_some_and(|installed| installed.parent().is_some_and(|p| same_path(p, &dir))) {
+    return installed_dll();
+  }
+  let dev = in_dev_tree(&dir).then(|| dir.join("..").join("apo").join(DLL_NAME));
   dev.into_iter().chain([dir.join(DLL_NAME)]).find(|p| p.is_file())
 }
 

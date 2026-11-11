@@ -3,8 +3,8 @@ GamersEqualizer - testovací verze
 
 Spuštění
 --------
-1. ZIP rozbal do vlastní složky (např. C:\GamersEqualizer). Nespouštěj ho přímo ze ZIPu.
-   Oba soubory (exe a dll) musí zůstat vedle sebe: aplikace z té složky instaluje zvukové efekty.
+1. ZIP rozbal do libovolné složky (třeba ve Stažených). Nespouštěj ho přímo ze ZIPu.
+   Oba soubory (exe a dll) musí být vedle sebe: aplikace se z té složky nainstaluje.
 2. Spusť gamersequalizer.exe.
    Windows ukáže "Systém Windows ochránil váš počítač" (aplikace není podepsaná):
    klikni "Další informace" -> "Přesto spustit".
@@ -13,6 +13,8 @@ Spuštění
    Instalátor pak na pár sekund otevře mikrofon (rozsvítí se ikona mikrofonu) a ověří, že
    efekt běží. Když neběží, sám ho přepne na druhé místo a zkusí to znovu; když nejde ani
    jedno, napíše to červeně a okno nechá otevřené.
+   Aplikace se přitom zkopíruje do C:\Program Files\GamersEqualizer a pokračuje odtamtud
+   (okno se na chvilku zavře a znovu otevře). Rozbalenou složku pak můžeš smazat.
    Aplikace, které měly otevřený mikrofon (Discord, hra), pak znovu otevři.
 4. Pokud aplikace hlásí, že efekt mikrofonu NEFUNGUJE (červeně na kartě Mikrofon):
    klikni na "Zkusit jiné zapojení efektu (správce)..." a potvrď dotaz správce. Některé
@@ -34,7 +36,12 @@ přes Vzdálenou plochu si přihlášení uživatelé sdílejí nastavení zvuko
 Odinstalace
 -----------
 V aplikaci Nastavení > "Odinstalovat z Windows" (odebere efekty ze zvukových zařízení,
-automatické spouštění, volitelně i nastavení). Pak smaž složku s aplikací.
+aplikaci z Program Files, automatické spouštění, volitelně i nastavení).
+
+Nová verze
+----------
+Starou verzi ukonči (ikona u hodin > Ukončit GamersEqualizer), rozbal nový ZIP, spusť z něj
+gamersequalizer.exe a klikni na lištu s aktualizací. Dál pokračuje nainstalovaná aplikace.
 
 Hlášení chyb
 ------------

@@ -294,7 +294,8 @@ fn problems(state: &AppState) -> Vec<Problem> {
       )),
       ApoStatus::Outdated => Some((
         trf(
-          "Microphone processing is outdated (installed {}, this app has {}): new fixes and settings may not work.",
+          "The GamersEqualizer installed in Windows is older than this one or incomplete (installed {}, this one {}): \
+           new fixes and settings may not work.",
           &[&check.installed_version.as_deref().unwrap_or("?"), &check.bundled_version.as_deref().unwrap_or("?")],
         ),
         tk("Update…"),

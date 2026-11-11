@@ -44,7 +44,13 @@ impl eframe::App for GamersEqualizerApp {
     // if it died (or was still exiting when this window started, so the startup check missed it).
     if self.daemon_checked_at.elapsed() >= DAEMON_CHECK_INTERVAL {
       self.daemon_checked_at = Instant::now();
-      crate::ensure_daemon_running();
+      // The installer just copied this app next to its effects: close, the installed one
+      // starts once this window is gone.
+      if crate::installed_copy_ready(&self.state) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+      } else {
+        crate::ensure_daemon_running();
+      }
     }
 
     // 1. Synchronize system master and mic volume from Windows in real time. A mic level the

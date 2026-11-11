@@ -153,7 +153,9 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
            without any setup in that app, and no virtual sound card is needed. They are installed for the whole \
            computer (Program Files and the system registry), so Windows asks for permission.\n\
            What happens: one Windows prompt, a small installer window, and Windows audio restarts for a few \
-           seconds. Apps that use the microphone or the headphones may need to be reopened.\n\
+           seconds. The app itself is copied next to the effects and continues from there (the window reopens), \
+           so the folder you started it from can be deleted afterwards. Apps that use the microphone or the \
+           headphones may need to be reopened.\n\
            Nothing else is changed. Settings > Uninstall from Windows removes all of it.",
         ));
       });
@@ -239,7 +241,7 @@ fn items(state: &AppState) -> Vec<Item> {
   if let Some(check) = super::apo_banner::mic_check(state) {
     if let Some(guid) = needs_install(check) {
       let title = match check.status {
-        ApoStatus::Outdated => tr("Update the microphone processing").to_string(),
+        ApoStatus::Outdated => tr("Update GamersEqualizer in Windows").to_string(),
         _ => trf("Microphone processing on \"{}\"", &[&super::apo_banner::mic_in_use_name(state)]),
       };
       list.push(Item {

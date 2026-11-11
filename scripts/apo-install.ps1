@@ -11,9 +11,12 @@
     'Capture:{guid}:MFX' / ':EFX' moves the mic chain to that slot (the app's "try another
     effect slot"): some mic arrays never start an endpoint effect but run mode effects.
   The mic chain sits in ONE slot per microphone; without a slot it stays where it is (EFX first).
-  -ProbeExe (the app's exe, passed by the app): afterwards the microphone is opened for a few
-    seconds to check that Windows starts the mic chain; if not, it moves to the other slot
-    (EFX <-> MFX) and is checked once more.
+  -AppExe (the app's exe, passed by the app): it is installed next to the effects
+    (%ProgramFiles%\GamersEqualizer\gamersequalizer.exe; the app then continues from there and
+    "start with Windows" points there), unless it runs from there already or -NoAppInstall (a
+    developer's build). Afterwards it opens the microphone for a few seconds to check that
+    Windows starts the mic chain; if not, the chain moves to the other slot (EFX <-> MFX) and
+    is checked once more.
 
 .DESCRIPTION
   - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup.
@@ -45,12 +48,15 @@ param(
   [ValidateSet('Capture', 'Render')][string]$Flow = 'Capture',
   # Render: skip the stream EQ (chat / media channels).
   [switch]$NoStreamEq,
-  # The app's exe: `--probe-mic {guid}` opens the microphone for the self-test after installing.
-  [string]$ProbeExe,
+  # The app's exe: installed next to the effects, and `--probe-mic {guid}` opens the microphone
+  # for the self-test after installing.
+  [string]$AppExe,
   # SHA-256 (hex) the app computed: files from its user-writable folder are used only when the
   # copy this elevated script makes hashes the same.
-  [string]$ProbeExeSha256,
-  [string]$SourceDllSha256
+  [string]$AppExeSha256,
+  [string]$SourceDllSha256,
+  # A developer's build: it runs in place, only a temporary copy is made for the self-test.
+  [switch]$NoAppInstall
 )
 
 $ErrorActionPreference = 'Stop'
@@ -89,6 +95,7 @@ if (-not $SourceDll) { $SourceDll = Join-Path $PSScriptRoot '..\target\apo\gamer
 $ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEqualizer'
 $InstallDir = Join-Path $ProgramDir 'apo'
 $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
+$InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
 $BackupDir = Join-Path $ProgramDir 'apo-backup'
 
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
@@ -149,29 +156,34 @@ function Set-EffectSlot($job, [string]$class, [string]$slot) {
   }
 }
 
-# Elevated, so never run the exe in the user's folder: copy it where only administrators write
-# and use the copy when it hashes as the app said. False (check skipped) otherwise.
+# The exe that opens the microphone for the self-test, or nothing (check skipped). Elevated, so
+# never the exe in the user's folder: the installed app when it is the build the app hashed
+# (installed just now, or the app runs from there), else a temporary copy made where only
+# administrators write, used when it hashes as the app said.
 # shortcut: the app hashes its exe file when it starts this script; same-user malware that had
 # swapped that file before passes. Upgrade: sign the exe and check the signature here.
-function Copy-ProbeExe {
-  if (-not ($ProbeExe -and $ProbeExeSha256 -and (Test-Path $ProbeExe))) {
+function Get-ProbeExe {
+  if (-not ($AppExe -and $AppExeSha256 -and (Test-Path $AppExe))) {
     Write-Host "`nMicrophone check skipped: the app did not pass its exe."
-    return $false
+    return
   }
   # The install is done: a failure here only skips the check, it is not "Install failed".
   try {
-    Copy-Item $ProbeExe $ProbeCopy -Force
-    if ((Get-FileHash $ProbeCopy -Algorithm SHA256).Hash -ne $ProbeExeSha256) {
-      Remove-Item $ProbeCopy -Force
+    if ((Test-Path $InstalledExe) -and (Get-FileHash $InstalledExe -Algorithm SHA256).Hash -eq $AppExeSha256) {
+      return $InstalledExe
+    }
+    Copy-Item $AppExe $ProbeTemp -Force
+    if ((Get-FileHash $ProbeTemp -Algorithm SHA256).Hash -ne $AppExeSha256) {
+      Remove-Item $ProbeTemp -Force
       Write-Host "`nMicrophone check skipped: the app's exe changed after the app started this installer." -ForegroundColor Yellow
-      return $false
+      return
     }
   }
   catch {
     Write-Host "`nMicrophone check skipped: $_" -ForegroundColor Yellow
-    return $false
+    return
   }
-  $true
+  $ProbeTemp
 }
 
 # Audio enhancements off for the device (flag in either key, as the app reads it): Windows runs
@@ -311,6 +323,21 @@ foreach ($job in $jobs) {
   Write-Host "Backup: $backupFile"
 }
 
+# --- The app itself: staged and checked before anything changes ---------------------------
+# It moves next to its effects, unless it runs from there already or is a developer's build.
+$installApp = $false
+if ($AppExe -and $AppExeSha256 -and -not $NoAppInstall -and (Test-Path $AppExe)) {
+  $installApp = [IO.Path]::GetFullPath($AppExe) -ine $InstalledExe
+}
+$stagedExe = "$InstalledExe.new"
+if ($installApp) {
+  Copy-Item $AppExe $stagedExe -Force
+  if ((Get-FileHash $stagedExe -Algorithm SHA256).Hash -ne $AppExeSha256) {
+    Remove-Item $stagedExe -Force
+    throw 'The app exe changed after the app checked it; nothing changed.'
+  }
+}
+
 # --- Install (audio service stopped once, so audiodg releases an older DLL) ---------------
 Stop-Service Audiosrv -Force
 try {
@@ -355,6 +382,24 @@ try {
       Set-EffectSlot $job $target[0] $TargetSlot
     }
   }
+
+  # Last, so the app that started this finds everything else in place when it sees its
+  # installed copy and continues from there.
+  if ($installApp) {
+    # An older installed copy (its service, its window) holds the file open.
+    Get-Process gamersequalizer -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $InstalledExe } | Stop-Process -Force
+    for ($try = 1; ; $try++) {
+      try { Move-Item $stagedExe $InstalledExe -Force; break }
+      catch {
+        if ($try -ge 10) { throw "The installed app could not be replaced ($InstalledExe): $_" }
+        Start-Sleep -Milliseconds 500
+      }
+    }
+    # The same bytes the user started and approved (hash checked above), now installed: without
+    # the internet zone mark of the downloaded ZIP, like the DLL.
+    Unblock-File $InstalledExe
+    Write-Host "App: $InstalledExe"
+  }
 }
 finally {
   $audioStarted = Get-Date
@@ -371,9 +416,11 @@ foreach ($job in $jobs) {
 # Some mic arrays never start an endpoint effect (EFX) but run mode effects (MFX), or the
 # other way round, and nothing in the registry tells which in advance.
 $selfTestFailed = $false
-$ProbeCopy = Join-Path $InstallDir 'gamersequalizer-probe.exe'
+$ProbeTemp = Join-Path $InstallDir 'gamersequalizer-probe.exe'
+$ProbeCopy = $null
 $micJobs = @($jobs | Where-Object { $_.Flow -eq 'Capture' })
-if ($micJobs.Count -gt 0 -and -not (Copy-ProbeExe)) { $micJobs = @() }
+if ($micJobs.Count -gt 0) { $ProbeCopy = Get-ProbeExe }
+if (-not $ProbeCopy) { $micJobs = @() }
 foreach ($job in $micJobs) {
   # Enhancements off: Windows runs no effect in either slot; the warning above says so.
   if (Test-EnhancementsOff $job) { continue }
@@ -395,10 +442,11 @@ foreach ($job in $micJobs) {
   $audioStarted = Move-MicChain $job $slot
   $selfTestFailed = $true
 }
-if (Test-Path $ProbeCopy) { Remove-Item $ProbeCopy -Force -ErrorAction SilentlyContinue }
+if (Test-Path $ProbeTemp) { Remove-Item $ProbeTemp -Force -ErrorAction SilentlyContinue }
 
 Write-Host ''
 Write-Host 'Installed. Apps that had a microphone or output open lost it when the audio service restarted: reopen them.'
+if ($installApp) { Write-Host "The app now runs from $InstalledExe; the folder it was started from can be deleted." }
 Write-Host 'Settings come from the GamersEqualizer app; keep it running.'
 if ($FromApp -and $selfTestFailed) { Read-Host 'Press Enter to close' }
 elseif ($FromApp) { Start-Sleep -Seconds 3 }

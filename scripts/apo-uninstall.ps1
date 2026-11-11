@@ -5,8 +5,8 @@
 
 .DESCRIPTION
   Removes our CLSID from every capture/render endpoint's effect lists (other effects stay),
-  unregisters the COM class and APO, deletes the config key and the installed DLL, and
-  restarts the Windows Audio service.
+  unregisters the COM class and APO, deletes the config key, the installed DLL and the
+  installed app (once it has exited), and restarts the Windows Audio service.
   -RestoreBackup <file.reg> additionally re-imports an FxProperties backup made by apo-install.ps1
   (byte-for-byte original state of that endpoint).
   -RemoveBackups also deletes those backups (%ProgramFiles%\GamersEqualizer\apo-backup, and
@@ -38,6 +38,7 @@ $Clsids = @('{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}', '{6b0f3c1e-8f2a-4d7b-9a51-
 # Known folders, not $env:ProgramFiles / $env:ProgramData (user-overridable, inherited here).
 $ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEqualizer'
 $InstallDir = Join-Path $ProgramDir 'apo'
+$InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
 $BackupDir = Join-Path $ProgramDir 'apo-backup'
 # Older versions backed up here. Any user can create this folder (or a junction to a system
 # folder), so it is never deleted recursively: only our .reg files, and not through a link.
@@ -109,10 +110,19 @@ try {
       Write-Host "Removed old backups in $LegacyBackupRoot"
     }
   }
-  if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
 }
 finally {
   Start-Service Audiosrv
 }
+
+# The installed app started this and exits right after; its exe cannot go while it runs.
+foreach ($file in $InstalledExe, "$InstalledExe.new") {
+  for ($try = 0; $try -lt 20 -and (Test-Path $file); $try++) {
+    Remove-Item $file -Force -ErrorAction SilentlyContinue
+    if (Test-Path $file) { Start-Sleep -Seconds 1 }
+  }
+  if (Test-Path $file) { Write-Warning "Could not delete $file (still running?); delete it by hand." }
+}
+if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
 Write-Host 'Uninstalled.'
 if ($FromApp) { Start-Sleep -Seconds 3 }

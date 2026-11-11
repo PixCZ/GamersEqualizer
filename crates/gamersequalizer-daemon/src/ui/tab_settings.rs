@@ -125,7 +125,7 @@ fn uninstall_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::DELETE, COLOR)), tr("Uninstall from Windows"));
     ui.label(theme::caption(tr(
-      "Removes everything the app registered in Windows: the microphone and output effects on all audio devices (administrator rights, audio stops for a few seconds), their backups, start with Windows and the notifications. Then the app exits.",
+      "Removes everything the app put into Windows: the microphone and output effects on all audio devices (administrator rights, audio stops for a few seconds), their backups, the app itself in Program Files, start with Windows and the notifications. Then the app exits.",
     )));
     if !state.uninstall_ui.confirming {
       if ui.button(theme::with_icon(icons::DELETE, tr("Uninstall..."))).clicked() {

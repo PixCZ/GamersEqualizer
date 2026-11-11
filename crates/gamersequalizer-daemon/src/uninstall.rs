@@ -1,13 +1,14 @@
 //! "Uninstall from Windows" (Settings): removes everything the app registered in the system.
 //!
-//! - Microphone / output effects (APO): elevated `scripts/apo-uninstall.ps1` takes our classes
-//!   off every audio device, unregisters them and deletes the DLL and the install backups.
+//! - Microphone / output effects (APO) and the installed app: elevated
+//!   `scripts/apo-uninstall.ps1` takes our classes off every audio device, unregisters them and
+//!   deletes the DLL, the install backups and the app's exe in Program Files (once it exited).
 //! - Start with Windows (`HKCU\...\Run`) and the notification registration (`notify.rs`).
 //! - Optionally the user's settings and profiles (`%APPDATA%\GamersEqualizer`, legacy
 //!   `%APPDATA%\OpenSonar`). This process and the background service keep files open there
 //!   (the log), so a hidden helper deletes them once every app process has exited.
 //!
-//! The app folder itself (portable exe) is the user's to delete; a running exe can't remove itself.
+//! A copy in the folder the ZIP was unpacked to is the user's to delete.
 
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;

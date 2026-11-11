@@ -23,7 +23,7 @@ use sonar_importer::{import_sonar_db, ProfileStorage, DEFAULT_SONAR_DB_PATH};
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use ui::{AppState, GamersEqualizerApp};
 use win_audio::WinAudioSystem;
@@ -35,6 +35,15 @@ use windows::Win32::System::Threading::CreateMutexW;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
+/// Passed to the installed copy by `hand_over_to_installed`: it must not hand over again.
+const NO_HANDOVER_ARG: &str = "--no-handover";
+/// How long the window waits for its service to exit before starting the installed app.
+const SERVICE_EXIT_WAIT: Duration = Duration::from_secs(5);
+/// Set by the window once the installer has put the app into Program Files: when the window
+/// has closed, `run_gui_mode` starts the installed app.
+static MOVE_TO_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// Starting the installed copy failed in this process: it keeps running from here.
+static HANDOVER_FAILED: AtomicBool = AtomicBool::new(false);
 /// Reading Windows volumes and re-applying per-app session volumes walks devices and every
 /// audio session over COM (opening each app's process for its name). At the loop's 20 Hz
 /// that was most of the daemon's CPU. Volume changes are picked up within 250 ms; channel
@@ -52,6 +61,11 @@ fn main() {
   }
   let is_daemon = args.iter().any(|a| a == "--daemon");
   app_log::init(if is_daemon { "service" } else { "ui" });
+  // Once installed, the app lives next to its effects in Program Files: a copy started from
+  // elsewhere (the unzipped folder, an old autostart entry) starts that one instead.
+  if !args.iter().any(|a| a == NO_HANDOVER_ARG) && hand_over_to_installed(args.get(1..).unwrap_or_default()) {
+    return;
+  }
 
   if is_daemon {
     run_background_daemon();
@@ -464,23 +478,80 @@ fn run_gui_mode() {
     }),
   );
 
+  if MOVE_TO_INSTALLED.load(Ordering::Relaxed) {
+    // Only now, with this window gone (the installed app would find it and just focus it). Its
+    // service was asked to stop and holds the single-instance mutex until it has exited.
+    let asked = Instant::now();
+    while daemon_running() && asked.elapsed() < SERVICE_EXIT_WAIT {
+      std::thread::sleep(Duration::from_millis(100));
+    }
+    if !hand_over_to_installed(&[]) {
+      // The installed app did not start: at least the effects keep their settings.
+      ensure_daemon_running();
+    }
+    return;
+  }
   info!("[GamersEqualizer] UI Control Center closed. Background service continues running uninterrupted.");
+}
+
+/// Starts the installed copy with `args` in place of this process, when there is one to hand
+/// over to (`handover_target`); true when it was started and this process should end. The
+/// autostart entry follows. `NO_HANDOVER_ARG` keeps a path mix-up from looping.
+pub(crate) fn hand_over_to_installed(args: &[String]) -> bool {
+  if HANDOVER_FAILED.load(Ordering::Relaxed) {
+    return false;
+  }
+  let Some(installed) = win_audio::apo_install::handover_target() else {
+    return false;
+  };
+  autostart::repoint();
+  let started = Command::new(&installed).args(args).arg(NO_HANDOVER_ARG).creation_flags(DETACHED_PROCESS).spawn();
+  match started {
+    Ok(_) => {
+      info!("[GamersEqualizer] handing over to the installed app: {installed:?}");
+      true
+    }
+    Err(e) => {
+      error!("[GamersEqualizer] could not start the installed app {installed:?}, running from here: {e}");
+      HANDOVER_FAILED.store(true, Ordering::Relaxed);
+      false
+    }
+  }
+}
+
+/// The window's part of an install: true once the installer has put this app into Program
+/// Files. The caller closes the window (and no longer restarts the service); `run_gui_mode`
+/// then starts the installed app. This copy's service is told to stop: the installed one
+/// would exit as a duplicate.
+pub(crate) fn installed_copy_ready(state: &AppState) -> bool {
+  if MOVE_TO_INSTALLED.load(Ordering::Relaxed) {
+    return true;
+  }
+  if HANDOVER_FAILED.load(Ordering::Relaxed) || win_audio::apo_install::handover_target().is_none() {
+    return false;
+  }
+  state.signal_daemon_shutdown();
+  MOVE_TO_INSTALLED.store(true, Ordering::Relaxed);
+  true
+}
+
+/// True while a background service process lives (it holds the mutex until it exits).
+pub(crate) fn daemon_running() -> bool {
+  let mutex = unsafe { CreateMutexW(None, false, w!(r"Local\GamersEqualizer_Daemon_Mutex")) };
+  let running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+  if let Ok(m) = mutex {
+    unsafe {
+      let _ = CloseHandle(m);
+    }
+  }
+  running
 }
 
 /// Check if daemon mutex exists, and start detached background process if not.
 /// Also called periodically by the UI: the mutex disappears with the daemon process (crash,
 /// kill), unlike the `daemon_active` flag in shared memory, which a killed daemon leaves set.
 pub(crate) fn ensure_daemon_running() {
-  let mutex_name = w!(r"Local\GamersEqualizer_Daemon_Mutex");
-  let mutex = unsafe { CreateMutexW(None, false, mutex_name) };
-  let already_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-  if let Ok(m) = mutex {
-    unsafe {
-      let _ = CloseHandle(m);
-    }
-  }
-
-  if !already_running {
+  if !daemon_running() {
     if let Ok(exe_path) = std::env::current_exe() {
       info!("[GamersEqualizer] Spawning detached background daemon: {:?}", exe_path);
       let _ = Command::new(&exe_path).arg("--daemon").creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn();

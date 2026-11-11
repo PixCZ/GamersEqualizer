@@ -1,5 +1,4 @@
 use log::info;
-use std::env;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
@@ -46,7 +45,8 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
     }
 
     let result = if enable {
-      let exe_path = env::current_exe().map_err(|e| e.to_string())?;
+      // The installed copy once there is one: the unzipped folder may be deleted.
+      let exe_path = crate::win_audio::apo_install::autostart_exe().ok_or("the app's exe path is unknown")?;
       // Launch headless daemon on login
       let cmd_str = format!("\"{}\" --daemon", exe_path.to_string_lossy());
       let wide_cmd: Vec<u16> = cmd_str.encode_utf16().chain(std::iter::once(0)).collect();
@@ -72,6 +72,16 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
 
     let _ = RegCloseKey(hkey);
     result
+  }
+}
+
+/// Rewrites an enabled autostart entry, so it follows the app into its installed place
+/// (`autostart_exe`). No entry: nothing happens.
+pub fn repoint() {
+  if is_autostart_enabled() {
+    if let Err(e) = set_autostart(true) {
+      log::warn!("[GamersEqualizer] could not update the autostart entry: {e}");
+    }
   }
 }
 
