@@ -19,22 +19,64 @@ pub struct BiquadCoefficients {
   pub a2: f32,
 }
 
-/// Cascade of biquads processed in Transposed Direct Form II (f64 state: stable at low
-/// frequencies such as an 80 Hz high-pass at 48 kHz).
-#[derive(Debug, Clone, Default)]
+/// Cascade of biquads processed in Transposed Direct Form II (f64 state and f64 between
+/// stages: avoids SSE2 f32<->f64 round-trips and intermediate quantization noise).
+#[derive(Debug, Clone)]
 pub struct BiquadCascade {
-  stages: Vec<Stage>,
+  channels: usize,
+  coefs: Vec<StageCoefs>,
+  state: FilterState,
+}
+
+impl Default for BiquadCascade {
+  fn default() -> Self {
+    Self { channels: 1, coefs: Vec::new(), state: FilterState::default() }
+  }
+}
+
+/// Per-stage, per-channel filter memory (`stage_idx * channels + ch`), kept in separate
+/// slices (SoA) so stereo and 5.1/7.1 vectorize cleanly and use FMA when available.
+#[derive(Debug, Clone, Default)]
+struct FilterState {
+  z1: Vec<f64>,
+  z2: Vec<f64>,
+}
+
+impl FilterState {
+  fn resize_and_zero(&mut self, len: usize) {
+    self.z1.resize(len, 0.0);
+    self.z2.resize(len, 0.0);
+    self.reset();
+  }
+
+  fn reset(&mut self) {
+    self.z1.fill(0.0);
+    self.z2.fill(0.0);
+  }
+
+  fn clear(&mut self) {
+    self.z1.clear();
+    self.z2.clear();
+  }
+
+  fn flush_non_finite(&mut self) {
+    // Recover from NaN/Inf so one bad block cannot poison the filter state.
+    for (s1, s2) in self.z1.iter_mut().zip(self.z2.iter_mut()) {
+      if !s1.is_finite() || !s2.is_finite() {
+        *s1 = 0.0;
+        *s2 = 0.0;
+      }
+    }
+  }
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Stage {
+struct StageCoefs {
   b0: f64,
   b1: f64,
   b2: f64,
   a1: f64,
   a2: f64,
-  z1: f64,
-  z2: f64,
 }
 
 impl BiquadCoefficients {
@@ -150,66 +192,212 @@ impl BiquadCoefficients {
 }
 
 impl BiquadCascade {
+  pub fn with_channels(channels: usize) -> Self {
+    Self { channels: channels.max(1), coefs: Vec::new(), state: FilterState::default() }
+  }
+
+  pub fn channels(&self) -> usize {
+    self.channels
+  }
+
+  /// Resize per-channel filter state when the stream channel count changes (resets memory).
+  pub fn set_channels(&mut self, channels: usize) {
+    let channels = channels.max(1);
+    if channels != self.channels {
+      self.channels = channels;
+      self.state.resize_and_zero(self.coefs.len() * channels);
+    }
+  }
+
   /// Rebuild coefficients for the enabled bands. Filter state is kept when the stage count
   /// is unchanged, so dragging a slider doesn't click.
   pub fn set_bands(&mut self, bands: &[BiquadBand], sample_rate: f32) {
-    let new: Vec<BiquadCoefficients> = expand_slopes(bands)
+    let coefs: Vec<StageCoefs> = expand_slopes(bands)
       .iter()
       .filter(|b| b.enabled)
       .take(MAX_STREAM_EQ_BANDS)
       .map(|b| BiquadCoefficients::from_band(b, sample_rate))
+      .map(|c| StageCoefs { b0: c.b0 as f64, b1: c.b1 as f64, b2: c.b2 as f64, a1: c.a1 as f64, a2: c.a2 as f64 })
       .collect();
 
-    let keep_state = new.len() == self.stages.len();
-    let old = std::mem::take(&mut self.stages);
-    self.stages = new
-      .iter()
-      .enumerate()
-      .map(|(i, c)| {
-        let (z1, z2) = match old.get(i) {
-          Some(s) if keep_state => (s.z1, s.z2),
-          _ => (0.0, 0.0),
-        };
-        Stage { b0: c.b0 as f64, b1: c.b1 as f64, b2: c.b2 as f64, a1: c.a1 as f64, a2: c.a2 as f64, z1, z2 }
-      })
-      .collect();
+    if coefs.len() != self.coefs.len() {
+      self.state.resize_and_zero(coefs.len() * self.channels);
+    }
+    self.coefs = coefs;
+  }
+
+  pub fn clear(&mut self) {
+    self.coefs.clear();
+    self.state.clear();
   }
 
   pub fn is_empty(&self) -> bool {
-    self.stages.is_empty()
+    self.coefs.is_empty()
   }
 
   /// Forget the filter memory (coefficients stay): for audio that does not continue the
   /// samples processed last (resume after a pause).
   pub fn reset_state(&mut self) {
-    for stage in self.stages.iter_mut() {
-      (stage.z1, stage.z2) = (0.0, 0.0);
-    }
+    self.state.reset();
   }
 
   pub fn process(&mut self, samples: &mut [f32]) {
     self.process_strided(samples, 1, 0);
   }
 
-  /// Process one channel of an interleaved buffer (`channel` of `channels`). Each channel
-  /// needs its own cascade (own filter state).
+  /// Process one channel of an interleaved buffer (`channel` of `channels`).
   pub fn process_strided(&mut self, samples: &mut [f32], channels: usize, channel: usize) {
+    if self.coefs.is_empty() {
+      return;
+    }
     let step = channels.max(1);
-    for stage in self.stages.iter_mut() {
-      for s in samples.iter_mut().skip(channel).step_by(step) {
-        let x = *s as f64;
-        let y = stage.b0 * x + stage.z1;
-        stage.z1 = stage.b1 * x - stage.a1 * y + stage.z2;
-        stage.z2 = stage.b2 * x - stage.a2 * y;
-        *s = y as f32;
+    if self.channels == 1 && step == 1 && channel == 0 {
+      run_lanes::<1>(&self.coefs, &mut self.state, samples);
+    } else {
+      let slot = if channel < self.channels { channel } else { 0 };
+      run_channel(&self.coefs, &mut self.state, self.channels, slot, samples, step, channel);
+    }
+    self.state.flush_non_finite();
+  }
+
+  /// Process all channels of an interleaved buffer in one cascade (shared coefficients,
+  /// per-channel filter memory). Mono, stereo, quad, 5.1, and 7.1 run in a single pass.
+  pub fn process_interleaved(&mut self, samples: &mut [f32], channels: usize) {
+    if self.coefs.is_empty() || channels == 0 {
+      return;
+    }
+    self.set_channels(channels);
+    match channels {
+      1 => run_lanes::<1>(&self.coefs, &mut self.state, samples),
+      2 => run_lanes::<2>(&self.coefs, &mut self.state, samples),
+      4 => run_lanes::<4>(&self.coefs, &mut self.state, samples),
+      6 => run_lanes::<6>(&self.coefs, &mut self.state, samples),
+      8 => run_lanes::<8>(&self.coefs, &mut self.state, samples),
+      _ => {
+        for ch in 0..channels {
+          run_channel(&self.coefs, &mut self.state, channels, ch, samples, channels, ch);
+        }
       }
     }
-    // Flush denormals / recover from NaN so one bad block can't poison the state forever.
-    for stage in self.stages.iter_mut() {
-      if !stage.z1.is_finite() || !stage.z2.is_finite() {
-        stage.z1 = 0.0;
-        stage.z2 = 0.0;
+    self.state.flush_non_finite();
+  }
+}
+
+fn run_lanes<const CH: usize>(coefs: &[StageCoefs], state: &mut FilterState, samples: &mut [f32]) {
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if std::arch::is_x86_feature_detected!("fma") {
+    // SAFETY: guarded by runtime CPU feature detection (`is_x86_feature_detected!("fma")`).
+    unsafe { sample_outer_lanes_fma::<CH>(coefs, &mut state.z1, &mut state.z2, samples) };
+    return;
+  }
+  sample_outer_lanes::<CH, false>(coefs, &mut state.z1, &mut state.z2, samples);
+}
+
+fn run_channel(
+  coefs: &[StageCoefs],
+  state: &mut FilterState,
+  state_stride: usize,
+  state_slot: usize,
+  samples: &mut [f32],
+  sample_stride: usize,
+  sample_channel: usize,
+) {
+  #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+  if std::arch::is_x86_feature_detected!("fma") {
+    // SAFETY: guarded by runtime CPU feature detection (`is_x86_feature_detected!("fma")`).
+    unsafe {
+      sample_outer_channel_fma(coefs, state, state_stride, state_slot, samples, sample_stride, sample_channel);
+    }
+    return;
+  }
+  sample_outer_channel::<false>(coefs, state, state_stride, state_slot, samples, sample_stride, sample_channel);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "fma")]
+fn sample_outer_lanes_fma<const CH: usize>(coefs: &[StageCoefs], z1: &mut [f64], z2: &mut [f64], samples: &mut [f32]) {
+  sample_outer_lanes::<CH, true>(coefs, z1, z2, samples);
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "fma")]
+fn sample_outer_channel_fma(
+  coefs: &[StageCoefs],
+  state: &mut FilterState,
+  state_stride: usize,
+  state_slot: usize,
+  samples: &mut [f32],
+  sample_stride: usize,
+  sample_channel: usize,
+) {
+  sample_outer_channel::<true>(coefs, state, state_stride, state_slot, samples, sample_stride, sample_channel);
+}
+
+#[inline(always)]
+fn mul_add_f64<const FMA: bool>(a: f64, b: f64, c: f64) -> f64 {
+  if FMA {
+    a.mul_add(b, c)
+  } else {
+    a * b + c
+  }
+}
+
+#[inline(always)]
+fn step_biquad<const FMA: bool>(c: &StageCoefs, z1: &mut f64, z2: &mut f64, x: f64) -> f64 {
+  let y = mul_add_f64::<FMA>(c.b0, x, *z1);
+  let a1_term = mul_add_f64::<FMA>(-c.a1, y, *z2);
+  *z1 = mul_add_f64::<FMA>(c.b1, x, a1_term);
+  *z2 = mul_add_f64::<FMA>(c.b2, x, -c.a2 * y);
+  y
+}
+
+#[inline(always)]
+fn sample_outer_channel<const FMA: bool>(
+  coefs: &[StageCoefs],
+  state: &mut FilterState,
+  state_stride: usize,
+  state_slot: usize,
+  samples: &mut [f32],
+  sample_stride: usize,
+  sample_channel: usize,
+) {
+  for s in samples.iter_mut().skip(sample_channel).step_by(sample_stride) {
+    let mut x = *s as f64;
+    for (c, (s1, s2)) in coefs.iter().zip(
+      state
+        .z1
+        .iter_mut()
+        .skip(state_slot)
+        .step_by(state_stride)
+        .zip(state.z2.iter_mut().skip(state_slot).step_by(state_stride)),
+    ) {
+      x = step_biquad::<FMA>(c, s1, s2, x);
+    }
+    *s = x as f32;
+  }
+}
+
+#[inline(always)]
+fn sample_outer_lanes<const CH: usize, const FMA: bool>(
+  coefs: &[StageCoefs],
+  z1: &mut [f64],
+  z2: &mut [f64],
+  samples: &mut [f32],
+) {
+  let (s1_stages, _) = z1.as_chunks_mut::<CH>();
+  let (s2_stages, _) = z2.as_chunks_mut::<CH>();
+  for frame in samples.as_chunks_mut::<CH>().0 {
+    let mut x = [0.0f64; CH];
+    for (dst, src) in x.iter_mut().zip(frame.iter()) {
+      *dst = *src as f64;
+    }
+    for ((c, s1), s2) in coefs.iter().zip(s1_stages.iter_mut()).zip(s2_stages.iter_mut()) {
+      for ((xv, z1v), z2v) in x.iter_mut().zip(s1.iter_mut()).zip(s2.iter_mut()) {
+        *xv = step_biquad::<FMA>(c, z1v, z2v, *xv);
       }
+    }
+    for (dst, src) in frame.iter_mut().zip(x.iter()) {
+      *dst = *src as f32;
     }
   }
 }
@@ -288,5 +476,38 @@ mod tests {
     let mut cascade = BiquadCascade::default();
     cascade.set_bands(&[band], 48000.0);
     assert!(cascade.is_empty());
+  }
+
+  #[test]
+  fn interleaved_matches_per_channel_strided_and_recovers_from_nan() {
+    let bands = vec![
+      BiquadBand { filter_type: FilterType::LowShelf, frequency: 120.0, gain_db: 4.5, q: 0.7, ..BiquadBand::default() },
+      BiquadBand { frequency: 2500.0, gain_db: -3.0, q: 1.5, ..BiquadBand::default() },
+      BiquadBand { filter_type: FilterType::HighPass, frequency: 80.0, slope_db: 24, ..BiquadBand::default() },
+    ];
+    for channels in [1usize, 2, 3, 4, 6, 8] {
+      let mut interleaved = BiquadCascade::with_channels(channels);
+      interleaved.set_bands(&bands, 48_000.0);
+      let mut per_ch: Vec<BiquadCascade> = (0..channels).map(|_| BiquadCascade::default()).collect();
+      per_ch.iter_mut().for_each(|c| c.set_bands(&bands, 48_000.0));
+
+      let input: Vec<f32> = (0..960 * channels)
+        .map(|i| ((i % channels + 1) as f32 * 0.05) * (2.0 * PI * 440.0 * (i / channels) as f32 / 48_000.0).sin())
+        .collect();
+      let mut a = input.clone();
+      let mut b = input;
+      interleaved.process_interleaved(&mut a, channels);
+      for (ch, c) in per_ch.iter_mut().enumerate() {
+        c.process_strided(&mut b, channels, ch);
+      }
+      assert_eq!(a, b, "interleaved and strided must match bit-for-bit ({channels} ch)");
+
+      // NaN block resets state so the following finite block recovers cleanly.
+      let mut bad = vec![f32::NAN; 16 * channels];
+      interleaved.process_interleaved(&mut bad, channels);
+      let mut good = vec![0.1f32; 64 * channels];
+      interleaved.process_interleaved(&mut good, channels);
+      assert!(good.iter().all(|s| s.is_finite()));
+    }
   }
 }

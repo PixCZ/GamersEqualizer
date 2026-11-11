@@ -2525,3 +2525,32 @@ self-test confirmed it twice and moved nothing.
   (`e1b98e5-dirty`) when the pair was switched on. Check it on that branch.
 - The binaries are unsigned; Defender flagged an older exe as `Trojan:Win32/Cloxer` (generic detection).
 - Windows Terminal and Notepad are taken for games ("installed by a launcher").
+
+## Milestone 54: Unified EQ profile management and biquad cascade optimization (2026-11-11)
+
+**What changed**
+
+- **Consistent EQ profile management across all five tabs (`Headphones`, `Game`, `Chat`, `Media`, `Mic`):**
+  - Generalized output-layer profile operations (`OutputLayer`, add, save-as, delete, active game lookup, case-insensitive NTFS-safe duplicate check) in `crates/gamersequalizer-daemon/src/output_eq/mod.rs` and `ui/mic_presets.rs`.
+  - Replaced `ui/mic_preset_bar.rs` with shared `crates/gamersequalizer-daemon/src/ui/profile_bar.rs` (`New…`, `Save as…`, delete, `Copy to share`, `Import…`, centered dialogs) across `tab_eq.rs`, `tab_headphones.rs` and `tab_mic.rs`, keeping tab-specific AutoEQ wizard, Sonar DB import and Mic `Save`/`Reset` intact (`i18n.rs`, `i18n_cs.rs`, `state.rs`, `app.rs`).
+- **EQ biquad cascade optimization (`BiquadCascade` + `StreamProcessor` + `OutputProcessor`):**
+  - Evaluated `origin/sidetone`'s `eq_bench.rs` and `docs/eq-optimization-analysis.md` procedure on Windows x86-64. Confirmed Hypothesis 1: keeping `f32` rounding between stages only yielded `0.56×–1.35×` on baseline SSE2 (regressing to `144 329 ns` at 64 stages).
+  - Updated `crates/gamersequalizer-common/src/biquad.rs` to run sample-by-sample with `f64` between stages (`max diff <= 8.9e-8` vs legacy `f32`-rounded stages), split filter memory into SoA slices (`FilterState { z1, z2 }`), and dispatch via `std::arch::is_x86_feature_detected!("fma")` (`#[target_feature(enable = "fma")]` + `.mul_add()`, SSE2/portable fallback), keeping `flush_non_finite`.
+  - Updated `BiquadCascade::process_interleaved` to handle `1` (mono), `2` (stereo), `4` (quad), `6` (5.1) and `8` (7.1) channels in a single pass, and updated `StreamProcessor` and `OutputProcessor` in `crates/gamersequalizer-apo/src/lib.rs` to own one multichannel cascade (`OutputProcessor` stays behind mix/spatial renderers in `EFX`; spatial apps still bypass `SFX`).
+  - Added `crates/gamersequalizer-common/examples/eq_bench.rs` (extended with 5.1 and 7.1 cases) and expanded `interleaved_matches_per_channel_strided_and_recovers_from_nan` to `[1, 2, 3, 4, 6, 8]` channels.
+
+**Measured (Windows x86-64, `cargo run --release -p gamersequalizer-common --example eq_bench`)**
+
+| Case (480 frames / 10 ms)     | Before (Windows x86-64)  | After (SoA + FMA)     | Speedup | % of 10 ms |
+| ----------------------------- | ------------------------ | --------------------- | ------- | ---------- |
+| Mic EQ, mono (10 biquads)     | `9 198 ns`               | `3 987 ns`            | `2.31×` | `0.040 %`  |
+| Mic EQ full, mono (16 biquad) | `14 727 ns`              | `6 076 ns`            | `2.42×` | `0.061 %`  |
+| Output EQ, stereo (20 biquad) | `36 812 ns`              | `7 106 ns`            | `5.18×` | `0.071 %`  |
+| Stream EQ full, stereo (64 b) | `117 663 ns`             | `27 668 ns`           | `4.25×` | `0.277 %`  |
+| Output EQ, 5.1 (6 ch, 20 b)   | `62 784 ns` (before SoA) | `11 750 ns`           | `5.34×` | `0.118 %`  |
+| Output EQ, 7.1 (8 ch, 20 b)   | `83 702 ns` (before SoA) | `11 511 ns`           | `7.27×` | `0.115 %`  |
+
+**Open**
+
+- Live APO DLL build (`scripts/dev-rebuild.ps1 -Apo`) and testing inside `audiodg.exe` (including live 5.1/7.1 and Dolby Atmos behavior) not run yet.
+- Live GUI click-through of unified EQ profile dialogs across all five EQ tabs not tested manually yet.

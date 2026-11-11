@@ -48,11 +48,11 @@ mod rate_bridge;
 use event_log::Level;
 use std::ffi::c_void;
 use std::mem::{offset_of, size_of};
-use std::ptr::{addr_of_mut, null_mut};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::time::Instant;
+use std::ptr::{addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
@@ -62,16 +62,16 @@ use gamersequalizer_mic_vst::{GamersEqualizerPlugin, SharedMemoryClient};
 use rate_bridge::RateBridge;
 use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, BOOL, GUID, HRESULT};
 use windows::Win32::Foundation::{
-  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER,
-  S_FALSE, S_OK,
+  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, S_FALSE,
+  S_OK,
 };
 use windows::Win32::Media::Audio::Apo::{
-  IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
+  APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject, IAudioProcessingObjectConfiguration,
   IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT, IAudioProcessingObjectRT_Vtbl,
   IAudioProcessingObject_Vtbl, IAudioSystemEffects, IAudioSystemEffects_Vtbl, APOERR_ALREADY_UNLOCKED,
   APOERR_APO_LOCKED, APOERR_FORMAT_NOT_SUPPORTED, APOERR_NUM_CONNECTIONS_INVALID, APO_CONNECTION_DESCRIPTOR,
   APO_CONNECTION_PROPERTY, APO_CONNECTION_PROPERTY_V2, APO_FLAG, APO_FLAG_DEFAULT, APO_FLAG_INPLACE,
-  APOInitSystemEffects2, APO_REG_PROPERTIES, BUFFER_SILENT, BUFFER_VALID, UNCOMPRESSEDAUDIOFORMAT,
+  APO_REG_PROPERTIES, BUFFER_SILENT, BUFFER_VALID, UNCOMPRESSEDAUDIOFORMAT,
 };
 use windows::Win32::System::Com::{CoTaskMemAlloc, IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -161,10 +161,10 @@ struct StreamProcessor {
   /// (slot index, owner value); None = table full, run unregistered (pass-through).
   slot: Option<(usize, u64)>,
   sample_rate: f32,
-  /// One per channel, for the bus/version in `built`.
-  cascades: Vec<BiquadCascade>,
+  /// Shared coefficients with per-channel filter state, for the bus/version in `built`.
+  cascade: BiquadCascade,
   preamp_gain: f32,
-  /// (bus, stream EQ version) the cascades hold; None = nothing built (pass-through).
+  /// (bus, stream EQ version) the cascade holds; None = nothing built (pass-through).
   built: Option<(StreamBus, u32)>,
   /// Share of the processed signal in the output, 0..1, moved by `fade_step` per frame.
   wet: f32,
@@ -177,15 +177,15 @@ struct StreamProcessor {
   failed: bool,
 }
 
-/// Output EQ: one cascade per channel, coefficients for the stream's sample rate.
+/// Output EQ: shared coefficients with per-channel state, for the stream's sample rate.
 struct OutputProcessor {
   shm: Option<SharedMemoryClient>,
   sample_rate: f32,
-  cascades: Vec<BiquadCascade>,
+  cascade: BiquadCascade,
   preamp_gain: f32,
   /// Catches peaks above 0 dBFS from loudness matching / user gain.
   limiter: PeakLimiter,
-  /// `out_eq_version` the cascades were built from.
+  /// `out_eq_version` the cascade was built from.
   version: Option<u32>,
   /// Anything to do (bands or a preamp); false = pass through.
   active: bool,
@@ -331,7 +331,11 @@ static INNER_VTBL: IUnknown_Vtbl =
 /// # Safety
 /// Called by COM with pointers it owns; every pointer is null-checked before use.
 #[no_mangle]
-pub unsafe extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+pub unsafe extern "system" fn DllGetClassObject(
+  rclsid: *const GUID,
+  riid: *const GUID,
+  ppv: *mut *mut c_void,
+) -> HRESULT {
   if ppv.is_null() {
     return E_POINTER;
   }
@@ -431,10 +435,18 @@ unsafe fn unknown_vtbl(unknown: *mut c_void) -> &'static IUnknown_Vtbl {
 }
 
 const fn delegating_unknown<const OFF: usize>() -> IUnknown_Vtbl {
-  IUnknown_Vtbl { QueryInterface: delegating_qi::<OFF>, AddRef: delegating_add_ref::<OFF>, Release: delegating_release::<OFF> }
+  IUnknown_Vtbl {
+    QueryInterface: delegating_qi::<OFF>,
+    AddRef: delegating_add_ref::<OFF>,
+    Release: delegating_release::<OFF>,
+  }
 }
 
-unsafe extern "system" fn delegating_qi<const OFF: usize>(this: *mut c_void, iid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+unsafe extern "system" fn delegating_qi<const OFF: usize>(
+  this: *mut c_void,
+  iid: *const GUID,
+  ppv: *mut *mut c_void,
+) -> HRESULT {
   let outer = object::<OFF>(this).outer;
   (unknown_vtbl(outer).QueryInterface)(outer, iid, ppv)
 }
@@ -509,7 +521,10 @@ unsafe extern "system" fn apo_get_latency(_this: *mut c_void, latency: *mut i64)
   S_OK
 }
 
-unsafe extern "system" fn apo_get_registration_properties(this: *mut c_void, out: *mut *mut APO_REG_PROPERTIES) -> HRESULT {
+unsafe extern "system" fn apo_get_registration_properties(
+  this: *mut c_void,
+  out: *mut *mut APO_REG_PROPERTIES,
+) -> HRESULT {
   if out.is_null() {
     return E_POINTER;
   }
@@ -813,7 +828,7 @@ impl StreamProcessor {
         shm,
         slot,
         sample_rate,
-        cascades: Vec::new(),
+        cascade: BiquadCascade::default(),
         preamp_gain: 1.0,
         built: None,
         wet: 0.0,
@@ -883,7 +898,8 @@ impl StreamProcessor {
       wet_buf.copy_from_slice(buf);
       self.run_eq_in_place(wet_buf, channels);
       for (dry_frame, wet_frame) in buf.chunks_exact_mut(channels).zip(wet_buf.chunks_exact(channels)) {
-        self.wet = if goal > self.wet { (self.wet + self.fade_step).min(1.0) } else { (self.wet - self.fade_step).max(0.0) };
+        self.wet =
+          if goal > self.wet { (self.wet + self.fade_step).min(1.0) } else { (self.wet - self.fade_step).max(0.0) };
         for (d, w) in dry_frame.iter_mut().zip(wet_frame) {
           *d += self.wet * (w - *d);
         }
@@ -897,17 +913,16 @@ impl StreamProcessor {
     self.built = target;
     let Some(eq) = target.and_then(|(bus, _)| bus.eq_index()).and_then(|i| self.shm.layout().header.stream_eq.get(i))
     else {
-      self.cascades.clear();
+      self.cascade.clear();
       self.preamp_gain = 1.0;
       return;
     };
     let (bands, preamp_db) = eq.read();
-    if fresh || self.cascades.len() != channels {
-      self.cascades = (0..channels).map(|_| BiquadCascade::default()).collect();
+    if fresh {
+      self.cascade.reset_state();
     }
-    for cascade in self.cascades.iter_mut() {
-      cascade.set_bands(&bands, self.sample_rate);
-    }
+    self.cascade.set_channels(channels);
+    self.cascade.set_bands(&bands, self.sample_rate);
     self.preamp_gain = 10f32.powf(preamp_db / 20.0);
   }
 
@@ -915,9 +930,7 @@ impl StreamProcessor {
     if self.preamp_gain != 1.0 {
       buf.iter_mut().for_each(|s| *s *= self.preamp_gain);
     }
-    for (channel, cascade) in self.cascades.iter_mut().enumerate().take(channels) {
-      cascade.process_strided(buf, channels, channel);
-    }
+    self.cascade.process_interleaved(buf, channels);
   }
 }
 
@@ -935,7 +948,7 @@ impl OutputProcessor {
     catch_unwind(AssertUnwindSafe(move || OutputProcessor {
       shm,
       sample_rate,
-      cascades: (0..channels).map(|_| BiquadCascade::default()).collect(),
+      cascade: BiquadCascade::with_channels(channels as usize),
       preamp_gain: 1.0,
       limiter: PeakLimiter::new(sample_rate),
       version: None,
@@ -976,11 +989,9 @@ impl OutputProcessor {
       if self.version != Some(version) {
         self.version = Some(version);
         let (bands, preamp_db) = h.read_out_eq();
-        for cascade in self.cascades.iter_mut() {
-          cascade.set_bands(&bands, self.sample_rate);
-        }
+        self.cascade.set_bands(&bands, self.sample_rate);
         self.preamp_gain = 10f32.powf(preamp_db / 20.0);
-        self.active = self.cascades.first().is_some_and(|c| !c.is_empty()) || preamp_db != 0.0;
+        self.active = !self.cascade.is_empty() || preamp_db != 0.0;
       }
     }
     let goal = if enabled && self.active { 1.0 } else { 0.0 };
@@ -989,7 +1000,7 @@ impl OutputProcessor {
     }
     if self.wet <= 0.0 {
       // Fading in after a pass-through stretch: the filter memory is from back then.
-      self.cascades.iter_mut().for_each(BiquadCascade::reset_state);
+      self.cascade.reset_state();
     }
     if self.wet >= 1.0 && goal >= 1.0 {
       self.run_eq_in_place(buf, channels);
@@ -1003,7 +1014,8 @@ impl OutputProcessor {
       wet_buf.copy_from_slice(buf);
       self.run_eq_in_place(wet_buf, channels);
       for (dry_frame, wet_frame) in buf.chunks_exact_mut(channels).zip(wet_buf.chunks_exact(channels)) {
-        self.wet = if goal > self.wet { (self.wet + self.fade_step).min(1.0) } else { (self.wet - self.fade_step).max(0.0) };
+        self.wet =
+          if goal > self.wet { (self.wet + self.fade_step).min(1.0) } else { (self.wet - self.fade_step).max(0.0) };
         for (d, w) in dry_frame.iter_mut().zip(wet_frame) {
           *d += self.wet * (w - *d);
         }
@@ -1016,9 +1028,7 @@ impl OutputProcessor {
     if self.preamp_gain != 1.0 {
       buf.iter_mut().for_each(|s| *s *= self.preamp_gain);
     }
-    for (channel, cascade) in self.cascades.iter_mut().enumerate().take(channels) {
-      cascade.process_strided(buf, channels, channel);
-    }
+    self.cascade.process_interleaved(buf, channels);
     // Volume matching / user gain may let peaks pass 0 dBFS: turn them down instead of clipping.
     self.limiter.process(buf, channels);
   }
@@ -1470,7 +1480,9 @@ mod tests {
       let frames = rate as usize / 100;
       for block in 0..50 {
         let mut buf: Vec<f32> = (0..frames)
-          .flat_map(|i| [(((block * frames + i) as f32) * 2.0 * std::f32::consts::PI * 300.0 / rate as f32).sin() * 0.3, 0.9])
+          .flat_map(|i| {
+            [(((block * frames + i) as f32) * 2.0 * std::f32::consts::PI * 300.0 / rate as f32).sin() * 0.3, 0.9]
+          })
           .collect();
         processor.process(&mut buf, 2, now_hns());
         assert_eq!(buf.len(), frames * 2);
