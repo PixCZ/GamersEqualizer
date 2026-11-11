@@ -31,6 +31,9 @@
 .PARAMETER NoTimestamp
   Skip timestamping (for offline builds).
 
+.PARAMETER CerOutPath
+  Optional path to export the public .cer certificate matching the signing certificate.
+
 .EXAMPLE
   .\scripts\sign-binaries.ps1
   .\scripts\sign-binaries.ps1 -Files target\dist\gamersequalizer.exe, target\apo-dist\gamersequalizer_apo.dll
@@ -42,7 +45,8 @@ param(
   [string]$Password,
   [string]$Thumbprint,
   [string]$TimestampServer = 'http://timestamp.digicert.com',
-  [switch]$NoTimestamp
+  [switch]$NoTimestamp,
+  [string]$CerOutPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,12 +78,27 @@ if (-not $PfxPath) {
 if ($PfxPath) {
   $pfxFull = if ([IO.Path]::IsPathRooted($PfxPath)) { $PfxPath } else { Join-Path $root $PfxPath }
   if (-not (Test-Path $pfxFull)) { throw "PFX file not found: $pfxFull" }
-  if (-not $Password) {
-    $Password = if ($env:GAMERSEQUALIZER_PFX_PASSWORD) { $env:GAMERSEQUALIZER_PFX_PASSWORD } else { 'GamersEqualizer' }
-  }
-  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
   $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
-  $cert.Import($pfxFull, $Password, $flags)
+  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+  $candidates = if ($PSBoundParameters.ContainsKey('Password')) {
+    @($Password)
+  } elseif ($env:GAMERSEQUALIZER_PFX_PASSWORD) {
+    @($env:GAMERSEQUALIZER_PFX_PASSWORD)
+  } else {
+    @('', 'GamersEqualizer')
+  }
+  $imported = $false
+  $lastErr = $null
+  foreach ($pwd in $candidates) {
+    try {
+      $cert.Import($pfxFull, $pwd, $flags)
+      $imported = $true
+      break
+    } catch {
+      $lastErr = $_
+    }
+  }
+  if (-not $imported) { throw "Failed to import PFX ($pfxFull): $lastErr" }
   Write-Host "Using PFX certificate: $($cert.Subject) ($($cert.Thumbprint))" -ForegroundColor Cyan
 }
 elseif ($Thumbprint) {
@@ -100,6 +119,12 @@ else {
 
 if (-not $cert.HasPrivateKey) {
   throw "Certificate does not contain a private key: $($cert.Subject)"
+}
+
+if ($CerOutPath) {
+  $cerFull = if ([IO.Path]::IsPathRooted($CerOutPath)) { $CerOutPath } else { Join-Path $root $CerOutPath }
+  Export-Certificate -Cert $cert -FilePath $cerFull | Out-Null
+  Write-Host "Exported public cert: $cerFull" -ForegroundColor Green
 }
 
 # 3. Sign each file

@@ -38,7 +38,8 @@ param(
   [switch]$Fast,
   [switch]$Sign,
   [switch]$NoSign,
-  [string]$PfxPath
+  [string]$PfxPath,
+  [string]$PackageName
 )
 
 $ErrorActionPreference = 'Stop'
@@ -90,8 +91,12 @@ $version = (Select-String -Path 'crates\gamersequalizer-daemon\Cargo.toml' -Patt
 $commit = (git rev-parse --short HEAD).Trim()
 $dirty = [bool](git status --porcelain)
 if ($dirty) { $commit += '-dirty' }
-$name = "GamersEqualizer-$version-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$commit"
-if ($Fast) { $name += '-fast' }
+if ($PackageName) {
+  $name = $PackageName
+} else {
+  $name = "GamersEqualizer-$version-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$commit"
+  if ($Fast) { $name += '-fast' }
+}
 
 $out = Join-Path $root 'target\package'
 $zip = Join-Path $out "$name.zip"
@@ -163,13 +168,14 @@ if ($shouldSign) {
   if (Test-Path $signScript) {
     Write-Host "`nSigning staged binaries..." -ForegroundColor Cyan
     $stagedBins = @((Join-Path $stage 'gamersequalizer.exe'), (Join-Path $stage 'gamersequalizer_apo.dll'))
-    $signParams = @{ Files = $stagedBins }
+    $signParams = @{
+      Files = $stagedBins
+      CerOutPath = (Join-Path $stage 'GamersEqualizer-dev.cer')
+    }
     if (Test-Path $resolvedPfx) { $signParams.PfxPath = $resolvedPfx }
     & $signScript @signParams
 
-    # Include public certificate and installer script for testers
-    $cerFile = Join-Path $root 'packaging\GamersEqualizer-dev.cer'
-    if (Test-Path $cerFile) { Copy-Item $cerFile $stage }
+    # Include installer script for testers (public .cer was exported right next to it)
     $certInstaller = Join-Path $root 'packaging\install-tester-cert.ps1'
     if (Test-Path $certInstaller) { Copy-Item $certInstaller $stage }
   }

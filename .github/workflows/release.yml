@@ -1,15 +1,19 @@
-# Builds the Windows app on GitHub's runners.
+# Builds and optionally signs the Windows app on GitHub's runners.
 # - Manual run (Actions tab -> Release -> Run workflow): tests, builds, uploads the zip as a
 #   workflow artifact (kept 14 days).
-# - Pushing a tag v* (git tag v0.1.0 && git push origin v0.1.0): the same, plus a GitHub Release
-#   with the zip attached.
-# Not code-signed yet: Windows SmartScreen warns on first start of the downloaded exe.
+# - Pushing a tag (git tag 0.1.0 && git push origin 0.1.0, or v0.1.0): the same, plus a GitHub
+#   Release with the zip attached.
+# - Code signing: configure repository secrets SIGNING_CERT_PFX_BASE64 and SIGNING_CERT_PASSWORD
+#   in Settings -> Secrets and variables -> Actions. When present, gamersequalizer.exe and
+#   gamersequalizer_apo.dll are signed and the public .cer + install-tester-cert.ps1 are bundled.
 name: Release
 
 on:
   workflow_dispatch:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
+      - "[0-9].*"
 
 permissions:
   contents: write # create the release on tags
@@ -32,34 +36,50 @@ jobs:
       - name: Test rnnoise2
         run: cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml
 
-      - name: Build app (dist profile)
-        run: cargo build --profile dist -p gamersequalizer
-
-      - name: Build microphone APO
-        run: cargo build --profile apo -p gamersequalizer-apo
-
-      - name: Package
+      - name: Build, sign and package
         shell: pwsh
+        env:
+          PFX_B64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
+          GAMERSEQUALIZER_PFX_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         run: |
           $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
-          $dir = "GamersEqualizer-$version-x64"
-          New-Item -ItemType Directory -Force "$dir/scripts" | Out-Null
-          # Layout the app expects: the APO DLL next to the exe, install scripts in scripts/.
-          Copy-Item target/dist/gamersequalizer.exe $dir
-          Copy-Item target/apo/gamersequalizer_apo.dll $dir
-          Copy-Item scripts/apo-install.ps1, scripts/apo-uninstall.ps1 "$dir/scripts"
-          Compress-Archive -Path "$dir/*" -DestinationPath "$dir.zip"
-          "ZIP=$dir.zip" >> $env:GITHUB_ENV
+          $pkgName = "GamersEqualizer-$version-x64"
+          $pkgArgs = @{ PackageName = $pkgName }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          if ($env:PFX_B64 -and $env:PFX_B64.Trim()) {
+            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:PFX_B64.Trim()))
+            $pkgArgs.Sign = $true
+            $pkgArgs.PfxPath = $pfxPath
+            Write-Host "Code signing enabled from repository secret." -ForegroundColor Cyan
+          } else {
+            $pkgArgs.NoSign = $true
+            Write-Host "No SIGNING_CERT_PFX_BASE64 secret set; building unsigned package." -ForegroundColor Yellow
+          }
+
+          try {
+            .\scripts\package.ps1 @pkgArgs
+          } finally {
+            if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
+          }
+
+          "ZIP=target/package/$pkgName.zip" >> $env:GITHUB_ENV
+          "ZIP_NAME=$pkgName.zip" >> $env:GITHUB_ENV
+          "BUILD_TXT=target/package/$pkgName.build.txt" >> $env:GITHUB_ENV
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP }}
-          path: ${{ env.ZIP }}
+          name: ${{ env.ZIP_NAME }}
+          path: |
+            ${{ env.ZIP }}
+            ${{ env.BUILD_TXT }}
           retention-days: 14
 
       - name: GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ZIP }}
+          files: |
+            ${{ env.ZIP }}
+            ${{ env.BUILD_TXT }}
           generate_release_notes: true
