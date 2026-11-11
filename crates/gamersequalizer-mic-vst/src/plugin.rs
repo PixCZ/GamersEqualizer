@@ -10,7 +10,8 @@ use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
   AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
-  MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10, NOISE_GATE_AUTO_LOOKAHEAD,
+  MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
+  NOISE_GATE_AUTO_LOOKAHEAD,
 };
 use std::sync::atomic::Ordering;
 
@@ -88,6 +89,11 @@ pub struct GamersEqualizerPlugin {
   /// `aec.process_block` did not run on the last block (no reference): same, for the AEC alone.
   aec_idle: bool,
   block_counter: u32,
+  /// False: another mic chain in this process publishes the telemetry, this one only
+  /// processes (two would overwrite each other's values in the shared memory).
+  publishes: bool,
+  /// More mic chains than this one run in this process (`MIC_CHAIN_OTHERS`).
+  others: bool,
   ref_rms: f32,
   mic_rms: f32,
   out_rms: f32,
@@ -189,6 +195,8 @@ impl GamersEqualizerPlugin {
       paused: false,
       aec_idle: false,
       block_counter: 0,
+      publishes: true,
+      others: false,
       ref_rms: 0.0,
       mic_rms: 0.0,
       out_rms: 0.0,
@@ -280,6 +288,13 @@ impl GamersEqualizerPlugin {
       self.tap_frames.extend(left.iter().zip(right).map(|(&l, &r)| StereoFrame { left: l, right: r }));
       shm.ring_buffer().push_frames(&self.tap_frames);
     }
+  }
+
+  /// With several mic chains in one process only one may publish telemetry: `publishes` says
+  /// whether it is this one, `others` whether more than this one run.
+  pub fn set_publishing(&mut self, publishes: bool, others: bool) {
+    self.publishes = publishes;
+    self.others = others;
   }
 
   /// The host is skipping the chain for a while (passes the mic through): the next processed
@@ -561,7 +576,9 @@ impl GamersEqualizerPlugin {
       if self.load.end_window(self.ai_denoiser.active_model().is_heavy()) {
         self.ai_denoiser.fall_back_overloaded();
       }
-      self.publish_telemetry();
+      if self.publishes {
+        self.publish_telemetry();
+      }
       self.load.reset_window();
     }
   }
@@ -672,7 +689,8 @@ impl GamersEqualizerPlugin {
     let flags = flag(self.ai_denoiser.asleep(), MIC_CHAIN_ASLEEP)
       | flag(dn.bypassed, MIC_CHAIN_BYPASSED)
       | flag(dn.takeover, MIC_CHAIN_TAKEOVER)
-      | flag(lookahead > 0, MIC_CHAIN_LOOKAHEAD);
+      | flag(lookahead > 0, MIC_CHAIN_LOOKAHEAD)
+      | flag(self.others, MIC_CHAIN_OTHERS);
     h.mic_chain_flags.store(flags, Ordering::Relaxed);
     h.mic_quiet_ms.store((dn.quiet_samples / 48).min(u32::MAX as usize) as u32, Ordering::Relaxed);
 

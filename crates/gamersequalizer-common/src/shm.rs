@@ -42,6 +42,9 @@ pub const MIC_CHAIN_ASLEEP: u32 = 1;
 pub const MIC_CHAIN_BYPASSED: u32 = 1 << 1;
 pub const MIC_CHAIN_TAKEOVER: u32 = 1 << 2;
 pub const MIC_CHAIN_LOOKAHEAD: u32 = 1 << 3;
+/// More mic chains run in the same audiodg (apps record in different processing modes or from
+/// different microphones, each gets its own chain); the telemetry is from one of them only.
+pub const MIC_CHAIN_OTHERS: u32 = 1 << 4;
 
 /// One parametric EQ band in shared memory (f32 values stored as bits).
 #[repr(C)]

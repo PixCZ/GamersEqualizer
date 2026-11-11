@@ -64,9 +64,27 @@ const SCAN_MAX_AGE: std::time::Duration = std::time::Duration::from_millis(400);
 /// Apps other than this one that keep a microphone open right now, as short display names
 /// (`Discord.exe`, `WindowsSoundRecorder`), sorted, without duplicates.
 pub fn recording_apps() -> Vec<String> {
+  let mut apps: Vec<String> = recording().into_iter().map(|(_, name)| name).collect();
+  apps.sort_by_key(|a| a.to_lowercase());
+  apps.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+  apps
+}
+
+/// The app that has kept a microphone open longest. With several mic chains running (apps
+/// recording in different processing modes) the first chain's values are the ones shown, and
+/// it belongs to this app.
+/// shortcut: any microphone counts, and a third app sharing the first chain's mode keeps it
+/// alive after its first app stopped; exact only with one mic and two apps. Upgrade: the APO
+/// reports its stream's session, the service matches it to an app.
+pub fn longest_recording_app() -> Option<String> {
+  recording().into_iter().min_by_key(|(since, _)| *since).map(|(_, name)| name)
+}
+
+/// (recording since, display name) of each app that keeps a microphone open; see `SCAN_MAX_AGE`.
+fn recording() -> Vec<(u64, String)> {
   use std::sync::Mutex;
   use std::time::Instant;
-  static LAST: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+  static LAST: Mutex<Option<(Instant, Vec<(u64, String)>)>> = Mutex::new(None);
   let Ok(mut last) = LAST.lock() else { return scan_recording_apps() };
   if let Some((at, apps)) = last.as_ref() {
     if at.elapsed() < SCAN_MAX_AGE {
@@ -78,7 +96,7 @@ pub fn recording_apps() -> Vec<String> {
   apps
 }
 
-fn scan_recording_apps() -> Vec<String> {
+fn scan_recording_apps() -> Vec<(u64, String)> {
   // Our own mic bridge opens the mic too; it is not "another app recording".
   let own = std::env::current_exe().ok().map(|p| p.to_string_lossy().replace('\\', "#").to_lowercase());
   let is_own = |name: &str| own.as_deref() == Some(name.to_lowercase().as_str());
@@ -90,19 +108,17 @@ fn scan_recording_apps() -> Vec<String> {
     if name == NON_PACKAGED {
       if let Some(np) = open_key(root, &HSTRING::from(NON_PACKAGED)) {
         for app in subkey_names(np) {
-          if !is_own(&app) && app_in_use(np, &app) {
-            apps.push(display_name(&app, true));
+          if let Some(since) = in_use_since(np, &app).filter(|_| !is_own(&app)) {
+            apps.push((since, display_name(&app, true)));
           }
         }
         close_key(np);
       }
-    } else if app_in_use(root, &name) {
-      apps.push(display_name(&name, false));
+    } else if let Some(since) = in_use_since(root, &name) {
+      apps.push((since, display_name(&name, false)));
     }
   }
   close_key(root);
-  apps.sort_by_key(|a| a.to_lowercase());
-  apps.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
   apps
 }
 
@@ -116,11 +132,12 @@ fn display_name(key: &str, non_packaged: bool) -> String {
   family.rsplit('.').next().filter(|s| !s.is_empty()).unwrap_or(family).to_string()
 }
 
-fn app_in_use(parent: HKEY, app: &str) -> bool {
+/// When the app opened the microphone it still holds (FILETIME), None when it holds none.
+fn in_use_since(parent: HKEY, app: &str) -> Option<u64> {
   let key = HSTRING::from(app);
-  let start = read_qword(parent, &key, "LastUsedTimeStart");
-  let stop = read_qword(parent, &key, "LastUsedTimeStop");
-  matches!((start, stop), (Some(s), Some(0)) if s != 0)
+  let start = read_qword(parent, &key, "LastUsedTimeStart")?;
+  let stop = read_qword(parent, &key, "LastUsedTimeStop")?;
+  (start != 0 && stop == 0).then_some(start)
 }
 
 fn read_qword(parent: HKEY, subkey: &HSTRING, value: &str) -> Option<u64> {

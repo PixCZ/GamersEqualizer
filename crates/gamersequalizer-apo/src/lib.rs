@@ -204,9 +204,24 @@ struct OutputProcessor {
 /// Mic chains alive in this process: one per microphone in EFX, one per processing mode in
 /// use in MFX. The "started" note shows it, so two chains on one mic are visible.
 static MIC_CHAINS: AtomicU32 = AtomicU32::new(0);
+/// Id of the mic chain whose telemetry the app shows (0 = none): the first one to process.
+/// Several would overwrite each other's values in the shared memory.
+static MIC_PUBLISHER: AtomicU32 = AtomicU32::new(0);
+/// Bumped by the publisher on every block: the others see it is still being called.
+static MIC_PUBLISHER_BEAT: AtomicU32 = AtomicU32::new(0);
+/// Source of mic chain ids.
+static MIC_CHAIN_IDS: AtomicU32 = AtomicU32::new(0);
+/// Blocks (~0.5 s) without the publisher's beat after which another chain takes over: the
+/// publisher failed, or its app paused the stream without closing it.
+const PUBLISHER_QUIET_BLOCKS: u32 = 50;
 
-/// Counts one live mic chain in `MIC_CHAINS` for as long as it exists.
-struct MicChainCount;
+/// One live mic chain: counted in `MIC_CHAINS`, and maybe the publisher, for as long as it exists.
+struct MicChainCount {
+  id: u32,
+  /// The publisher's beat this chain saw last, and its own blocks since it last changed.
+  seen_beat: u32,
+  quiet_blocks: u32,
+}
 
 struct MicProcessor {
   plugin: GamersEqualizerPlugin,
@@ -227,7 +242,7 @@ struct MicProcessor {
   /// Blocks the engine handed over / the chain processed, for the note when the stream stops.
   blocks: u64,
   processed: u64,
-  _count: MicChainCount,
+  count: MicChainCount,
 }
 
 /// How regularly the audio engine calls the mic APO (debug log): an app gets its data late
@@ -1012,12 +1027,40 @@ impl OutputProcessor {
 impl MicChainCount {
   fn new() -> Self {
     MIC_CHAINS.fetch_add(1, Ordering::Relaxed);
-    Self
+    // Never 0 ("no publisher"), also after the counter wraps.
+    let id = MIC_CHAIN_IDS.fetch_add(1, Ordering::Relaxed).wrapping_add(1).max(1);
+    Self { id, seen_beat: 0, quiet_blocks: 0 }
+  }
+
+  /// One block of this chain: true when it is the one that publishes telemetry. It takes
+  /// over when there is no publisher (the first chain; the previous one's stream closed) or
+  /// the publisher went quiet. Atomics only: called on the real-time thread.
+  fn publishes(&mut self) -> bool {
+    let current = MIC_PUBLISHER.load(Ordering::Relaxed);
+    if current == self.id {
+      MIC_PUBLISHER_BEAT.fetch_add(1, Ordering::Relaxed);
+      return true;
+    }
+    if current != 0 {
+      let beat = MIC_PUBLISHER_BEAT.load(Ordering::Relaxed);
+      if beat != self.seen_beat {
+        self.seen_beat = beat;
+        self.quiet_blocks = 0;
+        return false;
+      }
+      self.quiet_blocks += 1;
+      if self.quiet_blocks < PUBLISHER_QUIET_BLOCKS {
+        return false;
+      }
+    }
+    self.quiet_blocks = 0;
+    MIC_PUBLISHER.compare_exchange(current, self.id, Ordering::AcqRel, Ordering::Relaxed).is_ok()
   }
 }
 
 impl Drop for MicChainCount {
   fn drop(&mut self) {
+    let _ = MIC_PUBLISHER.compare_exchange(self.id, 0, Ordering::AcqRel, Ordering::Relaxed);
     MIC_CHAINS.fetch_sub(1, Ordering::Relaxed);
   }
 }
@@ -1063,7 +1106,7 @@ impl MicProcessor {
         timing: CallTiming::default(),
         blocks: 0,
         processed: 0,
-        _count: MicChainCount::new(),
+        count: MicChainCount::new(),
       }
     }));
     if built.is_err() {
@@ -1105,7 +1148,10 @@ impl MicProcessor {
     }
     let qpc_hns = self.clock.next(qpc_hns, frames as u64);
     let now = Instant::now();
-    self.timing.note(now, frames, self.clock.rate, self.plugin.shm_header());
+    // With several mic chains (MFX: one per processing mode in use) the app shows one of them.
+    let publishes = self.count.publishes();
+    self.plugin.set_publishing(publishes, MIC_CHAINS.load(Ordering::Relaxed) > 1);
+    self.timing.note(now, frames, self.clock.rate, self.plugin.shm_header().filter(|_| publishes));
     // Nobody's settings to apply (app not running for the user at the console): the raw mic.
     let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, processed, .. } = self;
     if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, now)) {
@@ -1628,6 +1674,23 @@ mod tests {
     unsafe {
       assert_eq!((*props).clsid, CLSID_STREAM_APO);
       CoTaskMemFree(Some(props as *const c_void));
+    }
+  }
+
+  #[test]
+  fn only_one_mic_chain_publishes_and_the_next_takes_over() {
+    // Other tests create mic chains too (shared statics): only what holds regardless.
+    let (mut first, mut second) = (MicChainCount::new(), MicChainCount::new());
+    assert_ne!(first.id, second.id);
+    assert!(!(first.publishes() && second.publishes()), "two publishers at once");
+    if first.publishes() {
+      // `first` goes quiet (failed, or its stream paused): after enough of its own blocks
+      // without a beat `second` takes over, unless another test's chain beats in between.
+      let quiet = first.id;
+      let took_over = (0..PUBLISHER_QUIET_BLOCKS + 2).any(|_| second.publishes());
+      assert!(took_over || MIC_PUBLISHER.load(Ordering::Relaxed) != quiet);
+      drop(first);
+      assert_ne!(MIC_PUBLISHER.load(Ordering::Relaxed), quiet, "a closed chain is never the publisher");
     }
   }
 

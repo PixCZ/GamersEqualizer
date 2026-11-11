@@ -8,7 +8,7 @@ use super::chatmix::{get_endpoint_volume, ChatMixController};
 use super::endpoint_lock::EndpointLockManager;
 use gamersequalizer_common::shm::{
   AecState, DenoiseLimit, DenoiseModel, ShmHeader, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED, MIC_CHAIN_LOOKAHEAD,
-  MIC_CHAIN_TAKEOVER, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
+  MIC_CHAIN_OTHERS, MIC_CHAIN_TAKEOVER, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
 };
 use log::debug;
 use std::sync::atomic::Ordering;
@@ -17,11 +17,12 @@ use std::time::{Duration, Instant};
 /// No new telemetry for this long = the DSP stopped (same as `dsp_watch.rs`).
 const IDLE_AFTER: Duration = Duration::from_secs(2);
 const SUMMARY_EVERY: Duration = Duration::from_secs(10);
-const FLAGS: [(u32, &str); 4] = [
+const FLAGS: [(u32, &str); 5] = [
   (MIC_CHAIN_ASLEEP, "model asleep"),
   (MIC_CHAIN_BYPASSED, "denoiser bypassed"),
   (MIC_CHAIN_TAKEOVER, "takeover"),
   (MIC_CHAIN_LOOKAHEAD, "lookahead"),
+  (MIC_CHAIN_OTHERS, "other mic chains"),
 ];
 
 /// What only the daemon knows: devices and Windows volumes. Read only with debug logging on.

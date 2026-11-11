@@ -17,6 +17,7 @@ use crate::health::{Fix, Issue, RunStatus};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus};
 use crate::win_audio::WinAudioSystem;
+use gamersequalizer_common::shm::MIC_CHAIN_OTHERS;
 
 /// Registry + file metadata only: cheap enough to notice a finished install quickly.
 const RECHECK_INTERVAL: Duration = Duration::from_secs(3);
@@ -199,6 +200,8 @@ pub fn selected_mic_is_default(state: &AppState) -> bool {
 /// a virtual mic "running" may be the bridge; a per-path counter in the mapping would tell them apart.
 pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
   let live = state.mic_dsp_live();
+  let several =
+    live && state.shm_header().is_some_and(|h| h.mic_chain_flags.load(Ordering::Relaxed) & MIC_CHAIN_OTHERS != 0);
   let run = run_status(state);
   let not_running = run.is_some_and(|r| r.mic_not_running.is_some());
   let note = run.and_then(|r| newest_note(r, "Mic chain")).map(str::to_string);
@@ -238,6 +241,23 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
   theme::status_line(ui, severity, &text);
   if let Some(note) = note.filter(|_| not_running) {
     theme::status_line(ui, Severity::Info, &trf("Last report from Windows audio: {}", &[&note]));
+  }
+  // Apps recording in different processing modes (MFX) or from different microphones each get
+  // their own chain; the APO publishes the values of one of them, the first while it runs.
+  if several {
+    let text = match crate::mic_usage::longest_recording_app() {
+      Some(app) => trf(
+        "Several recordings are processed at once, each separately (apps record in different modes or from \
+         different microphones). The values shown here belong to the one that started first: {}",
+        &[&app],
+      ),
+      None => tr(
+        "Several recordings are processed at once, each separately (apps record in different modes or from \
+         different microphones). The values shown here belong to the one that started first.",
+      )
+      .to_string(),
+    };
+    theme::status_line(ui, Severity::Info, &text);
   }
   let Some(guid) = switch_on else {
     return;

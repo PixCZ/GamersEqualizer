@@ -48,6 +48,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Windows refused to change the default microphone: {}", "Windows odmítl změnit výchozí mikrofon: {}"),
   ("The mic effect does NOT work on this microphone (build {}): apps get the raw microphone", "Efekt mikrofonu na tomto mikrofonu NEFUNGUJE (sestavení {}): aplikace dostávají neupravený mikrofon"),
   ("Last report from Windows audio: {}", "Poslední hlášení ze zvuku Windows: {}"),
+  ("Several recordings are processed at once, each separately (apps record in different modes or from different microphones). The values shown here belong to the one that started first: {}", "Zpracovává se víc nahrávání najednou, každé zvlášť (aplikace nahrávají v různých režimech nebo z různých mikrofonů). Zobrazené údaje patří tomu, které začalo první: {}"),
+  ("Several recordings are processed at once, each separately (apps record in different modes or from different microphones). The values shown here belong to the one that started first.", "Zpracovává se víc nahrávání najednou, každé zvlášť (aplikace nahrávají v různých režimech nebo z různých mikrofonů). Zobrazené údaje patří tomu, které začalo první."),
   ("Try another effect slot (administrator)...", "Zkusit jiné zapojení efektu (správce)..."),
   ("Moves the mic effect between the two places where Windows can run it (device effects and mode effects). Some microphones run only one of them. Windows asks for permission and audio restarts for a few seconds.", "Přesune efekt mikrofonu mezi dvěma místy, kde ho Windows umí spouštět (efekty zařízení a efekty režimu). Některé mikrofony spouštějí jen jedno z nich. Windows se zeptá na povolení a zvuk se na pár sekund restartuje."),
   ("The installer did not start: {}", "Instalátor se nespustil: {}"),
