@@ -234,9 +234,28 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
       (tr("Windows mic effect not on this microphone (see the message at the top)").to_string(), Severity::Warning)
     }
   };
+  let switch_on = check.endpoint_guid.clone().filter(|_| not_running && check.can_install);
   theme::status_line(ui, severity, &text);
   if let Some(note) = note.filter(|_| not_running) {
     theme::status_line(ui, Severity::Info, &trf("Last report from Windows audio: {}", &[&note]));
+  }
+  let Some(guid) = switch_on else {
+    return;
+  };
+  let clicked = ui
+    .add(theme::accent_button(ui, tr("Try another effect slot (administrator)...")))
+    .on_hover_text(tr(
+      "Moves the mic effect between the two places where Windows can run it (device effects and mode effects). \
+       Some microphones run only one of them. Windows asks for permission and audio restarts for a few seconds.",
+    ))
+    .clicked();
+  if clicked {
+    state.apo_banner.message =
+      apo_install::launch_switch_mic_slot(&guid).err().map(|e| trf("The installer did not start: {}", &[&e]));
+    recheck(state);
+  }
+  if let Some(msg) = state.apo_banner.message.as_deref() {
+    ui.label(RichText::new(msg).small());
   }
 }
 

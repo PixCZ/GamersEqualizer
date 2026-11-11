@@ -35,12 +35,11 @@ const SCRIPT_NAME: &str = "apo-install.ps1";
 const SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-install.ps1"));
 const UNINSTALL_SCRIPT_NAME: &str = "apo-uninstall.ps1";
 const UNINSTALL_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-uninstall.ps1"));
+/// Composite MFX (mode effect) list: the mic effect moves there on mics that never start EFX.
+const MFX_LIST_VALUE: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14";
 /// Composite SFX/MFX/EFX effect lists in an endpoint's FxProperties.
-const FX_LIST_VALUES: [&str; 3] = [
-  "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13",
-  "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14",
-  "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
-];
+const FX_LIST_VALUES: [&str; 3] =
+  ["{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},13", MFX_LIST_VALUE, "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15"];
 /// Processing modes each slot runs in (`PKEY_SFX/MFX/EFX_ProcessingModes_Supported_For_Streaming`).
 const FX_MODE_VALUES: [(&str, &str); 3] = [
   ("SFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},5"),
@@ -125,10 +124,34 @@ pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
   if targets.is_empty() {
     return Ok(());
   }
-  let endpoints = endpoint_args(targets)?;
+  launch_installer(&endpoint_args(targets)?)
+}
+
+/// Moves the mic effect on microphone `guid` to its other slot (EFX <-> MFX), elevated. Some
+/// mic arrays never start an endpoint effect (EFX) while their mode effects (MFX) run, and
+/// nothing in the registry tells which in advance; Equalizer APO offers the same switch.
+pub fn launch_switch_mic_slot(guid: &str) -> Result<(), String> {
+  let endpoint = switch_arg(guid, mic_in_mfx(guid))?;
+  log::info!("[Setup] moving the mic effect: {endpoint}");
+  launch_installer(&endpoint)
+}
+
+/// The mic effect sits in the mode effect list (MFX) of microphone `guid`.
+pub fn mic_in_mfx(guid: &str) -> bool {
+  let key = format!("{}\\{guid}\\FxProperties", endpoints_root(Flow::Capture));
+  read_string_value(&key, MFX_LIST_VALUE).is_some_and(|list| list.to_ascii_lowercase().contains(MIC_APO_CLSID))
+}
+
+fn launch_installer(endpoints: &str) -> Result<(), String> {
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
-  let args = format!("-Endpoint {} -SourceDll {} -FromApp", ps_quote(&endpoints), ps_quote(&dll.to_string_lossy()));
+  let args = format!("-Endpoint {} -SourceDll {} -FromApp", ps_quote(endpoints), ps_quote(&dll.to_string_lossy()));
   run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer")
+}
+
+/// `Capture:{guid}:MFX`, or `:EFX` when it is in MFX already: the slot it moves to.
+fn switch_arg(guid: &str, in_mfx: bool) -> Result<String, String> {
+  let to = if in_mfx { "EFX" } else { "MFX" };
+  Ok(format!("{}:{to}", endpoint_args(&[(Flow::Capture, guid)])?))
 }
 
 /// `Capture:{guid},Render:{guid}` (one PowerShell array argument, no spaces).
@@ -549,5 +572,12 @@ mod tests {
   fn several_endpoints_become_one_script_argument() {
     let args = endpoint_args(&[(Flow::Capture, "{cf0a-1}"), (Flow::Render, "{b45c-2}")]).unwrap();
     assert_eq!(args, "Capture:{cf0a-1},Render:{b45c-2}");
+  }
+
+  #[test]
+  fn switching_the_mic_slot_names_the_other_one() {
+    assert_eq!(switch_arg("{cf0a-1}", false).unwrap(), "Capture:{cf0a-1}:MFX");
+    assert_eq!(switch_arg("{cf0a-1}", true).unwrap(), "Capture:{cf0a-1}:EFX");
+    assert!(switch_arg("{x' -Evil '}", false).is_err());
   }
 }

@@ -87,6 +87,19 @@ odmítnutý `LockForProcess`. Poslední hlášení mikrofonu ukáže, kde se to 
 každý audiodg zvlášť. Pokus bez kompilace: přidat mikrofon i do slotu MFX
 (`apo-install.ps1 -Flow Capture -Slot MFX`) a podívat se, jestli pak přijde „Mic Chain: stream … started“.
 
+**Pokus s MFX (11. 11. 08:54, stejný build 10dd4cd, Naměřeno):** mikrofon přidaný i do slotu MFX
+(`fx,14`) se při nahrávání spustil: „Mic Chain: stream 48000 Hz, 2 ch, float 4 bytes … started“, pak
+„stream stopped after 1687 blocks, 1679 processed“. Služba poprvé hlásí `[Mic] microphone processing
+started` a změřila latenci 54.9 ms. **Na tomhle mikrofonu Windows EFX nespouští, MFX ano.**
+
+Rozhodnutí (stejně jako Equalizer APO, který má výchozí SFX/EFX a přepnutí na SFX/MFX):
+- Výchozí slot mikrofonu zůstává EFX. Na vývojovém PC funguje a běží i pro RAW streamy.
+- Když služba vidí, že efekt v EFX nic nezpracoval, nabídne „Zkusit jiné zapojení efektu“ (karta
+  Mikrofon i menu v liště). Instalátor dostane `Capture:{guid}:MFX`, přesune efekt a z druhého slotu
+  ho odebere, aby neběžel dvakrát. Bez slotu (aktualizace) ho nechá tam, kde je.
+- Omezení MFX: běží jen v režimech z `modes,6` (tady DEFAULT, RAW, SPEECH, COMMUNICATIONS). Aplikace v
+  jiném režimu by dostala neupravený mikrofon.
+
 Vývojové PC se týden jen uspává do hibernace, restart neproběhl. Než ho prohlásíme za referenci,
 je potřeba ho jednou opravdu restartovat (Restartovat, ne Vypnout: rychlé spuštění je taky
 hibernace) a ověřit, že mikrofon funguje dál.

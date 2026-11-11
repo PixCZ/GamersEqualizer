@@ -123,7 +123,7 @@ pub enum Issue {
   /// `apps` already joined for display.
   MicSilenced { why: Silenced, apps: String, mic_id: Option<String> },
   /// Our effect is listed on the device but did not run while it was in use. `key` ignores it.
-  NotRunning { flow: Flow, device_name: String, key: String },
+  NotRunning { flow: Flow, device_id: String, device_name: String, key: String },
 }
 
 /// What a menu item under an issue does.
@@ -138,6 +138,8 @@ pub enum Fix {
   /// Accept `.1` as the user's format on output `.0`.
   KeepSpatial(String, SpatialFormat),
   MakeMicDefault(String),
+  /// Move the mic effect on this microphone (endpoint id) to its other slot (admin prompt).
+  SwitchMicSlot(String),
   UnmuteMic(String),
   RaiseMicVolume(String),
   /// The window's banner explains the admin prompt before installing.
@@ -331,6 +333,13 @@ impl Issue {
       ],
       Issue::OutputProcessing { key, .. } => vec![
         (tr("Set up in GamersEqualizer...").to_string(), Fix::OpenWindow),
+        (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
+      ],
+      // Some mics never start an endpoint effect (EFX) but run mode effects (MFX), or the
+      // other way round: the other slot is the fix that works without knowing which.
+      Issue::NotRunning { flow: Flow::Capture, device_id, key, .. } => vec![
+        (tr("Try another effect slot (administrator)...").to_string(), Fix::SwitchMicSlot(device_id.clone())),
+        (tr("Open sound settings...").to_string(), Fix::OpenSoundSettings),
         (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
       ],
       // The audio enhancements switch is in the device's sound settings.
@@ -534,6 +543,7 @@ impl RunWatch {
     }
     (self.strikes >= NOT_RUNNING_CHECKS).then(|| Issue::NotRunning {
       flow,
+      device_id: id.clone(),
       device_name: name.clone(),
       key: format!("not_running:{flow:?}:{id}"),
     })
@@ -747,6 +757,12 @@ impl HealthMonitor {
       Fix::MakeMicDefault(id) => {
         if let Err(e) = endpoints.set_as_default_recording_device(id) {
           warn!("[Health] setting the default microphone failed: {e}");
+        }
+      }
+      Fix::SwitchMicSlot(id) => {
+        let guid = apo_install::endpoint_guid_of(id).ok_or_else(|| format!("no device GUID in {id}"));
+        if let Err(e) = guid.and_then(|guid| apo_install::launch_switch_mic_slot(&guid)) {
+          warn!("[Health] moving the mic effect could not start: {e}");
         }
       }
       Fix::UnmuteMic(id) => crate::win_audio::chatmix::set_endpoint_mute(id, false),
@@ -1022,6 +1038,7 @@ mod tests {
     }
     let issue = watch.update(Flow::Capture, true, 5).unwrap();
     assert_eq!(issue.notify_key(), "not_running:Capture:mic");
+    assert_eq!(issue.fixes()[0].1, Fix::SwitchMicSlot("mic".into()), "the other slot is offered first");
     assert_eq!(watch.update(Flow::Capture, false, 5), None, "an idle check takes a strike back");
     assert!(watch.update(Flow::Capture, true, 5).is_some(), "in use again: shown again");
     assert_eq!(watch.update(Flow::Capture, true, 6), None, "a heartbeat clears it");

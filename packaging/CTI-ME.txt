@@ -11,9 +11,12 @@ Spuštění
 3. V aplikaci se objeví lišta k instalaci efektů pro mikrofon / sluchátka. Klikni na ni
    a potvrď dotaz správce (UAC). Zvuk ve Windows na pár sekund vypadne, to je normální.
    Aplikace, které měly otevřený mikrofon (Discord, hra), pak znovu otevři.
-4. Pokud aplikace hlásí, že Windows efekty nespouští (červeně nahoře nebo na kartě Mikrofon):
-   Nastavení > Systém > Zvuk > zařízení > "Vylepšení zvuku" musí být zapnuté.
-   Když to nepomůže, spusť diagnostiku (viz Hlášení chyb).
+4. Pokud aplikace hlásí, že efekt mikrofonu NEFUNGUJE (červeně na kartě Mikrofon):
+   klikni na "Zkusit jiné zapojení efektu (správce)..." a potvrď dotaz správce. Některé
+   mikrofony (hlavně v noteboocích) spouštějí efekt jen na jednom ze dvou míst. Pak znovu
+   otevři aplikaci, která nahrává, a nahrávej aspoň 15 s.
+   Dál musí být zapnuté Nastavení > Systém > Zvuk > zařízení > "Vylepšení zvuku".
+   Když nic z toho nepomůže, spusť diagnostiku (viz Hlášení chyb).
 
 Když se exe vůbec nespustí
 --------------------------

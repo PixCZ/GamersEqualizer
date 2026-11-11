@@ -8,6 +8,9 @@
   -Flow Render -Slot SFX: the stream EQ only.  -NoStreamEq: the output EQ only.
   -Endpoint 'Capture:{guid}','Render:{guid}': several endpoints at once (default slots). The
     app uses this so the user approves one administrator prompt and audio restarts only once.
+    'Capture:{guid}:MFX' / ':EFX' moves the mic chain to that slot (the app's "try another
+    effect slot"): some mic arrays never start an endpoint effect but run mode effects.
+  The mic chain sits in ONE slot per microphone; without a slot it stays where it is (EFX first).
 
 .DESCRIPTION
   - Backs up each endpoint's FxProperties key (reg export) to %ProgramFiles%\GamersEqualizer\apo-backup.
@@ -34,7 +37,8 @@ param(
   [string]$SourceDll,
   # Started by the app's "fix" button: keep the window open on errors, briefly on success.
   [switch]$FromApp,
-  [ValidateSet('EFX', 'MFX', 'SFX')][string]$Slot = 'EFX',
+  # Default: render EFX; capture keeps the slot it is in (EFX for a new microphone).
+  [ValidateSet('EFX', 'MFX', 'SFX')][string]$Slot,
   [ValidateSet('Capture', 'Render')][string]$Flow = 'Capture',
   # Render: skip the stream EQ (chat / media channels).
   [switch]$NoStreamEq
@@ -108,6 +112,14 @@ function Get-ActiveEndpoints([string]$flow) {
   }
 }
 
+# Capture keeps the slot it was moved to, so an update does not undo the move.
+function Get-DefaultSlot([string]$flow, [string]$endpointKey) {
+  if ($flow -ne 'Capture') { return 'EFX' }
+  $mfx = (Get-ItemProperty (Join-Path $endpointKey 'FxProperties')).($CompositeValues.MFX)
+  if (@($mfx) -contains $Classes.Capture.Clsid) { return 'MFX' }
+  'EFX'
+}
+
 # (class, slot) pairs for one endpoint.
 function Get-Targets([string]$flow, [string]$slot, [bool]$noStreamEq) {
   if ($flow -eq 'Capture') {
@@ -137,6 +149,8 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
   if (-not (Test-Path (Join-Path $endpointKey 'FxProperties'))) {
     throw "$($ep.Name) has no FxProperties key (no effects configured); not supported by this prototype."
   }
+  if (-not $slot) { $slot = Get-DefaultSlot $flow $endpointKey }
+  if ($CompositeValues.Keys -notcontains $slot) { throw "No effect slot for $($ep.Name) ('$slot'); nothing changed." }
   [pscustomobject]@{
     Flow = $flow; Id = $endpointId; Name = $ep.Name; Word = $word; Key = $endpointKey
     Targets = Get-Targets $flow $slot $noStreamEq
@@ -149,9 +163,12 @@ if ($Endpoint) {
   # `powershell -File ... -Endpoint a,b` (how the app starts this) passes ONE string "a,b";
   # only `-Command` or a call from PowerShell makes it an array. Split either way.
   foreach ($spec in ($Endpoint -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-    $flowName, $id = $spec -split ':', 2
+    $flowName, $id, $specSlot = $spec -split ':', 3
     if ($DeviceWords.Keys -notcontains $flowName -or -not $id) { throw "Bad -Endpoint '$spec' (expected Capture:{guid} or Render:{guid})." }
-    $jobs += Resolve-Job $flowName $id 'EFX' $false
+    if ($specSlot -and ($flowName -ne 'Capture' -or @('EFX', 'MFX') -notcontains $specSlot)) {
+      throw "Bad -Endpoint '$spec' (a slot is only Capture:{guid}:EFX or Capture:{guid}:MFX)."
+    }
+    $jobs += Resolve-Job $flowName $id $specSlot $false
   }
 }
 else {
@@ -222,8 +239,20 @@ try {
         if ($legacy) { $list = @($legacy) }
       }
       if (-not ($list | Where-Object { $_ -ieq $Clsid })) { $list += $Clsid }
-      Set-FxValue "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties" $CompositeValue ([string[]]$list)
+      $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
+      Set-FxValue $fxSubKey $CompositeValue ([string[]]$list)
       Write-Host "$($job.Name) $TargetSlot chain: $($list -join ' -> ')"
+      # One mic chain per microphone: left in the other slot too, it could run twice.
+      if ($target[0] -eq 'Capture') {
+        $otherSlot = if ($TargetSlot -eq 'MFX') { 'EFX' } else { 'MFX' }
+        $otherValue = $CompositeValues[$otherSlot]
+        $before = @($fx.$otherValue | Where-Object { $_ })
+        $rest = @($before | Where-Object { $_ -ine $Clsid })
+        if ($rest.Count -ne $before.Count) {
+          Set-FxValue $fxSubKey $otherValue ([string[]]$rest)
+          Write-Host "$($job.Name): removed from the $otherSlot chain"
+        }
+      }
     }
   }
 }
