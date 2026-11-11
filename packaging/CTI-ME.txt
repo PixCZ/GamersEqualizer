@@ -41,8 +41,8 @@ aplikaci z Program Files, automatické spouštění, volitelně i nastavení).
 
 Nová verze
 ----------
-Starou verzi ukonči (ikona u hodin > Ukončit GamersEqualizer), rozbal nový ZIP, spusť z něj
-gamersequalizer.exe a klikni na lištu s aktualizací. Dál pokračuje nainstalovaná aplikace.
+Rozbal nový ZIP a spusť z něj gamersequalizer.exe. Běžící starou verzi ukončí sám.
+Pak klikni na lištu s aktualizací; dál pokračuje nainstalovaná aplikace.
 
 Hlášení chyb
 ------------

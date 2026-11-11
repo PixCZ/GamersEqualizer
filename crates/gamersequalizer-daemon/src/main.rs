@@ -12,6 +12,7 @@ pub mod mic_usage;
 pub mod notify;
 pub mod output_eq;
 pub mod sonar_importer;
+pub mod takeover;
 pub mod tray;
 pub mod ui;
 pub mod uninstall;
@@ -375,6 +376,10 @@ fn run_background_daemon() {
 /// Standalone UI Control Center (can be opened, closed, and reopened at will)
 fn run_gui_mode() {
   info!("[GamersEqualizer] Starting UI Control Center...");
+
+  // A new version was unpacked and started: it ends the older one that is running, then
+  // offers to update the installation.
+  takeover::replace_older_copies();
 
   // One window only: a second launch (tray, Start menu) brings the open one to the front.
   if tray::focus_window() {

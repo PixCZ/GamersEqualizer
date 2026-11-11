@@ -81,6 +81,9 @@ pub struct HealthMemory {
   pub spatial_formats: BTreeMap<String, SpatialFormat>,
   /// Problems the user chose to ignore (`Issue::ignore_key`).
   pub ignored: BTreeSet<String>,
+  /// Time of the newest `[ApoNote]` already written to the log (as in the event, ISO UTC):
+  /// older ones were logged by an earlier run.
+  pub notes_logged_until: String,
   /// When each connected output was first seen in this run (not saved: after a restart all of
   /// them count as old, so a switch made while the service was off is still flagged).
   #[serde(skip)]
@@ -685,9 +688,18 @@ impl HealthMonitor {
       self.notes_reading = None;
       // Unreadable this time: keep the last ones (else they would be logged again next time).
       if let Some(notes) = read {
+        // Each note once, also across restarts: every start used to log the newest 100 again.
+        // One without a time ("... not readable") once per run.
+        let until = self.memory.notes_logged_until.clone();
         // Oldest first, so the log reads in order.
         for note in notes.iter().rev().filter(|n| !self.notes.contains(*n)) {
-          info!("[ApoNote] {} {}", note.time, note.text);
+          if note.time.is_empty() || note.time > until {
+            info!("[ApoNote] {} {}", note.time, note.text);
+          }
+        }
+        if let Some(newest) = notes.iter().map(|n| &n.time).max().filter(|t| **t > until) {
+          self.memory.notes_logged_until = newest.clone();
+          self.save();
         }
         self.notes = notes;
       }

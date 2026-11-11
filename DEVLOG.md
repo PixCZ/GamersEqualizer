@@ -2469,3 +2469,59 @@ lists have 10 (6), and milestone 51 gave the slope range as 0.70..1.40 (the code
 - `window_report` prints `0.0` in `echo` / `left` for a capture with no echo-alone window
   (`125717`, `144824` in milestone 46's table); read it as "no data".
 - `ECHO_BOUND_UNDER_DB` (3 dB) may be too eager, see the end of milestone 49.
+
+## Milestone 53: An effect that is installed but does nothing: the log says why, MFX fallback, the app installs itself (2026-11-11)
+
+Branch `diag/apo-not-running`. A tester's log showed the mic effect "installed and active" for four
+days while audiodg never ran it; the app read that state from the registry only.
+
+**Measured (author's notebook, Windows 11 25H2, Realtek "Microphone Array")**
+
+| Observation                                                            | Meaning                                                   |
+| ---------------------------------------------------------------------- | --------------------------------------------------------- |
+| DLL loaded in audiodg, COM ok, shared memory v19 on both sides         | not the signature check, not a version mismatch           |
+| Output EQ and Stream EQ note "started", the mic chain notes nothing    | Windows never reached `LockForProcess` on the capture EFX |
+| Mic chain added to the composite MFX list: 1687 blocks, 1679 processed | this driver runs mode effects, not the endpoint effect    |
+| Capture EFX lists two modes (DEFAULT + SPEECH), MFX four incl. RAW     | suspected reason; Microsoft allows only DEFAULT for EFX   |
+| Sound Recorder + voice typing (Win+H): "mic chains running here: 2"    | MFX runs one chain per processing mode in use             |
+| Windows passes a 56-byte init block                                    | `APOInitSystemEffects` v1, so the APO never gets the mode |
+
+On the dev PC (Realtek mic, one MFX mode besides DEFAULT, no RAW) the EFX slot works; the installer's
+self-test confirmed it twice and moved nothing.
+
+**What changed**
+
+- The app says the truth. The service counts checks in which another app records (or sound plays) while
+  the effect's heartbeat stands still; after 10 s the header, the Mic and Headphones tabs and a
+  notification say "does NOT work". `run_status.json` carries the verdict to the window.
+- The log alone explains it; testers send only the log (Log tab: "Save a copy to send").
+  `[ApoCheck]`: Windows build, DLL, COM registration, every device with our effects. `[ApoNote]`: the
+  APO's own notes from inside audiodg (each step: class, instance, init, formats, stream start/stop, with
+  process and DLL build), audiodg crashes, Defender detections, Code Integrity blocks, and every line the
+  installer printed. Each note is logged once, also across restarts.
+- Mic slot: EFX first (one chain for every app, RAW streams included). After installing, the installer
+  opens the mic for 3 s (`--probe-mic`) and moves the chain to MFX when Windows did not start it; the Mic
+  tab offers the same switch later. An update keeps the slot.
+- Several mic chains in one audiodg (MFX: one per mode; EFX: one per microphone): only the first one
+  publishes telemetry (`MIC_PUBLISHER`, flag `MIC_CHAIN_OTHERS`), and the Mic tab names the app whose
+  values are shown.
+- The app installs itself: the exe goes to `%ProgramFiles%\GamersEqualizer\` next to the DLL (hash checked
+  by the elevated script), a copy started from elsewhere hands over to it, "start with Windows" points
+  there, a newer copy ends an older running one (`takeover.rs`), uninstall removes it.
+- The installer writes nothing to its window while audio is stopped: a paused console (a click into it)
+  once left the notebook without sound until Enter was pressed.
+- Exe and DLL carry a version resource with the git hash; the service logs it at start.
+
+**Open**
+
+- Why the notebook's capture EFX is never started is not known (the chain was moved before the new step
+  notes could show where it stops). The MFX fallback hides the question.
+- In MFX an app in a mode the driver does not list gets the raw microphone; two modes at once run the
+  chain twice (double CPU). Not seen as a problem yet.
+- Not run on Windows when this was written: `takeover.rs`, the Mic tab's "several recordings" line, the
+  uninstall of the installed exe.
+- Found by the new crash notes, not part of this branch: on 2026-11-10 20:22 audiodg crashed about 20
+  times in a minute in `gamersequalizer_apo.dll` (stack overflow, `c00000fd`) with a `sidetone` dev build
+  (`e1b98e5-dirty`) when the pair was switched on. Check it on that branch.
+- The binaries are unsigned; Defender flagged an older exe as `Trojan:Win32/Cloxer` (generic detection).
+- Windows Terminal and Notepad are taken for games ("installed by a launcher").
