@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime};
 
 const FILE: &str = "health.json";
@@ -187,6 +188,9 @@ pub struct HealthMonitor {
   /// Newest APO notes from the Application log, newest first, and when they were read.
   notes: Vec<ApoNote>,
   notes_read_at: Option<Instant>,
+  /// A read of the event logs on its own thread: on a big log a query takes hundreds of ms,
+  /// too long for the service loop (tray, mic gain). None (inside) = unreadable this time.
+  notes_reading: Option<Receiver<Option<Vec<ApoNote>>>>,
   /// Last `run_status.json` written; None = not written in this run yet.
   run_status: Option<RunStatus>,
 }
@@ -576,6 +580,7 @@ impl HealthMonitor {
       described: Vec::new(),
       notes: Vec::new(),
       notes_read_at: None,
+      notes_reading: None,
       run_status: None,
     }
   }
@@ -654,11 +659,12 @@ impl HealthMonitor {
     true
   }
 
-  /// Logs what decides whether Windows runs our effects (`[ApoCheck]`: system, the devices in
-  /// use) and new notes from inside audiodg (`[ApoNote]`), each only when it changes, so a
-  /// tester's log tells it without a diagnostic script.
+  /// Logs what decides whether Windows runs our effects (`[ApoCheck]`: system, registration,
+  /// every device with our effects, the devices in use) and new notes (`[ApoNote]`: from inside
+  /// audiodg, and what Windows recorded about our files), each only when it changes, so a
+  /// tester's log alone tells what went wrong.
   fn log_apo_state(&mut self, mic: Option<&str>, output: Option<&str>) {
-    let mut lines = vec![apo_install::describe_system()];
+    let mut lines = vec![apo_install::describe_system(), apo_install::describe_installed()];
     for (flow, id) in [(Flow::Capture, mic), (Flow::Render, output)] {
       if let Some(guid) = id.and_then(apo_install::endpoint_guid_of) {
         lines.push(apo_install::describe_endpoint(flow, &guid));
@@ -669,20 +675,43 @@ impl HealthMonitor {
     }
     self.described = lines;
 
-    // A query scans the whole Application log: not every check.
+    let finished = match self.notes_reading.as_ref().map(|rx| rx.try_recv()) {
+      None => None,
+      Some(Ok(read)) => Some(read),
+      Some(Err(TryRecvError::Empty)) => return,
+      Some(Err(TryRecvError::Disconnected)) => Some(None),
+    };
+    if let Some(read) = finished {
+      self.notes_reading = None;
+      // Unreadable this time: keep the last ones (else they would be logged again next time).
+      if let Some(notes) = read {
+        // Oldest first, so the log reads in order.
+        for note in notes.iter().rev().filter(|n| !self.notes.contains(*n)) {
+          info!("[ApoNote] {} {}", note.time, note.text);
+        }
+        self.notes = notes;
+      }
+    }
+
+    // A query scans whole logs: not every check.
     if self.notes_read_at.is_some_and(|t| t.elapsed() < NOTES_INTERVAL) {
       return;
     }
     self.notes_read_at = Some(Instant::now());
-    // Unreadable this time: keep the last ones (else they would be logged again next time).
-    let Some(notes) = apo_notes::newest() else {
-      return;
-    };
-    // Oldest first, so the log reads in order.
-    for note in notes.iter().rev().filter(|n| !self.notes.contains(*n)) {
-      info!("[ApoNote] {} {}", note.time, note.text);
+    let (tx, rx) = mpsc::channel();
+    let started = std::thread::Builder::new().name("apo-notes".into()).spawn(move || {
+      let read = apo_notes::newest().zip(apo_notes::windows_events()).map(|(mut notes, windows)| {
+        notes.extend(windows);
+        // Newest first, like the notes themselves (ISO times sort as text).
+        notes.sort_by(|a, b| b.time.cmp(&a.time));
+        notes
+      });
+      let _ = tx.send(read);
+    });
+    match started {
+      Ok(_) => self.notes_reading = Some(rx),
+      Err(e) => warn!("[Health] could not start reading the event logs: {e}"),
     }
-    self.notes = notes;
   }
 
   /// Writes `run_status.json` when the verdict or the notes changed.

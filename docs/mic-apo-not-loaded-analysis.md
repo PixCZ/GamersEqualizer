@@ -106,6 +106,14 @@ Rozhodnutí (stejně jako Equalizer APO, který má výchozí SFX/EFX a přepnut
 - Hlášení „started“ u mikrofonu uvádí, kolik mikrofonních řetězců v audiodg právě běží. V MFX vzniká
   jeden na každý režim, který se zrovna používá, takže je vidět, kdy běží dva najednou.
 
+**Diagnostika jen v logu (11. 11.):** testeři posílají jen log aplikace, žádný další nástroj.
+`scripts/apo-diagnose.ps1` je pryč a log obsahuje to, co skript uměl bez práv správce:
+- `[ApoCheck]`: build Windows, `DisableProtectedAudioDG`, DLL (čas, značka „staženo z internetu“),
+  registrace COM všech tří tříd, všechna zařízení s našimi efekty (sloty, stav) a zařízení v použití.
+- `[ApoNote]`: hlášení APO s procesem a buildem DLL (dokazuje, že audiodg DLL načetl, a kterou verzi),
+  pády audiodg, nálezy Defenderu a události Code Integrity o našich souborech. Když Windows některý z
+  těchto protokolů nedovolí číst, log to napíše.
+
 Vývojové PC se týden jen uspává do hibernace, restart neproběhl. Než ho prohlásíme za referenci,
 je potřeba ho jednou opravdu restartovat (Restartovat, ne Vypnout: rychlé spuštění je taky
 hibernace) a ověřit, že mikrofon funguje dál.

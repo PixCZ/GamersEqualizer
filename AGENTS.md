@@ -62,10 +62,12 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   `test_data/private/captures/` (git-ignored). Never ship an APO built with it.
 - The APO is installed via the app's banner or `scripts/apo-install.ps1`. Both need admin and restart
   Windows audio, so a human runs them.
-- "Installed but does nothing": `scripts/apo-diagnose.ps1` (read-only, admin) checks what decides whether
-  audiodg runs the APO and prints the APO's own notes. The APO writes those to the Windows Application
-  log (source `GamersEqualizer`, `gamersequalizer-apo/src/event_log.rs`); the service copies them into
-  its log as `[ApoNote]`, logs device state as `[ApoCheck]`, and tells the window via `run_status.json`.
+- "Installed but does nothing": the app log alone must tell why; testers send only the log, no extra
+  tools. `[ApoCheck]`: Windows build, DLL, COM registration, every device with our effects (slots, state)
+  and the devices in use. `[ApoNote]`: the APO's own notes from inside audiodg (Application log, source
+  `GamersEqualizer`, `gamersequalizer-apo/src/event_log.rs`; each names the process and the DLL build)
+  plus audiodg crashes, Defender detections and Code Integrity events about our files. `[ApoLink]`: why
+  the service cannot reach the APO. The window learns the verdict via `run_status.json`.
 - Mic effect slot: the installer puts the mic chain in EFX, then opens the mic briefly
   (`gamersequalizer.exe --probe-mic {guid}`) and moves it to MFX when Windows did not start it there
   (some notebook mic arrays). The Mic tab offers the same switch later ("Try another effect slot").
@@ -73,8 +75,7 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 ## Tester package
 
 Portable ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls its system parts itself):
-`gamersequalizer.exe` + `gamersequalizer_apo.dll` + `CTI-ME.txt` (Czech tester guide, `packaging/CTI-ME.txt`)
-+ `apo-diagnose.ps1`.
+`gamersequalizer.exe` + `gamersequalizer_apo.dll` + `CTI-ME.txt` (Czech tester guide, `packaging/CTI-ME.txt`).
 
 - `scripts/package.ps1`: final build from scratch (`dist` + `apo-dist` profiles, fat LTO, minutes; verifies
   the rustc flags in the verbose log). `-Fast` packages the `release`

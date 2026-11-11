@@ -19,7 +19,7 @@ Spuštění
    mikrofony (hlavně v noteboocích) spouštějí efekt jen na jednom ze dvou míst. Pak znovu
    otevři aplikaci, která nahrává, a nahrávej aspoň 15 s.
    Dál musí být zapnuté Nastavení > Systém > Zvuk > zařízení > "Vylepšení zvuku".
-   Když nic z toho nepomůže, spusť diagnostiku (viz Hlášení chyb).
+   Když nic z toho nepomůže, pošli log (viz Hlášení chyb).
 
 Když se exe vůbec nespustí
 --------------------------
@@ -41,8 +41,7 @@ Hlášení chyb
 Pošli popis, co jsi dělal, a soubor gamersequalizer.log ze složky
 %APPDATA%\GamersEqualizer\logs (vlož tu cestu do adresního řádku Průzkumníka).
 
-Když efekty nic nedělají, pošli k tomu i výstup diagnostiky (nic nemění, jen čte):
-1. Pusť aplikaci, ať nahrává mikrofon (např. Záznam zvuku), a k tomu nějaký zvuk.
-2. Otevři PowerShell jako správce, přejdi do složky s aplikací (cd "C:\GamersEqualizer")
-   a spusť: powershell -ExecutionPolicy Bypass -File .\apo-diagnose.ps1
-3. Celý výpis zkopíruj a pošli.
+Když efekty nic nedělají: nech aplikaci běžet, aspoň 15 s nahrávej mikrofon (např. Záznam
+zvuku) a k tomu pusť nějaký zvuk, nahrávání zastav a počkej půl minuty. Pak pošli log,
+všechno potřebné v něm je (stav efektů ve Windows, hlášení zevnitř zvukového systému,
+pády, nálezy antiviru).

@@ -13,6 +13,8 @@ fn main() {
   println!("cargo:rerun-if-changed=../build-support/version_info.rs");
 
   let hash = version_info::git_hash();
+  // Every Application-log note names the build audiodg really loaded.
+  println!("cargo:rustc-env=GAMERSEQUALIZER_GIT_HASH={hash}");
   let info = VersionInfo {
     kind: FileKind::Dll,
     description: "GamersEqualizer audio effects",

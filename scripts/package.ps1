@@ -14,7 +14,7 @@
   4. Reads the real rustc command lines from the verbose log and fails unless the exe and the
      DLL were linked with exactly those flags (and without the debug-capture feature).
   5. Checks both binaries were written by this build and import no VCRUNTIME140.dll.
-  6. Stages gamersequalizer.exe + gamersequalizer_apo.dll + CTI-ME.txt + apo-diagnose.ps1 and zips them under a new,
+  6. Stages gamersequalizer.exe + gamersequalizer_apo.dll + CTI-ME.txt and zips them under a new,
      time-stamped name. Next to the ZIP: <name>.build.log (full cargo output) and
      <name>.build.txt (toolchain, commit, flags, SHA256 of each file).
      Older ZIPs are never deleted or overwritten; only target\package\staging is cleared.
@@ -149,8 +149,6 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item $exe $stage
 Copy-Item $dll $stage
 Copy-Item 'packaging\CTI-ME.txt' $stage
-# Read-only check a tester runs when the effects do nothing (CTI-ME tells how).
-Copy-Item 'scripts\apo-diagnose.ps1' $stage
 
 # Fails loudly if static CRT linking (.cargo\config.toml) ever stops applying.
 foreach ($bin in 'gamersequalizer.exe', 'gamersequalizer_apo.dll') {

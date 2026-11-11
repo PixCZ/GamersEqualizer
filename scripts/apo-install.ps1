@@ -391,7 +391,7 @@ foreach ($job in $micJobs) {
   if ($result -ne 'not started') { continue }
   # Neither works (or the check cannot see it): back where it was put, the default or the user's choice.
   Write-Host "  Windows starts the mic effect neither in EFX nor in MFX: apps get the raw microphone." -ForegroundColor Red
-  Write-Host "  Putting it back in $slot. Run apo-diagnose.ps1 (next to the app) and send its output." -ForegroundColor Red
+  Write-Host "  Putting it back in $slot. Send the app log (%APPDATA%\GamersEqualizer\logs\gamersequalizer.log)." -ForegroundColor Red
   $audioStarted = Move-MicChain $job $slot
   $selfTestFailed = $true
 }

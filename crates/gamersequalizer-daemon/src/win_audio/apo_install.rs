@@ -46,6 +46,13 @@ const FX_MODE_VALUES: [(&str, &str); 3] = [
   ("MFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},6"),
   ("EFX", "{d3993a3f-99c2-4402-b5ec-a92a0367664b},7"),
 ];
+/// Endpoint name ("Microphone Array") and its device ("Realtek(R) Audio") in `Properties`.
+const ENDPOINT_NAME_VALUE: &str = "{a45c254e-df1c-4efd-8020-67d146a850e0},2";
+const DEVICE_NAME_VALUE: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6";
+/// Display names of `ALL_CLSIDS`, same order.
+const CLASS_NAMES: [&str; 3] = ["Mic Chain", "Output EQ", "Stream EQ"];
+/// `DEVICE_STATE_*` bits of an endpoint's `DeviceState` (higher bits are other flags).
+const DEVICE_STATE_MASK: u32 = 0xF;
 /// `PKEY_AudioEndpoint_Disable_SysFx`: 1 = audio enhancements off for the device.
 const DISABLE_SYSFX_VALUE: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
 const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
@@ -217,12 +224,81 @@ pub fn describe_system() -> String {
   let ubr = read_dword_value(WINDOWS_VERSION_KEY, "UBR").map_or_else(|| "?".to_string(), |v| v.to_string());
   let protected =
     read_dword_value(AUDIO_KEY, "DisableProtectedAudioDG").map_or_else(|| "-".to_string(), |v| v.to_string());
-  let dll = installed_dll().and_then(|p| file_stamp(&p)).map_or_else(|| "missing".to_string(), |(_, t)| format_time(t));
+  let installed = installed_dll();
+  let dll = installed.as_deref().and_then(file_stamp).map_or_else(|| "missing".to_string(), |(_, t)| format_time(t));
+  // Still marked as downloaded: Smart App Control / SmartScreen may refuse it.
+  let zone = installed.as_deref().map_or("-", |p| if zone_marked(p) { "yes" } else { "no" });
   format!(
-    "Windows {} build {}.{ubr}; DisableProtectedAudioDG {protected}; installed APO DLL {dll}",
+    "Windows {} build {}.{ubr}; DisableProtectedAudioDG {protected}; installed APO DLL {dll}, internet zone mark {zone}; \
+     COM: {}",
     text("DisplayVersion"),
-    text("CurrentBuild")
+    text("CurrentBuild"),
+    describe_registration(installed.as_deref())
   )
+}
+
+/// Every endpoint (also unplugged) whose effect lists hold our classes, with the slot(s):
+/// a second sound card or an old headset shows up here.
+pub fn describe_installed() -> String {
+  let mut parts = Vec::new();
+  for flow in [Flow::Capture, Flow::Render] {
+    for guid in hklm_subkeys(&endpoints_root(flow)) {
+      let endpoint = format!("{}\\{guid}", endpoints_root(flow));
+      let fx = format!("{endpoint}\\FxProperties");
+      let slots: Vec<&str> = ["SFX", "MFX", "EFX"]
+        .into_iter()
+        .zip(FX_LIST_VALUES)
+        .filter(|(_, value)| {
+          read_string_value(&fx, value)
+            .map(|list| list.to_ascii_lowercase())
+            .is_some_and(|list| flow.clsids().iter().any(|clsid| list.contains(clsid)))
+        })
+        .map(|(slot, _)| slot)
+        .collect();
+      if slots.is_empty() {
+        continue;
+      }
+      let state = match read_dword_value(&endpoint, "DeviceState").map(|v| v & DEVICE_STATE_MASK) {
+        Some(1) => "active".to_string(),
+        Some(2) => "disabled".to_string(),
+        Some(4) => "not present".to_string(),
+        Some(8) => "unplugged".to_string(),
+        Some(v) => format!("state {v}"),
+        None => "state ?".to_string(),
+      };
+      let props = format!("{endpoint}\\Properties");
+      let name = |value| read_string_value(&props, value).map(|n| one_line(&n)).unwrap_or_default();
+      let (endpoint_name, device) = (name(ENDPOINT_NAME_VALUE), name(DEVICE_NAME_VALUE));
+      parts.push(format!("{} {guid} \"{endpoint_name} ({device})\" {state}: {}", flow.as_str(), slots.join("+")));
+    }
+  }
+  if parts.is_empty() {
+    return "our effects are on no device".to_string();
+  }
+  format!("our effects are on: {}", parts.join("; "))
+}
+
+/// "Mic Chain ok, Output EQ ok, Stream EQ points to C:\old\x.dll": audiodg creates a class only
+/// when it points at the installed DLL and is registered as an APO.
+fn describe_registration(dll: Option<&Path>) -> String {
+  let dll = dll.map(|d| d.to_string_lossy().to_ascii_lowercase());
+  let states = ALL_CLSIDS.iter().zip(CLASS_NAMES).map(|(clsid, name)| {
+    let server = read_string_value(&format!("SOFTWARE\\Classes\\CLSID\\{clsid}\\InprocServer32"), "");
+    let apo = hklm_key_exists(&format!("SOFTWARE\\Classes\\AudioEngine\\AudioProcessingObjects\\{clsid}"));
+    let state = match server.map(|s| s.trim().to_string()) {
+      None => "not registered".to_string(),
+      Some(path) if dll.as_deref() != Some(path.to_ascii_lowercase().as_str()) => format!("points to {path}"),
+      Some(_) if !apo => "no APO entry".to_string(),
+      Some(_) => "ok".to_string(),
+    };
+    format!("{name} {state}")
+  });
+  states.collect::<Vec<_>>().join(", ")
+}
+
+/// The `Zone.Identifier` stream Windows adds to downloaded files.
+fn zone_marked(path: &Path) -> bool {
+  std::fs::metadata(format!("{}:Zone.Identifier", path.display())).is_ok()
 }
 
 /// A REG_MULTI_SZ read by `read_string_value` on one line: "a | b".

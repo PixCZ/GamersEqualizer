@@ -1,8 +1,9 @@
 //! Notes from inside audiodg to the Windows Application log (source `GamersEqualizer`): each
 //! step Windows takes towards a running effect (class, instance, init, formats, stream) and why
 //! it passes audio through unchanged. audiodg has no logger, and from outside an APO that
-//! silently passes audio through looks exactly like one Windows never loaded.
-//! `scripts/apo-diagnose.ps1` reads them.
+//! silently passes audio through looks exactly like one Windows never loaded. The service
+//! copies them into the app log (`[ApoNote]`, `gamersequalizer-daemon/src/apo_notes.rs`); each
+//! names the process and the DLL build, which proves which build audiodg loaded.
 //!
 //! Each distinct note once per process run (a mic opened a hundred times adds one entry), at
 //! most `MAX_NOTES`. Never call this from the real-time path: it locks and makes system calls.
@@ -47,7 +48,8 @@ fn write(level: Level, text: &str) {
   // Normally audiodg.exe; Sound settings also create effects, only to list them.
   let process = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
   let process = process.unwrap_or_else(|| "?".to_string());
-  let text = HSTRING::from(format!("{process} pid {}: {text}", std::process::id()));
+  let build = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GAMERSEQUALIZER_GIT_HASH"), ")");
+  let text = HSTRING::from(format!("{process} pid {}, build {build}: {text}", std::process::id()));
   // SAFETY: NUL-terminated strings that outlive the calls; the handle is closed below.
   unsafe {
     let Ok(source) = RegisterEventSourceW(PCWSTR::null(), w!("GamersEqualizer")) else {
