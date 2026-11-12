@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
-use gamersequalizer_common::sidetone::{device_hash, SidetonePairs, SidetoneSettings};
+use gamersequalizer_common::sidetone::{device_hash, SidetonePairs};
 use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::Audio::{
@@ -16,12 +16,10 @@ use windows::Win32::Media::Audio::{
   MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_ENGINE_PERIODICITY_LOCKED, AUDCLNT_SHAREMODE_SHARED,
   WAVEFORMATEX,
 };
-use windows::Win32::System::Com::{
-  CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
 
-use crate::output_eq::settings::write_atomic;
 use super::loopback;
+use crate::output_eq::settings::write_atomic;
 
 // ---------------------------------------------------------------------------------------
 // Constants
@@ -74,11 +72,7 @@ pub fn save(pairs: SidetonePairs) {
   store.pairs = pairs;
   store.version = store.version.wrapping_add(1);
   let Some(path) = store.path.clone() else { return };
-  let saved = store
-    .pairs
-    .to_json()
-    .map_err(std::io::Error::other)
-    .and_then(|text| write_atomic(&path, &text));
+  let saved = store.pairs.to_json().map_err(std::io::Error::other).and_then(|text| write_atomic(&path, &text));
   match saved {
     Ok(()) => store.modified = modified(&path),
     Err(e) => log::error!("[Sidetone] saving {} failed: {e}", path.display()),
@@ -158,7 +152,9 @@ impl Drop for CaptureStream {
   fn drop(&mut self) {
     let _ = unsafe { self.client.Stop() };
     if !self.format.is_null() {
-      unsafe { CoTaskMemFree(Some(self.format as *const std::ffi::c_void)); }
+      unsafe {
+        CoTaskMemFree(Some(self.format as *const std::ffi::c_void));
+      }
     }
   }
 }
@@ -176,7 +172,9 @@ impl Drop for RenderStream {
   fn drop(&mut self) {
     let _ = unsafe { self.client.Stop() };
     if !self.format.is_null() {
-      unsafe { CoTaskMemFree(Some(self.format as *const std::ffi::c_void)); }
+      unsafe {
+        CoTaskMemFree(Some(self.format as *const std::ffi::c_void));
+      }
     }
   }
 }
@@ -224,13 +222,7 @@ unsafe fn open_capture(id: &str, low_latency: bool) -> windows::core::Result<Cap
   }
   let capture: IAudioCaptureClient = client.GetService()?;
   client.Start()?;
-  Ok(CaptureStream {
-    device_id: id.to_string(),
-    client,
-    capture,
-    low_latency: used_low_latency,
-    format,
-  })
+  Ok(CaptureStream { device_id: id.to_string(), client, capture, low_latency: used_low_latency, format })
 }
 
 unsafe fn open_render(id: &str, low_latency: bool) -> windows::core::Result<RenderStream> {
@@ -271,14 +263,7 @@ unsafe fn open_render(id: &str, low_latency: bool) -> windows::core::Result<Rend
   let render: IAudioRenderClient = client.GetService()?;
   let buffer_frames = client.GetBufferSize()?;
   client.Start()?;
-  Ok(RenderStream {
-    device_id: id.to_string(),
-    client,
-    render,
-    buffer_frames,
-    low_latency: used_low_latency,
-    format,
-  })
+  Ok(RenderStream { device_id: id.to_string(), client, render, buffer_frames, low_latency: used_low_latency, format })
 }
 
 struct WorkerState {
@@ -315,11 +300,11 @@ impl WorkerState {
     let h = &self.shm.layout().header;
     let r = Ordering::Relaxed;
 
-    // 1. Dvojice
+    // 1. The pair
     let mic_id = h.get_selected_mic_id().or_else(loopback::resolve_default_capture_id);
     let out_id = loopback::resolve_render_id(None);
 
-    // 2. Nastavení
+    // 2. Its settings
     let (current_pairs, version) = pairs();
     let changed = mic_id != self.last_mic_id || out_id != self.last_out_id || version != self.last_version;
     if changed {
@@ -327,10 +312,11 @@ impl WorkerState {
       self.last_out_id = out_id.clone();
       self.last_version = version;
 
-      let settings = match (&mic_id, &out_id) {
-        (Some(m), Some(o)) => current_pairs.find(m, o).map(|p| p.settings()).unwrap_or_default(),
-        _ => SidetoneSettings::default(),
+      let pair = match (&mic_id, &out_id) {
+        (Some(m), Some(o)) => current_pairs.find(m, o),
+        _ => None,
       };
+      let settings = pair.map(|p| p.settings()).unwrap_or_default();
 
       if settings.enabled {
         let m_hash = mic_id.as_deref().map(device_hash).unwrap_or(0);
@@ -341,20 +327,25 @@ impl WorkerState {
         h.sidetone_mic_hash.store(0, r);
         h.sidetone_output_hash.store(0, r);
       }
+      // Before the settings (`enabled` goes last there): a pair never starts with another's EQ.
+      let bands = pair.map_or(&[][..], |p| p.bands.as_slice());
+      h.write_sidetone_eq(bands);
       h.write_sidetone(&settings);
       log::info!(
-        "[Sidetone] pair {} -> {}: {}",
+        "[Sidetone] pair {} -> {}: {}, volume {:.0} % of the leveled voice, {} EQ bands",
         mic_id.as_deref().unwrap_or("none"),
         out_id.as_deref().unwrap_or("none"),
-        if settings.enabled { "on" } else { "off" }
+        if settings.enabled { "on" } else { "off" },
+        settings.volume * 100.0,
+        bands.len()
       );
     }
 
-    // 3. Tepy
+    // 3. Beats
     let testing = self.test_watch.update(h.sidetone_test_beat.load(r), BEAT_FRESH);
     let feeding = self.writer_watch.update(h.sidetone_writer_beat.load(r), BEAT_FRESH);
 
-    // 4. Co držet otevřené
+    // 4. What to keep open
     let sidetone_settings = h.read_sidetone();
     let enabled = sidetone_settings.enabled;
     let low_latency = h.sidetone_low_latency.load(r);
@@ -362,7 +353,7 @@ impl WorkerState {
     let should_keep_render = enabled && (testing || feeding);
     let should_keep_capture = enabled && (testing || (low_latency && crate::mic_usage::microphone_in_use()));
 
-    // 5. Srovnat skutečnost
+    // 5. Make it so
     // Render stream
     if let Some(stream) = self.render_stream.as_ref() {
       let wanted_id = out_id.as_deref().unwrap_or_default();

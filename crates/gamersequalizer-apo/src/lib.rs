@@ -235,10 +235,12 @@ struct MicProcessor {
   timing: CallTiming,
 }
 
-/// Sidetone tap of the mic APO: raw input -> cuts -> noise suppression -> level -> ring.
+/// Sidetone tap of the mic APO: raw input -> EQ -> noise suppression -> level -> ring.
 /// Independent of the mic chain: it runs when the chain failed and only reads the buffer.
 struct SidetoneTap {
   chain: Box<SidetoneChain>,
+  /// `sidetone_eq_version` the chain's EQ was built from.
+  eq_version: Option<u32>,
   /// Frame-based suppressors (48 kHz only); None at another rate: the expander stands in.
   denoiser: Option<Box<SidetoneDenoiser>>,
   rate: u32,
@@ -1033,7 +1035,10 @@ impl MicProcessor {
     }
     // Sidetone first, from the untouched input; it has its own failure flag.
     if let Some(layout) = self.plugin.shm_layout() {
-      self.sidetone.process(layout, buf, channels, qpc_hns);
+      // This chain's own leveler, not the shared memory: every mic APO instance publishes there.
+      // A failed chain no longer levels, so the sidetone goes back to the raw microphone.
+      let leveler_gain_db = if self.failed { 0.0 } else { self.plugin.leveler_gain_db() };
+      self.sidetone.process(layout, buf, channels, qpc_hns, leveler_gain_db);
     }
     if self.failed {
       return;
@@ -1106,6 +1111,7 @@ impl SidetoneTap {
   fn new(rate: u32) -> Self {
     Self {
       chain: Box::new(SidetoneChain::new(rate as f32)),
+      eq_version: None,
       denoiser: (rate == sidetone_denoise::SAMPLE_RATE).then(|| Box::new(SidetoneDenoiser::new())),
       rate,
       endpoint_hash: 0,
@@ -1121,17 +1127,25 @@ impl SidetoneTap {
   }
 
   /// `buf`: the interleaved raw input of this block. Never changed.
-  fn process(&mut self, layout: &ShmLayout, buf: &[f32], channels: usize, qpc_hns: Option<u64>) {
+  fn process(&mut self, layout: &ShmLayout, buf: &[f32], channels: usize, qpc_hns: Option<u64>, leveler_gain_db: f32) {
     if self.failed || channels == 0 {
       return;
     }
-    if catch_unwind(AssertUnwindSafe(|| self.process_inner(layout, buf, channels, qpc_hns))).is_err() {
+    let inner = || self.process_inner(layout, buf, channels, qpc_hns, leveler_gain_db);
+    if catch_unwind(AssertUnwindSafe(inner)).is_err() {
       self.failed = true;
       self.release(layout);
     }
   }
 
-  fn process_inner(&mut self, layout: &ShmLayout, buf: &[f32], channels: usize, qpc_hns: Option<u64>) {
+  fn process_inner(
+    &mut self,
+    layout: &ShmLayout,
+    buf: &[f32],
+    channels: usize,
+    qpc_hns: Option<u64>,
+    leveler_gain_db: f32,
+  ) {
     let h = &layout.header;
     let r = Ordering::Relaxed;
     let pair_hash = h.sidetone_mic_hash.load(r);
@@ -1145,7 +1159,12 @@ impl SidetoneTap {
     let ours = pair_hash != 0 && (self.endpoint_hash == pair_hash || self.endpoint_hash == 0);
     let mut settings = h.read_sidetone();
     settings.enabled &= ours && self.watch.live(h, Instant::now()) && !h.master_bypass.load(r);
-    self.chain.configure(&settings, h.mic_input_gain_db_x10.load(r) as f32 / 10.0, h.mic_muted.load(r));
+    self.chain.configure(&settings, leveler_gain_db, h.mic_muted.load(r));
+    let eq_version = h.sidetone_eq_version.load(Ordering::Acquire);
+    if self.eq_version != Some(eq_version) {
+      self.eq_version = Some(eq_version);
+      self.chain.set_eq(&h.read_sidetone_eq());
+    }
     if self.chain.is_silent() {
       // Off, muted or not our pair: give the ring up (a clean stop for the reader), and tell
       // the suppressors about the pause, so nothing from before it is played afterwards.
@@ -1177,7 +1196,7 @@ impl SidetoneTap {
     for (dst, frame) in mono.iter_mut().zip(buf.chunks_exact(channels)) {
       *dst = frame.first().copied().unwrap_or(0.0);
     }
-    self.chain.run_cuts(mono);
+    self.chain.run_eq(mono);
     let wanted = self.chain.noise_mode();
     let mut active = if wanted == NoiseMode::Off { NoiseMode::Off } else { NoiseMode::Expander };
     if let Some(denoiser) = self.denoiser.as_mut() {
@@ -1876,13 +1895,7 @@ mod tests {
     let control = SharedMemoryClient::open_existing(&name).unwrap();
     let layout = control.layout();
     let h = &layout.header;
-    h.write_sidetone(&SidetoneSettings {
-      enabled: true,
-      gain_db: 0.0,
-      noise_mode: NoiseMode::Off,
-      low_cut_hz: 0.0,
-      ..Default::default()
-    });
+    h.write_sidetone(&SidetoneSettings { enabled: true, noise_mode: NoiseMode::Off, ..Default::default() });
     h.sidetone_mic_hash.store(MIC, Ordering::Relaxed);
     h.sidetone_output_hash.store(OUT, Ordering::Relaxed);
 
@@ -1898,7 +1911,7 @@ mod tests {
         let mic: Vec<f32> =
           (0..480).flat_map(|i| [((k * 480 + i) as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0).sin() * 0.25; 2]).collect();
         let before = mic.clone();
-        tap.process(layout, &mic, 2, None);
+        tap.process(layout, &mic, 2, None, 0.0);
         assert_eq!(mic, before, "the tap only reads the microphone buffer");
         let mut out = vec![0.0f32; 960];
         output.process(&mut out, 2);
@@ -1911,7 +1924,7 @@ mod tests {
     };
 
     let heard = run(&mut tap, &mut output, 100);
-    assert!((heard - 0.25).abs() < 0.02, "sidetone at 0 dB: {heard}");
+    assert!((heard - 0.25).abs() < 0.02, "sidetone at 100 %, no EQ, leveler at 0 dB: {heard}");
     assert_eq!(h.sidetone_underruns.load(Ordering::Relaxed), 0);
     assert!(h.sidetone_writer_beat.load(Ordering::Relaxed) > 0 && h.sidetone_reader_beat.load(Ordering::Relaxed) > 0);
 

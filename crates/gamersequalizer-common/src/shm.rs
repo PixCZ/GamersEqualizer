@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v20";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v21";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v20";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v21";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 20;
+pub const SHM_VERSION: u32 = 21;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -69,6 +69,7 @@ pub struct ShmStreamEq {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CopiedEqVersions {
   mic: Option<u32>,
+  sidetone: Option<u32>,
   out: Option<u32>,
   streams: [Option<u32>; STREAM_EQ_BUSES],
 }
@@ -329,12 +330,14 @@ pub struct ShmHeader {
   pub sidetone_enabled: AtomicBool,
   /// `NoiseMode::to_u32`.
   pub sidetone_noise_mode: AtomicU32,
-  pub sidetone_gain_db_x10: AtomicI32,
-  /// Cut corners in Hz, 0 = off.
-  pub sidetone_low_cut_hz: AtomicU32,
-  pub sidetone_high_cut_hz: AtomicU32,
+  /// 1000 = 100 % (`SidetoneSettings::volume`).
+  pub sidetone_volume_permille: AtomicU32,
   pub sidetone_gate_margin_db_x10: AtomicI32,
   pub sidetone_gate_range_db_x10: AtomicI32,
+  /// v21: the pair's parametric EQ, published like the microphone EQ (`write_sidetone_eq`).
+  pub sidetone_eq_version: AtomicU32,
+  pub sidetone_eq_band_count: AtomicU32,
+  pub sidetone_eq_bands: [ShmEqBand; MAX_EQ_BANDS],
   /// Daemon -> APOs: `device_hash` of the pair's microphone and output, 0 = none. An APO
   /// takes part only when the hash of its own endpoint matches.
   pub sidetone_mic_hash: AtomicU32,
@@ -597,11 +600,12 @@ impl Default for ShmHeader {
       aec_echo_slope_permille: AtomicI32::new(0),
       sidetone_enabled: AtomicBool::new(false),
       sidetone_noise_mode: AtomicU32::new(0),
-      sidetone_gain_db_x10: AtomicI32::new(0),
-      sidetone_low_cut_hz: AtomicU32::new(0),
-      sidetone_high_cut_hz: AtomicU32::new(0),
+      sidetone_volume_permille: AtomicU32::new(0),
       sidetone_gate_margin_db_x10: AtomicI32::new(0),
       sidetone_gate_range_db_x10: AtomicI32::new(0),
+      sidetone_eq_version: AtomicU32::new(0),
+      sidetone_eq_band_count: AtomicU32::new(0),
+      sidetone_eq_bands: std::array::from_fn(|_| ShmEqBand::default()),
       sidetone_mic_hash: AtomicU32::new(0),
       sidetone_output_hash: AtomicU32::new(0),
       sidetone_test_beat: AtomicU32::new(0),
@@ -694,15 +698,20 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);
     self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
     self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
-    self.sidetone_enabled.store(src.sidetone_enabled.load(r), r);
+    // Sidetone: the EQ and the values first, `enabled` last (as `write_sidetone` does), so
+    // the APOs never run a fresh "on" with the previous pair's values.
+    let version = src.sidetone_eq_version.load(Ordering::Acquire);
+    if seen.sidetone != Some(version) {
+      self.write_sidetone_eq(&src.read_sidetone_eq());
+      seen.sidetone = Some(version);
+    }
     self.sidetone_noise_mode.store(src.sidetone_noise_mode.load(r), r);
-    self.sidetone_gain_db_x10.store(src.sidetone_gain_db_x10.load(r), r);
-    self.sidetone_low_cut_hz.store(src.sidetone_low_cut_hz.load(r), r);
-    self.sidetone_high_cut_hz.store(src.sidetone_high_cut_hz.load(r), r);
+    self.sidetone_volume_permille.store(src.sidetone_volume_permille.load(r), r);
     self.sidetone_gate_margin_db_x10.store(src.sidetone_gate_margin_db_x10.load(r), r);
     self.sidetone_gate_range_db_x10.store(src.sidetone_gate_range_db_x10.load(r), r);
     self.sidetone_mic_hash.store(src.sidetone_mic_hash.load(r), r);
     self.sidetone_output_hash.store(src.sidetone_output_hash.load(r), r);
+    self.sidetone_enabled.store(src.sidetone_enabled.load(r), Ordering::Release);
     // Version first, bands after: a write in between is copied now and again next time.
     let version = src.mic_eq_version.load(Ordering::Acquire);
     if seen.mic != Some(version) {
@@ -870,9 +879,7 @@ impl ShmHeader {
     let s = settings.clamped();
     let x10 = |db: f32| (db * 10.0).round() as i32;
     self.sidetone_noise_mode.store(s.noise_mode.to_u32(), r);
-    self.sidetone_gain_db_x10.store(x10(s.gain_db), r);
-    self.sidetone_low_cut_hz.store(s.low_cut_hz as u32, r);
-    self.sidetone_high_cut_hz.store(s.high_cut_hz as u32, r);
+    self.sidetone_volume_permille.store((s.volume * 1000.0).round() as u32, r);
     self.sidetone_gate_margin_db_x10.store(x10(s.gate_margin_db), r);
     self.sidetone_gate_range_db_x10.store(x10(s.gate_range_db), r);
     self.sidetone_enabled.store(s.enabled, Ordering::Release);
@@ -885,13 +892,25 @@ impl ShmHeader {
     SidetoneSettings {
       enabled: self.sidetone_enabled.load(Ordering::Acquire),
       noise_mode: NoiseMode::from_u32(self.sidetone_noise_mode.load(r)),
-      gain_db: db(&self.sidetone_gain_db_x10),
-      low_cut_hz: self.sidetone_low_cut_hz.load(r) as f32,
-      high_cut_hz: self.sidetone_high_cut_hz.load(r) as f32,
+      volume: self.sidetone_volume_permille.load(r) as f32 / 1000.0,
       gate_margin_db: db(&self.sidetone_gate_margin_db_x10),
       gate_range_db: db(&self.sidetone_gate_range_db_x10),
     }
     .clamped()
+  }
+
+  /// Publish the sidetone EQ of the current pair. The mic APO picks it up when
+  /// `sidetone_eq_version` changes.
+  pub fn write_sidetone_eq(&self, bands: &[BiquadBand]) {
+    let count = write_bands(&self.sidetone_eq_bands, bands);
+    self.sidetone_eq_band_count.store(count as u32, Ordering::Relaxed);
+    self.sidetone_eq_version.fetch_add(1, Ordering::Release);
+  }
+
+  /// Read the sidetone EQ. Bands with an unknown filter type are skipped.
+  pub fn read_sidetone_eq(&self) -> Vec<BiquadBand> {
+    let count = (self.sidetone_eq_band_count.load(Ordering::Acquire) as usize).min(MAX_EQ_BANDS);
+    read_bands(&self.sidetone_eq_bands, count)
   }
 
   /// Publish the microphone EQ. Readers pick it up when `mic_eq_version` changes.
@@ -1355,9 +1374,7 @@ mod tests {
     let wanted = SidetoneSettings {
       enabled: true,
       noise_mode: NoiseMode::RnNoise,
-      gain_db: -12.5,
-      low_cut_hz: 250.0,
-      high_cut_hz: 8_000.0,
+      volume: 1.5,
       gate_margin_db: 6.0,
       gate_range_db: 24.0,
     };
@@ -1365,9 +1382,17 @@ mod tests {
     daemon.sidetone_mic_hash.store(11, Ordering::Relaxed);
     daemon.sidetone_output_hash.store(22, Ordering::Relaxed);
     assert_eq!(daemon.read_sidetone(), wanted);
+    let bands = crate::sidetone::default_bands();
+    daemon.write_sidetone_eq(&bands);
 
-    apo.copy_controls_from(&daemon, &mut CopiedEqVersions::default());
+    let mut seen = CopiedEqVersions::default();
+    apo.copy_controls_from(&daemon, &mut seen);
     assert_eq!(apo.read_sidetone(), wanted);
+    assert_eq!(apo.read_sidetone_eq(), bands);
+    // Copied again only after the next edit: every copy makes the APO rebuild its filters.
+    let version = apo.sidetone_eq_version.load(Ordering::Relaxed);
+    apo.copy_controls_from(&daemon, &mut seen);
+    assert_eq!(apo.sidetone_eq_version.load(Ordering::Relaxed), version);
     assert_eq!(
       (apo.sidetone_mic_hash.load(Ordering::Relaxed), apo.sidetone_output_hash.load(Ordering::Relaxed)),
       (11, 22)
@@ -1384,10 +1409,10 @@ mod tests {
     assert_eq!(daemon.sidetone_age_us.load(Ordering::Relaxed), 9_000);
 
     // Garbage in the mapping (an older daemon, a torn write) stays inside the ranges.
-    apo.sidetone_gain_db_x10.store(i32::MAX, Ordering::Relaxed);
+    apo.sidetone_volume_permille.store(u32::MAX, Ordering::Relaxed);
     apo.sidetone_noise_mode.store(999, Ordering::Relaxed);
     let read = apo.read_sidetone();
-    assert_eq!((read.gain_db, read.noise_mode), (crate::sidetone::GAIN_DB_MAX, NoiseMode::Expander));
+    assert_eq!((read.volume, read.noise_mode), (crate::sidetone::VOLUME_MAX, NoiseMode::Expander));
   }
 
   #[test]

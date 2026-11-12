@@ -1,7 +1,7 @@
 //! Sidetone: the user's own voice in their headphones (sealed in-ears block it). This file
 //! holds the parts that do not depend on Windows:
 //!
-//! mic APO: raw input -> `SidetoneChain` (cuts, band expander, level) -> `SidetoneRing` (in
+//! mic APO: raw input -> `SidetoneChain` (EQ, band expander, level) -> `SidetoneRing` (in
 //! the Global mapping) -> output APO: `SidetoneReader` -> mixed in before the output limiter.
 //!
 //! Nothing here adds delay: IIR filters and per-sample gains only, no lookahead. The delay of
@@ -37,18 +37,16 @@ const STALE_CLAIMS: u32 = 32;
 const RING_GUARD: usize = 256;
 const HNS_PER_SEC: f64 = 10_000_000.0;
 
-pub const GAIN_DB_MIN: f32 = -40.0;
-pub const GAIN_DB_MAX: f32 = 24.0;
-pub const LOW_CUT_HZ_MIN: f32 = 80.0;
-pub const LOW_CUT_HZ_MAX: f32 = 400.0;
-pub const HIGH_CUT_HZ_MIN: f32 = 4_000.0;
-pub const HIGH_CUT_HZ_MAX: f32 = 12_000.0;
+/// Top of the volume setting (300 %), like the microphone's "Sensitivity".
+pub const VOLUME_MAX: f32 = 3.0;
+/// Low cut of a new pair, Hz: the lows of one's own voice already arrive through the bones.
+const DEFAULT_LOW_CUT_HZ: f32 = 200.0;
 pub const GATE_MARGIN_DB_MIN: f32 = 3.0;
 pub const GATE_MARGIN_DB_MAX: f32 = 20.0;
 pub const GATE_RANGE_DB_MAX: f32 = 40.0;
-/// The Windows mic volume is taken back out of the sidetone by at most this much, so a mic
-/// at 10 % does not get its noise boosted by 40 dB.
-const MIC_VOLUME_COMPENSATION_MAX_DB: f32 = 20.0;
+/// The voice leveler's gain is followed only this far (its own range ends at +24 dB), so
+/// garbage in the mapping cannot blast the headphones.
+const LEVELER_GAIN_LIMIT_DB: f32 = 24.0;
 /// The level moves to a new value over about this long (no zipper noise, no click on mute).
 const LEVEL_RAMP_SECONDS: f32 = 0.010;
 
@@ -124,12 +122,9 @@ pub enum NoiseMode {
 pub struct SidetoneSettings {
   pub enabled: bool,
   pub noise_mode: NoiseMode,
-  /// Sidetone level relative to the raw microphone, dB.
-  pub gain_db: f32,
-  /// High-pass corner, Hz; 0 = off.
-  pub low_cut_hz: f32,
-  /// Low-pass corner, Hz; 0 = off.
-  pub high_cut_hz: f32,
+  /// Sidetone level, 1.0 = 100 %: the voice as loud as the voice leveler makes it for the
+  /// others (the raw microphone while the leveler is off or has not learned yet).
+  pub volume: f32,
   /// A band opens this many dB above its noise floor (sensitivity).
   pub gate_margin_db: f32,
   /// A closed band is turned down by this many dB (depth).
@@ -148,11 +143,11 @@ pub struct SidetonePair {
   pub enabled: bool,
   /// `NoiseMode::to_u32`; a mode from a newer version stays as its number.
   pub noise_mode: u32,
-  pub gain_db: f32,
-  pub low_cut_hz: f32,
-  pub high_cut_hz: f32,
+  pub volume: f32,
   pub gate_margin_db: f32,
   pub gate_range_db: f32,
+  /// Parametric EQ of the sidetone, the same bands as the voice EQ (`write_sidetone_eq`).
+  pub bands: Vec<BiquadBand>,
 }
 
 /// The saved matrix (`profiles/sidetone.json`).
@@ -282,14 +277,13 @@ struct BandState {
 }
 
 /// The sidetone processing in the mic APO, in place on the raw input (first channel):
-/// `run_cuts` -> noise suppression -> `run_level`. `process` does all three with the band
-/// expander; the frame-based modes run their own suppressor between `run_cuts` and
+/// `run_eq` -> noise suppression -> `run_level`. `process` does all three with the band
+/// expander; the frame-based modes run their own suppressor between `run_eq` and
 /// `run_level`.
 #[derive(Debug, Clone)]
 pub struct SidetoneChain {
   rate: f32,
-  cuts: BiquadCascade,
-  cut_hz: (f32, f32),
+  eq: BiquadCascade,
   expander: BandExpander,
   noise_mode: NoiseMode,
   level: f32,
@@ -327,15 +321,7 @@ impl NoiseMode {
 
 impl Default for SidetoneSettings {
   fn default() -> Self {
-    Self {
-      enabled: false,
-      noise_mode: NoiseMode::Expander,
-      gain_db: 0.0,
-      low_cut_hz: 200.0,
-      high_cut_hz: 0.0,
-      gate_margin_db: 10.0,
-      gate_range_db: 18.0,
-    }
+    Self { enabled: false, noise_mode: NoiseMode::Expander, volume: 1.0, gate_margin_db: 10.0, gate_range_db: 18.0 }
   }
 }
 
@@ -344,20 +330,10 @@ impl SidetoneSettings {
   pub fn clamped(self) -> Self {
     let d = Self::default();
     let or = |v: f32, default: f32| if v.is_finite() { v } else { default };
-    let cut = |v: f32, default: f32, min: f32, max: f32| {
-      let v = or(v, default);
-      if v < 1.0 {
-        0.0
-      } else {
-        v.clamp(min, max)
-      }
-    };
     Self {
       enabled: self.enabled,
       noise_mode: self.noise_mode,
-      gain_db: or(self.gain_db, d.gain_db).clamp(GAIN_DB_MIN, GAIN_DB_MAX),
-      low_cut_hz: cut(self.low_cut_hz, d.low_cut_hz, LOW_CUT_HZ_MIN, LOW_CUT_HZ_MAX),
-      high_cut_hz: cut(self.high_cut_hz, d.high_cut_hz, HIGH_CUT_HZ_MIN, HIGH_CUT_HZ_MAX),
+      volume: or(self.volume, d.volume).clamp(0.0, VOLUME_MAX),
       gate_margin_db: or(self.gate_margin_db, d.gate_margin_db).clamp(GATE_MARGIN_DB_MIN, GATE_MARGIN_DB_MAX),
       gate_range_db: or(self.gate_range_db, d.gate_range_db).clamp(0.0, GATE_RANGE_DB_MAX),
     }
@@ -381,11 +357,10 @@ impl SidetonePair {
       output_name: output_name.to_string(),
       enabled: s.enabled,
       noise_mode: s.noise_mode.to_u32(),
-      gain_db: s.gain_db,
-      low_cut_hz: s.low_cut_hz,
-      high_cut_hz: s.high_cut_hz,
+      volume: s.volume,
       gate_margin_db: s.gate_margin_db,
       gate_range_db: s.gate_range_db,
+      bands: default_bands(),
     }
   }
 
@@ -393,9 +368,7 @@ impl SidetonePair {
     SidetoneSettings {
       enabled: self.enabled,
       noise_mode: NoiseMode::from_u32(self.noise_mode),
-      gain_db: self.gain_db,
-      low_cut_hz: self.low_cut_hz,
-      high_cut_hz: self.high_cut_hz,
+      volume: self.volume,
       gate_margin_db: self.gate_margin_db,
       gate_range_db: self.gate_range_db,
     }
@@ -407,9 +380,7 @@ impl SidetonePair {
     let s = s.clamped();
     self.enabled = s.enabled;
     self.noise_mode = s.noise_mode.to_u32();
-    self.gain_db = s.gain_db;
-    self.low_cut_hz = s.low_cut_hz;
-    self.high_cut_hz = s.high_cut_hz;
+    self.volume = s.volume;
     self.gate_margin_db = s.gate_margin_db;
     self.gate_range_db = s.gate_range_db;
   }
@@ -894,8 +865,7 @@ impl SidetoneChain {
     let rate = if sample_rate.is_finite() && sample_rate >= 8_000.0 { sample_rate } else { 48_000.0 };
     Self {
       rate,
-      cuts: BiquadCascade::default(),
-      cut_hz: (0.0, 0.0),
+      eq: BiquadCascade::default(),
       expander: BandExpander::new(rate),
       noise_mode: NoiseMode::Expander,
       level: 0.0,
@@ -904,31 +874,23 @@ impl SidetoneChain {
     }
   }
 
-  /// Takes the settings over; cheap when nothing changed. `mic_volume_gain_db` is the gain of
-  /// the Windows mic volume (`mic_input_gain_db_x10`): it is taken back out, so the sidetone
-  /// keeps its level when the volume moves. Allocates only when a cut changes (like an EQ edit
-  /// in the output APO).
-  pub fn configure(&mut self, settings: &SidetoneSettings, mic_volume_gain_db: f32, muted: bool) {
+  /// The pair's EQ (`ShmHeader::read_sidetone_eq`). Allocates: call it only when the bands
+  /// changed, like an EQ edit in the output APO.
+  pub fn set_eq(&mut self, bands: &[BiquadBand]) {
+    self.eq.set_bands(bands, self.rate);
+  }
+
+  /// Takes the settings over; cheap, no allocation. `leveler_gain_db` is the gain the voice
+  /// leveler of the same mic APO applies now (0 while it is off or still learning):
+  /// with it 100 % is the voice at the leveler's target, whatever the microphone's own gain,
+  /// and the sidetone keeps its level when the Windows mic volume moves.
+  pub fn configure(&mut self, settings: &SidetoneSettings, leveler_gain_db: f32, muted: bool) {
     let s = settings.clamped();
-    if (s.low_cut_hz, s.high_cut_hz) != self.cut_hz {
-      self.cut_hz = (s.low_cut_hz, s.high_cut_hz);
-      let cut = |filter_type: FilterType, frequency: f32| BiquadBand {
-        enabled: frequency > 0.0,
-        filter_type,
-        frequency,
-        gain_db: 0.0,
-        q: std::f32::consts::FRAC_1_SQRT_2,
-        slope_db: 12,
-      };
-      self
-        .cuts
-        .set_bands(&[cut(FilterType::HighPass, s.low_cut_hz), cut(FilterType::LowPass, s.high_cut_hz)], self.rate);
-    }
     self.expander.set(s.gate_margin_db, s.gate_range_db);
     self.noise_mode = s.noise_mode;
-    let volume_db = if mic_volume_gain_db.is_finite() { mic_volume_gain_db } else { 0.0 };
-    let compensation_db = -volume_db.clamp(-MIC_VOLUME_COMPENSATION_MAX_DB, MIC_VOLUME_COMPENSATION_MAX_DB);
-    self.level_goal = if s.enabled && !muted { 10f32.powf((s.gain_db + compensation_db) / 20.0) } else { 0.0 };
+    let leveler_db = if leveler_gain_db.is_finite() { leveler_gain_db } else { 0.0 };
+    let leveler = 10f32.powf(leveler_db.clamp(-LEVELER_GAIN_LIMIT_DB, LEVELER_GAIN_LIMIT_DB) / 20.0);
+    self.level_goal = if s.enabled && !muted { s.volume * leveler } else { 0.0 };
   }
 
   pub fn noise_mode(&self) -> NoiseMode {
@@ -955,28 +917,28 @@ impl SidetoneChain {
 
   /// Forgets filter memory and levels: for audio that does not continue the last block.
   pub fn reset(&mut self) {
-    self.cuts.reset_state();
+    self.eq.reset_state();
     self.expander.reset();
     self.level = 0.0;
   }
 
   /// The whole chain with the band expander (or without, when the mode is not the expander).
   pub fn process(&mut self, samples: &mut [f32]) {
-    self.run_cuts(samples);
+    self.run_eq(samples);
     if self.noise_mode == NoiseMode::Expander {
       self.expander.process(samples);
     }
     self.run_level(samples);
   }
 
-  /// Low and high cut. Garbage in the input (NaN, infinity) becomes silence first.
-  pub fn run_cuts(&mut self, samples: &mut [f32]) {
+  /// The pair's EQ. Garbage in the input (NaN, infinity) becomes silence first.
+  pub fn run_eq(&mut self, samples: &mut [f32]) {
     for s in samples.iter_mut() {
       if !s.is_finite() {
         *s = 0.0;
       }
     }
-    self.cuts.process(samples);
+    self.eq.process(samples);
   }
 
   /// Sidetone level, moved to its goal in small steps. The last stage: its output is finite.
@@ -990,6 +952,18 @@ impl SidetoneChain {
       *s = if y.is_finite() { y.clamp(-SAMPLE_MAX, SAMPLE_MAX) } else { 0.0 };
     }
   }
+}
+
+/// EQ of a new pair: only the low cut.
+pub fn default_bands() -> Vec<BiquadBand> {
+  vec![BiquadBand {
+    enabled: true,
+    filter_type: FilterType::HighPass,
+    frequency: DEFAULT_LOW_CUT_HZ,
+    gain_db: 0.0,
+    q: std::f32::consts::FRAC_1_SQRT_2,
+    slope_db: 12,
+  }]
 }
 
 /// Stable 32-bit fingerprint of an endpoint id (FNV-1a over the lower-cased id), never 0:
@@ -1018,21 +992,13 @@ mod tests {
 
   #[test]
   fn settings_are_clamped_and_garbage_becomes_the_default() {
-    let s = SidetoneSettings {
-      gain_db: 99.0,
-      low_cut_hz: 10.0,
-      high_cut_hz: f32::NAN,
-      gate_margin_db: -5.0,
-      gate_range_db: 500.0,
-      ..Default::default()
-    }
-    .clamped();
-    assert_eq!(s.gain_db, GAIN_DB_MAX);
-    assert_eq!(s.low_cut_hz, LOW_CUT_HZ_MIN);
-    assert_eq!(s.high_cut_hz, 0.0, "default: off");
+    let s =
+      SidetoneSettings { volume: 99.0, gate_margin_db: -5.0, gate_range_db: 500.0, ..Default::default() }.clamped();
+    assert_eq!(s.volume, VOLUME_MAX);
     assert_eq!(s.gate_margin_db, GATE_MARGIN_DB_MIN);
     assert_eq!(s.gate_range_db, GATE_RANGE_DB_MAX);
-    assert_eq!(SidetoneSettings { low_cut_hz: 0.0, ..Default::default() }.clamped().low_cut_hz, 0.0, "0 stays off");
+    assert_eq!(SidetoneSettings { volume: f32::NAN, ..Default::default() }.clamped().volume, 1.0, "default: 100 %");
+    assert_eq!(SidetoneSettings { volume: -1.0, ..Default::default() }.clamped().volume, 0.0);
   }
 
   #[test]
@@ -1047,7 +1013,8 @@ mod tests {
     let mut pairs = SidetonePairs::default();
     let mut pair = SidetonePair::new("mic-A", "out-A", "Mic", "Headphones");
     pair.enabled = true;
-    pair.gain_db = -12.5;
+    pair.volume = 0.5;
+    pair.bands.push(BiquadBand { frequency: 3_000.0, gain_db: 4.0, ..pair.bands[0].clone() });
     pairs.upsert(pair.clone());
     pairs.upsert(SidetonePair::new("mic-A", "out-B", "Mic", "Other"));
     let back = SidetonePairs::from_json(&pairs.to_json().unwrap()).unwrap();
@@ -1056,18 +1023,21 @@ mod tests {
     assert!(back.find("mic-B", "out-A").is_none());
 
     // Replacing keeps one entry per pair; removing takes only that pair.
-    pair.gain_db = -3.0;
+    pair.volume = 2.0;
     pairs.upsert(pair);
     assert_eq!(pairs.pairs.len(), 2);
-    assert_eq!(pairs.find("mic-A", "out-A").unwrap().gain_db, -3.0);
+    assert_eq!(pairs.find("mic-A", "out-A").unwrap().volume, 2.0);
     pairs.remove("mic-A", "out-B");
     assert_eq!(pairs.pairs.len(), 1);
 
-    // A file from a newer build: unknown fields ignored, missing ones defaulted, unknown mode kept.
-    let newer = r#"{"pairs":[{"mic_id":"m","output_id":"o","noise_mode":77,"future":true}],"extra":1}"#;
-    let parsed = SidetonePairs::from_json(newer).unwrap();
+    // A file from another build (newer, or the first sidetone build with `gain_db` and the
+    // cuts): unknown fields ignored, missing ones defaulted, unknown mode kept.
+    let other =
+      r#"{"pairs":[{"mic_id":"m","output_id":"o","noise_mode":77,"gain_db":24.0,"low_cut_hz":90.0}],"extra":1}"#;
+    let parsed = SidetonePairs::from_json(other).unwrap();
     let p = parsed.find("m", "o").unwrap();
-    assert_eq!((p.noise_mode, p.gain_db, p.enabled), (77, 0.0, false));
+    assert_eq!((p.noise_mode, p.volume, p.enabled), (77, 1.0, false));
+    assert_eq!(p.bands, default_bands());
     assert_eq!(p.settings().noise_mode, NoiseMode::Expander);
     assert!(SidetonePairs::from_json("{ not json").is_err());
   }
@@ -1295,13 +1265,7 @@ mod tests {
   #[test]
   fn chain_survives_garbage_and_ramps_its_level() {
     let mut chain = SidetoneChain::new(RATE as f32);
-    let on = SidetoneSettings {
-      enabled: true,
-      gain_db: 0.0,
-      noise_mode: NoiseMode::Off,
-      low_cut_hz: 0.0,
-      ..Default::default()
-    };
+    let on = SidetoneSettings { enabled: true, noise_mode: NoiseMode::Off, ..Default::default() };
     chain.configure(&on, 0.0, false);
     assert!(!chain.is_silent());
     let mut block = vec![0.5f32; 4_800];
@@ -1310,13 +1274,21 @@ mod tests {
     chain.process(&mut block);
     assert!(block.iter().all(|s| s.is_finite()));
     assert!(max_step(&block[100..]) < 0.01, "the level ramps, no jump");
-    assert!((block[4_799] - 0.5).abs() < 1e-3, "0 dB reached: {}", block[4_799]);
+    assert!((block[4_799] - 0.5).abs() < 1e-3, "100 % reached: {}", block[4_799]);
 
-    // The Windows mic volume at -6 dB is taken back out: +6 dB.
-    chain.configure(&on, -6.0, false);
-    let mut block = vec![0.25f32; 4_800];
+    // The leveler lifts a quiet voice by 12 dB: so does the sidetone, times the volume (50 %).
+    chain.configure(&SidetoneSettings { volume: 0.5, ..on }, 12.0, false);
+    let mut block = vec![0.1f32; 4_800];
     chain.process(&mut block);
-    assert!((block[4_799] - 0.25 * 10f32.powf(6.0 / 20.0)).abs() < 1e-3);
+    assert!((block[4_799] - 0.1 * 0.5 * 10f32.powf(12.0 / 20.0)).abs() < 1e-3, "{}", block[4_799]);
+
+    // Garbage instead of the leveler's gain: the limit, or no gain.
+    for (garbage, level) in [(900.0, 0.1 * 10f32.powf(LEVELER_GAIN_LIMIT_DB / 20.0)), (f32::NAN, 0.1)] {
+      chain.configure(&on, garbage, false);
+      let mut block = vec![0.1f32; 4_800];
+      chain.process(&mut block);
+      assert!((block[4_799] - level).abs() < 1e-3, "{garbage}: {}", block[4_799]);
+    }
 
     // Muted: down to exactly zero, then nothing to write.
     chain.configure(&on, 0.0, true);
@@ -1328,13 +1300,10 @@ mod tests {
   }
 
   #[test]
-  fn chain_low_cut_removes_rumble() {
+  fn chain_default_eq_removes_rumble() {
     let mut chain = SidetoneChain::new(RATE as f32);
-    chain.configure(
-      &SidetoneSettings { enabled: true, gain_db: 0.0, noise_mode: NoiseMode::Off, ..Default::default() },
-      0.0,
-      false,
-    );
+    chain.configure(&SidetoneSettings { enabled: true, noise_mode: NoiseMode::Off, ..Default::default() }, 0.0, false);
+    chain.set_eq(&default_bands());
     let tone =
       |hz: f32| (0..RATE as usize).map(|i| 0.5 * (2.0 * PI * hz * i as f32 / RATE as f32).sin()).collect::<Vec<f32>>();
     let mut gain = |hz: f32| {

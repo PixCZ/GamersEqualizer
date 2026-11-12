@@ -729,6 +729,12 @@ impl GamersEqualizerPlugin {
     h.aec_telemetry_seq.fetch_add(1, Ordering::Release);
   }
 
+  /// Gain the voice leveler applies now, dB (0 while it is off or still learning). For the
+  /// sidetone tap of the same APO.
+  pub fn leveler_gain_db(&self) -> f32 {
+    self.leveler.gain_db()
+  }
+
   pub fn shm_header(&self) -> Option<&ShmHeader> {
     self.shm_client.as_ref().map(|c| &c.layout().header)
   }

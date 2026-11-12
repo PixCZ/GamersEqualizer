@@ -129,11 +129,10 @@ Vše vzorek po vzorku, bez lookaheadu, na vzorkovací frekvenci mikrofonu (před
 
 | Stupeň                 | Výchozí                     | Proč                                                                               |
 | ---------------------- | --------------------------- | ---------------------------------------------------------------------------------- |
-| Horní propust          | 200 Hz, 12 dB/okt (80–400)  | Hloubky hlasu už dodává kost (okluze). Bez nich nevzniká hřebenový filtr a dunění. |
-| Dolní propust          | vypnuto (4–12 kHz)          | Ubere sykot a šum převodníku.                                                      |
+| EQ příposlechu         | horní propust 200 Hz        | Stejný editor pásem jako EQ hlasu. Hloubky už dodává kost (okluze), proto ořez.    |
 | Expander (měkká brána) | 4 pásma, hloubka 18 dB      | V pauzách stáhne šum. Viz níže.                                                    |
-| Hlasitost              | −20 dB (−40 až +12, po 0,5) | Plynulý náběh ~10 ms, aby posuvník nelupal.                                        |
-| Kompenzace             | −`mic_input_gain_db_x10`    | Automatika vstupní úrovně hýbe hlasitostí ve Windows; příposlech má zůstat stejný. |
+| Hlasitost              | 100 % (0–300 %)             | 100 % = hlas tak hlasitý, jak ho posílá vyrovnání hlasitosti. Náběh ~10 ms.        |
+| Vztažná úroveň         | `plugin.leveler_gain_db()`  | Zisk vyrovnání hlasu: příposlech nezávisí na zesílení mikrofonu ve Windows.        |
 
 Expander pracuje **po pásmech** (`BandExpander` v `sidetone.rs`), jak to dělají naslouchadla:
 
@@ -332,7 +331,7 @@ Otázky pro člověka:
   odchodu ze sekce do 1 s skončí (indikátor mikrofonu zhasne).
 - Dvě dvojice s různým nastavením: přepnutí zařízení použije správný záznam do 1 s.
 - Ztlumení mikrofonu příposlech ztiší bez lupnutí.
-- Hlasitost po 0,5 dB v rozsahu aspoň 40 dB, bez lupání při tažení posuvníku.
+- Hlasitost 0–300 % (100 % = úroveň vyrovnání hlasitosti hlasu), bez lupání při tažení posuvníku.
 - Šum v pauzách o ≥ 15 dB tišší než při vypnutém potlačení v režimu expander a RNNoise 0.2,
   WebRTC NS ≥ 12 dB. RNNoise (2017) až poté, co uslyší hlas (kapitola 5.1).
 - Rámcové režimy: přidaná latence změřená a ukázaná u volby; při jiné frekvenci než 48 kHz
@@ -352,7 +351,7 @@ Otázky pro člověka:
 | 1  | **Vlastní hlas v referenci AEC.** Když loopback obsahuje výstup EFX, AEC3 dostane hlas jako „hru".                                                                | Krok 4.4 návodu. Když ano: referenci plnit z Output EQ APO (před přimícháním) místo z WASAPI loopbacku.                                 |
 | 2  | Zvukovka neumí periodu pod 10 ms. Microsoft ji dokládá jen pro HDAudio; pro USB ovladače údaj není.                                                               | Krok 1 návodu. Zůstane ~25–35 ms, podle literatury rušivé. Staví se i tak (1.1), latence je vidět v UI.                                 |
 | 3  | Krátká perioda na mikrofonu přetíží řetězec.                                                                                                                      | Krok 7 návodu: na mikrofonu jen s rezervou, jinak jen na výstupu.                                                                       |
-| 4  | Zpětná vazba při netěsných sluchátkách a vysoké hlasitosti.                                                                                                       | Strop +12 dB, limiter. Detektor pískání nedělat, dokud se to nestane.                                                                   |
+| 4  | Zpětná vazba při netěsných sluchátkách a vysoké hlasitosti.                                                                                                       | Strop 300 %, limiter.  Detektor pískání nedělat, dokud se to nestane.                                                                   |
 | 5  | Exkluzivní režim přehrávání obchází engine i APO.                                                                                                                 | Příposlech v tu chvíli nehraje. Napsat do UI.                                                                                           |
 | 6  | Tichý stream daemona změní chování loopbacku (stálé tiché pakety místo žádných).                                                                                  | V kroku 8.2 návodu ověřit stav AEC „bez reference" vs „ticho" a zpoždění.                                                               |
 | 7  | Id zařízení se po přeinstalaci ovladače změní a záznam v matici osiří.                                                                                            | Uživatel dvojici zapne znovu; starý záznam smaže v seznamu. Párování podle názvu nedělat.                                               |

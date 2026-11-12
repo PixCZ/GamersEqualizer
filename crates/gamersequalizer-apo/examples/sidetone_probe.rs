@@ -2,7 +2,7 @@
 //! both devices running and prints what the two APOs report, once per second.
 //!
 //!   cargo run -p gamersequalizer-apo --example sidetone_probe -- 20              (watch only)
-//!   cargo run -p gamersequalizer-apo --example sidetone_probe -- 20 on -12 1     (on, -12 dB, noise mode 1)
+//!   cargo run -p gamersequalizer-apo --example sidetone_probe -- 20 on 100 1     (on, 100 %, noise mode 1)
 //!
 //! Noise mode: 0 off, 1 band expander, 2 WebRTC NS, 3 RNNoise, 4 RNNoise 0.2.
 //! Needs the app's background service running: it mirrors the settings into the APO mapping.
@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::SHM_NAME;
-use gamersequalizer_common::sidetone::{device_hash, NoiseMode, SidetoneSettings};
+use gamersequalizer_common::sidetone::{default_bands, device_hash, NoiseMode, SidetoneSettings};
 use gamersequalizer_mic_vst::SharedMemoryClient;
 use windows::Win32::Media::Audio::{
   eCapture, eConsole, eRender, EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator,
@@ -25,7 +25,7 @@ fn main() -> windows::core::Result<()> {
   let arg = |n: usize| std::env::args().nth(n);
   let secs: u64 = arg(1).and_then(|s| s.parse().ok()).unwrap_or(20);
   let on = arg(2).as_deref() == Some("on");
-  let gain_db: f32 = arg(3).and_then(|s| s.parse().ok()).unwrap_or(-12.0);
+  let volume = arg(3).and_then(|s| s.parse::<f32>().ok()).unwrap_or(100.0) / 100.0;
   let noise_mode = NoiseMode::from_u32(arg(4).and_then(|s| s.parse().ok()).unwrap_or(1));
   let Ok(shm) = SharedMemoryClient::open_existing(SHM_NAME) else {
     println!("the app's background service is not running ({SHM_NAME} missing)");
@@ -54,7 +54,8 @@ fn main() -> windows::core::Result<()> {
     if on {
       h.sidetone_mic_hash.store(device_hash(&mic_id), r);
       h.sidetone_output_hash.store(device_hash(&out_id), r);
-      h.write_sidetone(&SidetoneSettings { enabled: true, gain_db, noise_mode, ..Default::default() });
+      h.write_sidetone_eq(&default_bands());
+      h.write_sidetone(&SidetoneSettings { enabled: true, volume, noise_mode, ..Default::default() });
     }
     mic.Start()?;
     out.Start()?;

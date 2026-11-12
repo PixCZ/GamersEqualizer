@@ -1105,14 +1105,13 @@ V `AppState` nové pole `pub sidetone_ui: SidetoneUi` s:
 | Upozornění               | `theme::info_bar` (Info)   | stálý text, viz texty                                | -                                    |
 | Stav                     | `theme::status_line`       | viz 6.5                                              | -                                    |
 | Vyzkoušet                | tlačítko zap/vyp           | `sidetone_ui.testing`; jen když je dvojice zapnutá   | jen tep                              |
-| Hlasitost                | posuvník, krok 0,5 dB      | `GAIN_DB_MIN`..`GAIN_DB_MAX`                         | dvojice                              |
+| Hlasitost                | posuvník 0–300 %           | `volume`, 0..`VOLUME_MAX`; 100 % = zisk leveleru     | dvojice                              |
 | Úroveň                   | `theme::meter`             | `sidetone_peak_permille`                             | -                                    |
 | Potlačení šumu           | výběr z 5                  | `NoiseMode`, u každé volby zpoždění                  | dvojice                              |
 | Citlivost                | posuvník, 1 dB             | `GATE_MARGIN_DB_MIN`..`MAX`; jen pro expander        | dvojice                              |
 | Hloubka                  | posuvník, 1 dB             | 0..`GATE_RANGE_DB_MAX`; ne pro „vypnuto" a WebRTC NS | dvojice                              |
 | Útlum expanderu          | `theme::meter`             | `sidetone_gate_gain_db_x10`; jen pro expander        | -                                    |
-| Ořez hloubek             | vypínač + posuvník, 10 Hz  | 0 nebo `LOW_CUT_HZ_MIN`..`MAX`                       | dvojice                              |
-| Ořez výšek               | vypínač + posuvník, 500 Hz | 0 nebo `HIGH_CUT_HZ_MIN`..`MAX`                      | dvojice                              |
+| EQ příposlechu           | `eq_editor::band_editor`   | `bands`, nejvýš `MAX_EQ_BANDS`; `write_sidetone_eq`  | dvojice                              |
 | Nízká latence            | `theme::toggle_labeled`    | `header.sidetone_low_latency`                        | `AudioSettings.sidetone_low_latency` |
 | Latence                  | text, barva                | viz 6.5                                              | -                                    |
 | Uložené dvojice          | seznam + „Smazat"          | `mic_name → output_name`, zapnuto/vypnuto            | `pairs.remove`, `sidetone::save`     |
@@ -1185,9 +1184,7 @@ Všechny texty přes `tr` / `trf` / `tk`, anglický klíč + český překlad do
 | Sensitivity                                                                           | Citlivost                                                                          |
 | Depth                                                                                 | Hloubka                                                                            |
 | Reduction now                                                                         | Útlum teď                                                                          |
-| Tone                                                                                  | Zabarvení                                                                          |
-| Low cut                                                                               | Ořez hloubek                                                                       |
-| High cut                                                                              | Ořez výšek                                                                         |
+| Sidetone EQ                                                                           | EQ příposlechu                                                                     |
 | Low latency                                                                           | Nízká latence                                                                      |
 | Asks Windows for its shortest audio period on both devices. Uses more CPU.            | Požádá Windows o nejkratší periodu zvuku na obou zařízeních. Zatíží víc procesor.  |
 | Off for this pair.                                                                    | Pro tuto dvojici vypnuto.                                                          |
