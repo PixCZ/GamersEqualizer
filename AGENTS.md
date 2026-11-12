@@ -72,6 +72,12 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 - The installer writes nothing to its window while Windows audio is stopped (`Say` in
   `apo-install.ps1` holds those lines): a click into a console window pauses the script at its next
   output until a key is pressed, which once left a PC without sound.
+- Windows versions: the installer needs Windows 10 version 1803 or newer (composite effect lists). On an
+  older Windows it stops before anything changes; the app checks the build before it asks for admin. An
+  endpoint whose driver effects it could not keep (`Get-EndpointBlocker`) is never touched: it is skipped
+  and named, and when none is left nothing changes. Self-check of that rule:
+  `scripts/tests/apo-install.tests.ps1` (part of `-Test`, also runs under `pwsh` on macOS). Only Windows 11
+  has been tried on real hardware so far.
 - Mic effect slot: the installer puts the mic chain in EFX, then opens the mic briefly
   (`gamersequalizer.exe --probe-mic {guid}`) and moves it to MFX when Windows did not start it there
   (some notebook mic arrays). The Mic tab offers the same switch later ("Try another effect slot").

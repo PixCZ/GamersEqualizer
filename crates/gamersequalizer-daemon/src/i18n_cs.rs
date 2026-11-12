@@ -53,7 +53,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Try another effect slot (administrator)...", "Zkusit jiné zapojení efektu (správce)..."),
   ("Moves the mic effect between the two places where Windows can run it (device effects and mode effects). Some microphones run only one of them. Windows asks for permission and audio restarts for a few seconds.", "Přesune efekt mikrofonu mezi dvěma místy, kde ho Windows umí spouštět (efekty zařízení a efekty režimu). Některé mikrofony spouštějí jen jedno z nich. Windows se zeptá na povolení a zvuk se na pár sekund restartuje."),
   ("The installer did not start: {}", "Instalátor se nespustil: {}"),
-  ("The Windows effects need Windows 11. This PC runs an older Windows, so nothing was installed or changed.", "Efekty ve Windows potřebují Windows 11. Tento počítač má starší Windows, proto se nic nenainstalovalo ani nezměnilo."),
+  ("The Windows effects need Windows 10 version 1803 or newer. Nothing was installed or changed.", "Efekty ve Windows potřebují Windows 10 verze 1803 nebo novější. Nic se nenainstalovalo ani nezměnilo."),
   ("The output EQ does NOT work on this device while sound plays: you hear it unprocessed.", "EQ výstupu na tomto zařízení NEFUNGUJE, i když hraje zvuk: slyšíte ho neupravený."),
   ("Windows mic effect installed and running on this microphone (build {})", "Efekt mikrofonu ve Windows je nainstalovaný a běží na tomto mikrofonu (sestavení {})"),
   ("Windows mic effect installed on this microphone (build {}); it runs while an app uses the microphone", "Efekt mikrofonu ve Windows je nainstalovaný na tomto mikrofonu (sestavení {}); běží, když mikrofon používá nějaká aplikace"),

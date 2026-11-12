@@ -71,9 +71,10 @@ const DEVICE_STATE_MASK: u32 = 0xF;
 /// `PKEY_AudioEndpoint_Disable_SysFx`: 1 = audio enhancements off for the device.
 const DISABLE_SYSFX_VALUE: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
 const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
-/// Oldest Windows build the installer runs on (Windows 11). Must match `$MinWindowsBuild` in
-/// scripts/apo-install.ps1, which checks again before it changes anything.
-const MIN_WINDOWS_BUILD: u32 = 22000;
+/// Oldest Windows build the installer runs on: Windows 10 version 1803, the first that reads
+/// composite effect lists. Must match `$MinWindowsBuild` in scripts/apo-install.ps1, which
+/// checks again before it changes anything.
+const MIN_WINDOWS_BUILD: u32 = 17134;
 const AUDIO_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
 /// ShellExecute returns a value > 32 on success.
 const SHELL_EXECUTE_OK: isize = 32;
@@ -221,8 +222,7 @@ fn launch_installer(endpoints: &str) -> Result<(), String> {
   // An unreadable build is left to the script's own check.
   if windows_build().is_some_and(|build| build < MIN_WINDOWS_BUILD) {
     return Err(
-      tr("The Windows effects need Windows 11. This PC runs an older Windows, so nothing was installed or changed.")
-        .to_string(),
+      tr("The Windows effects need Windows 10 version 1803 or newer. Nothing was installed or changed.").to_string(),
     );
   }
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;

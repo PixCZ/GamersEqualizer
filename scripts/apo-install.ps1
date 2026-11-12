@@ -27,6 +27,9 @@
     without dropping existing OEM effects, ensures the default processing mode is registered on each
     configured slot, and appends our CLSIDs.
   - Restarts the Windows Audio service once (all audio stops for a few seconds).
+  - Needs Windows 10 version 1803 or newer (composite effect lists): an older Windows stops it before
+    anything changes. An endpoint whose driver effects would be lost (Get-EndpointBlocker) is never
+    touched: with -Endpoint it is skipped and named, and when none is left nothing changes at all.
 
   Undo: scripts\apo-uninstall.ps1.
 #>
@@ -91,12 +94,13 @@ function Say([string]$text, [string]$color) {
   else { Write-Host $text }
 }
 
-# This script writes composite effect lists only, and it has only been run on Windows 11
-# (build 22000 and newer). Stop before anything changes. Must match MIN_WINDOWS_BUILD in apo_install.rs.
-$MinWindowsBuild = 22000
+# This script writes composite effect lists only (several effects per slot); Windows reads them
+# from Windows 10 version 1803 (build 17134) on. Stop before anything changes on an older one.
+# Must match MIN_WINDOWS_BUILD in apo_install.rs.
+$MinWindowsBuild = 17134
 $WindowsBuild = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuild
 if ($WindowsBuild -lt $MinWindowsBuild) {
-  throw "Windows build $WindowsBuild is older than Windows 11 (build $MinWindowsBuild). Nothing was changed."
+  throw "Windows build $WindowsBuild is older than Windows 10 version 1803 (build $MinWindowsBuild): it cannot run several effects per slot. Nothing was changed."
 }
 
 function Stop-Audio {
@@ -141,7 +145,7 @@ $InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
 $NullGuid = '{00000000-0000-0000-0000-000000000000}'
-# Fixed Microsoft Windows SDK PKEY_FX composite (Win10/11 REG_MULTI_SZ) and legacy (REG_SZ) slots.
+# Fixed Microsoft Windows SDK PKEY_FX composite (Windows 10 1803+, REG_MULTI_SZ) and legacy (REG_SZ) slots.
 $CompositeValues = @{ SFX = "$FxGuid,13"; MFX = "$FxGuid,14"; EFX = "$FxGuid,15" }
 # Legacy SFX may also sit in the pre-Windows 8.1 pre-mix (LFX) value ,1.
 $LegacyValues = @{ SFX = @("$FxGuid,5", "$FxGuid,1"); MFX = @("$FxGuid,6"); EFX = @("$FxGuid,7") }
@@ -259,7 +263,22 @@ function Ensure-ProcessingMode($job, [string]$fxSubKey, [string]$slot) {
   }
 }
 
-# Windows 11 ignores composite lists (,13 / ,14 / ,15) when legacy REG_SZ values (,1 / ,5 / ,6 / ,7)
+# Why our effects cannot go onto an endpoint with these FxProperties values ($fx: Get-ItemProperty
+# of the key), or nothing. A driver that has only the old pre-mix / post-mix effects (LFX ,1 /
+# GFX ,2) loses them once any stream / mode / endpoint effect value exists. Migrate-LegacySlots
+# carries the LFX over; nothing carries the GFX.
+# shortcut: such an endpoint is refused, not migrated. Upgrade (GFX into the composite MFX list,
+# as Windows maps it) once a tester has such a driver to try it on.
+function Get-EndpointBlocker($fx) {
+  if (-not $fx) { return }
+  $gfx = [string]$fx."$FxGuid,2"
+  if (-not $gfx.Trim() -or $gfx -eq $NullGuid) { return }
+  $names = @($fx.PSObject.Properties.Name)
+  if (5, 6, 7, 13, 14, 15 | Where-Object { $names -contains "$FxGuid,$_" }) { return }
+  "its driver has only old-style effects, and one of them (post-mix effect $gfx) would stop working"
+}
+
+# Windows ignores composite lists (,13 / ,14 / ,15) when legacy REG_SZ values (,1 / ,5 / ,6 / ,7)
 # coexist on the same endpoint (e.g. Microsoft Audio Home Theater Effects on USB headsets/DACs).
 # Promote all non-empty legacy CLSIDs into composite lists + ensure their streaming modes + clear legacy.
 function Migrate-LegacySlots($job) {
@@ -287,6 +306,7 @@ function Migrate-LegacySlots($job) {
       }
       Set-FxValue $fxSubKey $compName ([string[]]$compList.ToArray())
       Ensure-ProcessingMode $job $fxSubKey $s
+      $job.Migrated = $true
       Say "$($job.Name) promoted legacy $($presentNames -join '/') -> $compName`: $($compList -join ' -> ')"
     }
     foreach ($legacyName in $presentNames) {
@@ -486,11 +506,16 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
   [pscustomobject]@{
     Flow = $flow; Id = $endpointId; Name = $ep.Name; Word = $word; Key = $endpointKey
     Targets = Get-Targets $flow $slot $noStreamEq
+    # Set by Migrate-LegacySlots: the driver's own effects were moved into composite lists.
+    Migrated = $false
+    # Why this endpoint must stay as it is, or nothing; the callers below never install such a job.
+    Blocker = Get-EndpointBlocker (Get-ItemProperty (Join-Path $endpointKey 'FxProperties'))
   }
 }
 
 # --- Check every endpoint first: an error leaves the system untouched ----------------------
 $jobs = @()
+$skipped = @()
 if ($Endpoint) {
   # `powershell -File ... -Endpoint a,b` (how the app starts this) passes ONE string "a,b";
   # only `-Command` or a call from PowerShell makes it an array. Split either way.
@@ -500,12 +525,20 @@ if ($Endpoint) {
     if ($specSlot -and ($flowName -ne 'Capture' -or @('EFX', 'MFX') -notcontains $specSlot)) {
       throw "Bad -Endpoint '$spec' (a slot is only Capture:{guid}:EFX or Capture:{guid}:MFX)."
     }
-    $jobs += Resolve-Job $flowName $id $specSlot $false
+    $job = Resolve-Job $flowName $id $specSlot $false
+    # The app passes every active device at once: one that cannot take the effects is left
+    # untouched and named (again at the end), the others are installed.
+    if ($job.Blocker) { $skipped += "Skipped $($job.Name): $($job.Blocker). It was not changed." }
+    else { $jobs += $job }
   }
+  if (-not $jobs) { throw "$($skipped -join ' ') Nothing was changed." }
 }
 else {
-  $jobs += Resolve-Job $Flow $EndpointId $Slot $NoStreamEq.IsPresent
+  $job = Resolve-Job $Flow $EndpointId $Slot $NoStreamEq.IsPresent
+  if ($job.Blocker) { throw "Cannot install on $($job.Name): $($job.Blocker). Nothing was changed." }
+  $jobs += $job
 }
+foreach ($line in $skipped) { Say $line Yellow }
 if (-not (Test-Path $SourceDll)) {
   throw "DLL not found: $SourceDll. Build it first: cargo build --profile apo -p gamersequalizer-apo"
 }
@@ -622,7 +655,8 @@ foreach ($job in $jobs) {
 }
 
 # --- Self-test & safe automatic rollback on open failure or audiodg crash -----------------
-$selfTestFailed = $false
+# A skipped device also keeps the window open at the end.
+$selfTestFailed = [bool]$skipped
 $ProbeTemp = Join-Path $InstallDir 'gamersequalizer-probe.exe'
 $ProbeCopy = Get-ProbeExe
 
@@ -683,6 +717,14 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   }
   if (Test-ApoNoteStarted $res2 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)') {
     Say "  Works: Windows starts the mic effect ($other)." Green
+    continue
+  }
+  # The driver's effects were moved into composite lists and ours runs in neither slot: nothing
+  # shows that Windows reads those lists on this microphone, so its effects go back as they were.
+  if ($job.Migrated) {
+    Say '  Windows starts the mic effect neither in EFX nor in MFX: undoing the changes to this microphone.' Red
+    $audioStarted = Rollback-Job $job $audioStarted
+    $selfTestFailed = $true
     continue
   }
   # Both slots opened cleanly with zero crashes, yet Windows started neither: restore target slot
@@ -746,6 +788,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
 if (Test-Path $ProbeTemp) { Remove-Item $ProbeTemp -Force -ErrorAction SilentlyContinue }
 
 Say ''
+foreach ($line in $skipped) { Say $line Yellow }
 if ($selfTestFailed) {
   Say 'Completed with warnings/rollback on one or more endpoints. Send %APPDATA%\GamersEqualizer\logs\gamersequalizer.log if needed.' Yellow
 }

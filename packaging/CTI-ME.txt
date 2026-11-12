@@ -1,6 +1,14 @@
 GamersEqualizer - testovací verze
 =================================
 
+Co potřebuješ
+-------------
+Windows 11, nebo Windows 10 verze 1803 a novější. Na Windows 10 to zatím nikdo nezkoušel:
+instalátor si nejdřív ověří, že to na tvém počítači půjde, a když ne, skončí a nic nezmění.
+Zařízení, u kterého by to nešlo bezpečně, přeskočí, nechá ho být a napíše to žlutě.
+Po instalaci sám vyzkouší, že efekty běží. Když cokoli z toho napíše červeně, pošli prosím
+log (viz níže).
+
 Spuštění
 --------
 1. ZIP rozbal do libovolné složky (třeba ve Stažených). Nespouštěj ho přímo ze ZIPu.
