@@ -2571,3 +2571,23 @@ Measured shared-mode engine periods on the default microphone and default output
 - Minimum engine period equals default period (10.00 ms); low-latency mode with shorter periods is not exposed by these drivers.
 - In shared mode, the sidetone latency budget starts with 10 ms mic engine period + 10 ms render engine period (plus ring queue margin).
 
+---
+
+## Milestone 56: Review of the release-0.2.0 code; fixes (2026-11-12)
+
+Four read-only reviews of the code that came without an AI co-author trailer (sidetone, unified EQ
+profiles + biquad SoA, installer/USB APO, signing/CI/clipboard), then fixes. Only
+`gamersequalizer-common` and the PowerShell tests ran (macOS); daemon, APO and mic-vst need a Windows build.
+
+| Area      | Fixed                                                                                                                                                                                                                                                                             |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| APO       | Init-block parsing: APOInitSystemEffects3 no longer read as v1/v2 (garbage `pDeviceCollection` in audiodg); one helper, last device                                                                                                                                               |
+| Sidetone  | Daemon worker is the only publisher of pair/hashes/`enabled`; logs each "silent because" verdict change; no reopen loop on a low-latency fallback; no per-frame alloc in the denoiser; mix-format leak; edits kept on a pair switch                                               |
+| Profiles  | "Replace" keeps `game_ids`/`is_custom`/spelling; New/Save as/Import never rebind a game; one NTFS-like name check (non-ASCII case)                                                                                                                                                |
+| Biquad    | `set_bands` without allocation; out-of-range channel in a multichannel cascade is skipped                                                                                                                                                                                         |
+| Installer | First per-endpoint snapshot on disk (`apo-backup`), uninstall restores it; uninstaller silent while audio is stopped + event log; devices in use by default, others opt-in; rolled-back devices not re-offered; notes filtered by endpoint GUID; Default mode only on empty slots |
+| Signing   | No tester certificate; end-entity 1-year cert, mandatory password, timestamp required in CI; CI signs in a step without cargo; actions pinned to SHAs                                                                                                                             |
+| Cleanup   | `verify-usb-apo.ps1` (956 lines) and the no-op GPU exports removed; clipboard errors logged                                                                                                                                                                                       |
+
+Open: install/uninstall still duplicate their registry helpers (`shortcut:` comment); an old backup restores
+old OEM effect lists after a driver update; nothing of this has run on Windows yet.

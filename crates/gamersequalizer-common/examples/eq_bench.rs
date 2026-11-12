@@ -1,5 +1,7 @@
 //! Measures the biquad cascade as the APO runs it against loop orders that give the CPU
-//! several independent dependency chains (plain Rust: no SIMD, no unsafe), plus the limiter.
+//! several independent dependency chains (the alternatives are plain Rust; the cascade itself
+//! takes its FMA path on x86 CPUs that have FMA, so its rows include that gain), plus the
+//! limiter.
 //! Prints time per 10 ms block and the largest difference from the current output.
 //!
 //!   cargo run --release -p gamersequalizer-common --example eq_bench

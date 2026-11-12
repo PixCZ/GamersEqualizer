@@ -4,19 +4,22 @@
   Removes GamersEqualizer APOs everywhere they were added.
 
 .DESCRIPTION
-  Removes our CLSIDs from every capture/render endpoint's effect lists (other effects stay
-  and original String vs MultiString registry value kinds are preserved), cleans up any
-  Default-only streaming mode values on touched endpoints where the slot now has no effects
-  left, unregisters the COM classes and APOs, deletes the config key, the installed DLL,
-  the installed app (once it has exited) and any temporary scripts in
-  %LOCALAPPDATA%\GamersEqualizer\scripts, and restarts the Windows Audio service.
-  Does not require any backup folder to run cleanly.
-  -RestoreBackup <file.json | file.reg | dir> optionally restores exact pre-install
-  FxProperties values if manual/legacy backups exist: JSON backups are restored directly via
-  .NET RegistryKey (SetValue + QueryValues); legacy .reg files attempt reg.exe import.
-  -RemoveBackups also deletes any legacy backups (%ProgramFiles%\GamersEqualizer\apo-backup,
-  and the .reg files older versions left in %ProgramData%\GamersEqualizer); the app's
-  "Uninstall from Windows" button passes it.
+  First puts back the effect settings each endpoint had before GamersEqualizer first touched it
+  (the JSON backups apo-install.ps1 keeps in %ProgramFiles%\GamersEqualizer\apo-backup: the
+  effect lists and their processing modes only, so a legacy value the installer folded into a
+  composite list comes back). Then removes our CLSIDs from every capture/render endpoint's effect
+  lists (other effects stay, String vs MultiString kinds are preserved), cleans up Default-only
+  streaming modes on endpoints without a backup where the slot has no effects left, unregisters
+  the COM classes and APOs, deletes the config key, the installed DLL, the installed app (once it
+  has exited) and any temporary scripts in %LOCALAPPDATA%\GamersEqualizer\scripts, and restarts
+  the Windows Audio service. Installs older than the backups simply have none to restore.
+  The backup folder is deleted only when every backup in it was restored.
+  -RestoreBackup <file.json | file.reg | dir> restores other manual/legacy backups in full:
+  JSON via .NET RegistryKey (SetValue + QueryValues); legacy .reg files via reg.exe import.
+  -RemoveBackups also deletes the .reg files older versions left in %ProgramData%\GamersEqualizer;
+  the app's "Uninstall from Windows" button passes it.
+  Writes nothing to its window while Windows audio is stopped (a click into the window would
+  pause it there); every line also goes to the Application log for the app's log.
 #>
 param(
   [string]$RestoreBackup,
@@ -31,13 +34,35 @@ $ErrorActionPreference = 'Stop'
 trap {
   # A trap runs before `finally`; if the user closes this window at the prompt below, the
   # `finally` that restarts audio never runs. Start it here first (no-op when it is running).
-  Start-Service Audiosrv -ErrorAction SilentlyContinue
+  Start-Service Audiosrv -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
+  $script:AudioStopped = $false
   if ($FromApp) {
-    Write-Host "`nUninstall failed: $_" -ForegroundColor Red
+    Say "`nUninstall failed: $_" Red
     Read-Host 'Press Enter to close'
     exit 1
   }
   break
+}
+
+# shortcut: the registry helpers and constants below are copies of apo-install.ps1's (Set-FxValue,
+# the restore, CLSIDs, value names, Say). Merge both into one script with an -Uninstall mode once
+# the merged script can be tried on Windows; a dot-sourced module would be a third file outside
+# the hash check in elevated_bootstrap.
+
+# As in apo-install.ps1: nothing is written to the window while Windows audio is stopped (a
+# click into it pauses the script at its next output); the lines are held until audio runs.
+$AudioStopped = $false
+$Held = New-Object System.Collections.Generic.List[string]
+
+# One line for the window and for the app's log (Application log, source GamersEqualizer; the
+# source is deleted at the end, its entries stay).
+function Say([string]$text, [string]$color) {
+  if ($text.Trim()) {
+    try { [System.Diagnostics.EventLog]::WriteEntry('GamersEqualizer', "uninstaller: $($text.Trim())") } catch { }
+  }
+  if ($script:AudioStopped) { $Held.Add($text) }
+  elseif ($color) { Write-Host $text -ForegroundColor $color }
+  else { Write-Host $text }
 }
 
 # Mic chain, output EQ and stream EQ (all in the same DLL).
@@ -53,14 +78,18 @@ $LegacyBackupRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationDa
 $MmDevices = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
 $NullGuid = '{00000000-0000-0000-0000-000000000000}'
+# Composite list, then the legacy values (as in apo-install.ps1). GFX (,2) is not a slot here.
 $SlotEffectValues = @{
   SFX = @("$FxGuid,13", "$FxGuid,5", "$FxGuid,1")
   MFX = @("$FxGuid,14", "$FxGuid,6")
-  EFX = @("$FxGuid,15", "$FxGuid,7", "$FxGuid,2")
+  EFX = @("$FxGuid,15", "$FxGuid,7")
 }
 $ModesGuid = '{d3993a3f-99c2-4402-b5ec-a92a0367664b}'
 $DefaultProcessingMode = '{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}'
 $ModeValues = @{ SFX = "$ModesGuid,5"; MFX = "$ModesGuid,6"; EFX = "$ModesGuid,7" }
+# Every value apo-install.ps1 writes: what its backups put back. Driver properties next to them
+# stay as they are now, also when a driver update changed them after the install.
+$InstallerValues = @($SlotEffectValues.Values | ForEach-Object { $_ }) + @($ModeValues.Values)
 
 function Read-FxGuids([Microsoft.Win32.RegistryKey]$regKey, [string]$valueName) {
   $raw = $regKey.GetValue($valueName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -122,7 +151,21 @@ function Remove-StagedScripts([string]$dirPath) {
   return $removed
 }
 
-function Restore-FxFromJson([string]$jsonFile) {
+# $onlyNames: restore (and delete) only these values; all of them when empty.
+# True when the text (a backup's JSON, or Get-FxText) names one of our effect CLSIDs.
+function Test-HoldsOurEffects([string]$text) {
+  @($Clsids | Where-Object { $text -match [regex]::Escape($_) }).Count -gt 0
+}
+
+# Every value of an endpoint's FxProperties as text ('' when the endpoint is gone).
+function Get-FxText([string]$flow, [string]$id) {
+  $path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
+  $props = Get-ItemProperty $path -ErrorAction SilentlyContinue
+  if (-not $props) { return '' }
+  ($props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { @($_.Value) -join ';' }) -join "`n"
+}
+
+function Restore-FxFromJson([string]$jsonFile, [string[]]$onlyNames) {
   $parsed = Get-Content $jsonFile -Raw -Encoding UTF8 | ConvertFrom-Json
   $flow = [string]$parsed.Flow
   $id = [string]$parsed.Id
@@ -131,17 +174,18 @@ function Restore-FxFromJson([string]$jsonFile) {
   }
   $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$id\FxProperties"
   if (-not (Test-Path "HKLM:\$subKey")) {
-    Write-Warning "Skipping backup for missing endpoint $flow $id ($($jsonFile | Split-Path -Leaf))"
-    return $null
+    Say "Skipping backup for missing endpoint $flow $id ($($jsonFile | Split-Path -Leaf))" Yellow
+    return $id
   }
-  $origRecords = @($parsed.Values | ForEach-Object { $_ })
+  $inScope = { param($n) -not $onlyNames -or $onlyNames -contains $n }
+  $origRecords = @($parsed.Values | ForEach-Object { $_ } | Where-Object { & $inScope ([string]$_.Name) })
   $origNames = @($origRecords | ForEach-Object { [string]$_.Name })
   $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
   $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
   if ($null -eq $key) { throw "Key not found: HKLM\$subKey" }
   try {
     foreach ($cur in @($key.GetValueNames())) {
-      if ($origNames -notcontains $cur) { $key.DeleteValue($cur, $false) }
+      if ((& $inScope $cur) -and $origNames -notcontains $cur) { $key.DeleteValue($cur, $false) }
     }
     foreach ($rec in $origRecords) {
       $kind = [Microsoft.Win32.RegistryValueKind][Enum]::Parse([Microsoft.Win32.RegistryValueKind], [string]$rec.Kind)
@@ -169,14 +213,75 @@ function Restore-FxFromJson([string]$jsonFile) {
     }
   }
   finally { $key.Dispose() }
-  Write-Host "Restored $flow $id from $($jsonFile | Split-Path -Leaf)"
+  Say "Restored $flow $id from $($jsonFile | Split-Path -Leaf)"
   $id
+}
+
+# reg.exe prints to the window; its output goes nowhere, the exit code tells.
+function Import-RegFile([string]$file) {
+  cmd.exe /c "reg.exe import `"$file`" >nul 2>&1"
+  if ($LASTEXITCODE -ne 0) {
+    Say "reg import failed ($($file | Split-Path -Leaf), exit $LASTEXITCODE): FxProperties subkey ACLs often block reg.exe import" Yellow
+  }
+  else { Say "Restored $($file | Split-Path -Leaf)" }
 }
 
 if ($RestoreBackup -and -not (Test-Path $RestoreBackup)) { throw "Backup not found: $RestoreBackup" }
 
-Stop-Service Audiosrv -Force
+$script:AudioStopped = $true
+Stop-Service Audiosrv -Force -WarningAction SilentlyContinue
+# Endpoints whose effect settings came back from a backup: their modes are the driver's own.
+$restoredIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+$backupsRestored = $true
 try {
+  # First the installer's own backups (before our CLSIDs are removed below: a backup made by an
+  # update over an older install still lists them).
+  foreach ($jf in @(Get-ChildItem -Path $BackupDir -Filter '*-FxProperties-original.json' -File -ErrorAction SilentlyContinue)) {
+    try {
+      $backup = Get-Content $jf.FullName -Raw -Encoding UTF8
+      $parsed = $backup | ConvertFrom-Json
+      if (-not (Test-HoldsOurEffects (Get-FxText ([string]$parsed.Flow) ([string]$parsed.Id)))) {
+        # None of ours there any more (a driver update or a rollback since): the endpoint's
+        # current settings are newer than the backup and are kept.
+        Say "Skipping $($jf.Name): the endpoint no longer has our effects"
+        continue
+      }
+      $rid = Restore-FxFromJson $jf.FullName $InstallerValues
+      # A backup made by an update over an older install still holds our effects and the Default
+      # mode we added: such an endpoint still gets the cleanup below.
+      if ($rid -and -not (Test-HoldsOurEffects $backup)) { $null = $restoredIds.Add($rid) }
+    }
+    catch {
+      $backupsRestored = $false
+      Say "Restoring $($jf.Name) failed: $_" Red
+    }
+  }
+
+  if ($RestoreBackup) {
+    if ((Get-Item $RestoreBackup -ErrorAction SilentlyContinue) -is [System.IO.DirectoryInfo]) {
+      $jsonFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.json' -ErrorAction SilentlyContinue)
+      if ($jsonFiles.Count -eq 0) { $jsonFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-previous.json' -ErrorAction SilentlyContinue) }
+      foreach ($jf in $jsonFiles) {
+        $rid = Restore-FxFromJson $jf.FullName
+        if ($rid) { $null = $restoredIds.Add($rid) }
+      }
+      # Fallback only for older installs that wrote .reg before JSON backups existed.
+      $regFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.reg' -ErrorAction SilentlyContinue)
+      if ($regFiles.Count -eq 0) { $regFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*.reg' -ErrorAction SilentlyContinue) }
+      foreach ($rf in $regFiles) {
+        if ($rf.Name -match '^(\{[a-f0-9-]+\})-FxProperties-' -and $restoredIds.Contains($Matches[1])) { continue }
+        Import-RegFile $rf.FullName
+      }
+    }
+    elseif ($RestoreBackup -like '*.json') {
+      $rid = Restore-FxFromJson $RestoreBackup
+      if ($rid) { $null = $restoredIds.Add($rid) }
+    }
+    else {
+      Import-RegFile $RestoreBackup
+    }
+  }
+
   foreach ($flow in 'Capture', 'Render') {
     foreach ($ep in Get-ChildItem (Join-Path $MmDevices $flow)) {
       $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$flow\$($ep.PSChildName)\FxProperties"
@@ -194,9 +299,10 @@ try {
           if ($rest.Count -eq $vals.Count) { continue }
           Set-FxValue $subKey $name ([string[]]$rest) $kind
           $removedAny = $true
-          Write-Host "Removed from $flow $($ep.PSChildName) $name"
+          Say "Removed from $flow $($ep.PSChildName) $name"
         }
-        if ($removedAny -and -not $RestoreBackup) {
+        # A manual .reg restore leaves no id behind: no cleanup then, as before.
+        if ($removedAny -and -not $RestoreBackup -and -not $restoredIds.Contains($ep.PSChildName)) {
           $slots = if ($flow -eq 'Capture') { @('MFX', 'EFX') } else { @('SFX', 'MFX', 'EFX') }
           foreach ($slot in $slots) {
             $hasEffects = $false
@@ -208,40 +314,12 @@ try {
             $modes = @(Read-FxGuids $regKey $modeName)
             if ($modes.Count -eq 1 -and $modes[0] -ieq $DefaultProcessingMode) {
               Set-FxValue $subKey $modeName @()
-              Write-Host "Removed empty $slot mode $modeName from $flow $($ep.PSChildName)"
+              Say "Removed empty $slot mode $modeName from $flow $($ep.PSChildName)"
             }
           }
         }
       }
       finally { $regKey.Dispose() }
-    }
-  }
-
-  if ($RestoreBackup) {
-    if ((Get-Item $RestoreBackup -ErrorAction SilentlyContinue) -is [System.IO.DirectoryInfo]) {
-      $restoredIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-      $jsonFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.json' -ErrorAction SilentlyContinue)
-      if ($jsonFiles.Count -eq 0) { $jsonFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-previous.json' -ErrorAction SilentlyContinue) }
-      foreach ($jf in $jsonFiles) {
-        $rid = Restore-FxFromJson $jf.FullName
-        if ($rid) { $null = $restoredIds.Add($rid) }
-      }
-      # Fallback only for older installs that wrote .reg before JSON backups existed.
-      $regFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*-FxProperties-original.reg' -ErrorAction SilentlyContinue)
-      if ($regFiles.Count -eq 0) { $regFiles = @(Get-ChildItem -Path $RestoreBackup -Filter '*.reg' -ErrorAction SilentlyContinue) }
-      foreach ($rf in $regFiles) {
-        if ($rf.Name -match '^(\{[a-f0-9-]+\})-FxProperties-' -and $restoredIds.Contains($matches[1])) { continue }
-        & reg.exe import $rf.FullName
-        if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed ($($rf.Name), exit $LASTEXITCODE) - FxProperties subkey ACLs often block reg.exe import" }
-        else { Write-Host "Restored $($rf.Name)" }
-      }
-    }
-    elseif ($RestoreBackup -like '*.json') {
-      $null = Restore-FxFromJson $RestoreBackup
-    }
-    else {
-      & reg.exe import $RestoreBackup
-      if ($LASTEXITCODE -ne 0) { Write-Warning "reg import failed (exit $LASTEXITCODE)" } else { Write-Host "Restored $RestoreBackup" }
     }
   }
 
@@ -253,11 +331,15 @@ try {
     if (Test-Path $key) { Remove-Item $key -Recurse -Force }
   }
   if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
+  # Kept when a restore failed: the driver's settings are still in it (also for -RestoreBackup).
+  if ((Test-Path $BackupDir) -and $backupsRestored) {
+    Remove-Item $BackupDir -Recurse -Force
+    Say "Removed backups in $BackupDir"
+  }
+  elseif (Test-Path $BackupDir) {
+    Say "Kept $BackupDir (a restore failed): uninstall again to retry; the backups are used again." Yellow
+  }
   if ($RemoveBackups) {
-    if (Test-Path $BackupDir) {
-      Remove-Item $BackupDir -Recurse -Force
-      Write-Host "Removed backups in $BackupDir"
-    }
     $legacy = Get-Item $LegacyBackupRoot -Force -ErrorAction SilentlyContinue
     if ($legacy -and -not ($legacy.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
       $legacyDir = Get-Item (Join-Path $LegacyBackupRoot 'apo-backup') -Force -ErrorAction SilentlyContinue
@@ -266,16 +348,17 @@ try {
         if (-not (Get-ChildItem $legacyDir.FullName -Force)) { Remove-Item $legacyDir.FullName -Force }
       }
       if (-not (Get-ChildItem $LegacyBackupRoot -Force)) { Remove-Item $LegacyBackupRoot -Force }
-      Write-Host "Removed old backups in $LegacyBackupRoot"
+      Say "Removed old backups in $LegacyBackupRoot"
     }
   }
 }
 finally {
-  Start-Service Audiosrv
+  Start-Service Audiosrv -WarningAction SilentlyContinue
+  $script:AudioStopped = $false
+  foreach ($line in $Held) { Write-Host $line }
+  $Held.Clear()
 }
 
-# The installer's notes for the app log registered this event source.
-try { [System.Diagnostics.EventLog]::DeleteEventSource('GamersEqualizer') } catch { }
 
 # The installed app started this and exits right after; its exe cannot go while it runs.
 foreach ($file in $InstalledExe, "$InstalledExe.new") {
@@ -283,7 +366,7 @@ foreach ($file in $InstalledExe, "$InstalledExe.new") {
     Remove-Item $file -Force -ErrorAction SilentlyContinue
     if (Test-Path $file) { Start-Sleep -Seconds 1 }
   }
-  if (Test-Path $file) { Write-Warning "Could not delete $file (still running?); delete it by hand." }
+  if (Test-Path $file) { Say "Could not delete $file (still running?); delete it by hand." Yellow }
 }
 if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
 
@@ -295,9 +378,11 @@ $seenScriptDirs = New-Object 'System.Collections.Generic.HashSet[string]' ([Stri
 foreach ($dir in $scriptDirs) {
   $normDir = try { [IO.Path]::GetFullPath($dir).TrimEnd('\', '/') } catch { $dir }
   if ($seenScriptDirs.Add($normDir) -and (Remove-StagedScripts $normDir)) {
-    Write-Host "Removed temporary scripts in $normDir"
+    Say "Removed temporary scripts in $normDir"
   }
 }
 
-Write-Host 'Uninstalled.'
+Say 'Uninstalled.'
+# The notes for the app log registered this event source; last, since every Say writes to it.
+try { [System.Diagnostics.EventLog]::DeleteEventSource('GamersEqualizer') } catch { }
 if ($FromApp) { Start-Sleep -Seconds 3 }

@@ -78,6 +78,13 @@ const MIN_WINDOWS_BUILD: u32 = 17134;
 const AUDIO_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
 /// ShellExecute returns a value > 32 on success.
 const SHELL_EXECUTE_OK: isize = 32;
+/// Physical devices never offered for our effects unless they are the ones in use: Bluetooth
+/// hands-free (call-quality mic of a headset that also has a stereo output) and VR headsets.
+/// Heuristic by endpoint name, like `chatmix::is_virtual_endpoint`.
+const NOT_OFFERED_NAMES: [&str; 7] =
+  ["hands-free", "hands free", "handsfree", "rift", "vive", "mixed reality", "valve index"];
+/// Marks the installer's rollback line (`Get-RollbackLine` in apo-install.ps1).
+const ROLLED_BACK_MARK: &str = "Rolled back ";
 
 /// Which endpoint kind / APO class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,24 +406,53 @@ pub fn installed_on_any(flow: Flow) -> bool {
   hklm_subkeys(&endpoints_root(flow)).iter().any(|guid| endpoint_has_any_clsid(flow, guid))
 }
 
-/// Active physical endpoints in `endpoints` that have `FxProperties` and need installation,
-/// repair (`!endpoint_has_apo`), or update (`include_all`). Returns `(guid, name)` pairs.
-pub fn targets_to_install(
-  flow: Flow,
-  endpoints: &[super::AudioEndpointInfo],
-  include_all: bool,
-) -> Vec<(String, String)> {
+/// Active physical endpoints in `endpoints` that have `FxProperties` and lack our effect (not
+/// installed, or shadowed by legacy values: `!endpoint_has_apo`). Virtual devices, Bluetooth
+/// hands-free and VR headsets are left out. Returns `(guid, name)` pairs; the setup card offers
+/// them unticked next to the devices in use.
+pub fn targets_to_install(flow: Flow, endpoints: &[super::AudioEndpointInfo]) -> Vec<(String, String)> {
   let root = endpoints_root(flow);
   let eligible: Vec<(&super::AudioEndpointInfo, String)> = endpoints
     .iter()
-    .filter(|ep| !super::chatmix::is_virtual_endpoint(&ep.name.to_lowercase()))
+    .filter(|ep| offered_for_effects(&ep.name.to_lowercase()))
     .filter_map(|ep| {
       let guid = endpoint_guid_of(&ep.id)?;
       hklm_key_exists(&format!("{root}\\{guid}\\FxProperties")).then_some((ep, guid))
     })
-    .filter(|(_, guid)| include_all || !endpoint_has_apo(flow, guid))
+    .filter(|(_, guid)| !endpoint_has_apo(flow, guid))
     .collect();
   dedup_target_guids(eligible.into_iter().map(|(ep, guid)| (guid, ep.name.clone())))
+}
+
+fn offered_for_effects(name_lowercase: &str) -> bool {
+  !super::chatmix::is_virtual_endpoint(name_lowercase) && !NOT_OFFERED_NAMES.iter().any(|n| name_lowercase.contains(n))
+}
+
+/// `Capture:{guid}` (GUID lowercased): how the installer names an endpoint in its rollback line.
+pub fn endpoint_key(flow: Flow, guid: &str) -> String {
+  format!("{}:{}", flow.as_str(), guid.to_ascii_lowercase())
+}
+
+/// The installer undid its change on an endpoint (probe failed, audiodg crashed): `(note time,
+/// endpoint_key)` from its rollback line in the notes ("time installer: ... Rolled back NAME
+/// [Capture:{guid}] ..."), else None.
+pub fn rolled_back_endpoint(note: &str) -> Option<(String, String)> {
+  let (time, text) = note.split_once(' ')?;
+  let rest = text.strip_prefix("installer: ")?.trim_start();
+  let after = rest.strip_prefix(ROLLED_BACK_MARK)?;
+  let (_, tagged) = after.rsplit_once('[')?;
+  let (inner, _) = tagged.split_once(']')?;
+  let (flow, guid) = inner.split_once(':')?;
+  let flow = match flow {
+    "Capture" => Flow::Capture,
+    "Render" => Flow::Render,
+    _ => return None,
+  };
+  let well_formed =
+    guid.starts_with('{') && guid.ends_with('}') && guid.chars().all(|c| c.is_ascii_hexdigit() || "{}-".contains(c));
+  // To the second: "...01.5Z" and "...01Z" must not compare as text with the fraction.
+  let time = time.get(..19).unwrap_or(time);
+  well_formed.then(|| (time.to_string(), endpoint_key(flow, guid)))
 }
 
 fn dedup_target_guids(items: impl IntoIterator<Item = (String, String)>) -> Vec<(String, String)> {
@@ -456,9 +492,11 @@ fn uninstall_args(script_dir: Option<&Path>) -> String {
   args
 }
 
-/// Starts the uninstall script elevated (UAC prompt): removes every APO class from every
-/// endpoint (plus Default-only streaming modes on emptied slots), the COM registration, the
-/// DLL, any legacy install backups and temporary scripts in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
+/// Starts the uninstall script elevated (UAC prompt): puts back each endpoint's effect settings
+/// from the installer's backups (`%ProgramFiles%\GamersEqualizer\apo-backup`), removes every APO
+/// class from every endpoint (plus Default-only streaming modes on emptied slots of endpoints
+/// without a backup), the COM registration, the DLL, the backups once restored, any legacy
+/// backups and temporary scripts in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
 /// Returns once launched.
 pub fn launch_uninstall() -> Result<(), String> {
   let args = uninstall_args(scripts_dir().as_deref());
@@ -949,6 +987,36 @@ mod tests {
       &[mode.clone(), None, mode],
       &[None, None, None, None],
     ));
+  }
+
+  #[test]
+  fn rollback_lines_of_the_installer_name_the_endpoint() {
+    let note = "2026-11-12T10:00:01.5Z installer: Rolled back Headset (USB Audio) [Capture:{CF0A2270-1885-4dd6-82a5-f636e9efadd5}] to its pre-install effect settings.";
+    assert_eq!(
+      rolled_back_endpoint(note),
+      Some(("2026-11-12T10:00:01.5Z".to_string(), "Capture:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}".to_string()))
+    );
+    // Brackets in the device name: the last pair is the endpoint.
+    let note = "t installer:   Rolled back Mic [Front] (X) [Render:{b45cef56-a56b-49b0-88c0-4af057026718}] to its x.";
+    let key = rolled_back_endpoint(note).map(|(_, k)| k);
+    assert_eq!(key.as_deref(), Some("Render:{b45cef56-a56b-49b0-88c0-4af057026718}"));
+    for other in [
+      "t installer: Target: Mic {cf0a2270-1885-4dd6-82a5-f636e9efadd5}: GamersEqualizer Mic Chain (EFX)",
+      "t audiodg.exe pid 1: Rolled back Mic [Capture:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}]",
+      "t installer: Rolled back Mic [Speaker:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}]",
+      "t installer: Rolled back Mic [Capture:{cf0a2270'; evil}]",
+      "",
+    ] {
+      assert_eq!(rolled_back_endpoint(other), None, "{other}");
+    }
+  }
+
+  #[test]
+  fn hands_free_vr_and_virtual_devices_are_not_offered() {
+    for name in ["headset (wh-1000xm4 hands-free ag audio)", "rift s", "nvidia broadcast", "voicemeeter input"] {
+      assert!(!offered_for_effects(name), "{name}");
+    }
+    assert!(offered_for_effects("headphones (jabra evolve2 65)"));
   }
 
   #[test]

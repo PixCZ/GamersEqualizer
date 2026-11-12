@@ -364,6 +364,27 @@ impl AppState {
     save_mic_profile(&self.storage, &self.mic_profile);
   }
 
+  /// Make `profile` the mic EQ (no unsaved edits left).
+  pub fn use_mic_profile(&mut self, profile: ParametricProfile) {
+    self.mic_profile = profile;
+    self.mic_eq_unsaved = false;
+    self.apply_mic_eq();
+  }
+
+  /// Save `profile` as one of the user's mic presets and make it the mic EQ.
+  pub fn save_mic_preset(&mut self, profile: ParametricProfile) -> std::io::Result<()> {
+    super::mic_presets::save_user_preset(&self.storage, &profile)?;
+    self.use_mic_profile(profile);
+    self.available_mic_profiles = super::mic_presets::all_mic_presets(&self.storage);
+    Ok(())
+  }
+
+  pub fn delete_mic_preset(&mut self, name: &str) -> std::io::Result<()> {
+    super::mic_presets::delete_user_preset(&self.storage, name)?;
+    self.available_mic_profiles = super::mic_presets::all_mic_presets(&self.storage);
+    Ok(())
+  }
+
   /// Remember the mic chain and mixer across restarts. Call once per frame; writes only when
   /// something changed and no slider is being dragged.
   pub fn save_audio_settings_if_changed(&mut self, dragging: bool) {

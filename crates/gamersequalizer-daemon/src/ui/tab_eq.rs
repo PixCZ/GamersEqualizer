@@ -9,7 +9,7 @@ use crate::i18n::{tk, tr, trf};
 use crate::output_eq::game_match::MatchMethod;
 use crate::sonar_importer::{import_sonar_db, SonarDbReader, DEFAULT_SONAR_DB_PATH};
 use egui::{Color32, RichText, Ui};
-use gamersequalizer_common::biquad::MAX_OUT_EQ_BANDS;
+use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::streams::StreamBus;
 use std::path::Path;
 
@@ -98,7 +98,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
         (tr("Headphone correction"), hp_curve.as_slice(), HP_COLOR, 1.2),
         (tr("Combined"), combined.as_slice(), COMBINED_COLOR, 1.4),
       ];
-      changed = band_editor(ui, "game_eq", &mut profile.bands, MAX_OUT_EQ_BANDS / 2, LAYER_COLOR, &background, height);
+      changed = band_editor(ui, "game_eq", &mut profile.bands, MAX_LAYER_EQ_BANDS, LAYER_COLOR, &background, height);
     } else {
       let curves = [
         (tr("Headphone correction"), hp_curve.as_slice(), HP_COLOR, 1.2),
@@ -414,7 +414,7 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
         (tr("Headphone correction"), hp_curve.as_slice(), HP_COLOR, 1.2),
         (tr("Combined"), combined.as_slice(), COMBINED_COLOR, 1.4),
       ];
-      changed |= band_editor(ui, "bus_eq", &mut p.bands, MAX_OUT_EQ_BANDS / 2, color, &background, height);
+      changed |= band_editor(ui, "bus_eq", &mut p.bands, MAX_LAYER_EQ_BANDS, color, &background, height);
     } else {
       let curves = [
         (tr("Headphone correction"), hp_curve.as_slice(), HP_COLOR, 1.2),

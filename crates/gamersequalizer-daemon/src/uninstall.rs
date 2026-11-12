@@ -1,10 +1,11 @@
 //! "Uninstall from Windows" (Settings): removes everything the app registered in the system.
 //!
 //! - Microphone / output effects (APO) and the installed app: elevated
-//!   `scripts/apo-uninstall.ps1` takes our classes off every audio device (and cleans up any
-//!   empty slot modes we added), unregisters them and deletes the DLL, any legacy install
-//!   backups, the app's exe in Program Files (once it exited) and any temporary scripts
-//!   staged in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
+//!   `scripts/apo-uninstall.ps1` puts back each device's effect settings from the installer's
+//!   backups, takes our classes off every audio device (and cleans up any empty slot modes we
+//!   added), unregisters them and deletes the DLL, the backups once restored, any legacy
+//!   backups, the app's exe in Program Files (once it exited) and any temporary scripts staged
+//!   in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
 //! - Start with Windows (`HKCU\...\Run`) and the notification registration (`notify.rs`).
 //! - Optionally the user's settings and profiles (`%APPDATA%\GamersEqualizer`, legacy
 //!   `%APPDATA%\OpenSonar`). This process and the background service keep files open there

@@ -93,12 +93,12 @@ fn band(filter_type: FilterType, frequency: f32, gain_db: f32, q: f32) -> Biquad
 mod tests {
   use super::super::game_match::{resolve, GameFacts};
   use super::*;
-  use gamersequalizer_common::biquad::MAX_OUT_EQ_BANDS;
+  use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 
   #[test]
   fn presets_fit_the_game_layer_and_parameter_ranges() {
     for p in builtin_game_presets() {
-      assert!(p.bands.len() <= MAX_OUT_EQ_BANDS / 2, "{}", p.name);
+      assert!(p.bands.len() <= MAX_LAYER_EQ_BANDS, "{}", p.name);
       for b in &p.bands {
         let mut clamped = b.clone();
         clamped.clamp_parameters();

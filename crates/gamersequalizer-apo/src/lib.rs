@@ -1269,11 +1269,12 @@ impl MicProcessor {
       None => "Mic chain".to_string(),
     };
     let text = format!("{label}: stream stopped after {} blocks, {} processed: {why}", self.blocks, self.processed);
-    let key = match &self.endpoint_tag {
-      Some(tag) => format!("mic stop:{tag}:{why}"),
-      None => format!("mic stop:#{}:{why}", self.instance_id),
-    };
-    event_log::note(level, &key, &text);
+    let id = self.endpoint_tag.clone().unwrap_or_else(|| format!("#{}", self.instance_id));
+    event_log::note(level, &format!("mic stop:{id}:{why}"), &text);
+    if self.sidetone.failed {
+      let text = format!("{label}: the sidetone tap failed and stayed silent until this stream stopped");
+      event_log::note(Level::Warning, &format!("sidetone failed:{id}"), &text);
+    }
   }
 
   /// In place on interleaved `buf`: first channel through the chain, result to all channels.
@@ -1563,8 +1564,9 @@ fn frames_to_hns(frames: u64, rate: u32) -> i64 {
 // Private helpers
 // ---------------------------------------------------------------------------------------
 
-/// Endpoint `{guid}` (lowercased) from `APOInitSystemEffects` / `APOInitSystemEffects2`.
-/// Reads `pAPOEndpointProperties` (`PKEY_AudioEndpoint_GUID`), falling back to `pDeviceCollection`.
+/// Endpoint `{guid}` (lowercased) from the init block. Reads `pAPOEndpointProperties`
+/// (`PKEY_AudioEndpoint_GUID`; same offset in every APOInitSystemEffects version), falling back
+/// to the device collection (`endpoint_device_id`).
 ///
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
@@ -1590,19 +1592,7 @@ unsafe fn endpoint_guid_from_init(size: u32, data: *const u8) -> Option<String> 
       }
     }
   }
-  let devices = std::ptr::addr_of!((*init).pDeviceCollection).read_unaligned();
-  if let Some(col) = devices.as_ref() {
-    if let Ok(dev) = col.Item(0) {
-      if let Ok(pwstr) = dev.GetId() {
-        let text = pwstr.to_string().ok();
-        CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
-        if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
-          return Some(guid);
-        }
-      }
-    }
-  }
-  None
+  endpoint_device_id(size, data).and_then(|id| normalize_endpoint_guid(&id))
 }
 
 fn normalize_endpoint_guid(raw: &str) -> Option<String> {
@@ -1628,21 +1618,29 @@ unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
   Some(std::ptr::addr_of!((*init).AudioProcessingMode).read_unaligned().to_u128())
 }
 
-/// `device_hash` of the endpoint the engine creates this APO for: the last device in the
-/// init block's collection (documented for APOInitSystemEffects2, and how Equalizer APO
-/// finds its endpoint). None when the block is neither APOInitSystemEffects nor
-/// APOInitSystemEffects2, which starts with the same fields.
+/// `device_hash` of the endpoint the engine creates this APO for (`endpoint_device_id`).
 ///
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn endpoint_hash(size: u32, data: *const u8) -> Option<u32> {
+  endpoint_device_id(size, data).map(|id| device_hash(&id))
+}
+
+/// Device id of the endpoint the engine creates this APO for: the last device in the init
+/// block's collection (documented for APOInitSystemEffects2, and how Equalizer APO finds its
+/// endpoint). None when the block is neither APOInitSystemEffects nor APOInitSystemEffects2:
+/// APOInitSystemEffects3 has `pDeviceCollection` at another offset, where the v1 layout would
+/// read a garbage pointer inside audiodg.
+///
+/// # Safety
+/// `data` must point to `size` readable bytes or be null (audio engine contract).
+unsafe fn endpoint_device_id(size: u32, data: *const u8) -> Option<String> {
   let (v1, v2) = (size_of::<APOInitSystemEffects>(), size_of::<APOInitSystemEffects2>());
   if data.is_null() || (size as usize) < v1 {
     return None;
   }
   let init = data as *const APOInitSystemEffects;
   let declared = addr_of!((*init).APOInit.cbSize).read_unaligned() as usize;
-  // APOInitSystemEffects3 has other fields at these offsets: only the two known layouts.
   if declared != v1 && declared != v2 {
     return None;
   }
@@ -1654,7 +1652,7 @@ unsafe fn endpoint_hash(size: u32, data: *const u8) -> Option<u32> {
   let id = device.GetId().ok()?;
   let text = id.to_string().ok();
   CoTaskMemFree(Some(id.as_ptr() as *const c_void));
-  text.map(|t| device_hash(&t))
+  text
 }
 
 fn interface_ids() -> [GUID; 4] {
@@ -2279,10 +2277,17 @@ mod tests {
       assert_eq!(endpoint_hash(0, std::ptr::null()), None);
       let short = [0u8; 8];
       assert_eq!(endpoint_hash(short.len() as u32, short.as_ptr()), None);
-      // Right size, but cbSize says another layout (e.g. APOInitSystemEffects3).
+      // Right size, but cbSize says another layout (e.g. APOInitSystemEffects3). The collection
+      // slot holds a pointer that must never be called: the guard has to stop before it.
       let mut init: APOInitSystemEffects2 = std::mem::zeroed();
       init.APOInit.cbSize = size_of::<APOInitSystemEffects2>() as u32 + 8;
-      assert_eq!(endpoint_hash(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);
+      let poison = std::ptr::dangling_mut::<c_void>();
+      addr_of_mut!(init.pDeviceCollection).cast::<*mut c_void>().write_unaligned(poison);
+      let data = &init as *const _ as *const u8;
+      let size = size_of::<APOInitSystemEffects2>() as u32;
+      assert_eq!(endpoint_hash(size, data), None);
+      assert_eq!(endpoint_guid_from_init(size, data), None, "no endpoint properties, collection refused");
+      addr_of_mut!(init.pDeviceCollection).cast::<*mut c_void>().write_unaligned(std::ptr::null_mut());
       // Known layout, no device collection.
       init.APOInit.cbSize = size_of::<APOInitSystemEffects2>() as u32;
       assert_eq!(endpoint_hash(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);

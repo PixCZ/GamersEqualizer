@@ -1,14 +1,17 @@
 <#
 .SYNOPSIS
-  Generates a self-signed Code Signing certificate for GamersEqualizer.
+  Generates a self-signed code signing certificate for our own builds.
 
 .DESCRIPTION
-  Creates a self-signed Authenticode certificate, exports:
-  1. Private key + certificate (.pfx) for signing builds (stored in secrets\ by default, git-ignored).
-  2. Public certificate (.cer) for testers to install (stored in packaging\ by default).
+  Creates a self-signed Authenticode certificate and exports it with its private key to a .pfx
+  (secrets\ by default, git-ignored) for scripts\sign-binaries.ps1 and the CI secret.
 
-  Testers who install the public .cer into their "Trusted Root Certification Authorities"
-  will not see SmartScreen warnings or Smart App Control blocks for binaries signed with this cert.
+  Not for testers: SmartScreen and Smart App Control do not accept a self-signed root, so
+  installing it on their PCs gains nothing. Testers use "More info -> Run anyway".
+
+  The certificate is limited: end entity (BasicConstraints CA=false, so it cannot issue
+  certificates), code signing EKU only, valid for 1 year. After the export its private key is
+  removed from the certificate store; the password-protected .pfx is the only copy.
 
 .PARAMETER Subject
   Certificate subject name. Default: "CN=GamersEqualizer Dev"
@@ -16,17 +19,9 @@
 .PARAMETER PfxPath
   Path for the private .pfx file. Default: "secrets\GamersEqualizer-dev.pfx"
 
-.PARAMETER CerPath
-  Path for the public .cer file. Default: "packaging\GamersEqualizer-dev.cer"
-
-.PARAMETER Password
-  Password to protect the .pfx file. Default: "GamersEqualizer"
-
-.PARAMETER ValidYears
-  Validity period in years. Default: 5
-
 .PARAMETER InstallLocal
-  Also installs the certificate into the local machine's Trusted Root store (requires admin).
+  Also trusts the certificate on this PC (LocalMachine Root + TrustedPublisher; needs admin),
+  so signatures show as valid here.
 
 .EXAMPLE
   .\scripts\create-dev-cert.ps1
@@ -35,9 +30,6 @@
 param(
   [string]$Subject = 'CN=GamersEqualizer Dev',
   [string]$PfxPath = 'secrets\GamersEqualizer-dev.pfx',
-  [string]$CerPath = 'packaging\GamersEqualizer-dev.cer',
-  [string]$Password = 'GamersEqualizer',
-  [int]$ValidYears = 5,
   [switch]$InstallLocal
 )
 
@@ -45,52 +37,48 @@ $ErrorActionPreference = 'Stop'
 $root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $root
 
-Write-Host "Creating self-signed code signing certificate: $Subject..." -ForegroundColor Cyan
-
-# Ensure output directories exist
 $pfxFull = if ([IO.Path]::IsPathRooted($PfxPath)) { $PfxPath } else { [IO.Path]::GetFullPath((Join-Path $root $PfxPath)) }
-$cerFull = if ([IO.Path]::IsPathRooted($CerPath)) { $CerPath } else { [IO.Path]::GetFullPath((Join-Path $root $CerPath)) }
-$pfxDir = [IO.Path]::GetDirectoryName($pfxFull)
-$cerDir = [IO.Path]::GetDirectoryName($cerFull)
-if (-not (Test-Path $pfxDir)) { New-Item -ItemType Directory -Force $pfxDir | Out-Null }
-if (-not (Test-Path $cerDir)) { New-Item -ItemType Directory -Force $cerDir | Out-Null }
+if (Test-Path $pfxFull) { throw "$pfxFull already exists; not overwriting it" }
 
-# Generate the certificate in CurrentUser\My
-$notAfter = (Get-Date).AddYears($ValidYears)
+# Asked, never defaulted or printed: a known password makes a copied .pfx worthless as a secret.
+$password = Read-Host -AsSecureString 'Password for the .pfx'
+$again = Read-Host -AsSecureString 'Same password again'
+$plain = [Net.NetworkCredential]::new('', $password).Password
+if (-not $plain) { throw 'An empty password is not allowed.' }
+if ($plain -ne [Net.NetworkCredential]::new('', $again).Password) { throw 'The passwords differ.' }
+$plain = $null
+
+$pfxDir = [IO.Path]::GetDirectoryName($pfxFull)
+if (-not (Test-Path $pfxDir)) { New-Item -ItemType Directory -Force $pfxDir | Out-Null }
+
+Write-Host "Creating self-signed code signing certificate: $Subject..." -ForegroundColor Cyan
 $cert = New-SelfSignedCertificate `
   -Type CodeSigningCert `
   -Subject $Subject `
   -KeyUsage DigitalSignature `
+  -TextExtension @('2.5.29.19={critical}{text}ca=0', '2.5.29.37={text}1.3.6.1.5.5.7.3.3') `
   -FriendlyName 'GamersEqualizer Code Signing' `
-  -NotAfter $notAfter `
+  -NotAfter (Get-Date).AddYears(1) `
   -CertStoreLocation 'Cert:\CurrentUser\My'
-
 if (-not $cert) { throw 'Failed to create self-signed certificate.' }
 
-Write-Host "Certificate generated:" -ForegroundColor Green
-Write-Host "  Thumbprint : $($cert.Thumbprint)"
-Write-Host "  Subject    : $($cert.Subject)"
-Write-Host "  Expires    : $($cert.NotAfter)"
-
-# Export to PFX (private key + cert)
-$securePass = ConvertTo-SecureString -String $Password -Force -AsPlainText
-Export-PfxCertificate -Cert $cert -FilePath $pfxFull -Password $securePass | Out-Null
-Write-Host "Exported private key: $pfxFull" -ForegroundColor Green
-
-# Export to CER (public cert for testers)
-Export-Certificate -Cert $cert -FilePath $cerFull | Out-Null
-Write-Host "Exported public cert: $cerFull" -ForegroundColor Green
-
-if ($InstallLocal) {
-  Write-Host "Installing to local machine Trusted Root & Trusted Publisher (requires admin)..." -ForegroundColor Cyan
-  foreach ($storeName in 'Root', 'TrustedPublisher') {
-    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($storeName, 'LocalMachine')
-    $store.Open('ReadWrite')
-    $store.Add($cert)
-    $store.Close()
+try {
+  Export-PfxCertificate -Cert $cert -FilePath $pfxFull -Password $password | Out-Null
+  Write-Host "Exported private key: $pfxFull" -ForegroundColor Green
+  if ($InstallLocal) {
+    $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new($cert.RawData)
+    foreach ($storeName in 'Root', 'TrustedPublisher') {
+      $store = [Security.Cryptography.X509Certificates.X509Store]::new($storeName, 'LocalMachine')
+      $store.Open('ReadWrite')
+      try { $store.Add($public) } finally { $store.Close() }
+    }
+    Write-Host 'Trusted on this PC (LocalMachine\Root and TrustedPublisher).' -ForegroundColor Green
   }
-  Write-Host "Installed into LocalMachine\Root and LocalMachine\TrustedPublisher." -ForegroundColor Green
+} finally {
+  # The .pfx is the only copy of the key; no exportable key stays behind in the store.
+  Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey
 }
 
-Write-Host "`nDone. To sign binaries, run:" -ForegroundColor Cyan
-Write-Host "  .\scripts\sign-binaries.ps1 -PfxPath '$PfxPath' -Password '$Password'"
+Write-Host "  Thumbprint : $($cert.Thumbprint)"
+Write-Host "  Expires    : $($cert.NotAfter)"
+Write-Host "`nTo sign (asks for the password): .\scripts\sign-binaries.ps1 -PfxPath '$PfxPath'" -ForegroundColor Cyan

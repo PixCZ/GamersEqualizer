@@ -121,7 +121,7 @@ impl BiquadBand {
     self.butterworth_qs().map_or(1, |qs| qs.len())
   }
 
-  fn butterworth_qs(&self) -> Option<&'static [f32]> {
+  pub(crate) fn butterworth_qs(&self) -> Option<&'static [f32]> {
     if !self.is_cut() {
       return None;
     }

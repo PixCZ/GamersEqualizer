@@ -175,14 +175,17 @@ pub fn run_status(state: &AppState) -> Option<&RunStatus> {
   service.then_some(&state.apo_banner.run)
 }
 
-/// Newest note from inside audiodg about `prefix` ("Mic chain", "Output EQ"; any case), shown
-/// under a "does not work" line: the reason in the APO's own words (English, diagnostic).
-pub fn newest_note<'a>(run: &'a RunStatus, prefix: &str) -> Option<&'a str> {
+/// Newest note from inside audiodg about `prefix` ("Mic chain", "Output EQ"; any case) and one
+/// endpoint (`{guid}`, None = any): a note tagged with another endpoint's GUID
+/// (effects on several devices) is not this device's reason. Untagged notes still count.
+pub fn newest_note_on<'a>(run: &'a RunStatus, prefix: &str, guid: Option<&str>) -> Option<&'a str> {
   let prefix = prefix.to_lowercase();
+  let tag = guid.map(|g| format!("[{}]", g.to_lowercase()));
   // Not the installer's own lines ("installer: Target: ... Mic Chain (EFX)"): same source.
   let about = |note: &&String| {
     let note = note.to_lowercase();
-    note.contains(&prefix) && !note.contains(" installer: ")
+    let other_device = tag.as_ref().is_some_and(|tag| note.contains("[{") && !note.contains(tag.as_str()));
+    note.contains(&prefix) && !note.contains(" installer: ") && !other_device
   };
   let notes = &run.apo_notes;
   // Sound settings also create our effects, only to list them: what audiodg did comes first.
@@ -208,7 +211,8 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
     live && state.shm_header().is_some_and(|h| h.mic_chain_flags.load(Ordering::Relaxed) & MIC_CHAIN_OTHERS != 0);
   let run = run_status(state);
   let not_running = run.is_some_and(|r| r.mic_not_running.is_some());
-  let note = run.and_then(|r| newest_note(r, "Mic chain")).map(str::to_string);
+  let guid = state.apo_banner.check.as_ref().and_then(|c| c.endpoint_guid.clone());
+  let note = run.and_then(|r| newest_note_on(r, "Mic chain", guid.as_deref())).map(str::to_string);
   let Some(check) = state.apo_banner.check.as_ref() else {
     return;
   };
@@ -391,12 +395,24 @@ mod tests {
     let settings = "2026-11-11T07:30:00Z SystemSettings.exe pid 9: GamersEqualizer Mic Chain: class requested";
     let audiodg = "2026-11-11T07:25:00Z audiodg.exe pid 6836: Mic chain: stream stopped after 0 blocks, 0 processed";
     let run = RunStatus { apo_notes: vec![settings.to_string(), audiodg.to_string()], ..Default::default() };
-    assert_eq!(newest_note(&run, "Mic chain"), Some(audiodg));
+    assert_eq!(newest_note_on(&run, "Mic chain", None), Some(audiodg));
     let run = RunStatus { apo_notes: vec![settings.to_string()], ..Default::default() };
-    assert_eq!(newest_note(&run, "mic chain"), Some(settings));
-    assert_eq!(newest_note(&run, "Output EQ"), None);
+    assert_eq!(newest_note_on(&run, "mic chain", None), Some(settings));
+    assert_eq!(newest_note_on(&run, "Output EQ", None), None);
     let installer = "2026-11-11T12:26:29Z installer: Target: Microphone Array: GamersEqualizer Mic Chain (MFX)";
     let run = RunStatus { apo_notes: vec![installer.to_string()], ..Default::default() };
-    assert_eq!(newest_note(&run, "Mic chain"), None, "what the installer printed is not a report from audiodg");
+    assert_eq!(
+      newest_note_on(&run, "Mic chain", None),
+      None,
+      "what the installer printed is not a report from audiodg"
+    );
+
+    let mine = "2026-11-11T07:20:00Z audiodg.exe pid 6: Mic chain [{aa-01}]: stream stopped after 0 blocks";
+    let other = "2026-11-11T07:21:00Z audiodg.exe pid 6: Mic chain [{bb-02}]: stream stopped after 9 blocks";
+    let run = RunStatus { apo_notes: vec![other.to_string(), mine.to_string()], ..Default::default() };
+    assert_eq!(newest_note_on(&run, "Mic chain", Some("{AA-01}")), Some(mine), "another device's note is skipped");
+    assert_eq!(newest_note_on(&run, "Mic chain", None), Some(other));
+    let run = RunStatus { apo_notes: vec![audiodg.to_string()], ..Default::default() };
+    assert_eq!(newest_note_on(&run, "Mic chain", Some("{aa-01}")), Some(audiodg), "untagged notes still count");
   }
 }

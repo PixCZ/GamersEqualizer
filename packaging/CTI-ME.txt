@@ -36,11 +36,9 @@ Když se exe vůbec nespustí
 --------------------------
 - Zapnuté "Inteligentní řízení aplikací" (Smart App Control) nepodepsané programy blokuje
   úplně. Pozor: když ho vypneš, zpátky zapnout jde jen přeinstalací Windows.
-- Pokud balíček obsahuje install-tester-cert.ps1 a GamersEqualizer-dev.cer:
-  Můžeš certifikát jednorázově nainstalovat: klikni pravým tlačítkem na
-  install-tester-cert.ps1 -> "Spustit pomocí PowerShellu" (s právy správce).
-  Tím Windows začne aplikaci považovat za důvěryhodnou a SmartScreen/Smart App Control
-  ji přestane blokovat. (Odinstalace certifikátu: .\install-tester-cert.ps1 -Uninstall).
+- Žádný certifikát kvůli tomu neinstaluj, Smart App Control ani SmartScreen ho neuznají.
+- Modré okno SmartScreen ("Systém Windows ochránil počítač") jen varuje: tam stačí
+  "Další informace" -> "Přesto spustit" (Spuštění, bod 2).
 
 Víc uživatelů na jednom PC
 --------------------------

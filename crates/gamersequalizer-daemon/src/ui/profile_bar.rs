@@ -8,8 +8,10 @@ use super::mic_presets::{self, MicPreset, NameCheck, PresetSource};
 use super::state::{AppState, OutputLayer};
 use super::theme::{self, Severity};
 use crate::i18n::{tr, trf};
+use crate::output_eq::same_profile_slot;
+use crate::output_eq::share_text::{self, SHARE_HEADER, SHARE_NAME_PREFIX};
 use crate::sonar_importer::SonarDbReader;
-use gamersequalizer_common::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS};
+use gamersequalizer_common::biquad::{MAX_EQ_BANDS, MAX_LAYER_EQ_BANDS};
 use gamersequalizer_common::profile::{BiquadBand, ParametricProfile, VadType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +24,7 @@ impl EqTarget {
   fn max_slots(self) -> usize {
     match self {
       EqTarget::Mic => MAX_EQ_BANDS,
-      EqTarget::Output(_) => MAX_OUT_EQ_BANDS / 2,
+      EqTarget::Output(_) => MAX_LAYER_EQ_BANDS,
     }
   }
 }
@@ -48,17 +50,43 @@ enum SaveMode {
   KeepOnSwitch,
 }
 
+/// The EQ a Save dialog is about to write, apart from its name.
+#[derive(Clone)]
+struct SaveDraft {
+  bands: Vec<BiquadBand>,
+  gain_db: f32,
+  preamp_db: f32,
+  /// Mic only: preset picked while the current EQ had unsaved changes.
+  switch_to: Option<ParametricProfile>,
+}
+
+impl SaveDraft {
+  fn of(p: &ParametricProfile) -> Self {
+    Self { bands: p.bands.clone(), gain_db: p.gain_db, preamp_db: p.preamp_db, switch_to: None }
+  }
+
+  fn flat(bands: Vec<BiquadBand>) -> Self {
+    Self { bands, gain_db: 0.0, preamp_db: 0.0, switch_to: None }
+  }
+
+  fn profile(&self, name: &str, vad: VadType) -> ParametricProfile {
+    let mut p = ParametricProfile::new(name, vad);
+    p.bands = self.bands.clone();
+    p.gain_db = self.gain_db;
+    p.preamp_db = self.preamp_db;
+    p
+  }
+}
+
 enum Dialog {
   Save {
     mode: SaveMode,
-    bands: Vec<BiquadBand>,
-    gain_db: f32,
-    preamp_db: f32,
-    /// Mic only: preset picked while the current EQ had unsaved changes.
-    switch_to: Option<ParametricProfile>,
+    draft: SaveDraft,
   },
   Delete {
     name: String,
+    /// Output only: mention "Import from Sonar DB" (checked once when the dialog opens).
+    sonar_hint: bool,
   },
   Import,
 }
@@ -86,22 +114,15 @@ pub fn render_mic_bar(ui: &mut Ui, state: &mut AppState) {
       .show_ui(ui, |ui| picked = mic_preset_list(ui, &state.available_mic_profiles, &current));
     if let Some(p) = picked {
       if modified {
-        open_save_dialog(
-          state,
-          EqTarget::Mic,
-          SaveMode::KeepOnSwitch,
-          suggested_mic_name(state, false),
-          state.mic_profile.bands.clone(),
-          state.mic_profile.gain_db,
-          state.mic_profile.preamp_db,
-          Some(p),
-        );
+        let draft = SaveDraft { switch_to: Some(p), ..SaveDraft::of(&state.mic_profile) };
+        let name = suggested_mic_name(state, false);
+        open_save_dialog(state, EqTarget::Mic, SaveMode::KeepOnSwitch, name, draft);
       } else {
-        select_mic(state, p);
+        state.use_mic_profile(p);
       }
     }
 
-    action_buttons(ui, state, EqTarget::Mic);
+    action_buttons(ui, state, EqTarget::Mic, modified);
   });
 
   render_notice_and_dialogs(ui, state, EqTarget::Mic);
@@ -110,7 +131,7 @@ pub fn render_mic_bar(ui: &mut Ui, state: &mut AppState) {
 /// Shared profile action buttons (`New…`, `Save as…`, `Delete`, `Copy to share`, `Import…`)
 /// for an output EQ layer, placed inside the caller's horizontal row.
 pub fn render_output_buttons(ui: &mut Ui, state: &mut AppState, layer: OutputLayer) {
-  action_buttons(ui, state, EqTarget::Output(layer));
+  action_buttons(ui, state, EqTarget::Output(layer), false);
 }
 
 /// Status notice + open modal dialogs for an output EQ layer.
@@ -118,21 +139,18 @@ pub fn render_output_notice(ui: &mut Ui, state: &mut AppState, layer: OutputLaye
   render_notice_and_dialogs(ui, state, EqTarget::Output(layer));
 }
 
-fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
-  let active = active_profile(state, target);
-  let has_profile = active.is_some();
+/// `modified`: Mic only, the current EQ differs from its preset.
+fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified: bool) {
+  let has_profile = active_profile(state, target).is_some();
 
   if ui.button(format!("➕  {}", tr("New…"))).on_hover_text(tr("Create a new flat profile.")).clicked() {
     let name = unique_name(state, target, tr("New profile"));
-    open_save_dialog(state, target, SaveMode::New, name, Vec::new(), 0.0, 0.0, None);
+    open_save_dialog(state, target, SaveMode::New, name, SaveDraft::flat(Vec::new()));
   }
 
-  let (modified, mic_source) = match target {
-    EqTarget::Mic => (
-      mic_presets::is_modified(&state.available_mic_profiles, &state.mic_profile),
-      mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name).map(|p| p.source),
-    ),
-    EqTarget::Output(_) => (false, None),
+  let mic_source = match target {
+    EqTarget::Mic => mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name).map(|p| p.source),
+    EqTarget::Output(_) => None,
   };
 
   if target == EqTarget::Mic {
@@ -143,15 +161,8 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
       .on_disabled_hover_text(tr("Only your own presets can be saved over; use \"Save as…\" for this one."))
       .clicked()
     {
-      save_mic_preset(
-        state,
-        &state.mic_profile.name.clone(),
-        state.mic_profile.bands.clone(),
-        state.mic_profile.gain_db,
-        state.mic_profile.preamp_db,
-        None,
-        false,
-      );
+      let (name, draft) = (state.mic_profile.name.clone(), SaveDraft::of(&state.mic_profile));
+      save_mic_preset(state, &name, draft, false);
     }
   }
 
@@ -161,12 +172,12 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
     .on_disabled_hover_text(tr("Select a profile first."))
     .clicked()
   {
-    if let Some(p) = active.as_ref() {
+    if let Some(p) = active_profile(state, target).cloned() {
       let suggested = match target {
         EqTarget::Mic => suggested_mic_name(state, true),
         EqTarget::Output(_) => unique_name(state, target, &trf("{} (copy)", &[&tr(&p.name)])),
       };
-      open_save_dialog(state, target, SaveMode::SaveAs, suggested, p.bands.clone(), p.gain_db, p.preamp_db, None);
+      open_save_dialog(state, target, SaveMode::SaveAs, suggested, SaveDraft::of(&p));
     }
   }
 
@@ -180,7 +191,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
   {
     if let Some(p) = mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name) {
       let p = p.profile.clone();
-      select_mic(state, p);
+      state.use_mic_profile(p);
     }
   }
 
@@ -194,8 +205,10 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
     .on_disabled_hover_text(delete_disabled_hint)
     .clicked()
   {
-    if let Some(p) = active.as_ref() {
-      state.profile_bar.dialog = Some((target, Dialog::Delete { name: p.name.clone() }));
+    if let Some(name) = active_profile(state, target).map(|p| p.name.clone()) {
+      let sonar_hint =
+        matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && SonarDbReader::default_db_exists();
+      state.profile_bar.dialog = Some((target, Dialog::Delete { name, sonar_hint }));
       state.profile_bar.notice = None;
     }
   }
@@ -208,8 +221,8 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
     .on_disabled_hover_text(tr("Select a profile first."))
     .clicked()
   {
-    if let Some(p) = active.as_ref() {
-      ui.ctx().copy_text(mic_presets::to_share_text(p));
+    if let Some(text) = active_profile(state, target).map(share_text::to_share_text) {
+      ui.ctx().copy_text(text);
       state.profile_bar.notice = Some((
         target,
         true,
@@ -244,10 +257,8 @@ fn render_notice_and_dialogs(ui: &mut Ui, state: &mut AppState, target: EqTarget
     return;
   }
   match dlg {
-    Dialog::Save { mode, bands, gain_db, preamp_db, switch_to } => {
-      save_dialog(ui.ctx(), state, target, mode, bands, gain_db, preamp_db, switch_to);
-    }
-    Dialog::Delete { name } => delete_dialog(ui.ctx(), state, target, name),
+    Dialog::Save { mode, draft } => save_dialog(ui.ctx(), state, target, mode, draft),
+    Dialog::Delete { name, sonar_hint } => delete_dialog(ui.ctx(), state, target, name, sonar_hint),
     Dialog::Import => import_dialog(ui.ctx(), state, target),
   }
 }
@@ -286,17 +297,7 @@ fn window(title: &str) -> egui::Window<'_> {
     .default_width(440.0)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn save_dialog(
-  ctx: &egui::Context,
-  state: &mut AppState,
-  target: EqTarget,
-  mode: SaveMode,
-  bands: Vec<BiquadBand>,
-  gain_db: f32,
-  preamp_db: f32,
-  switch_to: Option<ParametricProfile>,
-) {
+fn save_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget, mode: SaveMode, draft: SaveDraft) {
   let mut keep_open = true;
   let title = match mode {
     SaveMode::New => tr("New profile"),
@@ -336,7 +337,7 @@ fn save_dialog(
     }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
-      let label = match (overwrite, switch_to.is_some(), mode == SaveMode::New) {
+      let label = match (overwrite, draft.switch_to.is_some(), mode == SaveMode::New) {
         (true, true, _) => tr("Replace and switch"),
         (true, false, _) => tr("Replace"),
         (false, true, _) => tr("Save and switch"),
@@ -346,12 +347,12 @@ fn save_dialog(
       let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
       if ui.add_enabled(can, theme::accent_button(ui, label)).clicked() || (can && enter) {
         let name = state.profile_bar.name.trim().to_string();
-        commit_save(state, target, mode, &name, bands.clone(), gain_db, preamp_db, switch_to.clone());
+        commit_save(state, target, mode, &name, draft.clone());
         keep_open = false;
       }
-      if let Some(p) = switch_to.as_ref() {
+      if let Some(p) = draft.switch_to.as_ref() {
         if ui.button(tr("Switch without saving")).clicked() {
-          select_mic(state, p.clone());
+          state.use_mic_profile(p.clone());
           keep_open = false;
         }
       }
@@ -361,20 +362,20 @@ fn save_dialog(
     });
   });
   if keep_open && state.profile_bar.dialog.is_none() {
-    state.profile_bar.dialog = Some((target, Dialog::Save { mode, bands, gain_db, preamp_db, switch_to }));
+    state.profile_bar.dialog = Some((target, Dialog::Save { mode, draft }));
   }
 }
 
-fn delete_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget, name: String) {
+fn delete_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget, name: String, sonar_hint: bool) {
   let mut keep_open = true;
   let title = if target == EqTarget::Mic { tr("Delete preset") } else { tr("Delete profile") };
   window(title).show(ctx, |ui| {
     let prompt = match target {
       EqTarget::Mic => trf("Delete your preset \"{}\"? The EQ you hear now stays as it is.", &[&name]),
-      EqTarget::Output(layer) => {
+      EqTarget::Output(_) => {
         let mut text =
           trf("Delete \"{}\"? The file moves to profiles\\_deleted and can be restored from there.", &[&tr(&name)]);
-        if layer != OutputLayer::Headphone && SonarDbReader::default_db_exists() {
+        if sonar_hint {
           text.push(' ');
           text.push_str(tr("\"Import from Sonar DB\" brings Sonar presets back."));
         }
@@ -394,7 +395,7 @@ fn delete_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget, na
     });
   });
   if keep_open {
-    state.profile_bar.dialog = Some((target, Dialog::Delete { name }));
+    state.profile_bar.dialog = Some((target, Dialog::Delete { name, sonar_hint }));
   }
 }
 
@@ -408,13 +409,15 @@ fn import_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget) {
           .desired_rows(8)
           .desired_width(480.0)
           .font(egui::TextStyle::Monospace)
-          .hint_text("# GamersEqualizer EQ preset\n# Name: ...\nFilter 1: ON PK Fc 1000 Hz Gain 3.0 dB Q 1.4\n..."),
+          .hint_text(format!(
+            "{SHARE_HEADER}\n{SHARE_NAME_PREFIX} ...\nFilter 1: ON PK Fc 1000 Hz Gain 3.0 dB Q 1.4\n..."
+          )),
       );
       if std::mem::take(&mut state.profile_bar.focus_name) {
         edit.request_focus();
       }
     });
-    let parsed = mic_presets::from_share_text_for(&state.profile_bar.import_text, target.max_slots());
+    let parsed = share_text::from_share_text(&state.profile_bar.import_text, target.max_slots());
     match &parsed {
       Ok(p) => {
         let name = p.name.as_deref().unwrap_or(tr("(no name, you choose one next)"));
@@ -434,7 +437,7 @@ fn import_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget) {
       if ui.add_enabled(ok.is_some(), theme::accent_button(ui, tr("Import"))).clicked() {
         if let Some(p) = ok {
           let suggested = unique_name(state, target, p.name.as_deref().unwrap_or(tr("Imported")));
-          open_save_dialog(state, target, SaveMode::Import, suggested, p.bands.clone(), 0.0, 0.0, None);
+          open_save_dialog(state, target, SaveMode::Import, suggested, SaveDraft::flat(p.bands.clone()));
           keep_open = false;
           return;
         }
@@ -449,26 +452,16 @@ fn import_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget) {
   }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn open_save_dialog(
-  state: &mut AppState,
-  target: EqTarget,
-  mode: SaveMode,
-  name: String,
-  bands: Vec<BiquadBand>,
-  gain_db: f32,
-  preamp_db: f32,
-  switch_to: Option<ParametricProfile>,
-) {
+fn open_save_dialog(state: &mut AppState, target: EqTarget, mode: SaveMode, name: String, draft: SaveDraft) {
   state.profile_bar.name = name;
   state.profile_bar.focus_name = true;
-  state.profile_bar.dialog = Some((target, Dialog::Save { mode, bands, gain_db, preamp_db, switch_to }));
+  state.profile_bar.dialog = Some((target, Dialog::Save { mode, draft }));
 }
 
-fn active_profile(state: &AppState, target: EqTarget) -> Option<ParametricProfile> {
+fn active_profile(state: &AppState, target: EqTarget) -> Option<&ParametricProfile> {
   match target {
-    EqTarget::Mic => Some(state.mic_profile.clone()),
-    EqTarget::Output(layer) => state.output_eq.layer_profile(layer).cloned(),
+    EqTarget::Mic => Some(&state.mic_profile),
+    EqTarget::Output(layer) => state.output_eq.layer_profile(layer),
   }
 }
 
@@ -499,36 +492,27 @@ fn check_name<'a>(state: &AppState, target: EqTarget, name: &str) -> NameStatus<
   }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn commit_save(
-  state: &mut AppState,
-  target: EqTarget,
-  mode: SaveMode,
-  name: &str,
-  bands: Vec<BiquadBand>,
-  gain_db: f32,
-  preamp_db: f32,
-  switch_to: Option<ParametricProfile>,
-) {
+fn commit_save(state: &mut AppState, target: EqTarget, mode: SaveMode, name: &str, draft: SaveDraft) {
   match target {
-    EqTarget::Mic => {
-      save_mic_preset(state, name, bands, gain_db, preamp_db, switch_to, mode == SaveMode::New);
-    }
+    EqTarget::Mic => save_mic_preset(state, name, draft, mode == SaveMode::New),
     EqTarget::Output(layer) => {
       if let Some(unsaved) = state.out_eq_unsaved.take() {
         state.output_eq_do(|eq, shm| eq.save_layer_profile(unsaved, shm));
       }
-      let mut profile = ParametricProfile::new(name, layer.vad().unwrap_or(VadType::Media));
-      profile.bands = bands;
-      profile.gain_db = gain_db;
-      profile.preamp_db = preamp_db;
-      let active_exe = if layer == OutputLayer::Game {
-        state.output_eq.active_game.as_ref().and_then(|g| state.output_eq.active_game_exe(&g.label))
-      } else {
-        None
-      };
-      let result = state.output_eq_do(|eq, shm| eq.add_layer_profile(layer, profile, active_exe.as_deref(), shm));
+      let profile = draft.profile(name, layer.vad().unwrap_or(VadType::Media));
+      let result = state.output_eq_do(|eq, shm| eq.add_layer_profile(layer, profile, shm));
       state.profile_bar.notice = Some(match result {
+        // A detected game keeps its profile: the new one is saved but not shown in the editor.
+        Ok(())
+          if layer == OutputLayer::Game
+            && !state.output_eq.layer_profile_name(layer).is_some_and(|n| same_profile_slot(n, name)) =>
+        {
+          (
+            target,
+            true,
+            trf("Saved \"{}\". The detected game keeps its own profile: pick the new one above to use it.", &[&name]),
+          )
+        }
         Ok(()) => {
           let msg =
             if mode == SaveMode::New { trf("Created \"{}\".", &[&name]) } else { trf("Saved as \"{}\".", &[&name]) };
@@ -543,29 +527,14 @@ fn commit_save(
   }
 }
 
-fn save_mic_preset(
-  state: &mut AppState,
-  name: &str,
-  bands: Vec<BiquadBand>,
-  gain_db: f32,
-  preamp_db: f32,
-  switch_to: Option<ParametricProfile>,
-  created: bool,
-) {
-  let mut profile = ParametricProfile::new(name, VadType::Mic);
-  profile.bands = bands;
-  profile.gain_db = gain_db;
-  profile.preamp_db = preamp_db;
-  match mic_presets::save_user_preset(&state.storage, &profile) {
+fn save_mic_preset(state: &mut AppState, name: &str, draft: SaveDraft, created: bool) {
+  let switch_to = draft.switch_to.clone();
+  match state.save_mic_preset(draft.profile(name, VadType::Mic)) {
     Ok(()) => {
-      state.mic_profile = profile;
-      state.mic_eq_unsaved = false;
-      state.apply_mic_eq();
-      state.available_mic_profiles = mic_presets::all_mic_presets(&state.storage);
       let msg = if created { trf("Created \"{}\".", &[&name]) } else { trf("Saved as \"{}\".", &[&name]) };
       state.profile_bar.notice = Some((EqTarget::Mic, true, msg));
       if let Some(p) = switch_to {
-        select_mic(state, p);
+        state.use_mic_profile(p);
       }
     }
     Err(e) => {
@@ -578,11 +547,8 @@ fn save_mic_preset(
 
 fn commit_delete(state: &mut AppState, target: EqTarget, name: &str) {
   state.profile_bar.notice = Some(match target {
-    EqTarget::Mic => match mic_presets::delete_user_preset(&state.storage, name) {
-      Ok(()) => {
-        state.available_mic_profiles = mic_presets::all_mic_presets(&state.storage);
-        (target, true, trf("Deleted \"{}\".", &[&name]))
-      }
+    EqTarget::Mic => match state.delete_mic_preset(name) {
+      Ok(()) => (target, true, trf("Deleted \"{}\".", &[&name])),
       Err(e) => {
         log::warn!("[MicPresets] delete {name} failed: {e}");
         (target, false, trf("Could not delete \"{}\": {}", &[&name, &e]))
@@ -599,12 +565,6 @@ fn commit_delete(state: &mut AppState, target: EqTarget, name: &str) {
       }
     }
   });
-}
-
-fn select_mic(state: &mut AppState, profile: ParametricProfile) {
-  state.mic_profile = profile;
-  state.mic_eq_unsaved = false;
-  state.apply_mic_eq();
 }
 
 /// For Mic: built-in/Sonar -> "<name> (mine)", user -> "<name> (copy)" (when copying explicitly)

@@ -1016,11 +1016,14 @@ pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
   }
 }
 
-/// Endpoint names of virtual devices (Sonar channels, VB-Cable, VR runtimes). Heuristic by name:
-/// a physical device with "virtual"/"cable" in its name would be skipped. A gaming headset is
-/// physical, so "game" is not on the list (channel binding adds it on top).
+/// Endpoint names of virtual devices (Sonar channels, VB-Cable, VR runtimes, NVIDIA Broadcast,
+/// Krisp; "steam" also covers Steam Streaming). Heuristic by name: a physical device with
+/// "virtual"/"cable" in its name would be skipped. A gaming headset is physical, so "game" is not
+/// on the list (channel binding adds it on top).
 pub fn is_virtual_endpoint(name_lowercase: &str) -> bool {
-  ["sonar", "virtual", "cable", "vb-audio", "voicemeeter", "steam", "oculus"].iter().any(|v| name_lowercase.contains(v))
+  ["sonar", "virtual", "cable", "vb-audio", "voicemeeter", "steam", "oculus", "nvidia broadcast", "krisp"]
+    .iter()
+    .any(|v| name_lowercase.contains(v))
 }
 
 /// The device to work with: the Windows default; only when that is virtual, the first physical one.

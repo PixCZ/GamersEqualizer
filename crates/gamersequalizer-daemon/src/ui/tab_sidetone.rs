@@ -1,19 +1,19 @@
 use super::state::AppState;
-use super::tab_mic::EQ_COLOR;
+use super::tab_mic::{ACCENT, EQ_COLOR};
 use super::theme::{self, icons, Severity};
 use crate::i18n::{tr, trf};
 use crate::win_audio::apo_install::ApoStatus;
-use crate::win_audio::sidetone;
-use crate::win_audio::WinAudioSystem;
-use egui::{Color32, RichText, Ui};
+use crate::win_audio::sidetone::{self, Verdict, BEAT_FRESH};
+use crate::win_audio::{AudioEndpointInfo, WinAudioSystem};
+use egui::{RichText, Ui};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::sidetone::{
-  device_hash, NoiseMode, SidetonePair, GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX, VOLUME_MAX,
+  device_hash, NoiseMode, SidetonePair, SidetonePairs, GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX,
+  VOLUME_MAX,
 };
+use gamersequalizer_mic_vst::sidetone_denoise::nominal_delay_ms;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-
-const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
+use std::time::Instant;
 
 pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   theme::page_header(
@@ -24,34 +24,33 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     Some(tr("Sealed headphones block your own voice. Sidetone plays the microphone back into them.")),
   );
 
-  // 1. Resolve active endpoints and names
-  let mic_id = state.selected_mic_endpoint_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
-  let out_id = win_audio.endpoint_lock.get_default_output_id().or_else(|| state.selected_endpoint_id.clone());
+  // 1. The pair the worker follows (same rule: `sidetone::active_pair`), and its names.
+  let (mut saved_pairs, _) = sidetone::pairs();
+  let pair_ids = sidetone::active_pair(
+    state.selected_mic_endpoint_id.clone(),
+    || win_audio.endpoint_lock.get_default_capture_id(),
+    win_audio.endpoint_lock.get_default_output_id(),
+  );
+  let Some(pair_key) = pair_ids else {
+    save_if_dirty(state, &mut saved_pairs);
+    theme::status_line(ui, Severity::Warning, tr("Sidetone needs a microphone and an output device."));
+    return;
+  };
+  let name_of = |list: &[AudioEndpointInfo], id: &str| {
+    list.iter().find(|e| e.id == id).map_or_else(|| tr("Unknown device").to_string(), |e| e.name.clone())
+  };
+  let mic_name = name_of(state.capture_endpoints.as_slice(), &pair_key.0);
+  let out_name = name_of(state.endpoints.as_slice(), &pair_key.1);
 
-  let mic_name = mic_id
-    .as_deref()
-    .and_then(|id| state.capture_endpoints.iter().find(|e| e.id == id).map(|e| e.name.clone()))
-    .unwrap_or_else(|| tr("Unknown device").to_string());
-
-  let out_name = out_id
-    .as_deref()
-    .and_then(|id| state.endpoints.iter().find(|e| e.id == id).map(|e| e.name.clone()))
-    .unwrap_or_else(|| tr("Unknown device").to_string());
-
-  let pair_key = (mic_id.unwrap_or_default(), out_id.unwrap_or_default());
-
-  // 2. Load or initialize the active pair
-  let (saved_pairs, _) = sidetone::pairs();
+  // 2. Load the pair; edits of the previous one are saved first (the device switched mid-drag).
   if state.sidetone_ui.pair.is_none() || state.sidetone_ui.pair_key != pair_key {
-    let mut pair = saved_pairs
+    save_if_dirty(state, &mut saved_pairs);
+    let pair = saved_pairs
       .find(&pair_key.0, &pair_key.1)
       .cloned()
       .unwrap_or_else(|| SidetonePair::new(&pair_key.0, &pair_key.1, &mic_name, &out_name));
-    pair.mic_name = mic_name.clone();
-    pair.output_name = out_name.clone();
     state.sidetone_ui.pair = Some(pair);
     state.sidetone_ui.pair_key = pair_key.clone();
-    state.sidetone_ui.dirty = false;
   }
 
   // 3. Track beats and update state
@@ -68,16 +67,13 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     state.sidetone_ui.last_writer_beat = writer_beat;
     state.sidetone_ui.last_writer_beat_time = Some(now);
   }
-  let reader_running =
-    state.sidetone_ui.last_reader_beat_time.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
-  let writer_running =
-    state.sidetone_ui.last_writer_beat_time.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1));
+  let reader_running = state.sidetone_ui.last_reader_beat_time.is_some_and(|t| now.duration_since(t) < BEAT_FRESH);
+  let writer_running = state.sidetone_ui.last_writer_beat_time.is_some_and(|t| now.duration_since(t) < BEAT_FRESH);
 
   if state.sidetone_ui.testing {
     if let Some(h) = state.shm_header() {
       h.sidetone_test_beat.fetch_add(1, Ordering::Relaxed);
     }
-    ui.ctx().request_repaint_after(Duration::from_millis(200));
   }
 
   let mut pair = state.sidetone_ui.pair.clone().unwrap_or_default();
@@ -86,15 +82,18 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   let mut settings = pair.settings();
   let mut changed = false;
   let mut eq_changed = false;
-  let mut enabled_toggled = false;
+  let verdict = state
+    .shm_header()
+    // What the daemon published, not only the switch here: right after switching on, its hashes
+    // are not out yet and the verdict would blame another device.
+    .map(|h| {
+      let enabled = settings.enabled && h.read_sidetone().enabled;
+      sidetone::verdict(h, enabled, writer_running, reader_running, state.sidetone_ui.testing)
+    });
 
   // -------------------------------------------------------------------------------------
   // Card 1: Active pair, toggle, status & try-it
   // -------------------------------------------------------------------------------------
-  let (mic_muted, out_hash_seen, out_hash) = state.shm_header().map_or((false, 0, 0), |h| {
-    let r = Ordering::Relaxed;
-    (h.mic_muted.load(r), h.sidetone_output_hash_seen.load(r), h.sidetone_output_hash.load(r))
-  });
 
   theme::card(ui, |ui| {
     ui.horizontal(|ui| {
@@ -103,7 +102,6 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         if theme::toggle_labeled(ui, settings.enabled, tr("On for this pair")) {
           settings.enabled = !settings.enabled;
           changed = true;
-          enabled_toggled = true;
           if !settings.enabled {
             state.sidetone_ui.testing = false;
           }
@@ -128,22 +126,21 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       super::apo_banner::render_apo_status_line(ui, state);
     } else if out_apo_missing {
       theme::status_line(ui, Severity::Warning, tr("Output EQ is not installed on this output device."));
-    } else if !settings.enabled {
-      theme::status_line(ui, Severity::Info, tr("Off for this pair."));
-    } else if mic_muted {
-      theme::status_line(ui, Severity::Warning, tr("The microphone is muted: sidetone is silent."));
-    } else if out_hash_seen != 0 && out_hash_seen != out_hash && !reader_running {
-      theme::status_line(
-        ui,
-        Severity::Info,
-        &trf("Another output is playing: sidetone waits for {}.", &[&pair.output_name]),
-      );
-    } else if !writer_running && !state.sidetone_ui.testing {
-      theme::status_line(ui, Severity::Info, tr("Waiting: no app is recording from this microphone."));
-    } else if reader_running {
-      theme::status_line(ui, Severity::Success, tr("Playing."));
     } else {
-      theme::status_line(ui, Severity::Info, tr("Starting…"));
+      let (severity, text) = match verdict.unwrap_or(Verdict::Starting) {
+        Verdict::Off => (Severity::Info, tr("Off for this pair.").to_string()),
+        Verdict::Muted => (Severity::Warning, tr("The microphone is muted: sidetone is silent.").to_string()),
+        Verdict::OtherMicrophone => {
+          (Severity::Info, trf("Another microphone is in use: sidetone waits for {}.", &[&pair.mic_name]))
+        }
+        Verdict::OtherOutput => {
+          (Severity::Info, trf("Another output is playing: sidetone waits for {}.", &[&pair.output_name]))
+        }
+        Verdict::NoRecorder => (Severity::Info, tr("Waiting: no app is recording from this microphone.").to_string()),
+        Verdict::Playing => (Severity::Success, tr("Playing.").to_string()),
+        Verdict::Starting => (Severity::Info, tr("Starting…").to_string()),
+      };
+      theme::status_line(ui, severity, &text);
     }
 
     ui.add_space(8.0);
@@ -154,10 +151,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         let btn_label = if state.sidetone_ui.testing { tr("Stop trying") } else { tr("Try it") };
         let btn =
           if state.sidetone_ui.testing { ui.button(btn_label) } else { ui.add(theme::accent_button(ui, btn_label)) };
-        if btn
-          .on_hover_text(tr("Plays without a recording app. Windows shows the microphone as in use meanwhile."))
-          .clicked()
-        {
+        if btn.clicked() {
           state.sidetone_ui.testing = !state.sidetone_ui.testing;
         }
       });
@@ -288,32 +282,16 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::MIC, ACCENT)), tr("Noise suppression"));
 
-    let format_mode_label = |mode: NoiseMode, delay_us: u32, is_active: bool| match mode {
-      NoiseMode::Off => tr("Off").to_string(),
-      NoiseMode::Expander => tr("Band expander (no delay)").to_string(),
-      NoiseMode::WebRtcNs => {
-        let ms_str = if is_active && delay_us > 0 {
-          format!("{:.0}", (delay_us as f32 / 1000.0).round())
-        } else {
-          "7".to_string()
-        };
-        trf("WebRTC noise suppressor (+{} ms)", &[&ms_str])
-      }
-      NoiseMode::RnNoise => {
-        let ms_str = if is_active && delay_us > 0 {
-          format!("{:.0}", (delay_us as f32 / 1000.0).round())
-        } else {
-          "10".to_string()
-        };
-        trf("RNNoise (+{} ms)", &[&ms_str])
-      }
-      NoiseMode::RnNoise2 => {
-        let ms_str = if is_active && delay_us > 0 {
-          format!("{:.0}", (delay_us as f32 / 1000.0).round())
-        } else {
-          "20".to_string()
-        };
-        trf("RNNoise 0.2 (+{} ms)", &[&ms_str])
+    // The measured delay while the mode runs, else what it adds on whole frames.
+    let format_mode_label = |mode: NoiseMode, delay_us: u32, is_active: bool| {
+      let ms = if is_active && delay_us > 0 { delay_us as f32 / 1000.0 } else { nominal_delay_ms(mode) };
+      let ms = format!("{:.0}", ms.round());
+      match mode {
+        NoiseMode::Off => tr("Off").to_string(),
+        NoiseMode::Expander => tr("Band expander (no delay)").to_string(),
+        NoiseMode::WebRtcNs => trf("WebRTC noise suppressor (+{} ms)", &[&ms]),
+        NoiseMode::RnNoise => trf("RNNoise (+{} ms)", &[&ms]),
+        NoiseMode::RnNoise2 => trf("RNNoise 0.2 (+{} ms)", &[&ms]),
       }
     };
 
@@ -413,7 +391,6 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   // -------------------------------------------------------------------------------------
   // Card 5: Saved pairs
   // -------------------------------------------------------------------------------------
-  let (mut saved_pairs, _) = sidetone::pairs();
   let mut to_remove = None;
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::SETTINGS, ACCENT)), tr("Saved pairs"));
@@ -433,44 +410,51 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
 
   if let Some((rm_mic, rm_out)) = to_remove {
     saved_pairs.remove(&rm_mic, &rm_out);
-    sidetone::save(saved_pairs);
+    sidetone::save(saved_pairs.clone());
     if pair.mic_id == rm_mic && pair.output_id == rm_out {
       state.sidetone_ui.pair = None;
+      state.sidetone_ui.dirty = false;
+      return;
     }
   }
 
   // -------------------------------------------------------------------------------------
-  // Sync to shared memory & disk
+  // Live values to shared memory, the pair to disk
   // -------------------------------------------------------------------------------------
   if changed || eq_changed {
     pair.set_settings(&settings);
     pair.bands.truncate(MAX_EQ_BANDS);
     state.sidetone_ui.dirty = true;
+    // Live while dragging, only into the pair the worker has published (its hashes are 0 while
+    // it is off). Switching on or off, and everything else, goes through the saved file: the
+    // worker is the only one that publishes a pair and its hashes (within ~1 s of the save).
     if let Some(h) = state.shm_header() {
       let r = Ordering::Relaxed;
-      // Before the settings: a pair switched on must not start with another pair's EQ.
-      if eq_changed || enabled_toggled {
-        h.write_sidetone_eq(&pair.bands);
-      }
-      h.write_sidetone(&settings);
-      if enabled_toggled {
-        if settings.enabled {
-          h.sidetone_mic_hash.store(device_hash(&pair.mic_id), r);
-          h.sidetone_output_hash.store(device_hash(&pair.output_id), r);
-        } else {
-          h.sidetone_mic_hash.store(0, r);
-          h.sidetone_output_hash.store(0, r);
+      let published = h.sidetone_mic_hash.load(r) == device_hash(&pair.mic_id)
+        && h.sidetone_output_hash.load(r) == device_hash(&pair.output_id);
+      if published {
+        if eq_changed {
+          h.write_sidetone_eq(&pair.bands);
         }
+        h.write_sidetone_values(&settings);
       }
     }
-    state.sidetone_ui.pair = Some(pair.clone());
+    state.sidetone_ui.pair = Some(pair);
   }
 
-  // Persist when user releases the pointer
-  if state.sidetone_ui.dirty && !ui.ctx().input(|i| i.pointer.any_down()) {
-    let (mut saved_pairs, _) = sidetone::pairs();
+  // Saved once the pointer is released, not on every drag frame.
+  if !ui.ctx().input(|i| i.pointer.any_down()) {
+    save_if_dirty(state, &mut saved_pairs);
+  }
+}
+
+/// Saves the pair being edited when it has unsaved changes.
+fn save_if_dirty(state: &mut AppState, saved_pairs: &mut SidetonePairs) {
+  if !std::mem::take(&mut state.sidetone_ui.dirty) {
+    return;
+  }
+  if let Some(pair) = state.sidetone_ui.pair.clone() {
     saved_pairs.upsert(pair);
-    sidetone::save(saved_pairs);
-    state.sidetone_ui.dirty = false;
+    sidetone::save(saved_pairs.clone());
   }
 }

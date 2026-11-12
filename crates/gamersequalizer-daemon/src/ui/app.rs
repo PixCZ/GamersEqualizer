@@ -213,6 +213,7 @@ impl eframe::App for GamersEqualizerApp {
     ctx.output(|o| {
       for cmd in &o.commands {
         if let egui::OutputCommand::CopyText(text) = cmd {
+          // A failure is logged inside; nothing else to show for Ctrl+C.
           let _ = crate::win_clipboard::set_clipboard_text(text);
         }
       }

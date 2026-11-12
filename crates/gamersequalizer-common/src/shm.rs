@@ -902,6 +902,13 @@ impl ShmHeader {
   /// Publish the sidetone settings of the current pair (daemon). `enabled` goes last, so an
   /// APO never runs a fresh "on" with the previous pair's values.
   pub fn write_sidetone(&self, settings: &SidetoneSettings) {
+    self.write_sidetone_values(settings);
+    self.sidetone_enabled.store(settings.enabled, Ordering::Release);
+  }
+
+  /// The values of `write_sidetone` without `enabled`: for live edits by the window, which must
+  /// not race the daemon's own off/on around a pair switch.
+  pub fn write_sidetone_values(&self, settings: &SidetoneSettings) {
     let r = Ordering::Relaxed;
     let s = settings.clamped();
     let x10 = |db: f32| (db * 10.0).round() as i32;
@@ -909,7 +916,6 @@ impl ShmHeader {
     self.sidetone_volume_permille.store((s.volume * 1000.0).round() as u32, r);
     self.sidetone_gate_margin_db_x10.store(x10(s.gate_margin_db), r);
     self.sidetone_gate_range_db_x10.store(x10(s.gate_range_db), r);
-    self.sidetone_enabled.store(s.enabled, Ordering::Release);
   }
 
   /// The sidetone settings as the APOs use them (always inside their ranges).

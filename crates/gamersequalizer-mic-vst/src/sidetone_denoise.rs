@@ -100,13 +100,11 @@ impl SidetoneDenoiser {
 
   /// Delay `process` adds right now in `mode`, in samples at 48 kHz (0 for the other modes).
   pub fn delay_samples(&self, mode: NoiseMode) -> usize {
-    let own = match self.available(mode) {
-      NoiseMode::WebRtcNs => WEBRTC_NS_DELAY,
-      NoiseMode::RnNoise => FRAME,
-      NoiseMode::RnNoise2 => 2 * FRAME,
-      NoiseMode::Off | NoiseMode::Expander => return 0,
-    };
-    own + if self.direct { 0 } else { FRAME }
+    let mode = self.available(mode);
+    if !mode.is_framed() {
+      return 0;
+    }
+    own_delay_samples(mode) + if self.direct { 0 } else { FRAME }
   }
 
   /// In place on 48 kHz mono `samples`. `depth_db`: how far noise is turned down at most
@@ -217,9 +215,8 @@ impl SidetoneDenoiser {
       }
       NoiseMode::Off | NoiseMode::Expander => false,
     };
-    if let (Some(d0), Some(d1)) = (self.dry.first().cloned(), self.dry.get_mut(1)) {
-      d1.copy_from_slice(&d0);
-    }
+    // The older frame moves to [1] without a copy (audio thread: no allocation).
+    self.dry.swap(0, 1);
     if let (Some(d0), Some(src)) = (self.dry.first_mut(), frame.get(..FRAME)) {
       d0.copy_from_slice(src);
     }
@@ -255,6 +252,21 @@ impl SidetoneDenoiser {
     self.ready_start = (self.ready_start + 1) % QUEUE;
     self.ready_len -= 1;
     sample
+  }
+}
+
+/// Delay `mode` adds on blocks of whole frames, ms: what the window shows before it runs.
+pub fn nominal_delay_ms(mode: NoiseMode) -> f32 {
+  own_delay_samples(mode) as f32 * 1000.0 / SAMPLE_RATE as f32
+}
+
+/// The suppressor's own delay in samples at 48 kHz, without the queue (0 for the other modes).
+fn own_delay_samples(mode: NoiseMode) -> usize {
+  match mode {
+    NoiseMode::WebRtcNs => WEBRTC_NS_DELAY,
+    NoiseMode::RnNoise => FRAME,
+    NoiseMode::RnNoise2 => 2 * FRAME,
+    NoiseMode::Off | NoiseMode::Expander => 0,
   }
 }
 

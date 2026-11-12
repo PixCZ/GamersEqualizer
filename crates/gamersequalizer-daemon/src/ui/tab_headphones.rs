@@ -12,7 +12,7 @@ use crate::output_eq::autoeq::{self, AutoEqEntry, Check, CheckLevel, DownloadsSc
 use crate::win_audio::apo_install::{self, ApoStatus, Flow};
 use crate::win_audio::{shell, WinAudioSystem};
 use egui::{Color32, RichText, Ui};
-use gamersequalizer_common::biquad::MAX_OUT_EQ_BANDS;
+use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::profile::{ParametricProfile, VadType};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -143,7 +143,7 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
     let height = super::eq_editor::plot_height(ui, 0.28, 150.0, 380.0);
     let mut changed = false;
     if let Some(profile) = state.output_eq.headphone_profile_mut() {
-      changed = band_editor(ui, "hp_eq", &mut profile.bands, MAX_OUT_EQ_BANDS / 2, COLOR, &[], height);
+      changed = band_editor(ui, "hp_eq", &mut profile.bands, MAX_LAYER_EQ_BANDS, COLOR, &[], height);
     } else {
       response_plot(ui, "hp_response", &[], COLOR, height);
       ui.label(theme::caption(tr("Select a headphone profile above, click \"Add from AutoEQ…\", or click \"New…\".")));
@@ -667,10 +667,13 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
   // The service saw sound play on this output while our effect processed nothing.
   let run = super::apo_banner::run_status(state);
   let not_running = run.is_some_and(|r| r.output_not_running.is_some());
-  let note = run.and_then(|r| super::apo_banner::newest_note(r, "Output EQ")).map(str::to_string);
   let Some((check, _)) = state.headphones_ui.apo.clone() else {
     return;
   };
+  // Only this output's notes: with effects on several devices another one's would mislead.
+  let note = run
+    .and_then(|r| super::apo_banner::newest_note_on(r, "Output EQ", check.endpoint_guid.as_deref()))
+    .map(str::to_string);
   let (text, severity, button) = match check.status {
     ApoStatus::Active if not_running => (
       tr("The output EQ does NOT work on this device while sound plays: you hear it unprocessed.").to_string(),

@@ -13,7 +13,7 @@ use gamersequalizer_mic_vst::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_R
 use gamersequalizer_mic_vst::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
 use std::sync::atomic::Ordering;
 
-const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
+pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
 const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
 const AI_COLOR: Color32 = Color32::from_rgb(140, 240, 120);
 pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(255, 180, 80);

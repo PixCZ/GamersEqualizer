@@ -3,9 +3,12 @@
 #   workflow artifact (kept 14 days).
 # - Pushing a tag (git tag 0.1.0 && git push origin 0.1.0, or v0.1.0): the same, plus a GitHub
 #   Release with the zip attached.
-# - Code signing: configure repository secrets SIGNING_CERT_PFX_BASE64 and SIGNING_CERT_PASSWORD
-#   in Settings -> Secrets and variables -> Actions. When present, gamersequalizer.exe and
-#   gamersequalizer_apo.dll are signed and the public .cer + install-tester-cert.ps1 are bundled.
+# - Code signing: repository secrets SIGNING_CERT_PFX_BASE64 and SIGNING_CERT_PASSWORD
+#   (Settings -> Secrets and variables -> Actions). When present, gamersequalizer.exe and
+#   gamersequalizer_apo.dll are signed and timestamped after the build; no certificate goes into
+#   the zip.
+# - The secrets reach only the `publish` job, a fresh runner that runs no cargo: build scripts and
+#   proc macros of dependencies never run where the key is. Actions are pinned to commit SHAs.
 name: Release
 
 on:
@@ -16,18 +19,22 @@ on:
       - "[0-9].*"
 
 permissions:
-  contents: write # create the release on tags
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60
+    outputs:
+      pkg_name: ${{ steps.package.outputs.pkg_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Test
         run: cargo test --workspace --release
@@ -36,38 +43,87 @@ jobs:
       - name: Test rnnoise2
         run: cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml
 
-      - name: Build, sign and package
+      - name: Build and package (unsigned, no secrets)
+        id: package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $pkgName = "GamersEqualizer-$version-x64"
+          .\scripts\package.ps1 -NoSign -PackageName $pkgName
+          "pkg_name=$pkgName" >> $env:GITHUB_OUTPUT
+
+      # The staged files and build.txt, for the publish job (which signs and zips them).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staged
+          path: |
+            target/package/staging/${{ steps.package.outputs.pkg_name }}
+            target/package/${{ steps.package.outputs.pkg_name }}.build.txt
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the release on tags
+    env:
+      PKG_NAME: ${{ needs.build.outputs.pkg_name }}
+    steps:
+      # Only for scripts/sign-binaries.ps1; nothing here builds or runs cargo.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: staged
+          path: staged
+
+      - name: Paths
+        shell: pwsh
+        run: |
+          "STAGE=staged/staging/$env:PKG_NAME" >> $env:GITHUB_ENV
+          "ZIP=out/$env:PKG_NAME.zip" >> $env:GITHUB_ENV
+          "ZIP_NAME=$env:PKG_NAME.zip" >> $env:GITHUB_ENV
+          "BUILD_TXT=out/$env:PKG_NAME.build.txt" >> $env:GITHUB_ENV
+
+
+      - name: Sign
         shell: pwsh
         env:
           PFX_B64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
           GAMERSEQUALIZER_PFX_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
         run: |
-          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
-          $pkgName = "GamersEqualizer-$version-x64"
-          $pkgArgs = @{ PackageName = $pkgName }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'signing.pfx'
-          if ($env:PFX_B64 -and $env:PFX_B64.Trim()) {
-            [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:PFX_B64.Trim()))
-            $pkgArgs.Sign = $true
-            $pkgArgs.PfxPath = $pfxPath
-            Write-Host "Code signing enabled from repository secret." -ForegroundColor Cyan
-          } else {
-            $pkgArgs.NoSign = $true
-            Write-Host "No SIGNING_CERT_PFX_BASE64 secret set; building unsigned package." -ForegroundColor Yellow
+          if (-not ($env:PFX_B64 -and $env:PFX_B64.Trim())) {
+            Write-Host "No SIGNING_CERT_PFX_BASE64 secret set; the package stays unsigned." -ForegroundColor Yellow
+            exit 0
           }
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64.Trim()))
+          $bins = @("$env:STAGE/gamersequalizer.exe", "$env:STAGE/gamersequalizer_apo.dll")
+          # Signs only the finished binaries; fails without a timestamp (CI is set).
+          .\scripts\sign-binaries.ps1 -Files $bins -PfxPath $pfx -RequireTimestamp
+          "SIGNED=1" >> $env:GITHUB_ENV
 
-          try {
-            .\scripts\package.ps1 @pkgArgs
-          } finally {
-            if (Test-Path $pfxPath) { Remove-Item $pfxPath -Force }
-          }
+      # The zip and the hashes in build.txt describe the files as shipped (signed or not).
+      - name: Zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path $env:STAGE -DestinationPath $env:ZIP
+          $info = @(Get-Content "staged/$env:PKG_NAME.build.txt" | Where-Object { $_ -notmatch '^[0-9A-F]{64}  ' })
+          $signed = if ($env:SIGNED) { 'signed   Authenticode SHA256, timestamped' } else { 'signed   no' }
+          $hashes = Get-ChildItem $env:STAGE | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $_.Name }
+          @($info + $signed + $hashes + "$((Get-FileHash $env:ZIP -Algorithm SHA256).Hash)  $env:ZIP_NAME") |
+            Set-Content $env:BUILD_TXT
 
-          "ZIP=target/package/$pkgName.zip" >> $env:GITHUB_ENV
-          "ZIP_NAME=$pkgName.zip" >> $env:GITHUB_ENV
-          "BUILD_TXT=target/package/$pkgName.build.txt" >> $env:GITHUB_ENV
+      - name: Remove the signing key
+        if: always()
+        shell: pwsh
+        run: Remove-Item (Join-Path $env:RUNNER_TEMP 'signing.pfx') -Force -ErrorAction SilentlyContinue
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ env.ZIP_NAME }}
           path: |
@@ -77,7 +133,7 @@ jobs:
 
       - name: GitHub Release
         if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             ${{ env.ZIP }}

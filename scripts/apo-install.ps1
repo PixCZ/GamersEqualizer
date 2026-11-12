@@ -19,8 +19,9 @@
     EFX does not start, and rolls back automatically on open failure or crash.
 
 .DESCRIPTION
-  - Takes an in-memory snapshot of each endpoint's FxProperties values before changing anything
-    (no persistent backup folder on disk) so self-test failures roll back cleanly in memory.
+  - Takes a snapshot of each endpoint's FxProperties values before changing anything: in memory for
+    the self-test rollback, and the first one per endpoint also as JSON in
+    %ProgramFiles%\GamersEqualizer\apo-backup (never overwritten), which apo-uninstall.ps1 restores.
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
   - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
   - Promotes any legacy single-CLSID values (,1 / ,5 / ,6 / ,7) into composite lists (,13 / ,14 / ,15)
@@ -141,6 +142,8 @@ $ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEq
 $InstallDir = Join-Path $ProgramDir 'apo'
 $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
 $InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
+# Must match $BackupDir in apo-uninstall.ps1.
+$BackupDir = Join-Path $ProgramDir 'apo-backup'
 
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
@@ -209,6 +212,23 @@ function Get-FxSnapshot([string]$flow, [string]$id) {
   finally { $key.Dispose() }
 }
 
+# The snapshot in the JSON form Restore-FxFromJson in apo-uninstall.ps1 reads: kinds by name,
+# binary values as base64, multi-strings always as arrays.
+# Values are assigned, not piped: Windows PowerShell 5.1 writes a piped array as {"value":[..],"Count":n}.
+function ConvertTo-FxJson($snapshot) {
+  $values = @(foreach ($rec in @($snapshot.Records)) {
+      $kind = [Microsoft.Win32.RegistryValueKind]$rec.Kind
+      $value = $rec.Value
+      if ($kind -eq [Microsoft.Win32.RegistryValueKind]::Binary) { $value = [Convert]::ToBase64String([byte[]]@($rec.Value)) }
+      elseif ($kind -eq [Microsoft.Win32.RegistryValueKind]::MultiString) {
+        [string[]]$multi = @($rec.Value | Where-Object { $null -ne $_ })
+        $value = $multi
+      }
+      [pscustomobject]@{ Name = [string]$rec.Name; Kind = $kind.ToString(); Value = $value }
+    })
+  [pscustomobject]@{ Flow = $snapshot.Flow; Id = $snapshot.Id; Values = $values } | ConvertTo-Json -Depth 5
+}
+
 # Exact value-only restore via SetValue + QueryValues (reg.exe import fails on TrustedInstaller subkeys).
 function Restore-FxSnapshot($snapshot) {
   $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($snapshot.Flow)\$($snapshot.Id)\FxProperties"
@@ -251,16 +271,32 @@ function Restore-FxSnapshot($snapshot) {
   finally { $key.Dispose() }
 }
 
+# True when the slot's composite list held one of the driver's effects (not ours) before this
+# install: the pre-install snapshot, not the registry now (Migrate-LegacySlots has run by then).
+function Test-SlotHadDriverEffects($snapshot, [string]$slot) {
+  if (-not $snapshot) { return $false }
+  $ours = @($Classes.Values | ForEach-Object { $_.Clsid })
+  $rec = @($snapshot.Records) | Where-Object { $_.Name -eq $CompositeValues[$slot] } | Select-Object -First 1
+  if (-not $rec) { return $false }
+  # Parenthesized: Read-FxList returns its list as one object; piping the expression enumerates it.
+  [bool]((Read-FxList $rec.Value) | Where-Object { $_ -ne $NullGuid -and $ours -notcontains $_ })
+}
+
+# Our effect runs in a slot only in the modes listed for it, so Default is added. Not where the
+# driver's effects sit with modes of their own: Default would run them in a mode it never declared.
 function Ensure-ProcessingMode($job, [string]$fxSubKey, [string]$slot) {
   $modeName = $ModeValues[$slot]
   if (-not $modeName) { return }
   $fx = Get-ItemProperty (Join-Path $job.Key 'FxProperties')
   $modes = Read-FxList $fx.$modeName
-  if (-not ($modes | Where-Object { $_ -ieq $DefaultProcessingMode })) {
-    $modes.Add($DefaultProcessingMode)
-    Set-FxValue $fxSubKey $modeName ([string[]]$modes.ToArray())
-    Say "$($job.Name) $slot modes: $($modes -join ', ')"
+  if ($modes | Where-Object { $_ -ieq $DefaultProcessingMode }) { return }
+  if ($modes.Count -gt 0 -and (Test-SlotHadDriverEffects $script:FxSnapshots["$($job.Flow):$($job.Id)"] $slot)) {
+    Say "$($job.Name) $slot`: the driver's effects there run only in modes $($modes -join ', '); Default not added, so ours may not start in $slot."
+    return
   }
+  $modes.Add($DefaultProcessingMode)
+  Set-FxValue $fxSubKey $modeName ([string[]]$modes.ToArray())
+  Say "$($job.Name) $slot modes: $($modes -join ', ')"
 }
 
 # Why our effects cannot go onto an endpoint with these FxProperties values ($fx: Get-ItemProperty
@@ -410,8 +446,14 @@ function Rollback-Job($job, [datetime]$sinceRestart) {
   Stop-Audio
   try { Restore-FxSnapshot $snap }
   finally { $started = Start-Audio }
-  Say "  Rolled back $($job.Name) to its exact pre-install FxProperties." Yellow
+  Say "  $(Get-RollbackLine $job)" Yellow
   $started
+}
+
+# The app reads `[Flow:{guid}]` from this line (apo_install::rolled_back_endpoint) and stops
+# offering that device.
+function Get-RollbackLine($job) {
+  "Rolled back $($job.Name) [$($job.Flow):$($job.Id)] to its pre-install effect settings."
 }
 
 # Probes one endpoint via `--probe-mic` or `--probe-render` and checks Application EventLog.
@@ -548,12 +590,23 @@ foreach ($job in $jobs) {
   Say "Target: $($job.Name) $($job.Id)`: $what"
 }
 
-# --- Snapshot (in-memory only, no disk backup) -------------------------------------------
+# --- Snapshot: in memory for the rollback below, and on disk for apo-uninstall.ps1 ----------
+# The disk copy is the driver's own effects without ours. It is refreshed while the endpoint holds
+# none of our effects (a driver update or a rollback since the last install changed them), and
+# kept while ours are in it: then it is the last state from before GamersEqualizer.
 $FxSnapshots = @{}
+New-Item -ItemType Directory -Force $BackupDir | Out-Null
 foreach ($job in $jobs) {
-  $FxSnapshots["$($job.Flow):$($job.Id)"] = Get-FxSnapshot $job.Flow $job.Id
+  $snap = Get-FxSnapshot $job.Flow $job.Id
+  $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap
+  $backupFile = Join-Path $BackupDir "$($job.Id)-FxProperties-original.json"
+  $json = ConvertTo-FxJson $snap
+  $holdsOurs = @($Classes.Values | Where-Object { $json -match [regex]::Escape($_.Clsid) }).Count -gt 0
+  if (-not $holdsOurs -or -not (Test-Path $backupFile)) {
+    [IO.File]::WriteAllText($backupFile, $json, (New-Object Text.UTF8Encoding $false))
+    Say "Backup of $($job.Name)'s effect settings: $backupFile"
+  }
 }
-Say 'Pre-install snapshot captured in memory (no disk backup created).'
 
 # --- The app itself: staged and checked before anything changes ---------------------------
 # It moves next to its effects, unless it runs from there already or is a developer's build.
@@ -639,7 +692,8 @@ try {
 catch {
   if (-not $installComplete -and $FxSnapshots) {
     foreach ($snap in $FxSnapshots.Values) {
-      try { Restore-FxSnapshot $snap } catch { }
+      try { Restore-FxSnapshot $snap }
+      catch { Say "Restoring $($snap.Flow) $($snap.Id) failed: $_" Red }
     }
   }
   throw
@@ -660,30 +714,34 @@ $selfTestFailed = [bool]$skipped
 $ProbeTemp = Join-Path $InstallDir 'gamersequalizer-probe.exe'
 $ProbeCopy = Get-ProbeExe
 
-if ($ProbeCopy) {
-  # Immediate startup crash check: if Audiosrv startup already crashed audiodg, undo everything at once.
-  Start-Sleep -Seconds 2
-  $startupCrashes = Get-AudiodgCrashesSince $audioStarted
-  if ($startupCrashes.Count -gt 0) {
-    Say "`naudiodg.exe crashed right after restarting audio: rolling back all endpoint changes..." Red
-    Stop-Audio
-    try {
-      foreach ($job in $jobs) {
-        $snap = $FxSnapshots["$($job.Flow):$($job.Id)"]
-        if ($snap) { Restore-FxSnapshot $snap }
-      }
+# Immediate startup crash check (also without the probe exe): if audiodg crashed as audio
+# started, undo everything at once.
+Start-Sleep -Seconds 2
+$startupCrashes = Get-AudiodgCrashesSince $audioStarted
+if ($startupCrashes.Count -gt 0) {
+  Say "`naudiodg.exe crashed right after restarting audio: rolling back all endpoint changes..." Red
+  Stop-Audio
+  try {
+    foreach ($job in $jobs) {
+      $snap = $FxSnapshots["$($job.Flow):$($job.Id)"]
+      if ($snap) { Restore-FxSnapshot $snap }
     }
-    finally { $audioStarted = Start-Audio }
-    $selfTestFailed = $true
-    $jobs = @()
   }
+  finally { $audioStarted = Start-Audio }
+  foreach ($job in $jobs) { Say "  $(Get-RollbackLine $job)" Yellow }
+  $selfTestFailed = $true
+  $jobs = @()
 }
 
-function Test-ApoNoteStarted($res, [string]$className, [string]$guid, [string]$tailPattern) {
+# Did Windows start our effect on this endpoint? A note tagged with its GUID says so. An untagged
+# note (Windows gave the effect no endpoint) counts only when this is the only endpoint of its
+# flow being installed: with several, it may be another device's.
+function Test-ApoNoteStarted($res, [string]$className, [string]$guid, [string]$tailPattern, [bool]$onlyOfFlow) {
   $clsPat = [regex]::Escape($className)
   $idPat = [regex]::Escape($guid)
   $all = @($res.Notes + $res.PreNotes)
   if (@($all | Where-Object { $_ -match "$clsPat \[$idPat\]: $tailPattern" }).Count -gt 0) { return $true }
+  if (-not $onlyOfFlow) { return $false }
   if (@($res.Notes | Where-Object { $_ -match "$clsPat`: $tailPattern" }).Count -gt 0) { return $true }
   if (@($all | Where-Object { $_ -match "$clsPat \[\{[0-9a-f-]+\}\]:" }).Count -eq 0 -and
       @($res.PreNotes | Where-Object { $_ -match "$clsPat`: $tailPattern" }).Count -gt 0) {
@@ -694,6 +752,7 @@ function Test-ApoNoteStarted($res, [string]$className, [string]$guid, [string]$t
 
 foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   if (-not $ProbeCopy -or (Test-EnhancementsOff $job)) { continue }
+  $onlyOfFlow = @($jobs | Where-Object { $_.Flow -eq 'Capture' }).Count -eq 1
   $slot = $job.Targets[0][1]
   Say "`nChecking $($job.Name): opening microphone for a few seconds..."
   $res = Invoke-EndpointProbe $job $audioStarted
@@ -702,7 +761,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
     $selfTestFailed = $true
     continue
   }
-  if (Test-ApoNoteStarted $res 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)') {
+  if (Test-ApoNoteStarted $res 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)' $onlyOfFlow) {
     Say "  Works: Windows starts the mic effect ($slot)." Green
     continue
   }
@@ -715,7 +774,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
     $selfTestFailed = $true
     continue
   }
-  if (Test-ApoNoteStarted $res2 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)') {
+  if (Test-ApoNoteStarted $res2 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)' $onlyOfFlow) {
     Say "  Works: Windows starts the mic effect ($other)." Green
     continue
   }
@@ -737,6 +796,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
 
 foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
   if (-not $ProbeCopy -or (Test-EnhancementsOff $job)) { continue }
+  $onlyOfFlow = @($jobs | Where-Object { $_.Flow -eq 'Render' }).Count -eq 1
   $hasOut = @($job.Targets | Where-Object { $_[0] -eq 'Render' }).Count -gt 0
   $hasStream = @($job.Targets | Where-Object { $_[0] -eq 'Stream' }).Count -gt 0
   Say "`nChecking $($job.Name): opening silent output for a moment..."
@@ -746,8 +806,8 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
     $selfTestFailed = $true
     continue
   }
-  $outOk = -not $hasOut -or (Test-ApoNoteStarted $res 'GamersEqualizer Output EQ' $job.Id 'stream .* started')
-  $streamOk = -not $hasStream -or (Test-ApoNoteStarted $res 'GamersEqualizer Stream EQ' $job.Id 'stream .* started')
+  $outOk = -not $hasOut -or (Test-ApoNoteStarted $res 'GamersEqualizer Output EQ' $job.Id 'stream .* started' $onlyOfFlow)
+  $streamOk = -not $hasStream -or (Test-ApoNoteStarted $res 'GamersEqualizer Stream EQ' $job.Id 'stream .* started' $onlyOfFlow)
   if ($outOk -and $streamOk) {
     Say '  Works: Windows starts the output effects.' Green
     continue
@@ -762,8 +822,8 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
       $selfTestFailed = $true
       continue
     }
-    $outOk2 = Test-ApoNoteStarted $res2 'GamersEqualizer Output EQ' $job.Id 'stream .* started'
-    $streamOk2 = -not $hasStream -or (Test-ApoNoteStarted $res2 'GamersEqualizer Stream EQ' $job.Id 'stream .* started')
+    $outOk2 = Test-ApoNoteStarted $res2 'GamersEqualizer Output EQ' $job.Id 'stream .* started' $onlyOfFlow
+    $streamOk2 = -not $hasStream -or (Test-ApoNoteStarted $res2 'GamersEqualizer Stream EQ' $job.Id 'stream .* started' $onlyOfFlow)
     if ($outOk2 -and $streamOk2) {
       Say '  Works: Windows starts the output effects (Output EQ in MFX).' Green
       continue

@@ -78,6 +78,10 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   and named, and when none is left nothing changes. Self-check of that rule:
   `scripts/tests/apo-install.tests.ps1` (part of `-Test`, also runs under `pwsh` on macOS). Only Windows 11
   has been tried on real hardware so far.
+- Devices: the setup card installs on the microphone and output in use; other connected devices are
+  opt-in checkboxes. A device whose install the installer rolled back is not offered again until "Try
+  again". Before changing an endpoint the installer saves its original effect lists once to
+  `%ProgramFiles%\GamersEqualizer\apo-backup\`; the uninstaller restores them, then removes our effects.
 - Mic effect slot: the installer puts the mic chain in EFX, then opens the mic briefly
   (`gamersequalizer.exe --probe-mic {guid}`) and moves it to MFX when Windows did not start it there
   (some notebook mic arrays). The Mic tab offers the same switch later ("Try another effect slot").
@@ -104,7 +108,12 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
 - The C runtime is linked statically (`.cargo/config.toml`), so testers need no Visual C++ Redistributable;
   `package.ps1` fails if a binary still imports `VCRUNTIME140.dll`.
 - Never package a `-DebugCapture` APO (`dev-rebuild.ps1` skips `-Package` with it).
-- Binaries are unsigned: testers see SmartScreen; Smart App Control blocks them entirely.
+- Binaries are unsigned or signed with our self-signed certificate. Testers install no certificate (neither
+  SmartScreen nor Smart App Control accepts a local root): SmartScreen "More info > Run anyway"; Smart App
+  Control blocks them entirely. `scripts/create-dev-cert.ps1` makes a password-protected end-entity
+  code-signing certificate (1 year) in `secrets\`; `package.ps1 -Sign` signs with a mandatory timestamp. In CI
+  a separate step without cargo signs the finished binaries (secrets `SIGNING_CERT_PFX_BASE64` /
+  `SIGNING_CERT_PASSWORD`).
 
 ## Ground rules
 

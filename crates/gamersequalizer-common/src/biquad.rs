@@ -1,4 +1,4 @@
-use crate::profile::{expand_slopes, BiquadBand, FilterType};
+use crate::profile::{BiquadBand, FilterType};
 use std::f32::consts::PI;
 
 /// Upper bound of microphone EQ bands (also its shared-memory slot count).
@@ -8,6 +8,9 @@ pub const MAX_OUT_EQ_BANDS: usize = 32;
 /// Biquads of one stream EQ (chat/media profile + the inverted game profile); also the
 /// most stages a cascade runs.
 pub const MAX_STREAM_EQ_BANDS: usize = 64;
+/// Slots one output layer (headphones, game, chat, media) may use in its editor: two layers
+/// share `MAX_OUT_EQ_BANDS`.
+pub const MAX_LAYER_EQ_BANDS: usize = MAX_OUT_EQ_BANDS / 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct BiquadCoefficients {
@@ -30,7 +33,7 @@ pub struct BiquadCascade {
 
 impl Default for BiquadCascade {
   fn default() -> Self {
-    Self { channels: 1, coefs: Vec::new(), state: FilterState::default() }
+    Self::with_channels(1)
   }
 }
 
@@ -43,6 +46,11 @@ struct FilterState {
 }
 
 impl FilterState {
+  fn reserve(&mut self, len: usize) {
+    self.z1.reserve(len.saturating_sub(self.z1.len()));
+    self.z2.reserve(len.saturating_sub(self.z2.len()));
+  }
+
   fn resize_and_zero(&mut self, len: usize) {
     self.z1.resize(len, 0.0);
     self.z2.resize(len, 0.0);
@@ -193,11 +201,11 @@ impl BiquadCoefficients {
 
 impl BiquadCascade {
   pub fn with_channels(channels: usize) -> Self {
-    Self { channels: channels.max(1), coefs: Vec::new(), state: FilterState::default() }
-  }
-
-  pub fn channels(&self) -> usize {
-    self.channels
+    // Room for the most stages up front: `set_bands` then never allocates on the audio thread.
+    let channels = channels.max(1);
+    let mut cascade = Self { channels, coefs: Vec::with_capacity(MAX_STREAM_EQ_BANDS), state: FilterState::default() };
+    cascade.state.reserve(MAX_STREAM_EQ_BANDS * channels);
+    cascade
   }
 
   /// Resize per-channel filter state when the stream channel count changes (resets memory).
@@ -205,25 +213,36 @@ impl BiquadCascade {
     let channels = channels.max(1);
     if channels != self.channels {
       self.channels = channels;
+      // Allocates when the channel count grows (a new stream format, not every block).
+      self.state.reserve(MAX_STREAM_EQ_BANDS * channels);
       self.state.resize_and_zero(self.coefs.len() * channels);
     }
   }
 
-  /// Rebuild coefficients for the enabled bands. Filter state is kept when the stage count
-  /// is unchanged, so dragging a slider doesn't click.
+  /// Rebuild coefficients for the enabled bands (steep cuts as stacked stages, like
+  /// `expand_slopes`). Filter state is kept when the stage count is unchanged, so dragging a
+  /// slider doesn't click. No allocation here (the APOs call it on the audio thread); their
+  /// `read_out_eq` / stream `read` before it still build a `Vec` on each EQ edit.
   pub fn set_bands(&mut self, bands: &[BiquadBand], sample_rate: f32) {
-    let coefs: Vec<StageCoefs> = expand_slopes(bands)
-      .iter()
-      .filter(|b| b.enabled)
-      .take(MAX_STREAM_EQ_BANDS)
-      .map(|b| BiquadCoefficients::from_band(b, sample_rate))
-      .map(|c| StageCoefs { b0: c.b0 as f64, b1: c.b1 as f64, b2: c.b2 as f64, a1: c.a1 as f64, a2: c.a2 as f64 })
-      .collect();
-
-    if coefs.len() != self.coefs.len() {
-      self.state.resize_and_zero(coefs.len() * self.channels);
+    let old_len = self.coefs.len();
+    self.coefs.clear();
+    for band in bands.iter().filter(|b| b.enabled) {
+      let stage = |b: &BiquadBand| {
+        let c = BiquadCoefficients::from_band(b, sample_rate);
+        StageCoefs { b0: c.b0 as f64, b1: c.b1 as f64, b2: c.b2 as f64, a1: c.a1 as f64, a2: c.a2 as f64 }
+      };
+      let room = MAX_STREAM_EQ_BANDS.saturating_sub(self.coefs.len());
+      match band.butterworth_qs() {
+        Some(qs) => {
+          self.coefs.extend(qs.iter().take(room).map(|&q| stage(&BiquadBand { q, slope_db: 12, ..band.clone() })))
+        }
+        None if room > 0 => self.coefs.push(stage(band)),
+        None => {}
+      }
     }
-    self.coefs = coefs;
+    if self.coefs.len() != old_len {
+      self.state.resize_and_zero(self.coefs.len() * self.channels);
+    }
   }
 
   pub fn clear(&mut self) {
@@ -245,7 +264,9 @@ impl BiquadCascade {
     self.process_strided(samples, 1, 0);
   }
 
-  /// Process one channel of an interleaved buffer (`channel` of `channels`).
+  /// Process one channel of an interleaved buffer (`channel` of `channels`). A one-channel
+  /// cascade may run any channel (one cascade per channel); a multichannel one only its own
+  /// channels, anything else is left untouched instead of sharing another channel's memory.
   pub fn process_strided(&mut self, samples: &mut [f32], channels: usize, channel: usize) {
     if self.coefs.is_empty() {
       return;
@@ -254,7 +275,11 @@ impl BiquadCascade {
     if self.channels == 1 && step == 1 && channel == 0 {
       run_lanes::<1>(&self.coefs, &mut self.state, samples);
     } else {
-      let slot = if channel < self.channels { channel } else { 0 };
+      let slot = match self.channels {
+        1 => 0,
+        n if channel < n => channel,
+        _ => return,
+      };
       run_channel(&self.coefs, &mut self.state, self.channels, slot, samples, step, channel);
     }
     self.state.flush_non_finite();
@@ -405,6 +430,55 @@ fn sample_outer_lanes<const CH: usize, const FMA: bool>(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::profile::expand_slopes;
+
+  #[test]
+  fn set_bands_builds_the_expanded_stages_in_place() {
+    let band = |filter_type, frequency, slope_db, enabled| BiquadBand {
+      enabled,
+      filter_type,
+      frequency,
+      gain_db: 3.0,
+      q: 0.9,
+      slope_db,
+    };
+    let bands = [
+      band(FilterType::HighPass, 80.0, 48, true),
+      band(FilterType::Peaking, 1000.0, 12, true),
+      band(FilterType::Peaking, 2000.0, 12, false),
+      band(FilterType::LowPass, 9000.0, 24, true),
+    ];
+    let mut cascade = BiquadCascade::default();
+    let capacity = cascade.coefs.capacity();
+    cascade.set_bands(&bands, 48_000.0);
+    let expected: Vec<_> = expand_slopes(&bands).into_iter().filter(|b| b.enabled).collect();
+    assert_eq!(cascade.coefs.len(), expected.len());
+    for (got, b) in cascade.coefs.iter().zip(&expected) {
+      let c = BiquadCoefficients::from_band(b, 48_000.0);
+      assert_eq!((got.b0, got.a1, got.a2), (c.b0 as f64, c.a1 as f64, c.a2 as f64));
+    }
+    // More bands than stages: capped, and still no new allocation.
+    cascade.set_bands(&vec![band(FilterType::HighPass, 80.0, 48, true); 40], 48_000.0);
+    assert_eq!(cascade.coefs.len(), MAX_STREAM_EQ_BANDS);
+    assert_eq!(cascade.coefs.capacity(), capacity);
+  }
+
+  #[test]
+  fn multichannel_cascade_leaves_an_unknown_channel_alone() {
+    let mut cascade = BiquadCascade::with_channels(2);
+    let peak = BiquadBand {
+      enabled: true,
+      filter_type: FilterType::Peaking,
+      frequency: 1000.0,
+      gain_db: 12.0,
+      q: 1.0,
+      slope_db: 12,
+    };
+    cascade.set_bands(&[peak], 48_000.0);
+    let mut buf = vec![0.5f32; 300];
+    cascade.process_strided(&mut buf, 3, 2);
+    assert!(buf.iter().all(|&s| s == 0.5));
+  }
 
   #[test]
   fn bogus_rates_and_gains_give_finite_coefficients_without_panicking() {

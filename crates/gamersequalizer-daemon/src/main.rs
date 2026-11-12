@@ -54,16 +54,6 @@ const VOLUME_SYNC_INTERVAL: Duration = Duration::from_millis(250);
 /// Window / taskbar icon resolution (Windows scales it down for the title bar).
 const WINDOW_ICON_SIZE: u32 = 64;
 
-/// Instruct NVIDIA Optimus driver to keep the discrete GPU sleeping and run on integrated graphics.
-#[allow(non_upper_case_globals)]
-#[no_mangle]
-pub static NvOptimusEnablement: u32 = 0x00000000;
-
-/// Instruct AMD PowerXpress / Enduro driver to prefer the integrated GPU for power saving.
-#[allow(non_upper_case_globals)]
-#[no_mangle]
-pub static AmdPowerXpressRequestHighPerformance: i32 = 0;
-
 fn main() {
   let args: Vec<String> = std::env::args().collect();
   // The installer (elevated) opens endpoints briefly to see whether Windows starts our effects.
@@ -607,11 +597,8 @@ fn wgpu_backends() -> wgpu::Backends {
   };
   let has_dx12_gpu = adapters.iter().any(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
   if has_dx12_gpu {
-    if let Some(igpu) = adapters.iter().find(|a| a.get_info().device_type == wgpu::DeviceType::IntegratedGpu) {
-      info!("[GamersEqualizer] graphics: DX12 (low power, integrated GPU: {})", igpu.get_info().name);
-    } else {
-      info!("[GamersEqualizer] graphics: DX12 (low power)");
-    }
+    // No adapter name: wgpu picks the adapter later (low-power preference), not this probe.
+    info!("[GamersEqualizer] graphics: DX12 (low power preference)");
     wgpu::Backends::DX12
   } else {
     info!("[GamersEqualizer] graphics: no DX12 GPU, using Vulkan/GL");

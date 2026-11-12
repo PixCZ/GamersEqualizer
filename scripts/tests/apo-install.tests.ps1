@@ -4,14 +4,29 @@ $ErrorActionPreference = 'Stop'
 $script = Join-Path (Split-Path $PSScriptRoot) 'apo-install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
 # The script installs when it is run, so only the pieces under test are taken out of it.
+$functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
+  'ConvertTo-FxJson'
+$variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues'
 $pieces = $ast.FindAll({
     param($n)
-    ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-EndpointBlocker') -or
-    ($n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -in '$FxGuid', '$NullGuid')
+    ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions) -or
+    ($n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -in $variables)
   }, $false)
-if ($pieces.Count -ne 3) { throw "Expected Get-EndpointBlocker, `$FxGuid and `$NullGuid in $script; found $($pieces.Count)." }
+$expected = $functions.Count + $variables.Count
+if ($pieces.Count -ne $expected) { throw "Expected $expected functions and variables in $script; found $($pieces.Count)." }
 $pieces | ForEach-Object { Invoke-Expression $_.Extent.Text }
 
+$failed = 0
+$total = 0
+function Check([string]$name, [bool]$ok, [string]$detail) {
+  $script:total++
+  if (-not $ok) {
+    $script:failed++
+    Write-Host "FAIL $name $detail" -ForegroundColor Red
+  }
+}
+
+# --- Get-EndpointBlocker --------------------------------------------------------------------
 function Fx([hashtable]$values) {
   $named = @{}
   foreach ($k in $values.Keys) { $named["$FxGuid,$k"] = $values[$k] }
@@ -29,13 +44,88 @@ $cases = @(
   @{ Name = 'GFX next to a mode effect';            Fx = (Fx @{ 2 = $oem; 6 = $oem });                Blocked = $false }
   @{ Name = 'GFX next to our composite list';       Fx = (Fx @{ 2 = $oem; 15 = @($oem) });            Blocked = $false }
 )
-$failed = 0
 foreach ($case in $cases) {
   $blocker = Get-EndpointBlocker $case.Fx
-  if ([bool]$blocker -ne $case.Blocked) {
-    $failed++
-    Write-Host "FAIL $($case.Name): expected blocked=$($case.Blocked), got '$blocker'" -ForegroundColor Red
-  }
+  Check "blocker: $($case.Name)" ([bool]$blocker -eq $case.Blocked) "expected blocked=$($case.Blocked), got '$blocker'"
 }
-if ($failed) { throw "$failed of $($cases.Count) cases failed." }
-Write-Host "apo-install: $($cases.Count) cases passed."
+
+# --- Read-FxList: REG_SZ or REG_MULTI_SZ in, a list without blanks and case-insensitive dupes --
+$list = Read-FxList @('  {A}', '', $null, '{a}', '{B} ')
+Check 'Read-FxList trims, drops blanks and dupes' (($list -join ',') -eq '{A},{B}') "got '$($list -join ',')'"
+$list = Read-FxList '{C}'
+Check 'Read-FxList takes a single REG_SZ' ($list.Count -eq 1 -and $list[0] -eq '{C}') "got $($list.Count)"
+$list = Read-FxList $null
+Check 'Read-FxList of nothing is an empty list, not $null' ($null -ne $list -and $list.Count -eq 0) ''
+$list.Add('{D}')
+Check 'Read-FxList result can be added to' ($list.Count -eq 1) ''
+
+# --- Get-Targets ------------------------------------------------------------------------------
+$t = Get-Targets 'Capture' 'MFX' $false
+Check 'Get-Targets capture' ($t.Count -eq 1 -and $t[0][0] -eq 'Capture' -and $t[0][1] -eq 'MFX') "got $($t | ConvertTo-Json -Compress)"
+$t = Get-Targets 'Render' 'EFX' $false
+Check 'Get-Targets render: output + stream EQ' ($t.Count -eq 2 -and $t[0][1] -eq 'EFX' -and $t[1][0] -eq 'Stream' -and $t[1][1] -eq 'SFX') "got $($t | ConvertTo-Json -Compress)"
+$t = Get-Targets 'Render' 'EFX' $true
+Check 'Get-Targets render -NoStreamEq' ($t.Count -eq 1 -and $t[0][0] -eq 'Render') "got $($t | ConvertTo-Json -Compress)"
+$t = Get-Targets 'Render' 'SFX' $false
+Check 'Get-Targets render SFX: stream EQ only' ($t.Count -eq 1 -and $t[0][0] -eq 'Stream') "got $($t | ConvertTo-Json -Compress)"
+$threw = $false
+try { $null = Get-Targets 'Capture' 'SFX' $false } catch { $threw = $true }
+Check 'Get-Targets capture SFX is refused' $threw ''
+
+# --- Test-ApoNoteStarted ----------------------------------------------------------------------
+$guid = '{cf0a2270-1885-4dd6-82a5-f636e9efadd5}'
+$other = '{b45cef56-a56b-49b0-88c0-4af057026718}'
+$mic = 'GamersEqualizer Mic Chain'
+$tail = '(stream |refused a stream)'
+function Res($notes, $pre) { [pscustomobject]@{ Notes = @($notes); PreNotes = @($pre) } }
+$noteCases = @(
+  @{ Name = 'tagged with this endpoint';               Res = (Res "audiodg.exe pid 1: $mic [$guid]: stream 48000 Hz" @());  Only = $false; Started = $true }
+  @{ Name = 'tagged, before the probe';                Res = (Res @() "audiodg.exe pid 1: $mic [$guid]: stream 48000 Hz");  Only = $false; Started = $true }
+  @{ Name = 'tagged with another endpoint';            Res = (Res "audiodg.exe pid 1: $mic [$other]: stream 48000 Hz" @()); Only = $true;  Started = $false }
+  @{ Name = 'untagged, only device of its flow';       Res = (Res "audiodg.exe pid 1: $mic`: stream 48000 Hz" @());         Only = $true;  Started = $true }
+  @{ Name = 'untagged, several devices of its flow';   Res = (Res "audiodg.exe pid 1: $mic`: stream 48000 Hz" @());         Only = $false; Started = $false }
+  @{ Name = 'untagged before the probe, only device';  Res = (Res @() "audiodg.exe pid 1: $mic`: refused a stream");         Only = $true;  Started = $true }
+  @{ Name = 'untagged before, tags exist elsewhere';   Res = (Res "x: $mic [$other]: class requested" "y: $mic`: stream 1"); Only = $true;  Started = $false }
+  @{ Name = 'other class';                             Res = (Res "audiodg.exe pid 1: GamersEqualizer Output EQ [$guid]: stream 2 started" @()); Only = $true; Started = $false }
+  @{ Name = 'nothing';                                 Res = (Res @() @());                                                 Only = $true;  Started = $false }
+)
+foreach ($case in $noteCases) {
+  $started = Test-ApoNoteStarted $case.Res $mic $guid $tail $case.Only
+  Check "notes: $($case.Name)" ($started -eq $case.Started) "expected $($case.Started), got $started"
+}
+
+# --- Test-SlotHadDriverEffects: Default mode only where the driver had no effects ------------
+$ourMic = $Classes.Capture.Clsid
+function Snap([hashtable]$values) {
+  [pscustomobject]@{ Records = @($values.Keys | ForEach-Object { [pscustomobject]@{ Name = "$FxGuid,$_"; Value = $values[$_] } }) }
+}
+Check 'slot empty before' (-not (Test-SlotHadDriverEffects (Snap @{}) 'EFX')) ''
+Check 'only ours before (an update)' (-not (Test-SlotHadDriverEffects (Snap @{ 15 = @($ourMic) }) 'EFX')) ''
+Check 'null GUID only' (-not (Test-SlotHadDriverEffects (Snap @{ 15 = @($NullGuid) }) 'EFX')) ''
+Check 'null GUID and ours' (-not (Test-SlotHadDriverEffects (Snap @{ 15 = @($NullGuid, $ourMic) }) 'EFX')) ''
+Check 'driver effect in EFX' (Test-SlotHadDriverEffects (Snap @{ 15 = @($oem, $ourMic) }) 'EFX') ''
+Check 'driver effect in another slot' (-not (Test-SlotHadDriverEffects (Snap @{ 14 = @($oem) }) 'EFX')) ''
+Check 'no snapshot' (-not (Test-SlotHadDriverEffects $null 'EFX')) ''
+
+# --- ConvertTo-FxJson: what apo-uninstall.ps1 reads back ---------------------------------------
+$kinds = [Microsoft.Win32.RegistryValueKind]
+$snapshot = [pscustomobject]@{
+  Flow = 'Capture'; Id = $guid
+  Records = @(
+    [pscustomobject]@{ Name = "$FxGuid,15"; Kind = $kinds::MultiString; Value = [string[]]@($oem) }
+    [pscustomobject]@{ Name = "$FxGuid,5"; Kind = $kinds::String; Value = $oem }
+    [pscustomobject]@{ Name = 'bin'; Kind = $kinds::Binary; Value = [byte[]]@(1, 2, 255) }
+    [pscustomobject]@{ Name = 'dw'; Kind = $kinds::DWord; Value = 7 }
+  )
+}
+$back = ConvertTo-FxJson $snapshot | ConvertFrom-Json
+$byName = @{}
+$back.Values | ForEach-Object { $byName[$_.Name] = $_ }
+Check 'json keeps flow and id' ($back.Flow -eq 'Capture' -and $back.Id -eq $guid) ''
+Check 'json: one-entry multi-string stays a list' (@($byName["$FxGuid,15"].Value).Count -eq 1 -and $byName["$FxGuid,15"].Kind -eq 'MultiString' -and $byName["$FxGuid,15"].Value -is [array]) "got $($byName["$FxGuid,15"] | ConvertTo-Json -Compress)"
+Check 'json: string' ($byName["$FxGuid,5"].Value -eq $oem -and $byName["$FxGuid,5"].Kind -eq 'String') ''
+Check 'json: binary as base64' ((([Convert]::FromBase64String($byName['bin'].Value)) -join ',') -eq '1,2,255') ''
+Check 'json: dword' ($byName['dw'].Value -eq 7 -and $byName['dw'].Kind -eq 'DWord') ''
+
+if ($failed) { throw "$failed of $total checks failed." }
+Write-Host "apo-install: $total checks passed."

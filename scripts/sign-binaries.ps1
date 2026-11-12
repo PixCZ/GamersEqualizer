@@ -20,7 +20,8 @@
   Path to the .pfx file containing the private key.
 
 .PARAMETER Password
-  Password for the .pfx file (or uses $env:GAMERSEQUALIZER_PFX_PASSWORD, or default 'GamersEqualizer').
+  Password for the .pfx file. Otherwise $env:GAMERSEQUALIZER_PFX_PASSWORD (CI), otherwise it is
+  asked for. There is no default password.
 
 .PARAMETER Thumbprint
   Thumbprint of a certificate in Cert:\CurrentUser\My (alternative to .pfx).
@@ -29,15 +30,17 @@
   RFC 3161 / Authenticode timestamp server URL. Default: http://timestamp.digicert.com
 
 .PARAMETER NoTimestamp
-  Skip timestamping (for offline builds).
+  Skip timestamping (for offline builds). Such a signature turns invalid when the
+  certificate expires.
 
-.PARAMETER CerOutPath
-  Optional path to export the public .cer certificate matching the signing certificate.
+.PARAMETER RequireTimestamp
+  Fail instead of signing without a timestamp when the timestamp server fails. Always on in CI
+  ($env:CI set); scripts\package.ps1 -Sign sets it.
 
 .EXAMPLE
   .\scripts\sign-binaries.ps1
   .\scripts\sign-binaries.ps1 -Files target\dist\gamersequalizer.exe, target\apo-dist\gamersequalizer_apo.dll
-  .\scripts\sign-binaries.ps1 -PfxPath 'D:\Certs\my-cert.pfx' -Password 'secret'
+  .\scripts\sign-binaries.ps1 -PfxPath 'D:\Certs\my-cert.pfx'   # asks for the password
 #>
 param(
   [string[]]$Files,
@@ -46,7 +49,7 @@ param(
   [string]$Thumbprint,
   [string]$TimestampServer = 'http://timestamp.digicert.com',
   [switch]$NoTimestamp,
-  [string]$CerOutPath
+  [switch]$RequireTimestamp
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,27 +81,20 @@ if (-not $PfxPath) {
 if ($PfxPath) {
   $pfxFull = if ([IO.Path]::IsPathRooted($PfxPath)) { $PfxPath } else { Join-Path $root $PfxPath }
   if (-not (Test-Path $pfxFull)) { throw "PFX file not found: $pfxFull" }
-  $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
-  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
-  $candidates = if ($PSBoundParameters.ContainsKey('Password')) {
-    @($Password)
+  # One password, never guessed: a parameter, the CI secret, or asked for.
+  $secure = if ($PSBoundParameters.ContainsKey('Password')) {
+    ConvertTo-SecureString -String $Password -AsPlainText -Force
   } elseif ($env:GAMERSEQUALIZER_PFX_PASSWORD) {
-    @($env:GAMERSEQUALIZER_PFX_PASSWORD)
+    ConvertTo-SecureString -String $env:GAMERSEQUALIZER_PFX_PASSWORD -AsPlainText -Force
   } else {
-    @('', 'GamersEqualizer')
+    Read-Host -AsSecureString "Password for $pfxFull"
   }
-  $imported = $false
-  $lastErr = $null
-  foreach ($pwd in $candidates) {
-    try {
-      $cert.Import($pfxFull, $pwd, $flags)
-      $imported = $true
-      break
-    } catch {
-      $lastErr = $_
-    }
+  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+  try {
+    $cert.Import($pfxFull, $secure, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
+  } catch {
+    throw "Failed to import PFX ($pfxFull), wrong password?: $_"
   }
-  if (-not $imported) { throw "Failed to import PFX ($pfxFull): $lastErr" }
   Write-Host "Using PFX certificate: $($cert.Subject) ($($cert.Thumbprint))" -ForegroundColor Cyan
 }
 elseif ($Thumbprint) {
@@ -121,11 +117,8 @@ if (-not $cert.HasPrivateKey) {
   throw "Certificate does not contain a private key: $($cert.Subject)"
 }
 
-if ($CerOutPath) {
-  $cerFull = if ([IO.Path]::IsPathRooted($CerOutPath)) { $CerOutPath } else { Join-Path $root $CerOutPath }
-  Export-Certificate -Cert $cert -FilePath $cerFull | Out-Null
-  Write-Host "Exported public cert: $cerFull" -ForegroundColor Green
-}
+$RequireTimestamp = $RequireTimestamp -or [bool]$env:CI
+if ($NoTimestamp -and $RequireTimestamp) { throw '-NoTimestamp contradicts -RequireTimestamp (or CI).' }
 
 # 3. Sign each file
 foreach ($file in $Files) {
@@ -138,7 +131,8 @@ foreach ($file in $Files) {
       $sig = Set-AuthenticodeSignature -FilePath $fullPath -Certificate $cert -HashAlgorithm SHA256 -TimestampServer $TimestampServer -ErrorAction Stop
     }
     catch {
-      Write-Warning "Timestamping failed ($TimestampServer): $_"
+      if ($RequireTimestamp) { throw "Timestamping failed ($TimestampServer): $_" }
+      Write-Warning "Timestamping failed ($TimestampServer), signing without a timestamp: $_"
     }
   }
   if (-not $sig -or -not $sig.SignerCertificate) {
@@ -149,6 +143,7 @@ foreach ($file in $Files) {
   if (-not $verify.SignerCertificate) {
     throw "Failed to sign $fullPath (status: $($verify.Status), message: $($verify.StatusMessage))"
   }
+  if ($RequireTimestamp -and -not $verify.TimeStamperCertificate) { throw "$fullPath has no timestamp" }
 
   $statusNote = if ($verify.Status -eq 'Valid') { 'Valid (Trusted)' } else { "$($verify.Status) (self-signed not in Trusted Root)" }
   Write-Host "Signed $([IO.Path]::GetFileName($fullPath)): $statusNote" -ForegroundColor Green

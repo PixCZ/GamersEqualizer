@@ -55,7 +55,7 @@ Závěr z tabulky: `AMD HDMI` a kamarádova `Arctis Nova 3` Render mají úplně
 
 ## 3. Výsledky živých experimentů (Změřeno: 2026-11-11 20:00–20:03)
 
-Běh `test-usb-apo.ps1` (v repu uložen jeho vylepšený nástupce [scripts/verify-usb-apo.ps1](../scripts/verify-usb-apo.ps1)), záloha `apo-backup\usb-exp-20261111-200018`, každý endpoint testován izolovaně s čerstvým restartem `Audiosrv` (`audiodg.exe` nový PID pro každý krok) a po skončení vrácen do původního stavu.
+Běh `test-usb-apo.ps1` (jeho nástupce `scripts/verify-usb-apo.ps1` byl z repa odstraněn; kontroly převzal instalátor a `[ApoCheck]` v logu aplikace), záloha `apo-backup\usb-exp-20261111-200018`, každý endpoint testován izolovaně s čerstvým restartem `Audiosrv` (`audiodg.exe` nový PID pro každý krok) a po skončení vrácen do původního stavu.
 
 ### 3.1 Capture matice
 
@@ -73,7 +73,7 @@ Pozorování ke Capture:
 
 ### 3.2 Render matice
 
-U `Jabra Render` šlo o výchozí přehrávací zařízení Windows, takže ihned po `Start-Service Audiosrv` (během 1,8 s pauzy před spuštěním `UsbAudioProbe`) jej začal přehrávat samotný systém — `audiodg.exe` tak zalogoval `stream started` už do sekce `[pre-probe]`, a kvůli deduplikaci zpráv na PID v [event_log.rs](../crates/gamersequalizer-apo/src/event_log.rs) se stejná hláška po startu `UsbAudioProbe` podruhé nezapsala (`SUMMARY` proto u `Jabra` vypsalo `Stream=False Output=False`, což je opraveno v [scripts/verify-usb-apo.ps1](../scripts/verify-usb-apo.ps1)). Surové řádky `AUDIODG.EXE` v logu nicméně jednoznačně ukazují skutečný stav na každém PIDu:
+U `Jabra Render` šlo o výchozí přehrávací zařízení Windows, takže ihned po `Start-Service Audiosrv` (během 1,8 s pauzy před spuštěním `UsbAudioProbe`) jej začal přehrávat samotný systém — `audiodg.exe` tak zalogoval `stream started` už do sekce `[pre-probe]`, a kvůli deduplikaci zpráv na PID v [event_log.rs](../crates/gamersequalizer-apo/src/event_log.rs) se stejná hláška po startu `UsbAudioProbe` podruhé nezapsala (`SUMMARY` proto u `Jabra` vypsalo `Stream=False Output=False`, což instalátor řeší kontrolou hlášek i z doby před sondou, `Test-ApoNoteStarted`). Surové řádky `AUDIODG.EXE` v logu nicméně jednoznačně ukazují skutečný stav na každém PIDu:
 
 | Krok                                   | Změny nad baseline / předchozím krokem                                                                       | ASUS (`{2ca1...}`)                           | EPOS (`{e9fa...}`)                           | Jabra (`{42b0...}` — dle EventLog PIDu)                          |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------- |
@@ -103,7 +103,7 @@ Při prvním pokusu o rollback na `ASUS Capture {4563517b...}` selhal příkaz `
 
 Protože `reg.exe export` ukládá do `.reg` souboru i podklíče `FxProperties\{...}\Default`, `\User`, `\Volatile`, snaží se `reg.exe import` při obnově otvírat/vytvářet podklíče, na které nemá ani účet Správce oprávnění. To se týká i stávající volby `-RestoreBackup` v [scripts/apo-uninstall.ps1](../scripts/apo-uninstall.ps1) (řádky 84–96) a vysvětluje, proč obnova ze zálohy nemusela fungovat.
 
-**Ověřené řešení (nasazené v [scripts/verify-usb-apo.ps1](../scripts/verify-usb-apo.ps1)):**
+**Ověřené řešení (nyní v [scripts/apo-install.ps1](../scripts/apo-install.ps1) a [scripts/apo-uninstall.ps1](../scripts/apo-uninstall.ps1)):**
 1. Před úpravou zálohovat přímé hodnoty `FxProperties` (`Name`, `RegistryValueKind`, `Value`, u `Binary` přes Base64) do JSON souboru + ponechat `.reg` jen jako čitelnou referenci.
 2. Při obnově otevřít klíč striktně s právy `RegistryRights 'SetValue, QueryValues'`, smazat nově přidané hodnoty (`DeleteValue($name, $false)`) a obnovit původní hodnoty přes `RegistryKey.SetValue($name, $typedVal, $kind)` (pozor na PowerShell 5.1: musí dostat přesné `.NET` typy `[byte[]]` a `[string[]]`, ne `@(...)` `Object[]`!).
 3. Ověřeno na všech 6 USB endpointech v `test-usb-apo.ps1` i zpětným `-InspectOnly`: po testu zůstal registr bajt po bajtu totožný s výchozím stavem.
@@ -132,20 +132,11 @@ Aby uživatel v žádném případě (ani u 1% edge-case ovladačů) nepřišel 
 
 ## 6. Návod k ověření pro další sessiony a otevřené body
 
-### Jak ověřit nálezy skriptem v tomto repozitáři
+### Jak ověřit nálezy
 
-- Pouze čtení (bez práv správce, bez restartu zvuku):
-  ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-usb-apo.ps1 -InspectOnly
-  ```
-- Pasivní WASAPI test (bez zásahu do registru):
-  ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-usb-apo.ps1 -BaselineOnly
-  ```
-- Plný izolovaný experiment na aktivních USB zařízeních (**PowerShell jako Správce**; automaticky zálohuje a vrátí vše do původního stavu):
-  ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-usb-apo.ps1
-  ```
+Samostatný ověřovací skript byl odstraněn. Stav každého zařízení s našimi efekty zapisuje aplikace
+do svého logu (`[ApoCheck]`), instalátor po instalaci sám otevře každé zařízení a při selhání ho
+vrátí; jeho řádky jsou v logu jako `[ApoNote] ... installer: ...`.
 
 ### Stav implementace v této větvi a co zbývá ověřit před mergem
 

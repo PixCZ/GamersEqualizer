@@ -29,6 +29,12 @@ pub struct UiPrefs {
   pub setup_done: bool,
   /// The user explicitly unchecked Output EQ when applying setup.
   pub output_declined: bool,
+  /// Endpoints the installer rolled back (`apo_install::endpoint_key`): the setup card no longer
+  /// offers them until the user clicks "Try again".
+  pub rolled_back: Vec<String>,
+  /// Time of the newest installer rollback line already taken into `rolled_back` (ISO UTC, as in
+  /// the note), so a line still in the notes does not bring back a device the user retried.
+  pub rolled_back_seen: String,
   #[serde(skip)]
   path: PathBuf,
 }
@@ -84,9 +90,11 @@ mod tests {
     p.language = LanguagePref::Czech;
     p.theme = ThemePref::Light;
     p.output_declined = true;
+    p.rolled_back = vec!["Capture:{abc}".to_string()];
     p.save();
     let loaded = UiPrefs::load_or_default(&dir);
     assert_eq!((loaded.language, loaded.theme, loaded.output_declined), (LanguagePref::Czech, ThemePref::Light, true));
+    assert_eq!(loaded.rolled_back, ["Capture:{abc}"]);
 
     // Existing files without `output_declined` default to false, and unknown enum values fall back.
     std::fs::write(dir.join(FILE), r#"{"language":"Czech","theme":"HighContrast","setup_done":true}"#).unwrap();

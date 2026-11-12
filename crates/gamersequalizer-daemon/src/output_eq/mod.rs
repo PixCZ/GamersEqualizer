@@ -21,6 +21,7 @@ pub mod game_match;
 pub mod game_presets;
 pub mod launchers;
 pub mod settings;
+pub mod share_text;
 
 use crate::dsp_apo::{compute_combined_engine, CombinedEngineResult};
 use crate::sonar_importer::ProfileStorage;
@@ -360,19 +361,27 @@ impl OutputEq {
     }
   }
 
-  /// Add or replace a profile in `layer` and select it right away.
+  /// Add or replace a profile in `layer` and select it, except on the Game layer while a
+  /// detected game has its own profile: game bindings only change on the user's explicit pick.
+  /// A replaced profile keeps its name's spelling (bindings and selections refer to it), its
+  /// launcher ids (game detection) and whether it is the user's own.
   pub fn add_layer_profile(
     &mut self,
     layer: OutputLayer,
     mut profile: ParametricProfile,
-    active_game_exe: Option<&str>,
     shm: Option<&ShmHeader>,
   ) -> Result<(), String> {
-    let name = profile.name.trim().to_string();
-    if name.is_empty() {
+    let trimmed = profile.name.trim().to_string();
+    if trimmed.is_empty() {
       return Err("profile name cannot be empty".into());
     }
-    profile.name = name.clone();
+    profile.name = trimmed;
+    if let Some(old) = self.layer_profiles(layer).iter().find(|p| same_profile_slot(&p.name, &profile.name)) {
+      profile.name = old.name.clone();
+      profile.game_ids = old.game_ids.clone();
+      profile.is_custom = old.is_custom;
+    }
+    let name = profile.name.clone();
     for b in &mut profile.bands {
       b.clamp_parameters();
     }
@@ -396,14 +405,10 @@ impl OutputEq {
     match layer {
       OutputLayer::Headphone => self.select_headphone(Some(name), shm),
       OutputLayer::Game => {
-        if let Some(exe) = active_game_exe {
-          self.bind_exe(exe, Some(name), shm);
-        } else if self.active_game.as_ref().is_none_or(|g| g.profile.is_empty()) {
+        if self.active_game.as_ref().is_none_or(|g| g.profile.is_empty()) {
           self.settings.fallback_game_profile = Some(name);
-          self.save_settings(shm);
-        } else {
-          self.save_settings(shm);
         }
+        self.save_settings(shm);
       }
       OutputLayer::Chat => self.select_bus_profile(StreamBus::Chat, Some(name), shm),
       OutputLayer::Media => self.select_bus_profile(StreamBus::Media, Some(name), shm),
@@ -478,7 +483,7 @@ impl OutputEq {
 
   /// Add or replace a headphone profile (AutoEQ import) and use it on the current output.
   pub fn add_headphone_profile(&mut self, profile: ParametricProfile, shm: Option<&ShmHeader>) {
-    if let Err(e) = self.add_layer_profile(OutputLayer::Headphone, profile, None, shm) {
+    if let Err(e) = self.add_layer_profile(OutputLayer::Headphone, profile, shm) {
       warn!("[OutputEq] could not add headphone profile: {e}");
     }
   }
@@ -751,10 +756,12 @@ impl OutputEq {
   }
 }
 
-/// True when two profile names occupy the same file on Windows (case-insensitive, sanitized).
-fn same_profile_slot(a: &str, b: &str) -> bool {
-  a.eq_ignore_ascii_case(b)
-    || ProfileStorage::sanitize_filename(a).eq_ignore_ascii_case(&ProfileStorage::sanitize_filename(b))
+/// True when two profile names are one profile: the same file on Windows, whose file names
+/// ignore case also beyond ASCII ("Řeč" = "řeč"), after the same sanitizing as the file name.
+/// Every name-collision check (mic presets, output layers, AutoEQ) goes through this.
+pub fn same_profile_slot(a: &str, b: &str) -> bool {
+  let key = |n: &str| ProfileStorage::sanitize_filename(n.trim()).to_lowercase();
+  key(a) == key(b)
 }
 
 /// Mean gain (dB) of the combined curve over the loudness band.
@@ -955,11 +962,11 @@ mod tests {
   fn layer_add_save_and_delete_works_across_all_output_layers() {
     let (mut eq, dir) = engine("layers_crud");
     let h = header();
-    assert!(eq.add_layer_profile(OutputLayer::Chat, ParametricProfile::new("   ", VadType::Chat), None, None).is_err());
+    assert!(eq.add_layer_profile(OutputLayer::Chat, ParametricProfile::new("   ", VadType::Chat), None).is_err());
 
     let mut chat = ParametricProfile::new("Discord", VadType::Chat);
     chat.bands.push(BiquadBand { frequency: 2000.0, gain_db: 2.5, ..BiquadBand::default() });
-    eq.add_layer_profile(OutputLayer::Chat, chat, None, Some(&h)).unwrap();
+    eq.add_layer_profile(OutputLayer::Chat, chat, Some(&h)).unwrap();
     assert_eq!(eq.layer_profile_name(OutputLayer::Chat), Some("Discord"));
     assert!(eq.layer_profile_exists(OutputLayer::Chat, "discord"));
 
@@ -967,17 +974,13 @@ mod tests {
     eq.save_layer_profile(OutputLayer::Chat, Some(&h));
 
     let media = ParametricProfile::new("Music", VadType::Media);
-    eq.add_layer_profile(OutputLayer::Media, media, None, Some(&h)).unwrap();
+    eq.add_layer_profile(OutputLayer::Media, media, Some(&h)).unwrap();
     assert_eq!(eq.layer_profile_name(OutputLayer::Media), Some("Music"));
 
-    // Game without active game selects as fallback; with active game exe binds that exe.
+    // Game without active game selects as fallback.
     let fallback = ParametricProfile::new("General", VadType::Game);
-    eq.add_layer_profile(OutputLayer::Game, fallback, None, Some(&h)).unwrap();
+    eq.add_layer_profile(OutputLayer::Game, fallback, Some(&h)).unwrap();
     assert_eq!(eq.settings.fallback_game_profile.as_deref(), Some("General"));
-
-    let game_custom = ParametricProfile::new("My CS2", VadType::Game);
-    eq.add_layer_profile(OutputLayer::Game, game_custom, Some("cs2.exe"), Some(&h)).unwrap();
-    assert_eq!(eq.settings.bindings.get("cs2.exe").map(String::as_str), Some("My CS2"));
 
     let reloaded = OutputEq::new(ProfileStorage::new(&dir));
     assert_eq!(reloaded.layer_profile(OutputLayer::Chat).unwrap().gain_db, -1.5);
@@ -985,6 +988,46 @@ mod tests {
 
     eq.delete_layer_profile(OutputLayer::Chat, "Discord", Some(&h)).unwrap();
     assert_eq!(eq.layer_profile_name(OutputLayer::Chat), None);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn profile_names_collide_like_windows_file_names() {
+    assert!(same_profile_slot("Řeč", "řeč"));
+    assert!(same_profile_slot("Discord ", "discord"));
+    assert!(same_profile_slot("a:b", "A_B"), "same file after sanitizing");
+    assert!(!same_profile_slot("Řeč", "Rec"));
+  }
+
+  #[test]
+  fn replacing_a_game_profile_keeps_its_ids_spelling_and_bindings() {
+    let (mut eq, dir) = engine("replace");
+    let h = header();
+    let event = GameForegroundEvent {
+      pid: std::process::id(),
+      exe_name: "division2.exe".into(),
+      full_path: r"C:\x\division2.exe".into(),
+    };
+    eq.on_foreground(&event, true, Some(&h));
+    let bindings = eq.settings.bindings.clone();
+
+    let mut edited = ParametricProfile::new("the division 2", VadType::Game);
+    edited.bands = vec![BiquadBand { gain_db: -3.0, frequency: 500.0, ..BiquadBand::default() }];
+    eq.add_layer_profile(OutputLayer::Game, edited, Some(&h)).unwrap();
+    assert_eq!(eq.game_profiles.len(), 1, "replaced, not added");
+    let p = eq.game_profiles.first().unwrap();
+    assert_eq!(p.name, "The Division 2", "the existing spelling stays");
+    assert_eq!(p.game_ids, vec!["1_2221490".to_string()]);
+    assert_eq!(p.bands.first().map(|b| b.gain_db), Some(-3.0));
+
+    // A new profile while the game runs: saved, but the game stays on its own profile.
+    eq.add_layer_profile(OutputLayer::Game, ParametricProfile::new("Flat", VadType::Game), Some(&h)).unwrap();
+    assert_eq!(eq.game_profile_name(), Some("The Division 2"));
+    assert_eq!(eq.settings.bindings, bindings);
+    assert!(eq.layer_profile_exists(OutputLayer::Game, "flat"));
+
+    let reloaded = OutputEq::new(ProfileStorage::new(&dir));
+    assert_eq!(reloaded.game_profiles.iter().find(|p| p.name == "The Division 2").unwrap().game_ids.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
   }
 }
