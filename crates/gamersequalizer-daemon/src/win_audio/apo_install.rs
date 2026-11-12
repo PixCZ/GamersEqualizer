@@ -22,6 +22,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+use crate::i18n::tr;
+
 /// Must match CLSID_GAIN_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
 /// crates/gamersequalizer-apo/src/lib.rs.
 const MIC_APO_CLSID: &str = "{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}";
@@ -69,6 +71,9 @@ const DEVICE_STATE_MASK: u32 = 0xF;
 /// `PKEY_AudioEndpoint_Disable_SysFx`: 1 = audio enhancements off for the device.
 const DISABLE_SYSFX_VALUE: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
 const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
+/// Oldest Windows build the installer runs on (Windows 11). Must match `$MinWindowsBuild` in
+/// scripts/apo-install.ps1, which checks again before it changes anything.
+const MIN_WINDOWS_BUILD: u32 = 22000;
 const AUDIO_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
 /// ShellExecute returns a value > 32 on success.
 const SHELL_EXECUTE_OK: isize = 32;
@@ -213,6 +218,13 @@ pub fn mic_in_mfx(guid: &str) -> bool {
 /// copy hashes as given here: the DLL it installs and this exe, which it runs with
 /// `--probe-mic` to check that Windows starts the mic chain.
 fn launch_installer(endpoints: &str) -> Result<(), String> {
+  // An unreadable build is left to the script's own check.
+  if windows_build().is_some_and(|build| build < MIN_WINDOWS_BUILD) {
+    return Err(
+      tr("The Windows effects need Windows 11. This PC runs an older Windows, so nothing was installed or changed.")
+        .to_string(),
+    );
+  }
   let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
   let dll_hash = file_sha256(&dll)?;
   let own_exe = std::env::current_exe().map_err(|e| e.to_string());
@@ -234,6 +246,10 @@ fn launch_installer(endpoints: &str) -> Result<(), String> {
     ps_quote(&dll.to_string_lossy())
   );
   run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer")
+}
+
+fn windows_build() -> Option<u32> {
+  read_string_value(WINDOWS_VERSION_KEY, "CurrentBuild")?.trim().parse().ok()
 }
 
 /// Hex SHA-256 of a file (the app's exe is tens of MB: read once per install).

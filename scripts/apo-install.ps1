@@ -91,6 +91,14 @@ function Say([string]$text, [string]$color) {
   else { Write-Host $text }
 }
 
+# This script writes composite effect lists only, and it has only been run on Windows 11
+# (build 22000 and newer). Stop before anything changes. Must match MIN_WINDOWS_BUILD in apo_install.rs.
+$MinWindowsBuild = 22000
+$WindowsBuild = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuild
+if ($WindowsBuild -lt $MinWindowsBuild) {
+  throw "Windows build $WindowsBuild is older than Windows 11 (build $MinWindowsBuild). Nothing was changed."
+}
+
 function Stop-Audio {
   $script:AudioStopped = $true
   Stop-Service Audiosrv -Force -WarningAction SilentlyContinue
