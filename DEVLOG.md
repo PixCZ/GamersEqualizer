@@ -2456,7 +2456,7 @@ lists have 10 (6), and milestone 51 gave the slope range as 0.70..1.40 (the code
   (milestone 51).
 - At 0.9 the passive meter confirmed 2 of 11 speaker captures (milestone 50); on the others
   nothing changes against milestone 44. A calibration signal played on request would measure
-  them: a proposal, not decided, in `docs/sidetone-zadani.md`, 7.2, on branch `sidetone`.
+  them: a proposal, not decided, in `docs/sidetone-zadani.md`, 7.2 (removed; `git show b931839:docs/sidetone-zadani.md`).
 - The log shows the fit but not the reference level spread (review note in milestone 51).
 - Nothing turns AEC3 off on headphones; the meter only refuses to confirm an echo there.
 - The filter length (`len=20` / `len=32`) is undecided and was not run through the denoiser
@@ -2465,7 +2465,7 @@ lists have 10 (6), and milestone 51 gave the slope range as 0.70..1.40 (the code
   in the app.
 - Not measured: whether the loopback reference is taken before or after the Windows volume.
   If before, a remembered "dB under the reference" stops holding when the user changes the
-  volume. Procedure: `docs/sidetone-implementace.md`, 4.5, on branch `sidetone`.
+  volume. Procedure: `docs/sidetone-implementace.md`, 4.5 (removed; `git show b931839:docs/sidetone-implementace.md`).
 - `window_report` prints `0.0` in `echo` / `left` for a capture with no echo-alone window
   (`125717`, `144824` in milestone 46's table); read it as "no data".
 - `ECHO_BOUND_UNDER_DB` (3 dB) may be too eager, see the end of milestone 49.
@@ -2534,7 +2534,7 @@ self-test confirmed it twice and moved nothing.
   - Generalized output-layer profile operations (`OutputLayer`, add, save-as, delete, active game lookup, case-insensitive NTFS-safe duplicate check) in `crates/gamersequalizer-daemon/src/output_eq/mod.rs` and `ui/mic_presets.rs`.
   - Replaced `ui/mic_preset_bar.rs` with shared `crates/gamersequalizer-daemon/src/ui/profile_bar.rs` (`New…`, `Save as…`, delete, `Copy to share`, `Import…`, centered dialogs) across `tab_eq.rs`, `tab_headphones.rs` and `tab_mic.rs`, keeping tab-specific AutoEQ wizard, Sonar DB import and Mic `Save`/`Reset` intact (`i18n.rs`, `i18n_cs.rs`, `state.rs`, `app.rs`).
 - **EQ biquad cascade optimization (`BiquadCascade` + `StreamProcessor` + `OutputProcessor`):**
-  - Evaluated `origin/sidetone`'s `eq_bench.rs` and `docs/eq-optimization-analysis.md` procedure on Windows x86-64. Confirmed Hypothesis 1: keeping `f32` rounding between stages only yielded `0.56×–1.35×` on baseline SSE2 (regressing to `144 329 ns` at 64 stages).
+  - Evaluated `origin/sidetone`'s `eq_bench.rs` and the procedure of its EQ analysis (summarized below) on Windows x86-64. Confirmed Hypothesis 1: keeping `f32` rounding between stages only yielded `0.56×–1.35×` on baseline SSE2 (regressing to `144 329 ns` at 64 stages).
   - Updated `crates/gamersequalizer-common/src/biquad.rs` to run sample-by-sample with `f64` between stages (`max diff <= 8.9e-8` vs legacy `f32`-rounded stages), split filter memory into SoA slices (`FilterState { z1, z2 }`), and dispatch via `std::arch::is_x86_feature_detected!("fma")` (`#[target_feature(enable = "fma")]` + `.mul_add()`, SSE2/portable fallback), keeping `flush_non_finite`.
   - Updated `BiquadCascade::process_interleaved` to handle `1` (mono), `2` (stereo), `4` (quad), `6` (5.1) and `8` (7.1) channels in a single pass, and updated `StreamProcessor` and `OutputProcessor` in `crates/gamersequalizer-apo/src/lib.rs` to own one multichannel cascade (`OutputProcessor` stays behind mix/spatial renderers in `EFX`; spatial apps still bypass `SFX`).
   - Added `crates/gamersequalizer-common/examples/eq_bench.rs` (extended with 5.1 and 7.1 cases) and expanded `interleaved_matches_per_channel_strided_and_recovers_from_nan` to `[1, 2, 3, 4, 6, 8]` channels.
@@ -2549,6 +2549,19 @@ self-test confirmed it twice and moved nothing.
 | Stream EQ full, stereo (64 b) | `117 663 ns`             | `27 668 ns`           | `4.25×` | `0.277 %`  |
 | Output EQ, 5.1 (6 ch, 20 b)   | `62 784 ns` (before SoA) | `11 750 ns`           | `5.34×` | `0.118 %`  |
 | Output EQ, 7.1 (8 ch, 20 b)   | `83 702 ns` (before SoA) | `11 511 ns`           | `7.27×` | `0.115 %`  |
+
+**Why this and nothing more (from the analysis on Apple M4 Pro, arm64)**
+
+- The old loop was slow because every sample waits for the previous one's filter state inside one
+  stage (one serial add-multiply chain, 2.3 ns per sample and stage). Sample by sample through all
+  stages keeps several chains in flight (0.7 ns). Running two stages offset by one sample gained nothing.
+- In absolute terms EQ was never expensive: mic EQ 0.11-0.17 % of a core, output EQ 0.43 %; the whole
+  mic chain takes 2-24 % of a block depending on the model. Only the stream EQ adds up (up to 64 biquads
+  per playing stream, 1.4 % each before this change).
+- Not worth touching: limiter (2.6 us per stereo block), leveler, expander, clip detector. Resampling
+  (`rubato`), FFT (`rustfft`) and AEC3 (`sonora-simd`) already use SIMD in their crates. No hand-written
+  asm or SIMD for EQ (stereo would gain at most another 2x, about 0.06 % of a core, and need `unsafe`).
+- Possible, not measured: hand SIMD in `nnnoiseless` (RNNoise 2017 runs several times per block).
 
 **Open**
 
@@ -2591,3 +2604,213 @@ profiles + biquad SoA, installer/USB APO, signing/CI/clipboard), then fixes. Onl
 
 Open: install/uninstall still duplicate their registry helpers (`shortcut:` comment); an old backup restores
 old OEM effect lists after a driver update; nothing of this has run on Windows yet.
+
+---
+
+## Milestone 57: USB headsets and inbox drivers: processing modes and legacy effect values (2026-11-11)
+
+Branch `diag/usb-apo-compatibility`. A tester's `Arctis Nova 3` showed the effects installed but never
+started. Measured on Windows 11 with three USB devices at once (`ASUS AI Noise-Cancelling Mic Adapter`,
+`EPOS H3PRO`, `Jabra EVOLVE LINK MS`, 6 endpoints), each step on a fresh `Audiosrv`, compared with the
+local Realtek and AMD HDMI.
+
+**Measured**
+
+- The inbox USB driver (`usbaudio2.sys`) puts `VocaEffectPack` on capture and Microsoft Audio Home Theater
+  Effects on render: legacy REG_SZ `,5` (SFX) and `,6` (MFX), no `,0`, and no EFX modes value
+  (`{d3993a3f-...},7`). AMD HDMI and the tester's Arctis render have the same pattern; Realtek has clean
+  composite lists and all modes.
+- All 6 endpoints run our effects: 0 audiodg crashes, 0 failed opens, 16 kHz mono (EPOS), 48 kHz mono and
+  stereo accepted.
+
+| Step (render unless noted)                      | Result                                             |
+| ----------------------------------------------- | -------------------------------------------------- |
+| Capture `,15` without modes,7 (the old install) | mic chain not started on any of the 3              |
+| Capture `,15` + modes,7 = Default               | started on all 3                                   |
+| `,13` + `,15`, legacy `,5`/`,6` kept, no modes  | nothing started                                    |
+| + modes,7                                       | Output EQ (EFX) runs, Stream EQ (`,13`) does not   |
+| + `,0` instead of modes,7                       | nothing: `PKEY_FX_Association` does not help       |
+| legacy `,5`/`,6` moved into `,13`/`,14`         | both run, Microsoft's effects kept                 |
+| Output EQ in `,14` with legacy `,6` back        | Output EQ not started: `,6` shadows `,14`          |
+| legacy `,5`/`,6` = our CLSIDs, no composite     | both run, but Microsoft's SFX/MFX are gone         |
+
+So a legacy value shadows the composite list of its own slot only, and a slot runs our effect only in the
+modes listed for it.
+
+- `FxProperties` grants Administrators only `SetValue, ReadKey`; its subkeys belong to TrustedInstaller /
+  Audiosrv. `reg.exe import` of a `.reg` export (which includes the subkeys) fails, so the old
+  `-RestoreBackup` never worked. Restoring value by value through `RegistryKey` with exactly
+  `SetValue, QueryValues` (PowerShell 5.1 needs real `[byte[]]` / `[string[]]`) left the registry byte for
+  byte as before on all 6 endpoints.
+- The USB-C ASUS adapter shows no endpoint until a jack is plugged into it.
+
+**What changed**
+
+- The installer adds Default to the slot's modes (not where the driver's own effects declare other
+  modes, milestone 56), moves legacy values into composite lists, snapshots `FxProperties` in memory and
+  restores it value by value.
+- After installing it opens every endpoint (`--probe-mic`, new silent `--probe-render`), checks for
+  audiodg crashes (Application log, event 1000) and the APO's "stream started" notes, tries MFX when EFX
+  does not start, and rolls the endpoint back when it does not open or audiodg crashes.
+- The uninstaller removes only our CLSIDs, keeps String vs MultiString and other vendors' effects, and
+  drops Default-only modes values it left on empty slots. `[ApoCheck]` logs legacy values and `,0`.
+- The verification script `verify-usb-apo.ps1` was removed (milestone 56): the installer's self-test and
+  `[ApoCheck]` do its job.
+
+**Open**
+
+- The live audio path with real EQ settings on the three USB devices was not checked by ear.
+
+---
+
+## Milestone 58: Windows 10 and installer fixes from `apo-fixes` (2026-11-12)
+
+**Windows 10**
+
+- Composite effect lists (`PKEY_CompositeFX_*`, several effects per slot) exist from Windows 10 version 1803
+  (build 17134), not only Windows 11; Microsoft's docs say so for every composite key. Older builds have
+  one effect per slot. The installer writes composite lists only, so it needs 17134: the app checks the
+  build before it asks for admin and the script checks it again before it changes anything.
+- The APO uses only `IAudioProcessingObject`, `...RT`, `...Configuration`, `IAudioSystemEffects` (v1) and
+  `APOInitSystemEffects2`, all from Windows 8.1/10. The UI falls back to egui fonts without the Windows 11
+  ones.
+- A driver with only the old LFX `,1` / GFX `,2` effects would lose its GFX once a newer value exists
+  (Equalizer APO treats such drivers separately). `Get-EndpointBlocker` skips such an endpoint and names
+  it; nothing changes when no endpoint is left.
+- A microphone whose driver effects were moved and whose chain starts in neither slot is rolled back.
+- Equalizer APO always sets `DisableProtectedAudioDG = 1`; we do not (it turns off the protected audio
+  path system-wide). Whether Windows 10 needs it for an unsigned APO is unknown; `[ApoCheck]` logs it.
+
+**From `apo-fixes`** (a parallel review branch; the rest of it was not taken: a move of shared helpers, a
+refactor of the APO's notes that could lose the endpoint GUID, a looser "started" check, and keeping an
+output whose effects never start)
+
+- Legacy values move into composite lists only for the slots our effects go into (also when an effect
+  moves to the other slot), plus SFX while LFX `,1` is set. The app's "configured" check uses the same
+  per-slot rule (milestone 57: `,5`/`,6` left `,15` running).
+- A device that does not open during the self-test is opened again without our effects: if it opens, ours
+  stay out (rollback line, not offered again); if not (exclusive use, privacy settings), ours go back in
+  unchecked. A crash, a check that did not run or hung, moved driver effects or a missing snapshot still
+  roll back at once.
+- "Update" is offered only where one of our effects already is; `endpoint_has_any_clsid` matches any of
+  our classes.
+- `scripts/tests/apo-install.tests.ps1` (54 checks, also under `pwsh` on macOS) covers the blocker, the
+  migration slots and the reopen decision.
+
+**Open**
+
+- Nothing has run on Windows 10. Test: Windows 10 22H2 (a VM is enough for render), export
+  `MMDevices\Audio` first, install, send `[ApoCheck]` and `[ApoNote]`, uninstall, compare `FxProperties`.
+
+---
+
+## Milestone 59: The echo canceller gets both speaker channels (2026-11-12)
+
+Branch `feat/aec-stereo-reference`.
+
+**What changed**
+
+- AEC3 gets left and right separately and learns a filter per channel (`aec3.rs`, `process_block_stereo`);
+  before, it got their mono mix.
+- Stereo turns on by itself after 1 s of audible content where the channels differ (difference above
+  -30 dB, level above -60 dBFS), and back to the mix after 5 min of mono content; pauses count for neither.
+  The switch rebuilds AEC3 in a mic pause like a gain change, so stereo starts 3-7 s after the content.
+- Same sound in both channels (calls, mono video) keeps the old path; the 16 earlier AEC captures give the
+  same numbers before and after. Debug log: `AEC stereo reference off -> on`; debug capture v4
+  (~122 MB) adds `03_ref_aec_left/right.wav` and `aec_stereo`. No shared memory change: the ring already
+  held L/R, the state is a bit in `mic_chain_flags`.
+- Loopback of 5.1/7.1: Windows mixes it to stereo (`AUTOCONVERTPCM`); only the fallback path, when
+  Windows refuses, mixes it itself (`StereoFrame::from_channels`).
+
+**Measured (macOS, synthetic scenes, 40 s; speakers -18 dBFS, right 0.9 ms later and 8 dB weaker, echo
+and voice -30 dBFS at the mic)**
+
+| Scene                              | Echo removed: mix | Echo removed: stereo |
+| ---------------------------------- | ----------------- | -------------------- |
+| same sound in both channels        | 43.5 dB           | 43.5 dB (stays mono) |
+| music (centre + independent sides) | 16.5 dB           | 43.8 dB              |
+| independent channels               | 9.9 dB            | 43.4 dB              |
+| one source sweeping L-R (0.25 Hz)  | 29.2 dB           | 44.0 dB              |
+| one source jumping L-R every 3 s   | 16.0 dB           | 44.3 dB              |
+| fixed pan 70/30                    | 43.7 dB           | 43.6 dB              |
+
+- The voice "survived" on the mix only because the echo stayed and the suppressor gave up; in stereo it
+  loses what it loses today with mono content in the same scene (about -10 dB, voice as loud as the echo).
+- AEC3 cost 0.46 -> 0.52 % of real time. A stereo filter did not detune after panning changes.
+
+**From the code**
+
+- `sonora` 0.3.0 with `detect_stereo_content = false` and two channels stays on the left channel
+  (2.5 dB removed instead of 35 dB). So the library's detector stays on with 0 s hysteresis and no way
+  back, and our wrapper decides the mode and keeps it across rebuilds.
+- Not used: AEC3's own multichannel config (no more echo removed, 10 dB more voice lost).
+- The fallback echo estimate is measured against the mix while AEC3 sums the channel powers: the gain
+  goes 3 dB down, so for unrelated channels the estimate is up to 3 dB high, never low.
+
+**Open**
+
+- Not run on Windows: `plugin.rs`, `loopback.rs`, `chain_log.rs`, the APO. Check: stereo music with an
+  open mic gives the `off -> on` line within ~7 s, a call never does; a 60 s debug capture (20 s music,
+  then voice) through `capture_tuning_report` with `VARIANTS="mono;"`; a game with positional sound and
+  headphones (nothing may get worse); `load avg` and `late blocks` before and after.
+- No setting for stereo/mono (A/B works offline on a capture); full N channels only after a 5.1 measurement.
+
+---
+
+## Milestone 60: Sidetone: your own voice in the headphones (2026-11-10 .. 2026-11-12)
+
+Branch `sidetone` (merged into `release-0.2.0`). Sealed or in-ear headphones block your own voice. Sidetone
+plays the microphone into them with fine volume (headset hardware offers about 3 steps and passes all the
+noise) and without steady hiss in pauses. It plays only while an app records the microphone (plus "Try it").
+
+**Built**
+
+- Tap: the mic APO (`SidetoneTap` in `MicProcessor::process`) takes the raw input before the mic chain,
+  also when the chain failed (then without the leveler's gain): low cut / EQ, noise mode, level (volume
+  0-300 % of the voice leveler's gain), into a 16384-sample `SidetoneRing` next to the header in the Global
+  shared memory (layout v21, so the APO is reinstalled with the app).
+- Playback: the Output EQ APO reads the ring (`SidetoneReader`: resampling, clock drift, 2 ms margin plus
+  1 ms per real underrun up to 10 ms) and adds it mono to L and R after the EQ, before the limiter. It plays
+  only when the APO's endpoint hash equals the pair's output.
+- Daemon (`win_audio/sidetone.rs`): one worker publishes the pair, its hashes, the settings and `enabled`;
+  pairs live in `sidetone.json`. It keeps a silent render stream open (the engine stops in silence) and
+  logs every change of its verdict (Off, Muted, OtherMicrophone, OtherOutput, NoRecorder, Starting,
+  Playing). The tab (`ui/tab_sidetone.rs`, shared EQ editor) shows the latency: green up to 10 ms, amber
+  up to 20 ms.
+- Noise modes: a 4-band expander with zero delay (default), or frame denoisers at 48 kHz
+  (`mic-vst/src/sidetone_denoise.rs`: WebRTC NS, RNNoise, RNNoise 0.2).
+
+**Why**
+
+- Rejected: hardware sidetone (3 steps), Windows "Listen to this device" (tens to hundreds of ms, after the
+  chain), a daemon capture-to-render stream (extra engine passes, shows in the mixer), own driver / ASIO /
+  exclusive mode, and a tap after the mic chain (AEC ~9 ms, gate lookahead, model block). DeepFilterNet and
+  DPDFNet add tens of ms.
+- Mixed after the EQ (the voice gets no game profile) and before the limiter (it guards the sum). Never
+  played on an unknown output (mic plus speakers would feed back); an unknown pair is off; no "always on"
+  (the microphone would stay open).
+- Sidetone must not reach the echo canceller. If the loopback reference were taken after the endpoint
+  effects it would hold your own voice, the echo meter would confirm a phantom echo and AEC3 would cut the
+  voice. Not measured; the fallback would be feeding the reference from the Output APO before the mix.
+
+**Measured**
+
+- Engine periods: milestone 55 (10 ms on both sides, no shorter period offered).
+- Frame denoisers (macOS, 480-sample blocks): delay WebRTC NS 6.9 ms, RNNoise 10 ms, RNNoise 0.2 20 ms
+  (+10 ms for other block sizes). Steady noise removed: expander 16-19 dB (-60 dBFS white noise), WebRTC
+  16-17 dB, RNNoise 3-9 dB at -50/-40 dBFS, RNNoise 0.2 34-37 dB.
+- Mouth-to-ear latency was not measured; estimated 25-35 ms at 10/10 ms periods.
+
+**Open**
+
+- Nothing since the milestone 56 fixes has run on Windows. On 2026-11-10 an early sidetone build crashed
+  audiodg about 20 times a minute (stack overflow, milestone 53) when a pair was switched on: check that
+  first.
+- Watch: `echo` / `fit` in `[Chain]` unchanged with sidetone on, underruns, chain load, whether the silent
+  render stream changes the loopback reference.
+- Limits: exclusive-mode playback bypasses it; the reader has no anti-alias filter; frame denoisers only at
+  48 kHz; switching modes gives a short gap; endpoint ids change on a driver reinstall (pairs are orphaned);
+  keyboard clicks pass the expander; Bluetooth hands-free is out of scope.
+- Not decided: AEC off for pairs with sidetone, an echo calibration burst on request, an echo cache keyed by
+  the chosen microphone.
+
