@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 /// Bump the version in the name on every layout change.
-pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v3";
+pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v4";
 pub const DEBUG_CAPTURE_MAGIC: u32 = 0x4744_4247; // 'GDBG'
 pub const DEBUG_CAPTURE_RATE: u32 = 48_000;
 pub const DEBUG_CAPTURE_MAX_SECONDS: u32 = 60;
@@ -24,15 +24,17 @@ pub const STATE_RECORDING: u32 = 2;
 pub const STATE_DONE: u32 = 3;
 
 /// (file name, meaning). Audio recorded per block, mono 48 kHz, all sample-aligned (index = same block position).
-pub const DEBUG_STAGES: [(&str, &str); 8] = [
+pub const DEBUG_STAGES: [(&str, &str); 10] = [
   ("01_mic_raw", "chain input (after the APO's resampler, first channel)"),
   ("02_ref_at_mic", "speaker reference that played at the mic block's time, no echo delay"),
-  ("03_ref_aec", "reference as fed to the AEC (shifted by delay - pre-delay); 0 if not run"),
+  ("03_ref_aec", "reference as fed to the AEC (shifted by delay - pre-delay), mono mix; 0 if not run"),
   ("04_after_aec", "= raw when AEC is off or not locked"),
   ("05_after_denoise", "after the neural model + gate (delayed by its latency)"),
   ("06_after_eq", "after the parametric voice EQ"),
   ("07_after_leveler", "after the learning voice leveler"),
   ("08_out", "after volume + soft limiter = what leaves the APO"),
+  ("03_ref_aec_left", "left channel of 03_ref_aec"),
+  ("03_ref_aec_right", "right channel of 03_ref_aec (the AEC runs on both while `aec_stereo` is 1)"),
 ];
 pub const STAGE_MIC_RAW: usize = 0;
 pub const STAGE_REF_AT_MIC: usize = 1;
@@ -42,9 +44,11 @@ pub const STAGE_AFTER_DENOISE: usize = 4;
 pub const STAGE_AFTER_EQ: usize = 5;
 pub const STAGE_AFTER_LEVELER: usize = 6;
 pub const STAGE_OUT: usize = 7;
+pub const STAGE_REF_AEC_LEFT: usize = 8;
+pub const STAGE_REF_AEC_RIGHT: usize = 9;
 
 /// (column, meaning) of the per-block variable table (`vars.tsv`), all stored as f32.
-pub const DEBUG_VARS: [(&str, &str); 56] = [
+pub const DEBUG_VARS: [(&str, &str); 57] = [
   ("frame", "first frame of the block in the capture"),
   ("frames", "block length"),
   ("t_ms", "block time (mic QPC) since capture start; -1 without a timestamp"),
@@ -101,6 +105,7 @@ pub const DEBUG_VARS: [(&str, &str); 56] = [
   ("input_clips", "clipped raw input samples since the stream started (cumulative)"),
   ("mic_auto_level", "Windows mic volume the automatic input gain set, 1.0 = 100 %, 0 none, NaN no shm"),
   ("limiter_gain_db", "peak limiter gain reduction, dB (0 = none)"),
+  ("aec_stereo", "1 = the AEC runs on both reference channels (they differ), 0 = on their mono mix"),
 ];
 
 #[repr(C)]
@@ -131,7 +136,7 @@ pub struct DebugCaptureLayout {
 }
 
 impl DebugCaptureLayout {
-  /// ~99 MB of pagefile-backed commit; physical memory only for pages actually written.
+  /// ~122 MB of pagefile-backed commit; physical memory only for pages actually written.
   pub const fn total_size_bytes() -> usize {
     std::mem::size_of::<Self>()
   }

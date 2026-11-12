@@ -46,6 +46,9 @@ pub const MIC_CHAIN_LOOKAHEAD: u32 = 1 << 3;
 /// More mic chains run in the same audiodg (apps record in different processing modes or from
 /// different microphones, each gets its own chain); the telemetry is from one of them only.
 pub const MIC_CHAIN_OTHERS: u32 = 1 << 4;
+/// The echo canceller runs on both channels of the speaker reference (they differ), not on
+/// their mono mix.
+pub const MIC_CHAIN_STEREO_REF: u32 = 1 << 5;
 
 /// One parametric EQ band in shared memory (f32 values stored as bits).
 #[repr(C)]
@@ -402,6 +405,27 @@ pub struct ActiveGame {
 pub struct StereoFrame {
   pub left: f32,
   pub right: f32,
+}
+
+impl StereoFrame {
+  /// One frame of an interleaved stream. 5.1 and 7.1 fold down the way Windows' own mix does:
+  /// the centre and the surrounds join their side 3 dB down, the LFE is left out (a mic hears
+  /// little of it, and the chain cuts under 70 Hz).
+  /// shortcut: the layout is taken from the channel count (FL FR FC LFE + surround pairs), not
+  /// from `dwChannelMask`; other counts keep their first two channels. Only reached when
+  /// Windows refuses to convert the loopback to stereo itself.
+  pub fn from_channels(frame: &[f32]) -> Self {
+    const DOWN_3_DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    match *frame {
+      [] => Self::default(),
+      [mono] => Self { left: mono, right: mono },
+      [left, right, centre, _lfe, ref surrounds @ ..] if matches!(surrounds.len(), 2 | 4) => {
+        let side = |first: usize| surrounds.iter().skip(first).step_by(2).sum::<f32>();
+        Self { left: left + (centre + side(0)) * DOWN_3_DB, right: right + (centre + side(1)) * DOWN_3_DB }
+      }
+      [left, right, ..] => Self { left, right },
+    }
+  }
 }
 
 /// Full shared memory segment layout
@@ -1147,7 +1171,19 @@ impl<'a> ShmRingBuffer<'a> {
     for (i, dst) in out.iter_mut().enumerate() {
       let pos = start.wrapping_add(i as u32);
       let age = write_pos.wrapping_sub(pos); // 1 = newest frame
-      *dst = if age >= 1 && age < cap - 1024 { self.read_slot(pos) } else { 0.0 };
+      *dst = if age >= 1 && age < cap - 1024 { self.read_mono(pos) } else { 0.0 };
+    }
+    self.layout.header.mic_active.store(true, Ordering::Relaxed);
+  }
+
+  /// `read_frames_from` for the reference's two channels.
+  pub fn read_stereo_frames_from(&self, start: u32, left: &mut [f32], right: &mut [f32]) {
+    let write_pos = self.layout.header.write_frame_index.load(Ordering::Acquire);
+    let cap = RING_BUFFER_CAPACITY as u32;
+    for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
+      let pos = start.wrapping_add(i as u32);
+      let age = write_pos.wrapping_sub(pos); // 1 = newest frame
+      (*l, *r) = if age >= 1 && age < cap - 1024 { self.read_slot(pos) } else { (0.0, 0.0) };
     }
     self.layout.header.mic_active.store(true, Ordering::Relaxed);
   }
@@ -1159,7 +1195,7 @@ impl<'a> ShmRingBuffer<'a> {
     let n = count.min(out.len());
     if let Some(dst) = out.get_mut(..n) {
       for (i, d) in dst.iter_mut().enumerate() {
-        *d = self.read_slot(start.wrapping_add(i as u32));
+        *d = self.read_mono(start.wrapping_add(i as u32));
       }
     }
     self.layout.header.mic_active.store(true, Ordering::Relaxed);
@@ -1180,15 +1216,21 @@ impl<'a> ShmRingBuffer<'a> {
     }
   }
 
-  fn read_slot(&self, pos: u32) -> f32 {
+  /// Both channels of a frame; a frame with a non-finite sample is silence.
+  fn read_slot(&self, pos: u32) -> (f32, f32) {
     let idx = pos as usize % RING_BUFFER_CAPACITY;
-    // Convert stereo to mono reference: (left + right) * 0.5, non-finite = silence.
-    let mono = self.layout.buffer.get(idx).map_or(0.0, |f| (f.left + f.right) * 0.5);
-    if mono.is_finite() {
-      mono.clamp(-REF_SAMPLE_MAX, REF_SAMPLE_MAX)
+    let frame = self.layout.buffer.get(idx).copied().unwrap_or_default();
+    if (frame.left + frame.right).is_finite() {
+      (frame.left.clamp(-REF_SAMPLE_MAX, REF_SAMPLE_MAX), frame.right.clamp(-REF_SAMPLE_MAX, REF_SAMPLE_MAX))
     } else {
-      0.0
+      (0.0, 0.0)
     }
+  }
+
+  /// Mono reference: (left + right) * 0.5.
+  fn read_mono(&self, pos: u32) -> f32 {
+    let (left, right) = self.read_slot(pos);
+    (left + right) * 0.5
   }
 }
 
@@ -1257,6 +1299,24 @@ mod tests {
   }
 
   #[test]
+  fn test_surround_frame_folds_down_to_stereo() {
+    let mix = |frame: &[f32]| {
+      let f = StereoFrame::from_channels(frame);
+      [f.left, f.right]
+    };
+    let h = std::f32::consts::FRAC_1_SQRT_2;
+    assert_eq!(mix(&[0.5]), [0.5, 0.5]);
+    assert_eq!(mix(&[0.1, 0.2]), [0.1, 0.2]);
+    // 5.1: the centre (a game's dialogue) and each surround reach the reference, the LFE does not.
+    assert_eq!(mix(&[0.0, 0.0, 1.0, 9.0, 0.0, 0.0]), [h, h]);
+    assert_eq!(mix(&[0.1, 0.2, 0.0, 0.0, 1.0, 0.0]), [0.1 + h, 0.2]);
+    // 7.1: back and side pairs.
+    assert_eq!(mix(&[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0]), [0.0, 2.0 * h]);
+    // Quad (no centre / LFE to tell apart): the front pair, as before.
+    assert_eq!(mix(&[0.1, 0.2, 0.3, 0.4]), [0.1, 0.2]);
+  }
+
+  #[test]
   fn test_ring_read_sanitizes_garbage() {
     let mut mem = new_layout();
     let mut ring = unsafe { ShmRingBuffer::from_raw(&mut mem) };
@@ -1264,12 +1324,16 @@ mod tests {
       StereoFrame { left: f32::INFINITY, right: 0.0 },
       StereoFrame { left: f32::NAN, right: 0.5 },
       StereoFrame { left: 1e30, right: 1e30 },
-      StereoFrame { left: 0.5, right: 0.5 },
+      StereoFrame { left: 0.5, right: 0.25 },
     ];
     ring.push_frames(&frames);
     let mut out = [1.0f32; 4];
     ring.read_frames_from(0, &mut out);
-    assert_eq!(out, [0.0, 0.0, REF_SAMPLE_MAX, 0.5]);
+    assert_eq!(out, [0.0, 0.0, REF_SAMPLE_MAX, 0.375]);
+    let (mut left, mut right) = ([1.0f32; 5], [1.0f32; 5]);
+    ring.read_stereo_frames_from(0, &mut left, &mut right);
+    assert_eq!(left, [0.0, 0.0, REF_SAMPLE_MAX, 0.5, 0.0]);
+    assert_eq!(right, [0.0, 0.0, REF_SAMPLE_MAX, 0.25, 0.0], "channels apart; not written yet = silence");
   }
 
   #[test]

@@ -22,6 +22,11 @@
 //! speakers, their volume and the mic (headset: no echo, laptop: almost as loud as the
 //! reference). It is measured next to AEC3 (`EchoMeter`), and AEC3's fallback echo estimate
 //! follows a strong echo instead of assuming one 40 dB down.
+//!
+//! Stereo reference: each speaker's echo has its own path to the mic (distance, level, colour),
+//! and one filter on the mono mix can only follow them while left and right play the same.
+//! While they differ AEC3 gets both channels and learns a filter for each (`mix_reference`);
+//! with the same sound on both it runs on their mix, exactly as it did before there was a choice.
 
 use sonora::config::{EchoCanceller, EchoCanceller3Config, MaxProcessingRate, Pipeline, TransparentModeType};
 use sonora::{AudioProcessing, Config, StreamConfig};
@@ -80,14 +85,29 @@ const ECHO_FIT_MIN_REF_SPREAD_DB: f32 = 2.0;
 const ECHO_BOUND_UNDER_DB: f32 = 3.0;
 /// The reported echo strength moves only by this much (dB), so a log shows steps, not jitter.
 const ECHO_REPORT_STEP_DB: f32 = 2.0;
+/// A reference frame is stereo when what its mono mix loses, (L - R) / 2, is over this share of
+/// the channels' mean power (-30 dB). Under it a mono filter's error is below what AEC3 trusts
+/// its linear filter for anyway (`erle.max_l`).
+const STEREO_SIDE_RATIO: f32 = 1e-3;
+/// Mean channel power (-60 dBFS) under which a frame says nothing: a pause in what plays.
+const STEREO_MIN_POWER: f32 = 1e-6;
+/// Stereo frames in a row before AEC3 is asked for both channels (1 s: not for a notification
+/// sound), and mono frames in a row before it goes back to their mix (5 min, AEC3's own timeout
+/// for its stereo mode). Pauses count for neither.
+const STEREO_ON_FRAMES: u32 = 100;
+const STEREO_OFF_FRAMES: u32 = 30_000;
 
 pub struct EchoCanceller3 {
   apm: AudioProcessing,
+  /// The reference frame's channels and their mono mix: AEC3 gets the mix unless `stereo`, the
+  /// echo meter always.
+  in_left: Vec<f32>,
+  in_right: Vec<f32>,
   in_ref: Vec<f32>,
   in_mic: Vec<f32>,
   in_len: usize,
   out_frame: Vec<f32>,
-  render_out: Vec<f32>,
+  render_out: [Vec<f32>; 2],
   out_queue: VecDeque<f32>,
   buffered: bool,
   erle_db: f32,
@@ -108,6 +128,12 @@ pub struct EchoCanceller3 {
   /// Fallback echo estimate AEC3 was built for (dB re the reference) and the step asked for.
   fallback_db: f32,
   wanted_fallback_db: f32,
+  /// AEC3 was built for both reference channels, and whether it should be (`mix_reference`).
+  stereo: bool,
+  wanted_stereo: bool,
+  /// Stereo frames in a row, mono frames in a row.
+  stereo_run: u32,
+  mono_run: u32,
   /// Test-only overrides of `tuning` (`tests::apply_variant`).
   #[cfg(test)]
   variant: String,
@@ -146,12 +172,14 @@ struct EchoMeter {
 impl EchoCanceller3 {
   pub fn new() -> Self {
     Self {
-      apm: build_apm(tuning(1.0, 10f32.powf(FALLBACK_ECHO_DB / 20.0))),
+      apm: build_apm(tuning(1.0, 10f32.powf(FALLBACK_ECHO_DB / 20.0), false), false),
+      in_left: vec![0.0; FRAME],
+      in_right: vec![0.0; FRAME],
       in_ref: vec![0.0; FRAME],
       in_mic: vec![0.0; FRAME],
       in_len: 0,
       out_frame: vec![0.0; FRAME],
-      render_out: vec![0.0; FRAME],
+      render_out: [vec![0.0; FRAME], vec![0.0; FRAME]],
       out_queue: VecDeque::with_capacity(8192),
       buffered: false,
       erle_db: 0.0,
@@ -166,6 +194,10 @@ impl EchoCanceller3 {
       echo: EchoMeter::new(),
       fallback_db: FALLBACK_ECHO_DB,
       wanted_fallback_db: FALLBACK_ECHO_DB,
+      stereo: false,
+      wanted_stereo: false,
+      stereo_run: 0,
+      mono_run: 0,
       #[cfg(test)]
       variant: String::new(),
     }
@@ -222,18 +254,32 @@ impl EchoCanceller3 {
     self.fallback_db
   }
 
-  /// Process a block in place. `ref_block` must be delay-aligned to `mic_block`.
+  /// AEC3 runs on both reference channels right now (a filter each), not on their mix.
+  pub fn is_stereo(&self) -> bool {
+    self.stereo
+  }
+
+  /// `process_block_stereo` with a mono reference.
   pub fn process_block(&mut self, ref_block: &[f32], mic_block: &mut [f32]) {
-    let n = mic_block.len().min(ref_block.len());
+    self.process_block_stereo(ref_block, ref_block, mic_block);
+  }
+
+  /// Process a block in place. The reference's two channels must be delay-aligned to
+  /// `mic_block`.
+  pub fn process_block_stereo(&mut self, ref_left: &[f32], ref_right: &[f32], mic_block: &mut [f32]) {
+    let n = mic_block.len().min(ref_left.len()).min(ref_right.len());
     if !self.buffered && (self.in_len != 0 || !n.is_multiple_of(FRAME)) {
       // This host's blocks don't line up with frames: 10 ms of latency from now on (once).
       self.buffered = true;
       self.out_queue.extend(std::iter::repeat_n(0.0, FRAME));
     }
-    for (&m, &r) in mic_block.iter().zip(ref_block) {
-      if let (Some(rs), Some(ms)) = (self.in_ref.get_mut(self.in_len), self.in_mic.get_mut(self.in_len)) {
+    for ((&m, &l), &r) in mic_block.iter().zip(ref_left).zip(ref_right) {
+      let at = self.in_len;
+      if let (Some(ls), Some(rs), Some(ms)) =
+        (self.in_left.get_mut(at), self.in_right.get_mut(at), self.in_mic.get_mut(at))
+      {
         // NaN/inf from a driver must not reach the filter state.
-        (*rs, *ms) = (finite(r), finite(m));
+        (*ls, *rs, *ms) = (finite(l), finite(r), finite(m));
       }
       self.in_len += 1;
       if self.in_len == FRAME {
@@ -281,6 +327,7 @@ impl EchoCanceller3 {
   }
 
   fn process_frame(&mut self) {
+    self.mix_reference();
     self.echo.push(&self.in_ref, &self.in_mic);
     if let Some((echo_db, bound)) = self.echo.shown {
       // A bound may be the user's voice: no reason to leave the lowest estimate.
@@ -296,7 +343,12 @@ impl EchoCanceller3 {
     let gain = if peak * self.mic_gain > MIC_PEAK_LIMIT { (MIC_PEAK_LIMIT / peak).max(1.0) } else { self.mic_gain };
     self.in_mic.iter_mut().for_each(|s| *s *= gain);
 
-    let rendered = self.apm.process_render_f32(&[&self.in_ref], &mut [&mut self.render_out]);
+    let [out_left, out_right] = &mut self.render_out;
+    let rendered = if self.stereo {
+      self.apm.process_render_f32(&[&self.in_left, &self.in_right], &mut [out_left, out_right])
+    } else {
+      self.apm.process_render_f32(&[&self.in_ref], &mut [out_left])
+    };
     let _ = self.apm.set_stream_delay_ms(0); // aligned beforehand
     let captured = self.apm.process_capture_f32(&[&self.in_mic], &mut [&mut self.out_frame]);
     let failed = rendered.is_err() || captured.is_err() || !self.out_frame.iter().all(|s| s.is_finite());
@@ -319,11 +371,38 @@ impl EchoCanceller3 {
     }
   }
 
-  /// Rebuild AEC3 for the wanted mic gain and fallback echo estimate once it is due. `peak`:
-  /// this frame's mic peak.
+  /// Mix this frame's reference to mono and ask for a stereo AEC3 while its channels differ.
+  fn mix_reference(&mut self) {
+    // `side`: 4 x the energy of (L - R) / 2. `power`: 2 x the channels' mean energy.
+    let (mut side, mut power) = (0.0f32, 0.0f32);
+    for ((mix, &l), &r) in self.in_ref.iter_mut().zip(&self.in_left).zip(&self.in_right) {
+      *mix = (l + r) * 0.5;
+      side += (l - r) * (l - r);
+      power += l * l + r * r;
+    }
+    if power > 2.0 * FRAME as f32 * STEREO_MIN_POWER {
+      (self.stereo_run, self.mono_run) = if side * 0.5 > STEREO_SIDE_RATIO * power {
+        (self.stereo_run.saturating_add(1), 0)
+      } else {
+        (0, self.mono_run.saturating_add(1))
+      };
+    }
+    self.wanted_stereo =
+      if self.wanted_stereo { self.mono_run < STEREO_OFF_FRAMES } else { self.stereo_run >= STEREO_ON_FRAMES };
+    #[cfg(test)]
+    if self.variant.split_whitespace().any(|token| token == "mono") {
+      self.wanted_stereo = false;
+    }
+  }
+
+  /// Rebuild AEC3 for the wanted mic gain, fallback echo estimate and reference channels once
+  /// it is due. `peak`: this frame's mic peak.
   fn follow_wanted_gain(&mut self, peak: f32) {
     let last_peak = std::mem::replace(&mut self.last_peak, peak);
-    if self.wanted_gain_db == self.mic_gain_db && self.wanted_fallback_db == self.fallback_db {
+    if self.wanted_gain_db == self.mic_gain_db
+      && self.wanted_fallback_db == self.fallback_db
+      && self.wanted_stereo == self.stereo
+    {
       (self.wanted_frames, self.wanted_peak) = (0, 0.0);
       return;
     }
@@ -334,28 +413,32 @@ impl EchoCanceller3 {
       peak.max(last_peak) <= self.wanted_peak * MIC_GAIN_PAUSE_RATIO || self.wanted_frames >= 3 * MIC_GAIN_LATCH_FRAMES;
     if self.free_frames > 0 || (self.wanted_frames >= MIC_GAIN_LATCH_FRAMES && pause) {
       log::info!(
-        "[AEC3] mic gain {} -> {} dB, fallback echo {} -> {} dB",
+        "[AEC3] mic gain {} -> {} dB, fallback echo {} -> {} dB, stereo reference {} -> {}",
         self.mic_gain_db,
         self.wanted_gain_db,
         self.fallback_db,
-        self.wanted_fallback_db
+        self.wanted_fallback_db,
+        self.stereo,
+        self.wanted_stereo
       );
       self.rebuild();
     }
   }
 
-  /// New AEC3 for the wanted mic gain and fallback echo estimate. Allocates on the audio thread
-  /// like `reset`: at a stream's start, and when the learned speech level or the measured echo
-  /// strength moves by a step (once per 2 s at most).
+  /// New AEC3 for the wanted mic gain, fallback echo estimate and reference channels. Allocates
+  /// on the audio thread like `reset`: at a stream's start, and when the learned speech level or
+  /// the measured echo strength moves by a step or the reference turns stereo or mono (once per
+  /// 2 s at most).
   fn rebuild(&mut self) {
     self.mic_gain_db = self.wanted_gain_db;
     self.mic_gain = 10f32.powf(self.mic_gain_db / 20.0);
     self.fallback_db = self.wanted_fallback_db;
+    self.stereo = self.wanted_stereo;
     #[allow(unused_mut)] // only the tests change it
-    let mut config = tuning(self.mic_gain, 10f32.powf(self.fallback_db / 20.0));
+    let mut config = tuning(self.mic_gain, 10f32.powf(self.fallback_db / 20.0), self.stereo);
     #[cfg(test)]
     tests::apply_variant(&mut config, &self.variant, self.mic_gain);
-    self.apm = build_apm(config);
+    self.apm = build_apm(config, self.stereo);
     self.erle_db = 0.0;
     (self.wanted_frames, self.wanted_peak) = (0, 0.0);
   }
@@ -436,7 +519,7 @@ impl Default for EchoCanceller3 {
   }
 }
 
-fn build_apm(tuning: EchoCanceller3Config) -> AudioProcessing {
+fn build_apm(tuning: EchoCanceller3Config, stereo: bool) -> AudioProcessing {
   let stream = StreamConfig::new(48_000, 1);
   let config = Config {
     pipeline: Pipeline { maximum_internal_processing_rate: MaxProcessingRate::Rate48kHz, ..Default::default() },
@@ -450,7 +533,7 @@ fn build_apm(tuning: EchoCanceller3Config) -> AudioProcessing {
   AudioProcessing::builder()
     .config(config)
     .capture_config(stream)
-    .render_config(stream)
+    .render_config(if stereo { StreamConfig::new(48_000, 2) } else { stream })
     .echo_canceller3_config(tuning)
     .build()
 }
@@ -497,9 +580,24 @@ fn build_apm(tuning: EchoCanceller3Config) -> AudioProcessing {
 /// In the full chain with denoiser (`ai_denoiser::tests::capture_replay_report`), mean voice loss
 /// drops on `122712` from 7.7 to 5.1 dB and on `125717` from 8.6 to 6.5 dB with zero leak increase
 /// and pauses remaining at -107 to -127 dBFS.
-fn tuning(mic_gain: f32, fallback_gain: f32) -> EchoCanceller3Config {
+///
+/// `stereo`: AEC3 gets both reference channels. For its fallback it adds their powers up, where
+/// the echo strength is measured against their mix: with the same sound on both that is half the
+/// sum (so the gain goes down 3 dB), otherwise less (the estimate is then over, by 3 dB with
+/// unrelated channels, and never under). `mix_reference` decides when, and remembers it over a rebuild: AEC3's own stereo
+/// detector is set to follow at the first frame and never to go back. It cannot be switched
+/// off: sonora 0.3.0 then stays on the left channel alone (its constructor starts mono and only
+/// the detector ever changes that; 2.5 dB instead of 35 dB removed with independent channels).
+/// AEC3's own multichannel settings (`create_default_multichannel_config`: faster coarse
+/// filter, slower suppressor gain) are left out: on synthetic stereo music they removed no more
+/// echo (43.6 dB either way) and took 10 dB more off a voice at the echo's level.
+fn tuning(mic_gain: f32, fallback_gain: f32, stereo: bool) -> EchoCanceller3Config {
   let mut cfg = EchoCanceller3Config::default();
-  cfg.ep_strength.default_gain = fallback_gain * mic_gain;
+  cfg.ep_strength.default_gain = fallback_gain * mic_gain * if stereo { std::f32::consts::FRAC_1_SQRT_2 } else { 1.0 };
+  if stereo {
+    cfg.multi_channel.stereo_detection_hysteresis_seconds = 0.0;
+    cfg.multi_channel.stereo_detection_timeout_threshold_seconds = 0;
+  }
   cfg.erle.max_l = 30.0;
   cfg.erle.max_h = 10.0;
   cfg.suppressor.high_frequency_suppression.bands_in_limiting_gain = 0;
@@ -870,6 +968,57 @@ mod tests {
     assert_eq!(seeded.echo_strength_db(), None, "other speakers: nothing known");
   }
 
+  // Stereo reference (2026-11-12).
+
+  /// Left and right play different music and reach the mic over different rooms, the right
+  /// speaker 0.9 ms further and 8 dB down; a voice at the echo's level joins at 12 s. On the
+  /// mono mix AEC3 removes 9.9 dB of the echo alone, with a filter per channel 43.1 dB (and
+  /// takes 7.6 dB off the voice, where the mix leaves the echo over it).
+  #[test]
+  fn test_stereo_reference_cancels_each_speakers_echo() {
+    let len = 24 * 48_000;
+    let (left, right) = (at_level(&music_like(len, 7), -18.0), at_level(&music_like(len, 31), -18.0));
+    let near = convolve(&left, &room_response(1_200, PRE_DELAY_SAMPLES, 0.25, 17));
+    let far = convolve(&right, &room_response(1_200, PRE_DELAY_SAMPLES + 43, 0.25, 91));
+    let (alone, both) = (14 * 48_000..18 * 48_000, 18 * 48_000..len);
+    let mut voice = vec![0.0f32; len];
+    voice[both.clone()].copy_from_slice(&at_level(&voice_like(both.len(), 3), -30.0));
+    let room = at_level(&noise(len, 9), -76.0);
+    let mic: Vec<f32> = (0..len).map(|n| (near[n] + far[n] * 0.4) * 0.3 + voice[n] + room[n]).collect();
+    let run = |variant: &str| {
+      let mut aec = EchoCanceller3::new();
+      aec.variant = variant.into();
+      let out = run_stereo(&mut aec, &left, &right, &mic);
+      let removed = energy_db(&mic[alone.clone()]) - energy_db(&out[alone.clone()]);
+      (removed, projection_db(&voice, &out, both.clone()), aec.is_stereo())
+    };
+    let (mono, stereo) = (run("mono"), run(""));
+    eprintln!("stereo music: on the mix {mono:.1?}, a filter per channel {stereo:.1?} (dB removed, voice, stereo)");
+    assert!(stereo.2 && !mono.2, "AEC3 on both channels: {} (kept mono: {})", stereo.2, mono.2);
+    assert!(stereo.0 > 35.0 && stereo.0 > mono.0 + 20.0, "{:.1} dB removed, {:.1} on the mix", stereo.0, mono.0);
+    assert!(stereo.1 > -10.0, "voice lost over the stereo echo: {:.1} dB", stereo.1);
+  }
+
+  /// What does not make AEC3 stereo: the same sound on both channels, half a second of stereo
+  /// (a notification), stereo under -60 dBFS. Stereo music does, and 5 minutes of mono after it
+  /// bring the mix back; a pause in between counts for nothing.
+  #[test]
+  fn test_stereo_reference_follows_what_plays() {
+    let (a, b) = (at_level(&music_like(FRAME, 7), -18.0), at_level(&music_like(FRAME, 31), -18.0));
+    let (quiet_a, quiet_b) = (at_level(&a, -70.0), at_level(&b, -70.0));
+    let mut aec = EchoCanceller3::new();
+    let mut play = |left: &[f32], right: &[f32], frames: u32| {
+      (0..frames).for_each(|_| aec.process_block_stereo(left, right, &mut [0.0; FRAME]));
+      aec.wanted_stereo
+    };
+    assert!(!play(&a, &a, 300), "the same sound on both channels");
+    assert!(!play(&a, &b, 50) && !play(&a, &a, 100), "half a second of stereo");
+    assert!(!play(&quiet_a, &quiet_b, 300), "stereo nobody hears");
+    assert!(!play(&a, &b, STEREO_ON_FRAMES - 1) && play(&a, &b, 1), "stereo music, from 1 s on");
+    assert!(play(&[0.0; FRAME], &[0.0; FRAME], STEREO_OFF_FRAMES), "a pause is not mono");
+    assert!(play(&a, &a, STEREO_OFF_FRAMES - 1) && !play(&a, &a, 1), "mono for 5 minutes");
+  }
+
   /// Every debug capture through AEC3 (raw mic + the reference as the live chain fed it, the
   /// capture's leveler gain as mic gain):
   /// per 5 s levels, and `test_data/private/aec_ab/<capture>_{mic,aec3}.wav` for listening and
@@ -886,7 +1035,8 @@ mod tests {
       let (Some(mic), Some(refs)) = (read_capture(&dir, "01_mic_raw.wav"), read_capture(&dir, "03_ref_aec.wav")) else {
         continue;
       };
-      let out = run_gained(&mut EchoCanceller3::new(), &refs, &mic, &capture_gains(&dir, mic.len())).0;
+      let out =
+        run_gained(&mut EchoCanceller3::new(), &stereo_refs(&dir, &refs), &mic, &capture_gains(&dir, mic.len())).0;
       let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
       eprintln!("\n{name}: per 5 s dBFS        mic    AEC3     ref");
       for t in (0..mic.len()).step_by(5 * 48_000) {
@@ -916,7 +1066,8 @@ mod tests {
     else {
       return eprintln!("skipped: no capture {cap} in test_data/private/captures/");
     };
-    let out = run_gained(&mut EchoCanceller3::new(), &refs, &mic, &capture_gains(&dir, mic.len())).0;
+    let out =
+      run_gained(&mut EchoCanceller3::new(), &stereo_refs(&dir, &refs), &mic, &capture_gains(&dir, mic.len())).0;
     let level = |x: &[f32], window: usize| energy_db(x.get(window * 4_800..(window + 1) * 4_800).unwrap_or_default());
     // The first second is AEC3 converging in the replay (the live one had its history).
     for window in 10..mic.len() / 4_800 {
@@ -981,7 +1132,7 @@ mod tests {
         let mut aec = EchoCanceller3::new();
         aec.variant = variant.into();
         aec.rebuild();
-        let (out, erle, _) = run_gained(&mut aec, &refs, &mic, &gains);
+        let (out, erle, _) = run_gained(&mut aec, &stereo_refs(&dir, &refs), &mic, &gains);
         let label = if variant.trim().is_empty() { "(as built)" } else { variant.trim() };
         let strength = match aec.echo_strength_db() {
           Some((db, true)) => format!("<{db:.0}"),
@@ -1067,7 +1218,7 @@ mod tests {
           Some(db) => aec.seed_echo_strength_db(db.parse().expect("seed=<dB>|auto")),
           None => {}
         }
-        let (out, erle, trace) = run_gained(&mut aec, &refs, &scaled, &gains);
+        let (out, erle, trace) = run_gained(&mut aec, &stereo_refs(&dir, &refs), &scaled, &gains);
         let late = out.get(AEC3_LATENCY_SAMPLES..).unwrap_or_default();
         let start = median(alone(music_at + 1, music_at + 5).map(|w| level(&scaled, w) - level(late, w)).collect());
         let meter = match aec.echo_strength_db() {
@@ -1298,8 +1449,8 @@ mod tests {
   /// (`erle.max_l` / `max_h`; `tuning` sets 30 / 10, AEC3's own are 4 / 1.5), `hf=<n>`
   /// (`bands_in_limiting_gain`; `tuning` sets 0 = bins over 2 kHz no longer follow the 2 kHz
   /// bin, AEC3's own is 1), `len=<blocks>` (filter length, default 13 = 52 ms), `gain=<x>`
-  /// (fallback echo gain, default 0.01). `pregain=`, `micscale=` and `seed=` belong to the
-  /// reports.
+  /// (fallback echo gain, default 0.01), `mono` (AEC3 stays on the mix of a stereo reference).
+  /// `pregain=`, `micscale=` and `seed=` belong to the reports.
   pub(super) fn apply_variant(cfg: &mut EchoCanceller3Config, spec: &str, mic_gain: f32) {
     for token in spec.split_whitespace() {
       let (key, value) = token.split_once('=').unwrap_or((token, ""));
@@ -1307,7 +1458,7 @@ mod tests {
       let mut number = || values.next().unwrap_or_else(|| panic!("AEC3 variant {token:?}: value missing"));
       let tunings = [&mut cfg.suppressor.normal_tuning, &mut cfg.suppressor.nearend_tuning];
       match key {
-        "pregain" | "micscale" | "seed" | "fit" => {}
+        "pregain" | "micscale" | "seed" | "fit" | "mono" => {}
         "open" => {
           for mask in tunings.into_iter().flat_map(|t| [&mut t.mask_lf, &mut t.mask_hf]) {
             (mask.enr_transparent, mask.enr_suppress) = (99.0, 100.0);
@@ -1333,6 +1484,12 @@ mod tests {
 
   fn read_capture(dir: &Path, name: &str) -> Option<Vec<f32>> {
     Some(hound::WavReader::open(dir.join(name)).ok()?.samples::<f32>().map_while(Result::ok).collect())
+  }
+
+  /// The two channels of the reference a capture's AEC got; `mono` (`03_ref_aec.wav`) for both
+  /// in a capture from before they were recorded.
+  fn stereo_refs(dir: &Path, mono: &[f32]) -> [Vec<f32>; 2] {
+    ["03_ref_aec_left.wav", "03_ref_aec_right.wav"].map(|name| read_capture(dir, name).unwrap_or(mono.to_vec()))
   }
 
   /// What the chain hands to `set_mic_gain_db` at each 480-sample block of a capture, from its
@@ -1373,17 +1530,18 @@ mod tests {
   /// the reference's), the fallback echo estimate and the mic gain changed.
   fn run_gained(
     aec: &mut EchoCanceller3,
-    refs: &[f32],
+    [left, right]: &[Vec<f32>; 2],
     mic: &[f32],
     gains: &[f32],
   ) -> (Vec<f32>, Vec<f32>, Vec<String>) {
     let (mut out, mut erle, mut trace) = (Vec::with_capacity(mic.len()), Vec::new(), Vec::new());
     let state = |aec: &EchoCanceller3| (aec.echo_strength_db(), aec.fallback_echo_db(), aec.mic_gain_db());
     let mut last = state(aec);
-    for (k, (r, m)) in refs.chunks(480).zip(mic.chunks(480)).enumerate() {
+    let mut was_stereo = false;
+    for (k, ((l, r), m)) in left.chunks(480).zip(right.chunks(480)).zip(mic.chunks(480)).enumerate() {
       aec.set_mic_gain_db(gains.get(k).copied().unwrap_or(0.0));
       let mut b = m.to_vec();
-      aec.process_block(r, &mut b);
+      aec.process_block_stereo(l, r, &mut b);
       out.extend_from_slice(&b);
       erle.push(aec.erle_db());
       let now = state(aec);
@@ -1399,6 +1557,9 @@ mod tests {
       }
       if now.2 != last.2 {
         trace.push(format!("{at:.1} s mic gain {} -> {}", last.2, now.2));
+      }
+      if std::mem::replace(&mut was_stereo, aec.is_stereo()) != was_stereo {
+        trace.push(format!("{at:.1} s stereo reference {was_stereo}"));
       }
       last = now;
     }
@@ -1458,6 +1619,16 @@ mod tests {
     for (r, m) in refs.chunks(block).zip(mic.chunks(block)) {
       let mut b = m.to_vec();
       aec.process_block(r, &mut b);
+      out.extend_from_slice(&b);
+    }
+    out
+  }
+
+  fn run_stereo(aec: &mut EchoCanceller3, left: &[f32], right: &[f32], mic: &[f32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(mic.len());
+    for ((l, r), m) in left.chunks(480).zip(right.chunks(480)).zip(mic.chunks(480)) {
+      let mut b = m.to_vec();
+      aec.process_block_stereo(l, r, &mut b);
       out.extend_from_slice(&b);
     }
     out

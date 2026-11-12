@@ -198,10 +198,7 @@ fn run_loopback(
         } else {
           let ch = fmt.channels.max(1);
           let slice = std::slice::from_raw_parts(p_data as *const f32, frames * ch);
-          frames_buf.extend(slice.chunks_exact(ch).map(|f| {
-            let l = f.first().copied().unwrap_or(0.0);
-            StereoFrame { left: l, right: f.get(1).copied().unwrap_or(l) }
-          }));
+          frames_buf.extend(slice.chunks_exact(ch).map(StereoFrame::from_channels));
         }
         let _ = capture.ReleaseBuffer(n);
         if qpc != 0 {
