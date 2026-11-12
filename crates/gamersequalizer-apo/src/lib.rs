@@ -49,15 +49,17 @@ use event_log::Level;
 use std::ffi::c_void;
 use std::mem::{offset_of, size_of};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::ptr::{addr_of_mut, null_mut};
+use std::ptr::{addr_of, addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use gamersequalizer_common::biquad::BiquadCascade;
-use gamersequalizer_common::limiter::PeakLimiter;
-use gamersequalizer_common::shm::{OwnerWatch, ShmHeader, APO_SHM_NAME, REF_SAMPLE_RATE};
+use gamersequalizer_common::limiter::{soft_limit, PeakLimiter};
+use gamersequalizer_common::shm::{OwnerWatch, ShmHeader, ShmLayout, APO_SHM_NAME, REF_SAMPLE_RATE};
+use gamersequalizer_common::sidetone::{device_hash, NoiseMode, SidetoneChain, SidetoneReader};
 use gamersequalizer_common::streams::{StreamBus, StreamInfo};
+use gamersequalizer_mic_vst::sidetone_denoise::{self, SidetoneDenoiser};
 use gamersequalizer_mic_vst::{GamersEqualizerPlugin, SharedMemoryClient};
 use rate_bridge::RateBridge;
 use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, BOOL, GUID, HRESULT};
@@ -65,6 +67,7 @@ use windows::Win32::Foundation::{
   CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, PROPERTYKEY,
   S_FALSE, S_OK,
 };
+use windows::Win32::Media::Audio::IMMDeviceCollection;
 use windows::Win32::Media::Audio::Apo::{
   APOInitSystemEffects, APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject,
   IAudioProcessingObjectConfiguration, IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT,
@@ -88,6 +91,11 @@ pub const CLSID_GAIN_APO: GUID = GUID::from_u128(0x17e8d42e_dc01_4bd0_90ff_ad7c8
 pub const CLSID_OUTPUT_EQ_APO: GUID = GUID::from_u128(0x6b0f3c1e_8f2a_4d7b_9a51_3e2c7d4b9f10);
 /// Stream probe. Must match `$Clsid` (Render, -Slot SFX) in `scripts/apo-install.ps1`.
 pub const CLSID_STREAM_APO: GUID = GUID::from_u128(0x3c9a5e21_7d4f_4b8e_a1c6_5f2e8d9b0a47);
+
+/// Sidetone telemetry (peak, gate, mode) is published every this many blocks.
+const SIDETONE_TELEMETRY_BLOCKS: u32 = 10;
+/// Numbers the sidetone taps of this process (ring owner = process id + this).
+static SIDETONE_INSTANCE: AtomicU32 = AtomicU32::new(0);
 
 /// Global mapping DACL: full access for SYSTEM, LOCAL SERVICE (audiodg) and Administrators;
 /// interactively logged-on users (the daemon) only map read/write (`0x6` =
@@ -148,6 +156,8 @@ struct ApoState {
   endpoint_tag: OnceLock<String>,
   locked: AtomicBool,
   channels: AtomicU32,
+  /// `device_hash` of the endpoint from Initialize; 0 = the engine did not say.
+  endpoint: AtomicU32,
   /// Frames per second of the locked format (0 before LockForProcess).
   rate: AtomicU32,
   /// `AudioProcessingMode` from Initialize (high, low half of the GUID); 0 = not reported.
@@ -208,6 +218,13 @@ struct OutputProcessor {
   fade_step: f32,
   /// Processed copy of the block while fading.
   scratch: Vec<f32>,
+  /// Sidetone: reader of the mic APO's ring, its mono block, and this endpoint's hash
+  /// (0 = unknown: never plays).
+  sidetone: SidetoneReader,
+  sidetone_buf: Vec<f32>,
+  sidetone_endpoint: u32,
+  /// Sidetone was mixed into the previous block.
+  sidetone_playing: bool,
 }
 
 /// The mic DSP chain plus its scratch buffers.
@@ -234,7 +251,8 @@ struct MicChainCount {
 }
 
 struct MicProcessor {
-  plugin: GamersEqualizerPlugin,
+  plugin: Box<GamersEqualizerPlugin>,
+  sidetone: Box<SidetoneTap>,
   mono_in: Vec<f32>,
   mono_out: Vec<f32>,
   /// Resampling to/from 48 kHz when the mic runs at another rate; None at 48 kHz.
@@ -255,6 +273,27 @@ struct MicProcessor {
   count: MicChainCount,
   endpoint_tag: Option<String>,
   instance_id: u32,
+}
+
+/// Sidetone tap of the mic APO: raw input -> EQ -> noise suppression -> level -> ring.
+/// Independent of the mic chain: it runs when the chain failed and only reads the buffer.
+struct SidetoneTap {
+  chain: Box<SidetoneChain>,
+  /// `sidetone_eq_version` the chain's EQ was built from.
+  eq_version: Option<u32>,
+  /// Frame-based suppressors (48 kHz only); None at another rate: the expander stands in.
+  denoiser: Option<Box<SidetoneDenoiser>>,
+  rate: u32,
+  /// `device_hash` of the endpoint this APO sits on; 0 = unknown.
+  endpoint_hash: u32,
+  instance: u32,
+  /// Owner value while this tap writes the ring.
+  owner: Option<u64>,
+  watch: OwnerWatch,
+  mono: Vec<f32>,
+  peak: f32,
+  blocks: u32,
+  failed: bool,
 }
 
 /// How regularly the audio engine calls the mic APO (debug log): an app gets its data late
@@ -568,6 +607,9 @@ unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *co
   // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
   let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
   note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
+  if let Some(hash) = endpoint_hash(size, data) {
+    st.endpoint.store(hash, Ordering::Relaxed);
+  }
   S_OK
 }
 
@@ -708,10 +750,17 @@ unsafe extern "system" fn cfg_lock_for_process(
   st.rate.store(rate as u32, Ordering::Release);
   let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
   let tag = st.endpoint_tag.get().cloned();
+  let endpoint = st.endpoint.load(Ordering::Relaxed);
   let processor = match st.kind {
-    ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|p| Processor::Mic(Box::new(p))),
+    ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|mut p| {
+      p.sidetone.endpoint_hash = endpoint;
+      Processor::Mic(p)
+    }),
     ApoKind::Output => {
-      OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(Processor::Output)
+      OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
+        p.sidetone_endpoint = endpoint;
+        Processor::Output(p)
+      })
     }
     ApoKind::Stream => shared_memory(st)
       .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
@@ -831,6 +880,7 @@ impl ApoState {
       endpoint_tag: OnceLock::new(),
       locked: AtomicBool::new(false),
       channels: AtomicU32::new(1),
+      endpoint: AtomicU32::new(0),
       rate: AtomicU32::new(0),
       mode: (AtomicU64::new(0), AtomicU64::new(0)),
       processor: Mutex::new(None),
@@ -991,6 +1041,10 @@ impl OutputProcessor {
       fade_step: 1.0 / (STREAM_FADE_SECONDS * sample_rate.max(1.0)),
       // ~85 ms of stereo at 48 kHz; grows only if the engine sends longer blocks.
       scratch: Vec::with_capacity(8192),
+      sidetone: SidetoneReader::default(),
+      sidetone_buf: Vec::with_capacity(4096),
+      sidetone_endpoint: 0,
+      sidetone_playing: false,
     }))
     .ok()
   }
@@ -1010,7 +1064,8 @@ impl OutputProcessor {
     let Some(shm) = self.shm.as_ref() else {
       return;
     };
-    let h: &ShmHeader = &shm.layout().header;
+    let layout = shm.layout();
+    let h: &ShmHeader = &layout.header;
     h.out_apo_blocks.fetch_add(1, Ordering::Relaxed);
     h.out_apo_sample_rate.store(self.sample_rate as u32, Ordering::Relaxed);
     h.out_apo_channels.store(channels as u32, Ordering::Relaxed);
@@ -1027,7 +1082,26 @@ impl OutputProcessor {
       }
     }
     let goal = if enabled && self.active { 1.0 } else { 0.0 };
+    // The mono sidetone block for this buffer is in `sidetone_buf` when this is true.
+    let sidetone = read_sidetone(
+      &mut self.sidetone,
+      &mut self.sidetone_buf,
+      layout,
+      buf.len() / channels,
+      self.sample_rate,
+      self.sidetone_endpoint,
+    );
+    let sidetone_started = sidetone && !std::mem::replace(&mut self.sidetone_playing, sidetone);
     if self.wet <= 0.0 && goal <= 0.0 {
+      if sidetone {
+        if sidetone_started {
+          // The limiter did not run while nothing was mixed in: its gain is from back then.
+          self.limiter = PeakLimiter::new(self.sample_rate);
+        }
+        // No EQ, but the sum of the mix and the voice still must not clip.
+        add_sidetone(buf, channels, &self.sidetone_buf);
+        self.limiter.process(buf, channels);
+      }
       return;
     }
     if self.wet <= 0.0 {
@@ -1035,7 +1109,12 @@ impl OutputProcessor {
       self.cascade.reset_state();
     }
     if self.wet >= 1.0 && goal >= 1.0 {
-      self.run_eq_in_place(buf, channels);
+      // After the EQ (the voice gets no game profile), before the limiter (it guards the sum).
+      self.run_eq(buf, channels);
+      if sidetone {
+        add_sidetone(buf, channels, &self.sidetone_buf);
+      }
+      self.limiter.process(buf, channels);
       return;
     }
     if self.scratch.len() < buf.len() {
@@ -1054,13 +1133,23 @@ impl OutputProcessor {
       }
     }
     self.scratch = scratch;
+    if sidetone {
+      // shortcut: during the 20 ms EQ fade the sum only gets the static safety curve.
+      add_sidetone(buf, channels, &self.sidetone_buf);
+      buf.iter_mut().for_each(|s| *s = soft_limit(*s));
+    }
   }
 
-  fn run_eq_in_place(&mut self, buf: &mut [f32], channels: usize) {
+  /// Preamp and the cascades, without the limiter.
+  fn run_eq(&mut self, buf: &mut [f32], channels: usize) {
     if self.preamp_gain != 1.0 {
       buf.iter_mut().for_each(|s| *s *= self.preamp_gain);
     }
     self.cascade.process_interleaved(buf, channels);
+  }
+
+  fn run_eq_in_place(&mut self, buf: &mut [f32], channels: usize) {
+    self.run_eq(buf, channels);
     // Volume matching / user gain may let peaks pass 0 dBFS: turn them down instead of clipping.
     self.limiter.process(buf, channels);
   }
@@ -1110,7 +1199,7 @@ impl Drop for MicChainCount {
 impl MicProcessor {
   /// Opens/creates the Global mapping and builds the chain for a `rate` Hz stream (resampled
   /// to 48 kHz unless it already is). None (pass-through) on an unsupported rate or failure.
-  fn create(rate: u32, endpoint_tag: Option<String>, instance_id: u32) -> Option<Self> {
+  fn create(rate: u32, endpoint_tag: Option<String>, instance_id: u32) -> Option<Box<Self>> {
     let refuse = |why: String| {
       note_tagged(ApoKind::Mic, endpoint_tag.as_deref(), instance_id, Level::Warning, format!("{why}; passes audio through"));
     };
@@ -1129,14 +1218,15 @@ impl MicProcessor {
     let shm_tag = endpoint_tag.clone();
     let built = catch_unwind(AssertUnwindSafe(move || {
       let shm = shared_memory_tagged(ApoKind::Mic, shm_tag.as_deref(), instance_id);
-      let mut plugin = GamersEqualizerPlugin::with_shm(REF_SAMPLE_RATE as f32, shm);
+      let mut plugin = Box::new(GamersEqualizerPlugin::with_shm(REF_SAMPLE_RATE as f32, shm));
       plugin.preload_selected_model();
       #[cfg(feature = "debug-capture")]
       if let Ok(map) = gamersequalizer_mic_vst::debug_capture::DebugCaptureMap::create(APO_SHM_SDDL) {
         plugin.attach_debug_capture(map, rate);
       }
-      MicProcessor {
+      Box::new(MicProcessor {
         plugin,
+        sidetone: Box::new(SidetoneTap::new(rate)),
         mono_in: vec![0.0; 4096],
         mono_out: vec![0.0; 4096],
         bridge,
@@ -1151,7 +1241,7 @@ impl MicProcessor {
         count: MicChainCount::new(),
         endpoint_tag: shm_tag,
         instance_id,
-      }
+      })
     }));
     if built.is_err() {
       refuse("building the chain panicked".to_string());
@@ -1189,7 +1279,17 @@ impl MicProcessor {
   /// In place on interleaved `buf`: first channel through the chain, result to all channels.
   fn process(&mut self, buf: &mut [f32], channels: usize, qpc_hns: Option<u64>) {
     self.blocks += 1;
-    if self.failed || channels == 0 {
+    if channels == 0 {
+      return;
+    }
+    // Sidetone first, from the untouched input; it has its own failure flag.
+    if let Some(layout) = self.plugin.shm_layout() {
+      // This chain's own leveler, not the shared memory: every mic APO instance publishes there.
+      // A failed chain no longer levels, so the sidetone goes back to the raw microphone.
+      let leveler_gain_db = if self.failed { 0.0 } else { self.plugin.leveler_gain_db() };
+      self.sidetone.process(layout, buf, channels, qpc_hns, leveler_gain_db);
+    }
+    if self.failed {
       return;
     }
     let frames = buf.len() / channels;
@@ -1248,6 +1348,148 @@ impl MicProcessor {
     *processed += 1;
     for (frame, &sample) in buf.chunks_exact_mut(channels).zip(output.iter()) {
       frame.fill(sample);
+    }
+  }
+}
+
+impl Drop for MicProcessor {
+  fn drop(&mut self) {
+    if let Some(layout) = self.plugin.shm_layout() {
+      self.sidetone.release(layout);
+    }
+  }
+}
+
+impl SidetoneTap {
+  fn new(rate: u32) -> Self {
+    Self {
+      chain: Box::new(SidetoneChain::new(rate as f32)),
+      eq_version: None,
+      denoiser: (rate == sidetone_denoise::SAMPLE_RATE).then(|| Box::new(SidetoneDenoiser::new())),
+      rate,
+      endpoint_hash: 0,
+      instance: SIDETONE_INSTANCE.fetch_add(1, Ordering::Relaxed).wrapping_add(1),
+      owner: None,
+      watch: OwnerWatch::default(),
+      // ~85 ms at 48 kHz; grows only if the engine sends longer blocks.
+      mono: vec![0.0; 4096],
+      peak: 0.0,
+      blocks: 0,
+      failed: false,
+    }
+  }
+
+  /// `buf`: the interleaved raw input of this block. Never changed.
+  fn process(&mut self, layout: &ShmLayout, buf: &[f32], channels: usize, qpc_hns: Option<u64>, leveler_gain_db: f32) {
+    if self.failed || channels == 0 {
+      return;
+    }
+    let inner = || self.process_inner(layout, buf, channels, qpc_hns, leveler_gain_db);
+    if catch_unwind(AssertUnwindSafe(inner)).is_err() {
+      self.failed = true;
+      self.release(layout);
+    }
+  }
+
+  fn process_inner(
+    &mut self,
+    layout: &ShmLayout,
+    buf: &[f32],
+    channels: usize,
+    qpc_hns: Option<u64>,
+    leveler_gain_db: f32,
+  ) {
+    let h = &layout.header;
+    let r = Ordering::Relaxed;
+    let pair_hash = h.sidetone_mic_hash.load(r);
+    // Reported only by the instance that is the pair's microphone or cannot tell: the APO of
+    // another microphone would overwrite it.
+    if self.endpoint_hash == pair_hash || self.endpoint_hash == 0 {
+      h.sidetone_mic_hash_seen.store(self.endpoint_hash, r);
+    }
+    // The pair's microphone. An endpoint we could not identify may write too: a wrong
+    // microphone is only a wrong voice, and the ring takes one writer.
+    let ours = pair_hash != 0 && (self.endpoint_hash == pair_hash || self.endpoint_hash == 0);
+    let mut settings = h.read_sidetone();
+    settings.enabled &= ours && self.watch.live(h, Instant::now()) && !h.master_bypass.load(r);
+    self.chain.configure(&settings, leveler_gain_db, h.mic_muted.load(r));
+    let eq_version = h.sidetone_eq_version.load(Ordering::Acquire);
+    if self.eq_version != Some(eq_version) {
+      self.eq_version = Some(eq_version);
+      self.chain.set_eq(&h.read_sidetone_eq());
+    }
+    if self.chain.is_silent() {
+      // Off, muted or not our pair: give the ring up (a clean stop for the reader), and tell
+      // the suppressors about the pause, so nothing from before it is played afterwards.
+      self.release(layout);
+      if let Some(denoiser) = self.denoiser.as_mut() {
+        denoiser.process(NoiseMode::Off, 0.0, &mut []);
+      }
+      return;
+    }
+    if self.owner.is_none() {
+      // SAFETY: no preconditions.
+      self.owner = layout.sidetone.claim_writer(unsafe { GetCurrentProcessId() }, self.instance);
+      if self.owner.is_some() {
+        // Filter memory and levels are from before the pause; the level fades in from zero.
+        self.chain.reset();
+      }
+    }
+    let Some(owner) = self.owner else {
+      return; // another mic APO instance holds the ring
+    };
+
+    let frames = buf.len() / channels;
+    if self.mono.len() < frames {
+      self.mono.resize(frames, 0.0);
+    }
+    let Some(mono) = self.mono.get_mut(..frames) else {
+      return;
+    };
+    for (dst, frame) in mono.iter_mut().zip(buf.chunks_exact(channels)) {
+      *dst = frame.first().copied().unwrap_or(0.0);
+    }
+    self.chain.run_eq(mono);
+    let wanted = self.chain.noise_mode();
+    let mut active = if wanted == NoiseMode::Off { NoiseMode::Off } else { NoiseMode::Expander };
+    if let Some(denoiser) = self.denoiser.as_mut() {
+      if wanted.is_framed() {
+        active = denoiser.process(wanted, settings.gate_range_db, mono);
+      } else {
+        // Tells it about the pause, so the next frame-based run starts fresh.
+        denoiser.process(wanted, 0.0, &mut []);
+      }
+    }
+    if active == NoiseMode::Expander {
+      self.chain.expander_mut().process(mono);
+    }
+    self.chain.run_level(mono);
+    let end_qpc = qpc_hns.map_or(0, |t| t.saturating_add(frames_to_hns(frames as u64, self.rate).max(0) as u64));
+    if !layout.sidetone.write(owner, mono, self.rate, end_qpc) {
+      // Another instance took the ring over (we were not called for a while): claim again.
+      self.owner = None;
+      return;
+    }
+
+    h.sidetone_writer_beat.fetch_add(1, r);
+    h.sidetone_mic_rate.store(self.rate, r);
+    h.sidetone_mic_block_frames.store(frames as u32, r);
+    self.peak = mono.iter().fold(self.peak, |p, s| p.max(s.abs()));
+    self.blocks += 1;
+    if self.blocks >= SIDETONE_TELEMETRY_BLOCKS {
+      h.sidetone_peak_permille.store((self.peak * 1000.0) as u32, r);
+      let gate_db = if active == NoiseMode::Expander { self.chain.expander_mut().gain_db() } else { 0.0 };
+      h.sidetone_gate_gain_db_x10.store((gate_db * 10.0) as i32, r);
+      h.sidetone_noise_mode_active.store(active.to_u32(), r);
+      let delay = self.denoiser.as_ref().map_or(0, |d| d.delay_samples(active)) as u64;
+      h.sidetone_noise_delay_us.store((delay * 1_000_000 / u64::from(sidetone_denoise::SAMPLE_RATE)) as u32, r);
+      (self.peak, self.blocks) = (0.0, 0);
+    }
+  }
+
+  fn release(&mut self, layout: &ShmLayout) {
+    if let Some(owner) = self.owner.take() {
+      layout.sidetone.release_writer(owner);
     }
   }
 }
@@ -1384,6 +1626,35 @@ unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
     return None;
   }
   Some(std::ptr::addr_of!((*init).AudioProcessingMode).read_unaligned().to_u128())
+}
+
+/// `device_hash` of the endpoint the engine creates this APO for: the last device in the
+/// init block's collection (documented for APOInitSystemEffects2, and how Equalizer APO
+/// finds its endpoint). None when the block is neither APOInitSystemEffects nor
+/// APOInitSystemEffects2, which starts with the same fields.
+///
+/// # Safety
+/// `data` must point to `size` readable bytes or be null (audio engine contract).
+unsafe fn endpoint_hash(size: u32, data: *const u8) -> Option<u32> {
+  let (v1, v2) = (size_of::<APOInitSystemEffects>(), size_of::<APOInitSystemEffects2>());
+  if data.is_null() || (size as usize) < v1 {
+    return None;
+  }
+  let init = data as *const APOInitSystemEffects;
+  let declared = addr_of!((*init).APOInit.cbSize).read_unaligned() as usize;
+  // APOInitSystemEffects3 has other fields at these offsets: only the two known layouts.
+  if declared != v1 && declared != v2 {
+    return None;
+  }
+  // Borrowed: the engine owns the collection; no AddRef, no Release.
+  let raw = addr_of!((*init).pDeviceCollection).cast::<*mut c_void>().read_unaligned();
+  let collection = IMMDeviceCollection::from_raw_borrowed(&raw)?;
+  let last = collection.GetCount().ok()?.checked_sub(1)?;
+  let device = collection.Item(last).ok()?;
+  let id = device.GetId().ok()?;
+  let text = id.to_string().ok();
+  CoTaskMemFree(Some(id.as_ptr() as *const c_void));
+  text.map(|t| device_hash(&t))
 }
 
 fn interface_ids() -> [GUID; 4] {
@@ -1528,6 +1799,59 @@ fn now_hns() -> Option<u64> {
     return None;
   }
   u64::try_from(counter as i128 * HNS_PER_SEC / freq as i128).ok()
+}
+
+/// Next sidetone block (mono, `frames` long) into `block`. True = there is audio to mix in.
+fn read_sidetone(
+  reader: &mut SidetoneReader,
+  block: &mut Vec<f32>,
+  layout: &ShmLayout,
+  frames: usize,
+  rate: f32,
+  endpoint: u32,
+) -> bool {
+  let h = &layout.header;
+  let r = Ordering::Relaxed;
+  let pair = h.sidetone_output_hash.load(r);
+  // Reported only by the instance that is the pair's output or cannot tell: the APO of
+  // another output would overwrite it.
+  if endpoint == pair || endpoint == 0 {
+    h.sidetone_output_hash_seen.store(endpoint, r);
+  }
+  // Only on the pair's output, and only when this endpoint is known to be it: sidetone in
+  // speakers is a feedback loop.
+  if !h.sidetone_enabled.load(r) || pair == 0 || pair != endpoint {
+    reader.pause();
+    return false;
+  }
+  if block.len() < frames {
+    block.resize(frames, 0.0);
+  }
+  let Some(out) = block.get_mut(..frames) else {
+    return false;
+  };
+  let info = reader.read(&layout.sidetone, out, rate);
+  h.sidetone_out_rate.store(rate as u32, r);
+  h.sidetone_out_block_frames.store(frames as u32, r);
+  h.sidetone_underruns.store(reader.underruns(), r);
+  h.sidetone_resyncs.store(reader.resyncs(), r);
+  if !info.playing {
+    return false;
+  }
+  h.sidetone_reader_beat.fetch_add(1, r);
+  h.sidetone_queued_us.store((u64::from(info.queued) * 1_000_000 / u64::from(info.ring_rate.max(1))) as u32, r);
+  // Capture to mix; the units are 100 ns.
+  let age_us =
+    now_hns().zip(layout.sidetone.capture_qpc_hns(info.queued)).map_or(0, |(now, captured)| now.saturating_sub(captured) / 10);
+  h.sidetone_age_us.store(u32::try_from(age_us).unwrap_or(u32::MAX), r);
+  true
+}
+
+/// Adds the mono sidetone to the first two channels (left, right) of an interleaved buffer.
+fn add_sidetone(buf: &mut [f32], channels: usize, mono: &[f32]) {
+  for (frame, sample) in buf.chunks_exact_mut(channels.max(1)).zip(mono) {
+    frame.iter_mut().take(2).for_each(|channel| *channel += sample);
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1883,6 +2207,85 @@ mod tests {
       u32ValidFrameCount: frames,
       u32BufferFlags: windows::Win32::Media::Audio::Apo::APO_BUFFER_FLAGS(flags),
       u32Signature: 0,
+    }
+  }
+
+  #[test]
+  fn sidetone_plays_on_the_pair_output_only() {
+    use gamersequalizer_common::sidetone::SidetoneSettings;
+    const MIC: u32 = 11;
+    const OUT: u32 = 22;
+    let name = format!(r"Local\GamersEqualizer_SidetoneTest_{}", std::process::id());
+    let shm = SharedMemoryClient::create_named(&name, None).unwrap();
+    let control = SharedMemoryClient::open_existing(&name).unwrap();
+    let layout = control.layout();
+    let h = &layout.header;
+    h.write_sidetone(&SidetoneSettings { enabled: true, noise_mode: NoiseMode::Off, ..Default::default() });
+    h.sidetone_mic_hash.store(MIC, Ordering::Relaxed);
+    h.sidetone_output_hash.store(OUT, Ordering::Relaxed);
+
+    let mut tap = SidetoneTap::new(48_000);
+    tap.endpoint_hash = MIC;
+    let mut output = OutputProcessor::create(Some(shm), 48_000.0, 2).unwrap();
+    output.sidetone_endpoint = OUT;
+    // 10 ms blocks of a 1 kHz tone at 0.25 on the mic, silence on the output.
+    let run = |tap: &mut SidetoneTap, output: &mut OutputProcessor, blocks: usize| -> f32 {
+      let mut peak = 0.0f32;
+      for k in 0..blocks {
+        h.owner_beat.fetch_add(1, Ordering::Release);
+        let mic: Vec<f32> =
+          (0..480).flat_map(|i| [((k * 480 + i) as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0).sin() * 0.25; 2]).collect();
+        let before = mic.clone();
+        tap.process(layout, &mic, 2, None, 0.0);
+        assert_eq!(mic, before, "the tap only reads the microphone buffer");
+        let mut out = vec![0.0f32; 960];
+        output.process(&mut out, 2);
+        assert!(out.as_chunks::<2>().0.iter().all(|[l, r]| l == r && l.is_finite()));
+        if k >= blocks / 2 {
+          peak = out.iter().fold(peak, |m, s| m.max(s.abs()));
+        }
+      }
+      peak
+    };
+
+    let heard = run(&mut tap, &mut output, 100);
+    assert!((heard - 0.25).abs() < 0.02, "sidetone at 100 %, no EQ, leveler at 0 dB: {heard}");
+    assert_eq!(h.sidetone_underruns.load(Ordering::Relaxed), 0);
+    assert!(h.sidetone_writer_beat.load(Ordering::Relaxed) > 0 && h.sidetone_reader_beat.load(Ordering::Relaxed) > 0);
+
+    // Another output (speakers), and an output that does not know what it is: silence.
+    for endpoint in [OUT + 1, 0] {
+      output.sidetone_endpoint = endpoint;
+      assert_eq!(run(&mut tap, &mut output, 20), 0.0, "endpoint {endpoint}");
+    }
+    output.sidetone_endpoint = OUT;
+    assert!(run(&mut tap, &mut output, 100) > 0.2, "back on the pair's output");
+
+    // The microphone of another pair stops feeding the ring.
+    tap.endpoint_hash = MIC + 1;
+    assert_eq!(run(&mut tap, &mut output, 100), 0.0);
+
+    // Muted microphone: silence, no click (the level ramps down first).
+    tap.endpoint_hash = MIC;
+    assert!(run(&mut tap, &mut output, 100) > 0.2);
+    h.mic_muted.store(true, Ordering::Relaxed);
+    assert_eq!(run(&mut tap, &mut output, 100), 0.0);
+  }
+
+  #[test]
+  fn endpoint_hash_rejects_blocks_it_does_not_know() {
+    // SAFETY: null, and a buffer of the stated size.
+    unsafe {
+      assert_eq!(endpoint_hash(0, std::ptr::null()), None);
+      let short = [0u8; 8];
+      assert_eq!(endpoint_hash(short.len() as u32, short.as_ptr()), None);
+      // Right size, but cbSize says another layout (e.g. APOInitSystemEffects3).
+      let mut init: APOInitSystemEffects2 = std::mem::zeroed();
+      init.APOInit.cbSize = size_of::<APOInitSystemEffects2>() as u32 + 8;
+      assert_eq!(endpoint_hash(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);
+      // Known layout, no device collection.
+      init.APOInit.cbSize = size_of::<APOInitSystemEffects2>() as u32;
+      assert_eq!(endpoint_hash(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);
     }
   }
 }

@@ -2554,3 +2554,20 @@ self-test confirmed it twice and moved nothing.
 
 - Live APO DLL build (`scripts/dev-rebuild.ps1 -Apo`) and testing inside `audiodg.exe` (including live 5.1/7.1 and Dolby Atmos behavior) not run yet.
 - Live GUI click-through of unified EQ profile dialogs across all five EQ tabs not tested manually yet.
+
+---
+
+## Milestone 55: Audio Engine Periods for Sidetone (2026-11-10)
+
+Measured shared-mode engine periods on the default microphone and default output via `period_probe` (`IAudioClient3::GetSharedModeEnginePeriod`).
+
+| Device     | Endpoint ID                                                 | Rate (Hz) | Default Frames | Default (ms) | Min Frames | Min (ms) | Max Frames | Step |
+| :--------- | :---------------------------------------------------------- | --------: | -------------: | -----------: | ---------: | -------: | ---------: | ---: |
+| Microphone | `{0.0.1.00000000}.{cf0a2270-1885-4dd6-82a5-f636e9efadd5}`  |     48000 |            480 |        10.00 |        480 |    10.00 |        480 |  480 |
+| Output     | `{0.0.0.00000000}.{b45cef56-a56b-49b0-88c0-4af057026718}`  |     48000 |            480 |        10.00 |        480 |    10.00 |        480 |  480 |
+
+### Observations
+- Both endpoints operate at 48000 Hz with a fixed period of 480 frames (10.00 ms).
+- Minimum engine period equals default period (10.00 ms); low-latency mode with shorter periods is not exposed by these drivers.
+- In shared mode, the sidetone latency budget starts with 10 ms mic engine period + 10 ms render engine period (plus ring queue margin).
+

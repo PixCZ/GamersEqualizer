@@ -9,7 +9,7 @@ use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
-  AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
+  AecState, DenoiseModel, ShmHeader, ShmLayout, StereoFrame, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
   MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
   NOISE_GATE_AUTO_LOOKAHEAD,
 };
@@ -747,8 +747,19 @@ impl GamersEqualizerPlugin {
     h.aec_telemetry_seq.fetch_add(1, Ordering::Release);
   }
 
+  /// Gain the voice leveler applies now, dB (0 while it is off or still learning). For the
+  /// sidetone tap of the same APO.
+  pub fn leveler_gain_db(&self) -> f32 {
+    self.leveler.gain_db()
+  }
+
   pub fn shm_header(&self) -> Option<&ShmHeader> {
     self.shm_client.as_ref().map(|c| &c.layout().header)
+  }
+
+  /// The whole mapping (the sidetone ring lives beside the header).
+  pub fn shm_layout(&self) -> Option<&ShmLayout> {
+    self.shm_client.as_ref().map(|c| c.layout())
   }
 
   /// Starts a capture block if one is recording: raw mic + the reference at mic time.

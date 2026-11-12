@@ -1,5 +1,6 @@
 use crate::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
 use crate::profile::{expand_slopes, BiquadBand, FilterType};
+use crate::sidetone::{NoiseMode, SidetoneRing, SidetoneSettings};
 use crate::streams::{StreamTable, STREAM_EQ_BUSES};
 use std::sync::atomic::{fence, AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -7,13 +8,13 @@ use std::time::{Duration, Instant};
 /// Name carries the layout version: a process still running an older build keeps its own
 /// (smaller) mapping instead of both reading each other's memory with different layouts.
 /// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v19";
+pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v21";
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v19";
+pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v21";
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 19;
+pub const SHM_VERSION: u32 = 21;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -71,6 +72,7 @@ pub struct ShmStreamEq {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CopiedEqVersions {
   mic: Option<u32>,
+  sidetone: Option<u32>,
   out: Option<u32>,
   streams: [Option<u32>; STREAM_EQ_BUSES],
 }
@@ -324,6 +326,58 @@ pub struct ShmHeader {
   /// fit, correlation and slope x 1000 (an echo is confirmed from 900 and a slope of 700-1300).
   pub aec_echo_fit_permille: AtomicI32,
   pub aec_echo_slope_permille: AtomicI32,
+
+  // --- v20: sidetone (own voice in the headphones), see `sidetone.rs` ---
+  /// Daemon -> APOs: sidetone is on for the current microphone + output pair. The values
+  /// below are that pair's (`write_sidetone` / `read_sidetone`).
+  pub sidetone_enabled: AtomicBool,
+  /// `NoiseMode::to_u32`.
+  pub sidetone_noise_mode: AtomicU32,
+  /// 1000 = 100 % (`SidetoneSettings::volume`).
+  pub sidetone_volume_permille: AtomicU32,
+  pub sidetone_gate_margin_db_x10: AtomicI32,
+  pub sidetone_gate_range_db_x10: AtomicI32,
+  /// v21: the pair's parametric EQ, published like the microphone EQ (`write_sidetone_eq`).
+  pub sidetone_eq_version: AtomicU32,
+  pub sidetone_eq_band_count: AtomicU32,
+  pub sidetone_eq_bands: [ShmEqBand; MAX_EQ_BANDS],
+  /// Daemon -> APOs: `device_hash` of the pair's microphone and output, 0 = none. An APO
+  /// takes part only when the hash of its own endpoint matches.
+  pub sidetone_mic_hash: AtomicU32,
+  pub sidetone_output_hash: AtomicU32,
+  /// GUI -> daemon: counts up while "Try it" is on and the Sidetone page is open; the daemon
+  /// keeps the microphone open while it changes.
+  pub sidetone_test_beat: AtomicU32,
+  /// GUI -> daemon: ask the audio engine for its shortest period on both devices.
+  pub sidetone_low_latency: AtomicBool,
+  /// Mic APO -> daemon: blocks written to the sidetone ring (changes = sidetone is fed).
+  pub sidetone_writer_beat: AtomicU32,
+  /// Mic APO -> daemon: its stream's rate and the frames of its last block (= engine period).
+  pub sidetone_mic_rate: AtomicU32,
+  pub sidetone_mic_block_frames: AtomicU32,
+  /// Mic APO -> daemon: peak of the sidetone signal over the last ~100 ms, x 1000 (1000 =
+  /// full scale), and the gain of the most closed expander band, dB x 10.
+  pub sidetone_peak_permille: AtomicU32,
+  pub sidetone_gate_gain_db_x10: AtomicI32,
+  /// Mic APO -> daemon: the noise mode that really runs (`NoiseMode::to_u32`; the expander
+  /// stands in when a frame-based one can't) and the delay it adds, microseconds.
+  pub sidetone_noise_mode_active: AtomicU32,
+  pub sidetone_noise_delay_us: AtomicU32,
+  /// Mic APO -> daemon: `device_hash` of the endpoint it sits on, 0 = it could not tell.
+  pub sidetone_mic_hash_seen: AtomicU32,
+  /// Output APO -> daemon: blocks mixed in (changes = sidetone is playing).
+  pub sidetone_reader_beat: AtomicU32,
+  pub sidetone_out_rate: AtomicU32,
+  pub sidetone_out_block_frames: AtomicU32,
+  /// Output APO -> daemon: audio queued in the ring after its last read, and the age of the
+  /// sample it mixed last (capture to mix), microseconds; age 0 = unknown.
+  pub sidetone_queued_us: AtomicU32,
+  pub sidetone_age_us: AtomicU32,
+  /// Output APO -> daemon: times it ran dry / jumped ahead (cumulative).
+  pub sidetone_underruns: AtomicU32,
+  pub sidetone_resyncs: AtomicU32,
+  /// Output APO -> daemon: `device_hash` of the endpoint it sits on, 0 = it could not tell.
+  pub sidetone_output_hash_seen: AtomicU32,
 }
 
 /// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
@@ -358,6 +412,8 @@ pub struct ShmLayout {
   /// v7: per-stream table of the render SFX instances (only used in the APO mapping).
   /// All zero in a fresh mapping = all slots free.
   pub streams: StreamTable,
+  /// v20: sidetone samples from the mic APO to the output APO (only used in the APO mapping).
+  pub sidetone: SidetoneRing,
 }
 
 /// Safe helper for reading and writing frames to the ring buffer
@@ -545,6 +601,34 @@ impl Default for ShmHeader {
       aec_mic_gain_db_x10: AtomicI32::new(0),
       aec_echo_fit_permille: AtomicI32::new(0),
       aec_echo_slope_permille: AtomicI32::new(0),
+      sidetone_enabled: AtomicBool::new(false),
+      sidetone_noise_mode: AtomicU32::new(0),
+      sidetone_volume_permille: AtomicU32::new(0),
+      sidetone_gate_margin_db_x10: AtomicI32::new(0),
+      sidetone_gate_range_db_x10: AtomicI32::new(0),
+      sidetone_eq_version: AtomicU32::new(0),
+      sidetone_eq_band_count: AtomicU32::new(0),
+      sidetone_eq_bands: std::array::from_fn(|_| ShmEqBand::default()),
+      sidetone_mic_hash: AtomicU32::new(0),
+      sidetone_output_hash: AtomicU32::new(0),
+      sidetone_test_beat: AtomicU32::new(0),
+      sidetone_low_latency: AtomicBool::new(false),
+      sidetone_writer_beat: AtomicU32::new(0),
+      sidetone_mic_rate: AtomicU32::new(0),
+      sidetone_mic_block_frames: AtomicU32::new(0),
+      sidetone_peak_permille: AtomicU32::new(0),
+      sidetone_gate_gain_db_x10: AtomicI32::new(0),
+      sidetone_noise_mode_active: AtomicU32::new(0),
+      sidetone_noise_delay_us: AtomicU32::new(0),
+      sidetone_mic_hash_seen: AtomicU32::new(0),
+      sidetone_reader_beat: AtomicU32::new(0),
+      sidetone_out_rate: AtomicU32::new(0),
+      sidetone_out_block_frames: AtomicU32::new(0),
+      sidetone_queued_us: AtomicU32::new(0),
+      sidetone_age_us: AtomicU32::new(0),
+      sidetone_underruns: AtomicU32::new(0),
+      sidetone_resyncs: AtomicU32::new(0),
+      sidetone_output_hash_seen: AtomicU32::new(0),
     };
     h.init_defaults();
     h
@@ -594,6 +678,8 @@ impl ShmHeader {
     self.denoise_model.store(DenoiseModel::DeepFilterNet.to_u32(), Ordering::Relaxed);
     self.mic_leveler_enabled.store(true, Ordering::Relaxed);
     self.mic_leveler_target_db_x10.store(MIC_LEVELER_DEFAULT_TARGET_DB_X10, Ordering::Relaxed);
+    // Off, with the default values: a pair's settings replace them when one is active.
+    self.write_sidetone(&SidetoneSettings::default());
   }
 
   /// GUI -> DSP settings, for mirroring the daemon's mapping into the APO's. An EQ is copied
@@ -615,6 +701,20 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);
     self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
     self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
+    // Sidetone: the EQ and the values first, `enabled` last (as `write_sidetone` does), so
+    // the APOs never run a fresh "on" with the previous pair's values.
+    let version = src.sidetone_eq_version.load(Ordering::Acquire);
+    if seen.sidetone != Some(version) {
+      self.write_sidetone_eq(&src.read_sidetone_eq());
+      seen.sidetone = Some(version);
+    }
+    self.sidetone_noise_mode.store(src.sidetone_noise_mode.load(r), r);
+    self.sidetone_volume_permille.store(src.sidetone_volume_permille.load(r), r);
+    self.sidetone_gate_margin_db_x10.store(src.sidetone_gate_margin_db_x10.load(r), r);
+    self.sidetone_gate_range_db_x10.store(src.sidetone_gate_range_db_x10.load(r), r);
+    self.sidetone_mic_hash.store(src.sidetone_mic_hash.load(r), r);
+    self.sidetone_output_hash.store(src.sidetone_output_hash.load(r), r);
+    self.sidetone_enabled.store(src.sidetone_enabled.load(r), Ordering::Release);
     // Version first, bands after: a write in between is copied now and again next time.
     let version = src.mic_eq_version.load(Ordering::Acquire);
     if seen.mic != Some(version) {
@@ -643,6 +743,24 @@ impl ShmHeader {
     self.out_apo_blocks.store(src.out_apo_blocks.load(r), r);
     self.out_apo_sample_rate.store(src.out_apo_sample_rate.load(r), r);
     self.out_apo_channels.store(src.out_apo_channels.load(r), r);
+    self.sidetone_reader_beat.store(src.sidetone_reader_beat.load(r), r);
+    self.sidetone_out_rate.store(src.sidetone_out_rate.load(r), r);
+    self.sidetone_out_block_frames.store(src.sidetone_out_block_frames.load(r), r);
+    self.sidetone_queued_us.store(src.sidetone_queued_us.load(r), r);
+    self.sidetone_age_us.store(src.sidetone_age_us.load(r), r);
+    self.sidetone_underruns.store(src.sidetone_underruns.load(r), r);
+    self.sidetone_resyncs.store(src.sidetone_resyncs.load(r), r);
+    self.sidetone_output_hash_seen.store(src.sidetone_output_hash_seen.load(r), r);
+    // The mic APO's sidetone tap too: it runs without the mic chain (whose telemetry
+    // `copy_dsp_telemetry_from` waits for), e.g. after the chain failed.
+    self.sidetone_writer_beat.store(src.sidetone_writer_beat.load(r), r);
+    self.sidetone_mic_rate.store(src.sidetone_mic_rate.load(r), r);
+    self.sidetone_mic_block_frames.store(src.sidetone_mic_block_frames.load(r), r);
+    self.sidetone_peak_permille.store(src.sidetone_peak_permille.load(r), r);
+    self.sidetone_gate_gain_db_x10.store(src.sidetone_gate_gain_db_x10.load(r), r);
+    self.sidetone_noise_mode_active.store(src.sidetone_noise_mode_active.load(r), r);
+    self.sidetone_noise_delay_us.store(src.sidetone_noise_delay_us.load(r), r);
+    self.sidetone_mic_hash_seen.store(src.sidetone_mic_hash_seen.load(r), r);
   }
 
   /// Publish the combined output EQ. Readers pick it up when `out_eq_version` changes.
@@ -755,6 +873,47 @@ impl ShmHeader {
       d.store(s.load(r), r);
     }
     self.aec_telemetry_seq.fetch_add(1, Ordering::Release);
+  }
+
+  /// Publish the sidetone settings of the current pair (daemon). `enabled` goes last, so an
+  /// APO never runs a fresh "on" with the previous pair's values.
+  pub fn write_sidetone(&self, settings: &SidetoneSettings) {
+    let r = Ordering::Relaxed;
+    let s = settings.clamped();
+    let x10 = |db: f32| (db * 10.0).round() as i32;
+    self.sidetone_noise_mode.store(s.noise_mode.to_u32(), r);
+    self.sidetone_volume_permille.store((s.volume * 1000.0).round() as u32, r);
+    self.sidetone_gate_margin_db_x10.store(x10(s.gate_margin_db), r);
+    self.sidetone_gate_range_db_x10.store(x10(s.gate_range_db), r);
+    self.sidetone_enabled.store(s.enabled, Ordering::Release);
+  }
+
+  /// The sidetone settings as the APOs use them (always inside their ranges).
+  pub fn read_sidetone(&self) -> SidetoneSettings {
+    let r = Ordering::Relaxed;
+    let db = |v: &AtomicI32| v.load(r) as f32 / 10.0;
+    SidetoneSettings {
+      enabled: self.sidetone_enabled.load(Ordering::Acquire),
+      noise_mode: NoiseMode::from_u32(self.sidetone_noise_mode.load(r)),
+      volume: self.sidetone_volume_permille.load(r) as f32 / 1000.0,
+      gate_margin_db: db(&self.sidetone_gate_margin_db_x10),
+      gate_range_db: db(&self.sidetone_gate_range_db_x10),
+    }
+    .clamped()
+  }
+
+  /// Publish the sidetone EQ of the current pair. The mic APO picks it up when
+  /// `sidetone_eq_version` changes.
+  pub fn write_sidetone_eq(&self, bands: &[BiquadBand]) {
+    let count = write_bands(&self.sidetone_eq_bands, bands);
+    self.sidetone_eq_band_count.store(count as u32, Ordering::Relaxed);
+    self.sidetone_eq_version.fetch_add(1, Ordering::Release);
+  }
+
+  /// Read the sidetone EQ. Bands with an unknown filter type are skipped.
+  pub fn read_sidetone_eq(&self) -> Vec<BiquadBand> {
+    let count = (self.sidetone_eq_band_count.load(Ordering::Acquire) as usize).min(MAX_EQ_BANDS);
+    read_bands(&self.sidetone_eq_bands, count)
   }
 
   /// Publish the microphone EQ. Readers pick it up when `mic_eq_version` changes.
@@ -1209,6 +1368,54 @@ mod tests {
     h.write_active_game(Some(&game));
     assert_eq!(h.read_active_game(), Some(game));
     assert_eq!(h.active_game_seq.load(Ordering::Relaxed) & 1, 0);
+  }
+
+  #[test]
+  fn test_sidetone_settings_roundtrip_and_mirroring() {
+    let (daemon, apo) = (ShmHeader::default(), ShmHeader::default());
+    assert!(!daemon.read_sidetone().enabled, "off until a pair switches it on");
+    let wanted = SidetoneSettings {
+      enabled: true,
+      noise_mode: NoiseMode::RnNoise,
+      volume: 1.5,
+      gate_margin_db: 6.0,
+      gate_range_db: 24.0,
+    };
+    daemon.write_sidetone(&wanted);
+    daemon.sidetone_mic_hash.store(11, Ordering::Relaxed);
+    daemon.sidetone_output_hash.store(22, Ordering::Relaxed);
+    assert_eq!(daemon.read_sidetone(), wanted);
+    let bands = crate::sidetone::default_bands();
+    daemon.write_sidetone_eq(&bands);
+
+    let mut seen = CopiedEqVersions::default();
+    apo.copy_controls_from(&daemon, &mut seen);
+    assert_eq!(apo.read_sidetone(), wanted);
+    assert_eq!(apo.read_sidetone_eq(), bands);
+    // Copied again only after the next edit: every copy makes the APO rebuild its filters.
+    let version = apo.sidetone_eq_version.load(Ordering::Relaxed);
+    apo.copy_controls_from(&daemon, &mut seen);
+    assert_eq!(apo.sidetone_eq_version.load(Ordering::Relaxed), version);
+    assert_eq!(
+      (apo.sidetone_mic_hash.load(Ordering::Relaxed), apo.sidetone_output_hash.load(Ordering::Relaxed)),
+      (11, 22)
+    );
+
+    // Telemetry goes the other way.
+    apo.sidetone_writer_beat.store(5, Ordering::Relaxed);
+    apo.sidetone_reader_beat.store(7, Ordering::Relaxed);
+    apo.sidetone_age_us.store(9_000, Ordering::Relaxed);
+    // Both APOs' parts come with the output telemetry (mirrored on every tick).
+    daemon.copy_output_telemetry_from(&apo);
+    assert_eq!(daemon.sidetone_writer_beat.load(Ordering::Relaxed), 5);
+    assert_eq!(daemon.sidetone_reader_beat.load(Ordering::Relaxed), 7);
+    assert_eq!(daemon.sidetone_age_us.load(Ordering::Relaxed), 9_000);
+
+    // Garbage in the mapping (an older daemon, a torn write) stays inside the ranges.
+    apo.sidetone_volume_permille.store(u32::MAX, Ordering::Relaxed);
+    apo.sidetone_noise_mode.store(999, Ordering::Relaxed);
+    let read = apo.read_sidetone();
+    assert_eq!((read.volume, read.noise_mode), (crate::sidetone::VOLUME_MAX, NoiseMode::Expander));
   }
 
   #[test]

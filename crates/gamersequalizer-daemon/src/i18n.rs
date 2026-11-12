@@ -125,7 +125,7 @@ mod tests {
   use super::*;
 
   /// Files whose `tr("...")` / `trf("...")` literals must all be translated.
-  const SOURCES: [(&str, &str); 20] = [
+  const SOURCES: [(&str, &str); 21] = [
     ("output_eq/game_presets.rs", include_str!("output_eq/game_presets.rs")),
     ("tray.rs", include_str!("tray.rs")),
     ("ui/setup.rs", include_str!("ui/setup.rs")),
@@ -142,6 +142,7 @@ mod tests {
     ("ui/tab_mic.rs", include_str!("ui/tab_mic.rs")),
     ("ui/tab_mixer.rs", include_str!("ui/tab_mixer.rs")),
     ("ui/tab_settings.rs", include_str!("ui/tab_settings.rs")),
+    ("ui/tab_sidetone.rs", include_str!("ui/tab_sidetone.rs")),
     ("ui/theme.rs", include_str!("ui/theme.rs")),
     ("output_eq/autoeq.rs", include_str!("output_eq/autoeq.rs")),
     ("win_audio/dolby_atmos.rs", include_str!("win_audio/dolby_atmos.rs")),

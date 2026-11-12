@@ -114,6 +114,7 @@ fn run_background_daemon() {
 
   let storage = ProfileStorage::default_storage();
   win_audio::app_channels::init(storage.base_dir());
+  win_audio::sidetone::init(storage.base_dir());
   debug!("[GamersEqualizer] Loaded storage.");
 
   let mut win_audio = match WinAudioSystem::new() {
@@ -127,6 +128,9 @@ fn run_background_daemon() {
   // Pairs per-stream APO instances with apps (chat / media stream EQ); runs for the daemon's life.
   if win_audio::stream_router::spawn().is_none() {
     error!("[GamersEqualizer] could not start the stream router: chat/media EQ stays off");
+  }
+  if win_audio::sidetone::spawn().is_none() {
+    error!("[GamersEqualizer] could not start the sidetone thread: sidetone stays off");
   }
 
   // Open or create shared memory for IPC
@@ -400,6 +404,7 @@ fn run_gui_mode() {
 
   let storage = ProfileStorage::default_storage();
   win_audio::app_channels::init(storage.base_dir());
+  win_audio::sidetone::init(storage.base_dir());
 
   // Import once: also when the profiles predate launcher ids (needed for game detection),
   // which is the one time it overwrites same-named profiles. Then never again.

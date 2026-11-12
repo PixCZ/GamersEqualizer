@@ -43,6 +43,7 @@ pub struct AudioSettings {
   /// (`mic_volume_permille`, may be > 1000) at that time; 0 = no automatic level.
   pub mic_auto_gain_permille: u32,
   pub mic_auto_wish_permille: u32,
+  pub sidetone_low_latency: bool,
 }
 
 impl Default for AudioSettings {
@@ -96,12 +97,14 @@ impl AudioSettings {
       mic_leveler_target_db_x10: h.mic_leveler_target_db_x10.load(r),
       mic_auto_gain_permille: h.mic_auto_gain_permille.load(r),
       mic_auto_wish_permille: if h.mic_auto_gain_permille.load(r) > 0 { h.mic_volume_permille.load(r) } else { 0 },
+      sidetone_low_latency: h.sidetone_low_latency.load(r),
     }
   }
 
   /// Fill a freshly created mapping (after its defaults and the Windows volumes are in).
   pub fn apply_to_header(&self, h: &mut ShmHeader) {
     let r = Ordering::Relaxed;
+    h.sidetone_low_latency.store(self.sidetone_low_latency, r);
     h.aec_enabled.store(self.aec_enabled, r);
     h.ai_voice_strength_permille.store(self.denoise_strength_permille.min(1000), r);
     h.noise_gate_threshold_db.store(self.noise_gate_db, r);
@@ -188,6 +191,7 @@ mod tests {
     h.mic_leveler_target_db_x10.store(-180, Ordering::Relaxed);
     h.game_volume_permille.store(400, Ordering::Relaxed);
     h.mic_volume_permille.store(2000, Ordering::Relaxed);
+    h.sidetone_low_latency.store(true, Ordering::Relaxed);
     let mut h = h;
     h.set_selected_mic_id("{mic-1}");
     AudioSettings::from_header(&h).save(&dir);
@@ -195,6 +199,7 @@ mod tests {
     // Restart: a new mapping starts from defaults, Windows mic at 100 %.
     let mut fresh = ShmHeader::default();
     AudioSettings::load_or_default(&dir).apply_to_header(&mut fresh);
+    assert!(fresh.sidetone_low_latency.load(Ordering::Relaxed));
     assert_eq!(DenoiseModel::from_u32(fresh.denoise_model.load(Ordering::Relaxed)), DenoiseModel::DpdfNet);
     assert!(!fresh.aec_enabled.load(Ordering::Relaxed));
     assert!(!fresh.mic_leveler_enabled.load(Ordering::Relaxed));

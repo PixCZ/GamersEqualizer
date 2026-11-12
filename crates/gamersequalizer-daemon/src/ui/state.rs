@@ -5,6 +5,7 @@ use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::{collapse_slopes, slots_used, ParametricProfile, VadType};
 use gamersequalizer_common::shm::ShmHeader as ShmHeaderT;
 use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout, APO_SHM_NAME, SHM_NAME};
+use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
@@ -104,9 +105,22 @@ pub enum ActiveTab {
   Game,
   Chat,
   Media,
+  Sidetone,
   Mic,
   Log,
   Settings,
+}
+
+#[derive(Default)]
+pub struct SidetoneUi {
+  pub testing: bool,
+  pub pair: Option<SidetonePair>,
+  pub pair_key: (String, String),
+  pub dirty: bool,
+  pub last_reader_beat: u32,
+  pub last_reader_beat_time: Option<std::time::Instant>,
+  pub last_writer_beat: u32,
+  pub last_writer_beat_time: Option<std::time::Instant>,
 }
 
 /// How long the double-talk indicator stays visible after the last detection.
@@ -137,6 +151,7 @@ pub struct AppState {
   /// Output EQ band edited but not saved yet (saved when the slider is released).
   pub out_eq_unsaved: Option<OutputLayer>,
   pub headphones_ui: super::tab_headphones::HeadphonesUi,
+  pub sidetone_ui: SidetoneUi,
   /// Last output APO heartbeat value and when it changed (live indicator).
   pub out_apo_seen: (u32, Option<std::time::Instant>),
 
@@ -216,6 +231,7 @@ impl AppState {
       output_eq,
       out_eq_unsaved: None,
       headphones_ui: Default::default(),
+      sidetone_ui: Default::default(),
       out_apo_seen: (0, None),
       mic_profile,
       apo_view: None,

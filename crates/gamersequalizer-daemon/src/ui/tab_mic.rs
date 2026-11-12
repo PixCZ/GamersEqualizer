@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
 const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
 const AI_COLOR: Color32 = Color32::from_rgb(140, 240, 120);
-const EQ_COLOR: Color32 = Color32::from_rgb(255, 180, 80);
+pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(255, 180, 80);
 const OK_COLOR: Color32 = Color32::from_rgb(80, 220, 120);
 /// Lowest level shown on the dBFS meters.
 const METER_FLOOR_DB: f32 = -80.0;
