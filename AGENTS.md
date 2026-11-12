@@ -82,6 +82,10 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   opt-in checkboxes. A device whose install the installer rolled back is not offered again until "Try
   again". Before changing an endpoint the installer saves its original effect lists once to
   `%ProgramFiles%\GamersEqualizer\apo-backup\`; the uninstaller restores them, then removes our effects.
+  It moves the driver's legacy effect values into composite lists only in the slots ours go into (a
+  legacy value shadows only its own slot). A device that does not open during the self-test is opened
+  once more without our effects: if it opens then, ours stay out; if not (exclusive use, privacy), ours
+  go back in unchecked, unless driver effects were moved for them.
 - Mic effect slot: the installer puts the mic chain in EFX, then opens the mic briefly
   (`gamersequalizer.exe --probe-mic {guid}`) and moves it to MFX when Windows did not start it there
   (some notebook mic arrays). The Mic tab offers the same switch later ("Try another effect slot").

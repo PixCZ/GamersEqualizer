@@ -140,10 +140,11 @@ pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
   let status = match (&endpoint_guid, installed_stamp) {
     (None, _) => ApoStatus::NoMicrophone,
     (_, None) => ApoStatus::NotInstalled,
-    // Only offer an update to a newer build, never a downgrade.
-    // The app's own update counts only where the effect is: elsewhere it would turn "not on
-    // this device" into "update", which installs the effect there.
-    (Some(guid), Some(_)) if dll_outdated || (app.is_some() && endpoint_has_apo(flow, guid)) => ApoStatus::Outdated,
+    // Only offer an update to a newer build, never a downgrade, and only where one of our effects
+    // already is: elsewhere "update" would install the effect on a device the user never chose.
+    (Some(guid), Some(_)) if (dll_outdated || app.is_some()) && endpoint_has_any_clsid(flow, guid) => {
+      ApoStatus::Outdated
+    }
     (Some(guid), Some(_)) if !endpoint_has_apo(flow, guid) => ApoStatus::NotOnThisMic,
     _ => ApoStatus::Active,
   };
@@ -783,11 +784,12 @@ fn endpoints_root(flow: Flow) -> String {
 
 fn endpoint_has_any_clsid(flow: Flow, guid: &str) -> bool {
   let lists = endpoint_fx_lists(flow, guid);
-  flow.clsids().iter().all(|clsid| lists.iter().any(|list| list.contains(clsid)))
+  lists.iter().any(|list| flow.clsids().iter().any(|clsid| list.contains(clsid)))
 }
 
 /// True only when all required CLSIDs sit in composite slots whose streaming modes include the
-/// Default processing mode and no non-null legacy values (`1/5/6/7`) shadow them.
+/// Default processing mode and whose own legacy value (SFX `,1`/`,5`, MFX `,6`, EFX `,7`) does not
+/// shadow them. A legacy value on another slot is harmless (measured: `,5`/`,6` left `,15` running).
 fn endpoint_has_apo(flow: Flow, guid: &str) -> bool {
   let key = format!("{}\\{guid}\\FxProperties", endpoints_root(flow));
   let slots = FX_LIST_VALUES.map(|n| read_string_value(&key, n));
@@ -802,16 +804,19 @@ fn endpoint_fx_configured(
   modes: &[Option<String>; 3],
   legacy: &[Option<String>; 4],
 ) -> bool {
-  let has_shadowing_legacy =
-    legacy.iter().flatten().any(|raw| raw.split('\n').map(str::trim).any(|s| !s.is_empty() && !s.eq_ignore_ascii_case(NULL_GUID)));
-  if has_shadowing_legacy {
-    return false;
-  }
+  let in_use = |raw: &Option<String>| {
+    raw.as_deref().is_some_and(|raw| {
+      raw.split('\n').map(str::trim).any(|s| !s.is_empty() && !s.eq_ignore_ascii_case(NULL_GUID))
+    })
+  };
+  // FX_LEGACY_VALUES order: LFX, SFX, MFX, EFX; slots: SFX, MFX, EFX.
+  let [lfx, sfx, mfx, efx] = legacy;
+  let shadowed = [in_use(lfx) || in_use(sfx), in_use(mfx), in_use(efx)];
   flow.clsids().iter().all(|clsid| {
-    slots.iter().zip(modes.iter()).any(|(slot, mode)| {
+    slots.iter().zip(modes.iter()).zip(shadowed).any(|((slot, mode), shadowed)| {
       let has_clsid = slot.as_deref().is_some_and(|s| s.to_ascii_lowercase().contains(clsid));
       let has_mode = mode.as_deref().is_some_and(|m| m.to_ascii_lowercase().contains(DEFAULT_PROCESSING_MODE));
-      has_clsid && has_mode
+      has_clsid && has_mode && !shadowed
     })
   })
 }
@@ -984,8 +989,36 @@ mod tests {
     assert!(endpoint_fx_configured(
       Flow::Render,
       &[Some(STREAM_APO_CLSID.into()), None, Some(OUTPUT_APO_CLSID.into())],
-      &[mode.clone(), None, mode],
+      &[mode.clone(), None, mode.clone()],
       &[None, None, None, None],
+    ));
+    // A legacy value shadows only its own slot (measured): MFX ,6 leaves SFX ,13 and EFX ,15
+    // running, but not MFX ,14; the old pre-mix value LFX ,1 counts as SFX.
+    let mfx_legacy = Some("{13AB3EBD-137E-4903-9D89-60BE8277FD17}".to_string());
+    assert!(endpoint_fx_configured(
+      Flow::Render,
+      &[Some(STREAM_APO_CLSID.into()), None, Some(OUTPUT_APO_CLSID.into())],
+      &[mode.clone(), None, mode.clone()],
+      &[None, None, mfx_legacy.clone(), None],
+    ));
+    assert!(!endpoint_fx_configured(
+      Flow::Render,
+      &[Some(STREAM_APO_CLSID.into()), Some(OUTPUT_APO_CLSID.into()), None],
+      &[mode.clone(), mode.clone(), None],
+      &[None, None, mfx_legacy.clone(), None],
+    ));
+    assert!(!endpoint_fx_configured(
+      Flow::Render,
+      &[Some(STREAM_APO_CLSID.into()), None, Some(OUTPUT_APO_CLSID.into())],
+      &[mode.clone(), None, mode.clone()],
+      &[mfx_legacy, None, None, None],
+    ));
+    // Capture in EFX next to the driver's legacy MFX: ready.
+    assert!(endpoint_fx_configured(
+      Flow::Capture,
+      &[None, None, Some(MIC_APO_CLSID.into())],
+      &[None, None, mode],
+      &[None, None, Some("{13AB3EBD-137E-4903-9D89-60BE8277FD17}".into()), None],
     ));
   }
 

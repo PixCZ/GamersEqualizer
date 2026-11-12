@@ -314,13 +314,23 @@ function Get-EndpointBlocker($fx) {
   "its driver has only old-style effects, and one of them (post-mix effect $gfx) would stop working"
 }
 
-# Windows ignores composite lists (,13 / ,14 / ,15) when legacy REG_SZ values (,1 / ,5 / ,6 / ,7)
-# coexist on the same endpoint (e.g. Microsoft Audio Home Theater Effects on USB headsets/DACs).
-# Promote all non-empty legacy CLSIDs into composite lists + ensure their streaming modes + clear legacy.
-function Migrate-LegacySlots($job) {
+# The slots whose legacy values Migrate-LegacySlots moves: those our effects go into, plus SFX while
+# the old pre-mix value (LFX ,1) is set, which stops running once our newer values exist.
+function Get-MigrationSlots($fx, [string[]]$slots) {
+  $lfx = [string]$fx."$FxGuid,1"
+  $withLfx = @($slots) + @(if ($lfx.Trim() -and $lfx -ne $NullGuid) { 'SFX' })
+  @($withLfx | Where-Object { $LegacyValues.ContainsKey($_) } | Select-Object -Unique)
+}
+
+# Windows ignores a composite list (,13 / ,14 / ,15) while that slot's legacy REG_SZ value
+# (,1 or ,5 / ,6 / ,7) is set (e.g. Microsoft Audio Home Theater Effects on USB headsets/DACs);
+# measured: legacy ,5/,6 shadow ,13/,14 and leave ,15 running. So only $slots (Get-MigrationSlots)
+# are migrated: their legacy CLSIDs move into the composite lists (with streaming modes) and the
+# legacy values go. The driver's legacy values on other slots stay as they are.
+function Migrate-LegacySlots($job, [string[]]$slots) {
   $fx = Get-ItemProperty (Join-Path $job.Key 'FxProperties')
   $fxSubKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
-  foreach ($s in 'SFX', 'MFX', 'EFX') {
+  foreach ($s in (Get-MigrationSlots $fx $slots)) {
     $found = New-Object System.Collections.Generic.List[string]
     $presentNames = New-Object System.Collections.Generic.List[string]
     foreach ($legacyName in $LegacyValues[$s]) {
@@ -359,7 +369,7 @@ function Get-ActiveEndpoints([string]$flow) {
 }
 
 # Appends $class to the endpoint's composite list for $slot and ensures its streaming modes entry.
-# Note: Migrate-LegacySlots has already moved any legacy REG_SZ values safely. Capture also leaves
+# Note: Migrate-LegacySlots has already moved the legacy REG_SZ value of $slot. Capture also leaves
 # the other slot (EFX <-> MFX), keeping any OEM effects there so it never runs twice.
 function Set-EffectSlot($job, [string]$class, [string]$slot, [switch]$RemoveFromOther) {
   $clsid = $Classes[$class].Clsid
@@ -437,16 +447,54 @@ function Get-AudiodgCrashesSince([datetime]$since) {
   catch { return , @() }
 }
 
+# Writes an endpoint's effect values from a snapshot while Windows audio is stopped. Returns
+# when audio started again.
+function Set-JobFx($snapshot) {
+  Stop-Audio
+  try { Restore-FxSnapshot $snapshot }
+  finally { $started = Start-Audio }
+  $started
+}
+
 function Rollback-Job($job, [datetime]$sinceRestart) {
   $snap = $script:FxSnapshots["$($job.Flow):$($job.Id)"]
   if (-not $snap) {
     Say "  Rollback warning: snapshot not found for $($job.Name)." Yellow
     return $sinceRestart
   }
-  Stop-Audio
-  try { Restore-FxSnapshot $snap }
-  finally { $started = Start-Audio }
+  $started = Set-JobFx $snap
   Say "  $(Get-RollbackLine $job)" Yellow
+  $started
+}
+
+# The endpoint did not open with our effects ($res from Invoke-EndpointProbe). After an audiodg
+# crash, or when the check itself did not run or hung (Ran = $false), they come out at once.
+# Otherwise they come out and it is opened again: when it opens now, ours were the cause and stay
+# out. When it fails without them too (another app holds it in exclusive mode, privacy settings
+# block the microphone), ours go back in, unchecked; not where the driver's effects were moved
+# for them (Migrated): nothing then shows that this device runs the moved effects. Returns when
+# audio last started.
+function Resolve-ProbeOpen($job, $res, [datetime]$sinceRestart) {
+  $snap = $script:FxSnapshots["$($job.Flow):$($job.Id)"]
+  $installed = $null
+  if (-not $res.Crashed -and $res.Ran -ne $false -and -not $job.Migrated -and $snap) {
+    try { $installed = Get-FxSnapshot $job.Flow $job.Id } catch { Say "  Reading the effect settings failed: $_" Yellow }
+  }
+  if (-not $installed) { return Rollback-Job $job $sinceRestart }
+  Say "  Opening the $($job.Word) again without GamersEqualizer, to see whether it is the cause..."
+  $started = Set-JobFx $snap
+  $baseline = Invoke-EndpointProbe $job $started
+  if ($baseline.OpenOk -or $baseline.Crashed -or $baseline.Ran -eq $false) {
+    Say "  $(Get-RollbackLine $job)" Yellow
+    return $started
+  }
+  # Still rolled back if this fails: the app must learn that before the trap ends the run.
+  try { $started = Set-JobFx $installed }
+  catch {
+    Say "  $(Get-RollbackLine $job)" Yellow
+    throw
+  }
+  Say "  The $($job.Word) does not open without GamersEqualizer either (another app may use it exclusively, or privacy settings block it): GamersEqualizer stays on it, unchecked. Try again when it is free." Yellow
   $started
 }
 
@@ -478,12 +526,12 @@ function Invoke-EndpointProbe($job, [datetime]$sinceRestart) {
     if (-not $probe.WaitForExit(20000)) {
       $probe.Kill()
       Say "  The $($job.Word) check did not finish in time." Red
-      return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Notes = @(); PreNotes = $preNotes }
+      return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Ran = $false; Notes = @(); PreNotes = $preNotes }
     }
   }
   catch {
     Say "  The check could not start: $_" Red
-    return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Notes = @(); PreNotes = $preNotes }
+    return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Ran = $false; Notes = @(); PreNotes = $preNotes }
   }
   $crashes = Get-AudiodgCrashesSince $sinceRestart
   $notes = Get-ApoNotesSince $probeSince
@@ -498,10 +546,14 @@ function Invoke-EndpointProbe($job, [datetime]$sinceRestart) {
   [pscustomobject]@{ OpenOk = $true; Crashed = $false; Notes = $notes; PreNotes = $preNotes }
 }
 
-# Puts an APO class into $slot (removing from the other of EFX/MFX), restarting Windows Audio once.
+# Puts an APO class into $slot (migrating that slot's legacy value first, removing it from the
+# other of EFX/MFX), restarting Windows Audio once.
 function Move-EndpointSlot($job, [string]$class, [string]$slot) {
   Stop-Audio
-  try { Set-EffectSlot $job $class $slot -RemoveFromOther }
+  try {
+    Migrate-LegacySlots $job @($slot)
+    Set-EffectSlot $job $class $slot -RemoveFromOther
+  }
   finally { $started = Start-Audio }
   $started
 }
@@ -640,7 +692,7 @@ try {
   Unblock-File $InstalledDll
 
   foreach ($job in $jobs) {
-    Migrate-LegacySlots $job
+    Migrate-LegacySlots $job @($job.Targets | ForEach-Object { $_[1] })
     foreach ($target in $job.Targets) {
       $Clsid = $Classes[$target[0]].Clsid
       $FriendlyName = $Classes[$target[0]].Name
@@ -757,7 +809,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   Say "`nChecking $($job.Name): opening microphone for a few seconds..."
   $res = Invoke-EndpointProbe $job $audioStarted
   if (-not $res.OpenOk) {
-    $audioStarted = Rollback-Job $job $audioStarted
+    $audioStarted = Resolve-ProbeOpen $job $res $audioStarted
     $selfTestFailed = $true
     continue
   }
@@ -770,7 +822,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   $audioStarted = Move-EndpointSlot $job 'Capture' $other
   $res2 = Invoke-EndpointProbe $job $audioStarted
   if (-not $res2.OpenOk) {
-    $audioStarted = Rollback-Job $job $audioStarted
+    $audioStarted = Resolve-ProbeOpen $job $res2 $audioStarted
     $selfTestFailed = $true
     continue
   }
@@ -802,7 +854,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
   Say "`nChecking $($job.Name): opening silent output for a moment..."
   $res = Invoke-EndpointProbe $job $audioStarted
   if (-not $res.OpenOk) {
-    $audioStarted = Rollback-Job $job $audioStarted
+    $audioStarted = Resolve-ProbeOpen $job $res $audioStarted
     $selfTestFailed = $true
     continue
   }
@@ -818,7 +870,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
     $audioStarted = Move-EndpointSlot $job 'Render' 'MFX'
     $res2 = Invoke-EndpointProbe $job $audioStarted
     if (-not $res2.OpenOk) {
-      $audioStarted = Rollback-Job $job $audioStarted
+      $audioStarted = Resolve-ProbeOpen $job $res2 $audioStarted
       $selfTestFailed = $true
       continue
     }

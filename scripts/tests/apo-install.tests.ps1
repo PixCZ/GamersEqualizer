@@ -5,8 +5,8 @@ $script = Join-Path (Split-Path $PSScriptRoot) 'apo-install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
-  'ConvertTo-FxJson'
-$variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues'
+  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen'
+$variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues'
 $pieces = $ast.FindAll({
     param($n)
     ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions) -or
@@ -126,6 +126,66 @@ Check 'json: one-entry multi-string stays a list' (@($byName["$FxGuid,15"].Value
 Check 'json: string' ($byName["$FxGuid,5"].Value -eq $oem -and $byName["$FxGuid,5"].Kind -eq 'String') ''
 Check 'json: binary as base64' ((([Convert]::FromBase64String($byName['bin'].Value)) -join ',') -eq '1,2,255') ''
 Check 'json: dword' ($byName['dw'].Value -eq 7 -and $byName['dw'].Kind -eq 'DWord') ''
+
+# --- Get-MigrationSlots ---------------------------------------------------------------------
+$migrationCases = @(
+  @{ Name = 'mic in EFX';                      Fx = (Fx @{ 6 = $oem });              Slots = @('EFX');         Want = 'EFX' }
+  @{ Name = 'output: EFX + stream SFX';        Fx = (Fx @{ 5 = $oem; 6 = $oem });    Slots = @('EFX', 'SFX');  Want = 'EFX,SFX' }
+  @{ Name = 'old pre-mix LFX adds SFX';        Fx = (Fx @{ 1 = $oem });              Slots = @('EFX');         Want = 'EFX,SFX' }
+  @{ Name = 'null LFX adds nothing';           Fx = (Fx @{ 1 = $NullGuid });         Slots = @('MFX');         Want = 'MFX' }
+  @{ Name = 'no FxProperties values';          Fx = $null;                           Slots = @('EFX', 'EFX');  Want = 'EFX' }
+)
+foreach ($case in $migrationCases) {
+  $got = (Get-MigrationSlots $case.Fx $case.Slots) -join ','
+  Check "migration slots: $($case.Name)" ($got -eq $case.Want) "expected '$($case.Want)', got '$got'"
+}
+
+# --- Resolve-ProbeOpen (registry, audio and probe replaced by stand-ins) ----------------------
+# Only the line the app reads matters here (apo_install::rolled_back_endpoint).
+function Say([string]$text, [string]$color) { if ($text -match 'rollback-line') { $script:calls.Add('rollback-line') } }
+function Get-RollbackLine($job) { 'rollback-line' }
+function Rollback-Job($job, [datetime]$since) { $script:calls.Add('rollback'); $script:t1 }
+function Set-JobFx($snapshot) {
+  $script:calls.Add("set $($snapshot.Tag)")
+  if ($snapshot.Tag -eq 'installed' -and $script:restoreFails) { throw 'restore failed' }
+  $script:t1
+}
+function Get-FxSnapshot([string]$flow, [string]$id) {
+  if ($script:readFails) { throw 'access denied' }
+  [pscustomobject]@{ Tag = 'installed' }
+}
+function Invoke-EndpointProbe($job, [datetime]$since) { $script:calls.Add('probe'); $script:baseline }
+$t0 = Get-Date '2026-11-12T10:00:00'
+$t1 = Get-Date '2026-11-12T10:00:05'
+$openCases = @(
+  @{ Name = 'audiodg crashed';               Crashed = $true;  Migrated = $false; Snap = $true;  Read = $true;  Base = 'fails'; Want = 'rollback' }
+  @{ Name = 'check did not run';             NotRun = $true;   Migrated = $false; Snap = $true;  Read = $true;  Base = 'fails'; Want = 'rollback' }
+  @{ Name = 'baseline check did not run';    Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'notrun'; Want = 'set before|probe|rollback-line' }
+  @{ Name = 'putting ours back fails';       Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'fails'; Want = 'set before|probe|set installed|rollback-line'; RestoreFails = $true }
+  @{ Name = 'driver effects were moved';     Crashed = $false; Migrated = $true;  Snap = $true;  Read = $true;  Base = 'fails'; Want = 'rollback' }
+  @{ Name = 'no pre-install snapshot';       Crashed = $false; Migrated = $false; Snap = $false; Read = $true;  Base = 'fails'; Want = 'rollback' }
+  @{ Name = 'settings unreadable';           Crashed = $false; Migrated = $false; Snap = $true;  Read = $false; Base = 'fails'; Want = 'rollback' }
+  @{ Name = 'opens without ours: stays out'; Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'opens'; Want = 'set before|probe|rollback-line' }
+  @{ Name = 'crash without ours: stays out'; Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'crash'; Want = 'set before|probe|rollback-line' }
+  @{ Name = 'fails without ours: back in';   Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'fails'; Want = 'set before|probe|set installed' }
+)
+foreach ($case in $openCases) {
+  $calls = New-Object System.Collections.Generic.List[string]
+  $readFails = -not $case.Read
+  $restoreFails = [bool]$case.RestoreFails
+  $baseline = [pscustomobject]@{ OpenOk = $case.Base -eq 'opens'; Crashed = $case.Base -eq 'crash' }
+  if ($case.Base -eq 'notrun') { $baseline | Add-Member Ran $false }
+  $FxSnapshots = @{}
+  if ($case.Snap) { $FxSnapshots['Capture:{id}'] = [pscustomobject]@{ Tag = 'before' } }
+  $job = [pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Word = 'microphone'; Migrated = $case.Migrated }
+  $res = [pscustomobject]@{ OpenOk = $false; Crashed = [bool]$case.Crashed }
+  if ($case.NotRun) { $res | Add-Member Ran $false }
+  $threw = $false
+  try { $started = Resolve-ProbeOpen $job $res $t0 } catch { $threw = $true; $started = $t1 }
+  $got = $calls -join '|'
+  $ok = $got -eq $case.Want -and $started -eq $t1 -and $threw -eq [bool]$case.RestoreFails
+  Check "probe open: $($case.Name)" $ok "expected '$($case.Want)', got '$got' (started $started, threw $threw)"
+}
 
 if ($failed) { throw "$failed of $total checks failed." }
 Write-Host "apo-install: $total checks passed."
