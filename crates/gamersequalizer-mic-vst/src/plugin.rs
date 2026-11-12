@@ -10,7 +10,7 @@ use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
   AecState, DenoiseModel, ShmHeader, StereoFrame, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
-  MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
+  MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS, MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
   NOISE_GATE_AUTO_LOOKAHEAD,
 };
 use std::sync::atomic::Ordering;
@@ -73,7 +73,9 @@ pub struct GamersEqualizerPlugin {
   /// Last stage: volume, then this (smooth gain on peaks instead of clipping them).
   limiter: PeakLimiter,
   pub sample_rate: f32,
+  /// Speaker reference of the block as the AEC gets it: mono mix, and left / right.
   ref_buffer: Vec<f32>,
+  ref_stereo: [Vec<f32>; 2],
   mic_mono_temp: Vec<f32>,
   tap_frames: Vec<StereoFrame>,
   aec_state: AecState,
@@ -186,6 +188,7 @@ impl GamersEqualizerPlugin {
       limiter: PeakLimiter::new(48_000.0),
       sample_rate,
       ref_buffer: vec![0.0; 2048],
+      ref_stereo: [vec![0.0; 2048], vec![0.0; 2048]],
       mic_mono_temp: vec![0.0; 2048],
       tap_frames: Vec::with_capacity(2048),
       aec_state: AecState::Disabled,
@@ -328,8 +331,10 @@ impl GamersEqualizerPlugin {
     if self.mic_mono_temp.len() < frames {
       self.mic_mono_temp.resize(frames, 0.0);
     }
-    if self.ref_buffer.len() < frames {
-      self.ref_buffer.resize(frames, 0.0);
+    for buffer in std::iter::once(&mut self.ref_buffer).chain(&mut self.ref_stereo) {
+      if buffer.len() < frames {
+        buffer.resize(frames, 0.0);
+      }
     }
     // Trust boundary: a driver glitch can deliver NaN/inf, and one non-finite sample would
     // stay in the AEC / leveler state for the rest of the stream. +-4 (12 dBFS) is far beyond
@@ -456,9 +461,14 @@ impl GamersEqualizerPlugin {
     };
     #[cfg(feature = "debug-capture")]
     if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {
-      match self.ref_buffer.get(..frames).filter(|_| self.aec_ref_offset.is_some()) {
-        Some(refs) => cap.stage(STAGE_REF_AEC, refs),
-        None => cap.stage_silent(STAGE_REF_AEC),
+      let [left, right] = &self.ref_stereo;
+      for (stage, buffer) in
+        [(STAGE_REF_AEC, &self.ref_buffer), (STAGE_REF_AEC_LEFT, left), (STAGE_REF_AEC_RIGHT, right)]
+      {
+        match buffer.get(..frames).filter(|_| self.aec_ref_offset.is_some()) {
+          Some(refs) => cap.stage(stage, refs),
+          None => cap.stage_silent(stage),
+        }
       }
       cap.stage(STAGE_AFTER_AEC, mic);
     }
@@ -586,8 +596,18 @@ impl GamersEqualizerPlugin {
   fn run_aec(&mut self, frames: usize, mic_qpc_hns: Option<u64>) -> AecState {
     // Assume it won't run; set back below when it does.
     let was_idle = std::mem::replace(&mut self.aec_idle, true);
-    let Self { shm_client, delay_estimator, aec, ref_buffer, mic_mono_temp, ref_rms, aec_ref_offset, aec_idle, .. } =
-      self;
+    let Self {
+      shm_client,
+      delay_estimator,
+      aec,
+      ref_buffer,
+      ref_stereo: [ref_left, ref_right],
+      mic_mono_temp,
+      ref_rms,
+      aec_ref_offset,
+      aec_idle,
+      ..
+    } = self;
     let Some(shm) = shm_client.as_mut() else {
       return AecState::NoReference;
     };
@@ -622,11 +642,19 @@ impl GamersEqualizerPlugin {
       return if stale { AecState::ReferenceSilent } else { AecState::Measuring };
     };
 
-    let (Some(refs), Some(mic)) = (ref_buffer.get_mut(..frames), mic_mono_temp.get_mut(..frames)) else {
+    let (Some(refs), Some(left), Some(right), Some(mic)) = (
+      ref_buffer.get_mut(..frames),
+      ref_left.get_mut(..frames),
+      ref_right.get_mut(..frames),
+      mic_mono_temp.get_mut(..frames),
+    ) else {
       return AecState::NoReference;
     };
     let offset = delay.saturating_sub(PRE_DELAY_SAMPLES) as u32;
-    ring.read_frames_from(idx.wrapping_sub(offset), refs);
+    ring.read_stereo_frames_from(idx.wrapping_sub(offset), left, right);
+    for ((mix, &l), &r) in refs.iter_mut().zip(left.iter()).zip(right.iter()) {
+      *mix = (l + r) * 0.5;
+    }
     *aec_ref_offset = Some(offset);
     *ref_rms = smooth_rms(*ref_rms, refs);
 
@@ -634,7 +662,7 @@ impl GamersEqualizerPlugin {
     if was_idle {
       aec.flush(); // the reference was gone: its queued output is from before the gap
     }
-    aec.process_block(refs, mic);
+    aec.process_block_stereo(left, right, mic);
     *aec_idle = false;
 
     if stale || *ref_rms < REF_SILENT_RMS {
@@ -690,7 +718,8 @@ impl GamersEqualizerPlugin {
       | flag(dn.bypassed, MIC_CHAIN_BYPASSED)
       | flag(dn.takeover, MIC_CHAIN_TAKEOVER)
       | flag(lookahead > 0, MIC_CHAIN_LOOKAHEAD)
-      | flag(self.others, MIC_CHAIN_OTHERS);
+      | flag(self.others, MIC_CHAIN_OTHERS)
+      | flag(self.aec.is_stereo() && self.aec_state != AecState::Disabled, MIC_CHAIN_STEREO_REF);
     h.mic_chain_flags.store(flags, Ordering::Relaxed);
     h.mic_quiet_ms.store((dn.quiet_samples / 48).min(u32::MAX as usize) as u32, Ordering::Relaxed);
 
@@ -858,6 +887,7 @@ impl GamersEqualizerPlugin {
       self.input_clips as f32,
       mic_auto,
       lin_db(self.limiter.gain()),
+      b(self.aec.is_stereo()),
     ];
     if let Some(cap) = self.capture.as_mut() {
       cap.end_block(&vars);
