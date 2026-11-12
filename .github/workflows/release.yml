@@ -9,6 +9,9 @@
 #   the zip.
 # - The secrets reach only the `publish` job, a fresh runner that runs no cargo: build scripts and
 #   proc macros of dependencies never run where the key is. Actions are pinned to commit SHAs.
+# - Build provenance: the zip and both binaries (as shipped, after signing) get a GitHub-signed
+#   attestation (SLSA, via Sigstore) naming this workflow and commit. Check a file with
+#   `gh attestation verify gamersequalizer.exe -R PixCZ/GamersEqualizer`.
 name: Release
 
 on:
@@ -67,6 +70,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write # create the release on tags
+      id-token: write # OIDC token for the Sigstore signature of the build provenance
+      attestations: write # store the provenance attestation in the repo
     env:
       PKG_NAME: ${{ needs.build.outputs.pkg_name }}
     steps:
@@ -117,6 +122,17 @@ jobs:
           $hashes = Get-ChildItem $env:STAGE | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $_.Name }
           @($info + $signed + $hashes + "$((Get-FileHash $env:ZIP -Algorithm SHA256).Hash)  $env:ZIP_NAME") |
             Set-Content $env:BUILD_TXT
+
+      # A private repository gets attestations only with GitHub Enterprise Cloud; without it this
+      # step fails, which must not stop the release (its log says why).
+      - name: Build provenance
+        continue-on-error: true
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: |
+            ${{ env.ZIP }}
+            ${{ env.STAGE }}/gamersequalizer.exe
+            ${{ env.STAGE }}/gamersequalizer_apo.dll
 
       - name: Remove the signing key
         if: always()
