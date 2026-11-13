@@ -123,6 +123,22 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   a separate step without cargo signs the finished binaries (secrets `SIGNING_CERT_PFX_BASE64` /
   `SIGNING_CERT_PASSWORD`).
 
+## Before a release or a push to main
+
+Before tagging a release or pushing/merging into `main`, offer the user a dependency check. Offer it, don't
+run it unasked; updates the user picks go into their own commit.
+
+- **GitHub Actions** (`.github/workflows/*.yml`): every `uses:` is pinned to a full commit SHA plus a
+  `# vX.Y.Z` comment, because a tag can be moved to other code (the release job holds the signing
+  certificate). Check that each SHA still belongs to that tag upstream
+  (`git ls-remote https://github.com/<owner>/<repo>`; GitHub also accepts SHAs from forks) and list newer
+  releases. An update takes the new tag's SHA and comment; never switch to a bare tag.
+- **Rust crates** (whole workspace, `Cargo.lock`): `cargo update --dry-run --verbose` lists
+  semver-compatible updates (`Updating`) and newer major versions (`Unchanged ... (available: ...)`); it
+  works on the Mac too. Known vulnerabilities: `cargo audit`, if installed (installing it needs the user's
+  okay, see Ground rules). Report what would change, which major bumps need code changes, and any
+  advisories. After applying, build, test and clippy (`dev-rebuild` agent).
+
 ## Ground rules
 
 - No global installs (`npm -g`, `pip install` outside a venv). Dependencies go into the project; system tools via `winget`, and ask first.
