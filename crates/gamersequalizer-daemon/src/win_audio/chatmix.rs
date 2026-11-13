@@ -1059,6 +1059,7 @@ mod tests {
   }
 
   #[test]
+  #[ignore = "needs a real output and mic (CI runners have none); run manually: cargo test -- --ignored"]
   fn test_system_volume_query() {
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

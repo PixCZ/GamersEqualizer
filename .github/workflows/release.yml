@@ -47,9 +47,14 @@ jobs:
       - name: Test
         run: cargo test --workspace --release
 
-      # Excluded from the workspace (vendor fork); its AVX2 kernel test needs an x86_64 runner.
+      # Vendor forks are excluded from the workspace, so their tests run here. rnnoise2: its AVX2
+      # kernel test needs an x86_64 runner. silero_vad: the port against onnxruntime's output.
+      # deep_filter has no tests. Separate steps: pwsh checks only the last command's exit code.
       - name: Test rnnoise2
         run: cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml
+
+      - name: Test silero_vad
+        run: cargo test --release --manifest-path crates/vendor/silero_vad/Cargo.toml
 
       - name: Build and package (unsigned, no secrets)
         id: package

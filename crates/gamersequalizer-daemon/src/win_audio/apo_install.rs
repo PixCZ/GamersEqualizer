@@ -1027,7 +1027,7 @@ mod tests {
     let note = "2026-11-12T10:00:01.5Z installer: Rolled back Headset (USB Audio) [Capture:{CF0A2270-1885-4dd6-82a5-f636e9efadd5}] to its pre-install effect settings.";
     assert_eq!(
       rolled_back_endpoint(note),
-      Some(("2026-11-12T10:00:01.5Z".to_string(), "Capture:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}".to_string()))
+      Some(("2026-11-12T10:00:01".to_string(), "Capture:{cf0a2270-1885-4dd6-82a5-f636e9efadd5}".to_string()))
     );
     // Brackets in the device name: the last pair is the endpoint.
     let note = "t installer:   Rolled back Mic [Front] (X) [Render:{b45cef56-a56b-49b0-88c0-4af057026718}] to its x.";

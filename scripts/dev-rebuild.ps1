@@ -77,6 +77,8 @@ if ($Test -and -not $failed) {
   # rnnoise2 is excluded from the workspace (vendor fork): its AVX2-vs-scalar kernel test and the
   # upstream reference test run only here on x86_64.
   Step 'cargo test rnnoise2 (release)' { cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml }
+  # silero_vad is excluded too: the port against onnxruntime's output.
+  Step 'cargo test silero_vad (release)' { cargo test --release --manifest-path crates/vendor/silero_vad/Cargo.toml }
   Step 'clippy --workspace' {
     # Windows PowerShell turns redirected native stderr into error records; with 'Stop' the
     # first clippy warning would abort the step.
