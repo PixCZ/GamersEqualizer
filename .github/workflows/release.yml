@@ -26,15 +26,11 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # Runs next to `build`, not before it: tests (release profile) and the package (dist + apo-dist,
+  # each from scratch with fat LTO) are three full builds, too long in a row for one job.
+  test:
     runs-on: windows-latest
     timeout-minutes: 60
-    env:
-      # A tag build shows the tag's version everywhere (About, logs, exe/DLL details); any other
-      # build shows the commit hash (crates/build-support/version_info.rs).
-      GAMERSEQUALIZER_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-    outputs:
-      pkg_name: ${{ steps.package.outputs.pkg_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -56,6 +52,29 @@ jobs:
       - name: Test silero_vad
         run: cargo test --release --manifest-path crates/vendor/silero_vad/Cargo.toml
 
+  build:
+    runs-on: windows-latest
+    # Two from-scratch fat-LTO builds on a 4-core runner; 60 minutes were not enough.
+    timeout-minutes: 120
+    env:
+      # A tag build shows the tag's version everywhere (About, logs, exe/DLL details); any other
+      # build shows the commit hash (crates/build-support/version_info.rs).
+      GAMERSEQUALIZER_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+    outputs:
+      pkg_name: ${{ steps.package.outputs.pkg_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      # Only the downloaded crates: package.ps1 cleans its profiles and builds from scratch, so a
+      # cached target dir would only cost upload time.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          cache-targets: false
+
       - name: Build and package (unsigned, no secrets)
         id: package
         shell: pwsh
@@ -75,7 +94,8 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: build
+    # A failing test stops the release even though the package was built.
+    needs: [test, build]
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
