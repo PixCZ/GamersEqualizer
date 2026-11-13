@@ -117,6 +117,8 @@ pub struct SidetoneUi {
   pub pair: Option<SidetonePair>,
   pub pair_key: (String, String),
   pub dirty: bool,
+  /// (mic id, output id) of the saved pair whose Delete waits for confirmation.
+  pub confirm_delete: Option<(String, String)>,
   pub last_reader_beat: u32,
   pub last_reader_beat_time: Option<std::time::Instant>,
   pub last_writer_beat: u32,

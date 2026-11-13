@@ -288,7 +288,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       let ms = format!("{:.0}", ms.round());
       match mode {
         NoiseMode::Off => tr("Off").to_string(),
-        NoiseMode::Expander => tr("Band expander (no delay)").to_string(),
+        NoiseMode::Expander => tr("Quiet pauses (no delay)").to_string(),
         NoiseMode::WebRtcNs => trf("WebRTC noise suppressor (+{} ms)", &[&ms]),
         NoiseMode::RnNoise => trf("RNNoise (+{} ms)", &[&ms]),
         NoiseMode::RnNoise2 => trf("RNNoise 0.2 (+{} ms)", &[&ms]),
@@ -314,7 +314,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         theme::status_line(
           ui,
           Severity::Warning,
-          tr("Running the band expander: this mode needs the microphone at 48 kHz."),
+          tr("Running quiet pauses instead: this mode needs the microphone at 48 kHz."),
         );
       } else if settings.noise_mode == NoiseMode::RnNoise2 && active_mode == NoiseMode::RnNoise {
         theme::status_line(ui, Severity::Warning, tr("Running RNNoise: RNNoise 0.2 could not be loaded."));
@@ -322,7 +322,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     }
 
     if settings.noise_mode == NoiseMode::Expander {
-      ui.label(theme::caption(tr("The expander removes steady noise in pauses. Loud short sounds (keys) pass.")));
+      ui.label(theme::caption(tr("Turns down steady noise in the pauses between words. Loud short sounds (keys) pass.")));
     }
 
     egui::Grid::new("sidetone_noise_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
@@ -392,21 +392,43 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   // Card 5: Saved pairs
   // -------------------------------------------------------------------------------------
   let mut to_remove = None;
+  // Deleting takes the pair's whole setup and EQ with no undo: one click only asks.
+  let mut confirm = state.sidetone_ui.confirm_delete.take();
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::SETTINGS, ACCENT)), tr("Saved pairs"));
     for p in &saved_pairs.pairs {
+      let key = (p.mic_id.clone(), p.output_id.clone());
+      let asking = confirm.as_ref() == Some(&key);
       ui.horizontal(|ui| {
         ui.label(theme::strong(&trf("{} → {}", &[&p.mic_name, &p.output_name]), 14.0));
         let state_str = if p.enabled { tr("On") } else { tr("Off") };
         ui.label(RichText::new(state_str).color(theme::palette(ui).text_secondary));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-          if ui.button(tr("Delete")).clicked() {
-            to_remove = Some((p.mic_id.clone(), p.output_id.clone()));
+          if !asking && ui.button(tr("Delete…")).clicked() {
+            confirm = Some(key.clone());
           }
         });
       });
+      if asking {
+        theme::status_line(
+          ui,
+          Severity::Warning,
+          tr("Delete this pair? Its whole sidetone setup goes with it, the EQ included, and cannot be restored."),
+        );
+        ui.horizontal(|ui| {
+          let err = theme::palette(ui).err;
+          if ui.button(RichText::new(theme::with_icon(icons::DELETE, tr("Delete"))).color(err)).clicked() {
+            to_remove = Some(key.clone());
+            confirm = None;
+          }
+          if ui.button(tr("Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            confirm = None;
+          }
+        });
+      }
     }
   });
+  state.sidetone_ui.confirm_delete = confirm;
 
   if let Some((rm_mic, rm_out)) = to_remove {
     saved_pairs.remove(&rm_mic, &rm_out);
