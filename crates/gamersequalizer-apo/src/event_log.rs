@@ -48,7 +48,7 @@ fn write(level: Level, text: &str) {
   // Normally audiodg.exe; Sound settings also create effects, only to list them.
   let process = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
   let process = process.unwrap_or_else(|| "?".to_string());
-  let build = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GAMERSEQUALIZER_GIT_HASH"), ")");
+  let build = env!("GAMERSEQUALIZER_VERSION");
   let text = HSTRING::from(format!("{process} pid {}, build {build}: {text}", std::process::id()));
   // SAFETY: NUL-terminated strings that outlive the calls; the handle is closed below.
   unsafe {

@@ -2,7 +2,8 @@
 # - Manual run (Actions tab -> Release -> Run workflow): tests, builds, uploads the zip as a
 #   workflow artifact (kept 14 days).
 # - Pushing a tag (git tag 0.1.0 && git push origin 0.1.0, or v0.1.0): the same, plus a GitHub
-#   Release with the zip attached.
+#   Release with the zip attached. The binaries then carry that version (About card, logs,
+#   Explorer > Properties > Details); every other build carries the commit hash instead.
 # - Code signing: repository secrets SIGNING_CERT_PFX_BASE64 and SIGNING_CERT_PASSWORD
 #   (Settings -> Secrets and variables -> Actions). When present, gamersequalizer.exe and
 #   gamersequalizer_apo.dll are signed and timestamped after the build; no certificate goes into
@@ -28,6 +29,10 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      # A tag build shows the tag's version everywhere (About, logs, exe/DLL details); any other
+      # build shows the commit hash (crates/build-support/version_info.rs).
+      GAMERSEQUALIZER_RELEASE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     outputs:
       pkg_name: ${{ steps.package.outputs.pkg_name }}
     steps:
@@ -50,7 +55,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $version = if ($env:GAMERSEQUALIZER_RELEASE_VERSION) { $env:GAMERSEQUALIZER_RELEASE_VERSION.Trim().TrimStart('v') } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
           $pkgName = "GamersEqualizer-$version-x64"
           .\scripts\package.ps1 -NoSign -PackageName $pkgName
           "pkg_name=$pkgName" >> $env:GITHUB_OUTPUT

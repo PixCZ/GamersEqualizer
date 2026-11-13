@@ -83,9 +83,8 @@ fn main() {
 /// Headless background audio service (runs on Windows boot or detached)
 fn run_background_daemon() {
   info!(
-    "[GamersEqualizer] Initializing headless background service, version {} ({})...",
-    env!("CARGO_PKG_VERSION"),
-    env!("GAMERSEQUALIZER_GIT_HASH")
+    "[GamersEqualizer] Initializing headless background service, version {}...",
+    env!("GAMERSEQUALIZER_VERSION")
   );
 
   // Single-instance daemon guard via named Win32 mutex

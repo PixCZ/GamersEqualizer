@@ -88,10 +88,12 @@ function Assert-RustcFlags([string]$log, [string]$crate, [string]$crateType, [st
   Write-Host "OK  $crate ($crateType): $($required -join ', ')"
 }
 
-$version = (Select-String -Path 'crates\gamersequalizer-daemon\Cargo.toml' -Pattern '^version\s*=\s*"(.+)"' |
-  Select-Object -First 1).Matches[0].Groups[1].Value
+# Same rule as the binaries (crates\build-support\version_info.rs): the tag's version in a release
+# build, otherwise "dev" (the commit follows in the name).
+$version = if ($env:GAMERSEQUALIZER_RELEASE_VERSION) { $env:GAMERSEQUALIZER_RELEASE_VERSION.Trim().TrimStart('v') } else { 'dev' }
 $commit = (git rev-parse --short HEAD).Trim()
-$dirty = [bool](git status --porcelain)
+# Untracked files do not count, as for the binaries' version.
+$dirty = [bool](git status --porcelain --untracked-files=no)
 if ($dirty) { $commit += '-dirty' }
 if ($PackageName) {
   $name = $PackageName

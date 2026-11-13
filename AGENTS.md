@@ -105,6 +105,10 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   the rustc flags in the verbose log). `-Fast` packages the `release`
   build instead (seconds); `scripts/dev-rebuild.ps1 -Package` does that after the dev build.
 - Output: `target/package/GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>[-dirty][-fast].zip`.
+- Version (`crates/build-support/version_info.rs`): a GitHub build of a tag (`0.1.0` or `v0.1.0`) shows
+  that version in the About card, logs and the exe/DLL details; it fails on a tag that is not `X.Y.Z`.
+  Every other build shows the short commit hash, `-dirty` when the sources differ from it; `<version>`
+  in the ZIP name is then `dev`. The `version` in the Cargo.toml files is not shown anywhere.
   Old ZIPs are never deleted or overwritten; only `target/package/staging` is cleared.
 - `apo-install.ps1` / `apo-uninstall.ps1` are built into the exe (`include_str!` in
   `win_audio/apo_install.rs`) and written to `%LOCALAPPDATA%\GamersEqualizer\scripts` before each

@@ -21,11 +21,12 @@ fn main() {
   println!("cargo:rerun-if-changed=build.rs");
   println!("cargo:rerun-if-changed=../build-support/version_info.rs");
 
-  // Short commit hash for the About card and the exe's product version.
-  let hash = version_info::git_hash();
-  println!("cargo:rustc-env=GAMERSEQUALIZER_GIT_HASH={hash}");
+  // For the About card, the log and the exe's version resource. `scripts/`: the installer scripts
+  // are built into the exe.
+  let version = version_info::version(&[".", "../../scripts"]);
+  println!("cargo:rustc-env=GAMERSEQUALIZER_VERSION={version}");
   let version =
-    VersionInfo { kind: FileKind::App, description: "GamersEqualizer", internal_name: "gamersequalizer" }.rc(&hash);
+    VersionInfo { kind: FileKind::App, description: "GamersEqualizer", internal_name: "gamersequalizer" }.rc(&version);
 
   // Bootstrap tooling, not the running app: failing the build loudly is the right outcome.
   #[allow(clippy::expect_used)]
