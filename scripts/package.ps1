@@ -64,7 +64,9 @@ function Invoke-Cargo([string[]]$cargoArgs) {
 function Invoke-CargoLogged([string[]]$cargoArgs, [string]$log) {
   Add-Content -LiteralPath $log -Value "`n> cargo $($cargoArgs -join ' ')"
   $ErrorActionPreference = 'Continue' # cargo writes progress to stderr; that is not an error
-  & cargo @cargoArgs 2>&1 | ForEach-Object {
+  # No colours: CI sets CARGO_TERM_COLOR=always (dtolnay/rust-toolchain), and the ANSI codes
+  # would hide the "Running `rustc ...`" lines from the filter below and from Assert-RustcFlags.
+  & cargo @cargoArgs --color never 2>&1 | ForEach-Object {
     $line = "$_"
     Add-Content -LiteralPath $log -Value $line
     if ($line -notmatch '^\s+Running `') { Write-Host $line }
