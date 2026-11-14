@@ -10,17 +10,19 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use windows::core::{w, GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
 use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
   RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD,
   RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
 };
+use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Shell::{
-  SHGetKnownFolderPath, ShellExecuteW, FOLDERID_ProgramFiles, FOLDERID_System, KF_FLAG_DEFAULT,
+  SHGetKnownFolderPath, ShellExecuteExW, FOLDERID_ProgramFiles, FOLDERID_System, KF_FLAG_DEFAULT,
+  SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use crate::i18n::tr;
 
@@ -68,6 +70,8 @@ const DEVICE_NAME_VALUE: &str = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6";
 const CLASS_NAMES: [&str; 3] = ["Mic Chain", "Output EQ", "Stream EQ"];
 /// `DEVICE_STATE_*` bits of an endpoint's `DeviceState` (higher bits are other flags).
 const DEVICE_STATE_MASK: u32 = 0xF;
+/// `DEVICE_STATE_ACTIVE`: connected and enabled.
+const DEVICE_STATE_ACTIVE: u32 = 1;
 /// `PKEY_AudioEndpoint_Disable_SysFx`: 1 = audio enhancements off for the device.
 const DISABLE_SYSFX_VALUE: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
 const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
@@ -76,8 +80,6 @@ const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersi
 /// checks again before it changes anything.
 const MIN_WINDOWS_BUILD: u32 = 17134;
 const AUDIO_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
-/// ShellExecute returns a value > 32 on success.
-const SHELL_EXECUTE_OK: isize = 32;
 /// Physical devices never offered for our effects unless they are the ones in use: Bluetooth
 /// hands-free (call-quality mic of a headset that also has a stereo output) and VR headsets.
 /// Heuristic by endpoint name, like `chatmix::is_virtual_endpoint`.
@@ -105,6 +107,16 @@ pub enum ApoStatus {
   NotOnThisMic,
   /// No microphone to check.
   NoMicrophone,
+}
+
+/// How an elevated script runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptRun {
+  /// From the window: visible, keeps errors on screen, returns once started.
+  FromApp,
+  /// From `--install` / `--uninstall`: waits for the exit code. `silent` (winget) hides the
+  /// window and never waits for a key.
+  Wait { silent: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -205,7 +217,31 @@ pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
   if targets.is_empty() {
     return Ok(());
   }
-  launch_installer(&endpoint_args(targets)?)
+  launch_installer(Some(&endpoint_args(targets)?), ScriptRun::FromApp).map(drop)
+}
+
+/// `--install`: installs the app and the effects on `targets` elevated and waits; no targets =
+/// the app alone (`-AppOnly`, a PC without audio devices). Returns the installer's exit code.
+pub fn install_and_wait(targets: &[(Flow, &str)], silent: bool) -> Result<u32, String> {
+  let endpoints = if targets.is_empty() { None } else { Some(endpoint_args(targets)?) };
+  launch_installer(endpoints.as_deref(), ScriptRun::Wait { silent })?.ok_or_else(|| "the installer gave no exit code".to_string())
+}
+
+/// Connected endpoints that carry our effects: an update installs on them again, so the effects
+/// stay where the user put them.
+pub fn endpoints_with_effects() -> Vec<(Flow, String)> {
+  let mut out = Vec::new();
+  for flow in [Flow::Capture, Flow::Render] {
+    let root = endpoints_root(flow);
+    for guid in hklm_subkeys(&root) {
+      let active = read_dword_value(&format!("{root}\\{guid}"), "DeviceState")
+        .is_some_and(|s| s & DEVICE_STATE_MASK == DEVICE_STATE_ACTIVE);
+      if active && endpoint_has_any_clsid(flow, &guid) {
+        out.push((flow, guid));
+      }
+    }
+  }
+  out
 }
 
 /// Moves the mic effect on microphone `guid` to its other slot (EFX <-> MFX), elevated. Some
@@ -214,7 +250,7 @@ pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
 pub fn launch_switch_mic_slot(guid: &str) -> Result<(), String> {
   let endpoint = switch_arg(guid, mic_in_mfx(guid))?;
   log::info!("[Setup] moving the mic effect: {endpoint}");
-  launch_installer(&endpoint)
+  launch_installer(Some(&endpoint), ScriptRun::FromApp).map(drop)
 }
 
 /// The mic effect sits in the mode effect list (MFX) of microphone `guid`.
@@ -225,8 +261,9 @@ pub fn mic_in_mfx(guid: &str) -> bool {
 
 /// The elevated installer uses files from the app's (user-writable) folder only when its own
 /// copy hashes as given here: the DLL it installs and this exe, which it runs with
-/// `--probe-mic` to check that Windows starts the mic chain.
-fn launch_installer(endpoints: &str) -> Result<(), String> {
+/// `--probe-mic` to check that Windows starts the mic chain. `endpoints` None: the app alone.
+/// Returns the exit code when `run` waits.
+fn launch_installer(endpoints: Option<&str>, run: ScriptRun) -> Result<Option<u32>, String> {
   // An unreadable build is left to the script's own check.
   if windows_build().is_some_and(|build| build < MIN_WINDOWS_BUILD) {
     return Err(
@@ -248,12 +285,25 @@ fn launch_installer(endpoints: &str) -> Result<(), String> {
       String::new()
     }
   };
+  let target = match endpoints {
+    Some(endpoints) => format!("-Endpoint {}", ps_quote(endpoints)),
+    None => "-AppOnly".to_string(),
+  };
   let args = format!(
-    "-Endpoint {} -SourceDll {} -SourceDllSha256 {dll_hash}{app} -FromApp",
-    ps_quote(endpoints),
-    ps_quote(&dll.to_string_lossy())
+    "{target} -SourceDll {} -SourceDllSha256 {dll_hash}{app} -AppVersion {}{}",
+    ps_quote(&dll.to_string_lossy()),
+    ps_quote(env!("GAMERSEQUALIZER_VERSION")),
+    from_app_arg(run)
   );
-  run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer")
+  run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer", run)
+}
+
+/// `-FromApp` keeps the script's window open on errors (Enter closes it); never when silent.
+fn from_app_arg(run: ScriptRun) -> &'static str {
+  match run {
+    ScriptRun::Wait { silent: true } => "",
+    _ => " -FromApp",
+  }
 }
 
 fn windows_build() -> Option<u32> {
@@ -480,8 +530,8 @@ pub fn is_registered() -> bool {
     })
 }
 
-fn uninstall_args(script_dir: Option<&Path>) -> String {
-  let mut args = String::from("-RemoveBackups -FromApp");
+fn uninstall_args(script_dir: Option<&Path>, run: ScriptRun) -> String {
+  let mut args = format!("-RemoveBackups{}", from_app_arg(run));
   if let Some(dir) = script_dir {
     args.push_str(" -ScriptDir ");
     args.push_str(&ps_quote(&dir.to_string_lossy()));
@@ -494,10 +544,10 @@ fn uninstall_args(script_dir: Option<&Path>) -> String {
 /// class from every endpoint (plus Default-only streaming modes on emptied slots of endpoints
 /// without a backup), the COM registration, the DLL, the backups once restored, any legacy
 /// backups and temporary scripts in `%LOCALAPPDATA%\GamersEqualizer\scripts`.
-/// Returns once launched.
-pub fn launch_uninstall() -> Result<(), String> {
-  let args = uninstall_args(scripts_dir().as_deref());
-  run_script_elevated(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT, &args, "uninstaller")
+/// Returns once launched, or with the exit code when `run` waits.
+pub fn launch_uninstall(run: ScriptRun) -> Result<Option<u32>, String> {
+  let args = uninstall_args(scripts_dir().as_deref(), run);
+  run_script_elevated(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT, &args, "uninstaller", run)
 }
 
 /// `System32\WindowsPowerShell\v1.0\powershell.exe` from the known folder, never a bare
@@ -515,7 +565,8 @@ pub(crate) fn powershell_exe() -> Result<PathBuf, String> {
 /// that swaps the file in between gets a refusal, not code running as admin. The bootstrap
 /// itself travels in the command line. Module autoload is pinned to the system folder (the
 /// user's Documents module folder would otherwise come first and could shadow cmdlets).
-fn run_script_elevated(name: &str, content: &str, args: &str, what: &str) -> Result<(), String> {
+/// `ScriptRun::Wait` blocks until the script ends and returns its exit code.
+fn run_script_elevated(name: &str, content: &str, args: &str, what: &str, run: ScriptRun) -> Result<Option<u32>, String> {
   let path = write_script(name, content)?;
   let hash = sha256_hex(content.as_bytes())?;
   let bootstrap = elevated_bootstrap(&path.to_string_lossy(), &hash, args);
@@ -523,31 +574,51 @@ fn run_script_elevated(name: &str, content: &str, args: &str, what: &str) -> Res
   let exe = powershell_exe()?;
   let exe_w: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
   let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
-  // SAFETY: NUL-terminated strings owned by this frame.
-  let result = unsafe {
-    ShellExecuteW(None, w!("runas"), PCWSTR(exe_w.as_ptr()), PCWSTR(params_w.as_ptr()), None, SW_SHOWNORMAL)
+  let wait = matches!(run, ScriptRun::Wait { .. });
+  let mut info = SHELLEXECUTEINFOW {
+    cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+    fMask: if wait { SEE_MASK_NOCLOSEPROCESS } else { Default::default() },
+    lpVerb: w!("runas"),
+    lpFile: PCWSTR(exe_w.as_ptr()),
+    lpParameters: PCWSTR(params_w.as_ptr()),
+    nShow: if run == (ScriptRun::Wait { silent: true }) { SW_HIDE.0 } else { SW_SHOWNORMAL.0 },
+    ..Default::default()
   };
-  if result.0 as isize > SHELL_EXECUTE_OK {
-    Ok(())
-  } else {
+  // SAFETY: `info` and the NUL-terminated strings it points to live in this frame.
+  if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
     remove_file_if_regular(&path);
     if let Some(dir) = path.parent() {
       prune_empty_script_dirs(dir);
     }
-    Err(format!("could not start the {what} (cancelled UAC prompt? code {})", result.0 as isize))
+    return Err(format!("could not start the {what} (cancelled UAC prompt? {e})"));
   }
+  if !wait || info.hProcess.is_invalid() {
+    return Ok(None);
+  }
+  let mut code = 0u32;
+  // SAFETY: SEE_MASK_NOCLOSEPROCESS handed us this process handle; it is closed once, here.
+  let read = unsafe {
+    WaitForSingleObject(info.hProcess, INFINITE);
+    let read = GetExitCodeProcess(info.hProcess, &mut code);
+    let _ = CloseHandle(info.hProcess);
+    read
+  };
+  read.map_err(|e| format!("could not read the {what}'s exit code: {e}"))?;
+  Ok(Some(code))
 }
 
 /// PowerShell run by `-EncodedCommand`: check the script file's hash, then run its text.
 fn elevated_bootstrap(script_path: &str, sha256_hex: &str, args: &str) -> String {
   let path = ps_quote(script_path);
+  // A hidden (silent) run has nobody to press Enter.
+  let pause = if args.contains("-FromApp") { "Read-Host 'Press Enter to close'; " } else { "" };
   [
     "$env:PSModulePath = [IO.Path]::Combine([Environment]::GetFolderPath('System'), 'WindowsPowerShell\\v1.0\\Modules')"
       .to_string(),
     format!("$c = [IO.File]::ReadAllText({path})"),
     "$h = -join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($c)) | ForEach-Object { $_.ToString('x2') })".to_string(),
     format!(
-      "if ($h -ne '{sha256_hex}') {{ Write-Host 'The script was changed after the app wrote it; not running it.' -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 1 }}"
+      "if ($h -ne '{sha256_hex}') {{ Write-Host 'The script was changed after the app wrote it; not running it.' -ForegroundColor Red; {pause}exit 1 }}"
     ),
     // Dot-sourced: its top-level variables must land in the script scope, which the scripts'
     // functions use as `$script:X` (`&` would give them a child scope; `$script:X` was then null).
@@ -1063,8 +1134,10 @@ mod tests {
 
   #[test]
   fn uninstall_args_quotes_script_dir_and_fits_command_line() {
-    let args = uninstall_args(Some(Path::new(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts")));
+    let args = uninstall_args(Some(Path::new(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts")), ScriptRun::FromApp);
     assert_eq!(args, r"-RemoveBackups -FromApp -ScriptDir 'C:\Users\O''Neil\AppData\Local\GamersEqualizer\scripts'");
+    assert_eq!(uninstall_args(None, ScriptRun::Wait { silent: true }), "-RemoveBackups");
+    assert_eq!(uninstall_args(None, ScriptRun::Wait { silent: false }), "-RemoveBackups -FromApp");
     let b = elevated_bootstrap(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts\apo-uninstall.ps1", "ab", &args);
     assert!(encode_command(&b).len() < 4096);
   }

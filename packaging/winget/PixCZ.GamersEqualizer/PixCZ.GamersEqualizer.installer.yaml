@@ -1,0 +1,33 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# Draft: InstallerSha256 comes from the GitHub release of PackageVersion
+# (wingetcreate update fills it).
+PackageIdentifier: PixCZ.GamersEqualizer
+PackageVersion: 0.1.1
+MinimumOSVersion: 10.0.17134.0
+InstallerType: zip
+NestedInstallerType: exe
+NestedInstallerFiles:
+  - RelativeFilePath: gamersequalizer.exe
+Scope: machine
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+InstallerSwitches:
+  Silent: --install --silent
+  SilentWithProgress: --install --silent
+  Interactive: --install
+# The exe asks for administrator rights itself (one UAC prompt for the elevated installer).
+ElevationRequirement: elevatesSelf
+UpgradeBehavior: install
+ProductCode: GamersEqualizer
+AppsAndFeaturesEntries:
+  - DisplayName: GamersEqualizer
+    Publisher: Jiri Nemec
+    ProductCode: GamersEqualizer
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/PixCZ/GamersEqualizer/releases/download/0.1.1/GamersEqualizer-0.1.1-x64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0

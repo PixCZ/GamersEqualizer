@@ -33,7 +33,7 @@ const WAIT_FOR_EXIT_SECS: u32 = 20;
 pub fn uninstall_all(remove_user_data: bool) -> Result<(), String> {
   // First, so a cancelled UAC prompt leaves the rest untouched.
   if apo_install::is_registered() {
-    apo_install::launch_uninstall()?;
+    apo_install::launch_uninstall(apo_install::ScriptRun::FromApp)?;
     info!("[Uninstall] APO uninstaller started");
   } else {
     // No elevated uninstaller ran; remove any previously staged scripts directly.

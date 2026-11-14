@@ -117,7 +117,14 @@ To update, unpack the newer ZIP, run it and click **Update**.
 
 To uninstall, open **Settings > Uninstall from Windows**. This removes the effects from every device,
 restores the original driver effects, and removes the app from Program Files and from startup. Your
-settings live in `%APPDATA%\GamersEqualizer`; you can tick an option to delete them too.
+settings live in `%APPDATA%\GamersEqualizer`; you can tick an option to delete them too. Once
+installed, the app also appears in Windows **Settings > Apps > Installed apps** and in the Start menu,
+and can be uninstalled from there (settings are kept).
+
+**From the command line** (scripts, package managers): `gamersequalizer.exe --install` installs the
+app and its effects on the microphone and output in use (on an update: where the effects already
+are), `gamersequalizer.exe --uninstall` removes everything. Add `--silent` to hide the installer
+window. Both ask for administrator rights once and exit with the installer's exit code.
 
 ## Troubleshooting
 

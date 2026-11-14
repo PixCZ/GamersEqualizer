@@ -45,28 +45,48 @@ pub fn replace_older_copies() -> bool {
     return false;
   }
   info!("[GamersEqualizer] an older copy of the app is running; this one takes over");
-  // The window first: its watchdog would start the service again.
-  close_window_of(&older);
   // One service runs at a time. With another process of this very file around it is this
   // copy's own (the app is running, and only a leftover of an older copy is in the way).
   let own_service = other_processes(&this).iter().any(|(_, path)| same_file(path, &this));
-  if !own_service {
+  end_copies(&older, !own_service, || older_copies(&this));
+  true
+}
+
+/// Ends every other running copy of the app (window and service), whatever its build:
+/// `--uninstall` does this first, so nothing keeps running from the files it removes.
+pub fn end_other_copies() {
+  // SAFETY: no arguments, cannot fail.
+  let own_pid = unsafe { GetCurrentProcessId() };
+  let Some(this) = image_path(own_pid).or_else(|| std::env::current_exe().ok()) else {
+    return;
+  };
+  let others = other_processes(&this);
+  if !others.is_empty() {
+    end_copies(&others, true, || other_processes(&this));
+  }
+}
+
+/// Asks `copies` to quit (window closed, service told to stop when `ask_service`), waits a
+/// little, then terminates what `still_running` still lists.
+fn end_copies(copies: &[(u32, PathBuf)], ask_service: bool, still_running: impl Fn() -> Vec<(u32, PathBuf)>) {
+  // The window first: its watchdog would start the service again.
+  close_window_of(copies);
+  if ask_service {
     match SharedMemoryClient::open_existing(SHM_NAME) {
       Ok(shm) => shm.layout().header.shutdown_daemon_signal.store(true, Ordering::SeqCst),
-      Err(e) => info!("[GamersEqualizer] the older service cannot be asked to stop ({e}); it will be ended"),
+      Err(e) => info!("[GamersEqualizer] the other service cannot be asked to stop ({e}); it will be ended"),
     }
   }
   let asked = Instant::now();
-  while asked.elapsed() < ASKED_WAIT && !older_copies(&this).is_empty() {
+  while asked.elapsed() < ASKED_WAIT && !still_running().is_empty() {
     std::thread::sleep(POLL);
   }
-  for (pid, path) in older_copies(&this) {
+  for (pid, path) in still_running() {
     match terminate(pid) {
-      Ok(()) => info!("[GamersEqualizer] ended the older copy {} (pid {pid})", path.display()),
-      Err(e) => warn!("[GamersEqualizer] could not end the older copy {} (pid {pid}): {e}", path.display()),
+      Ok(()) => info!("[GamersEqualizer] ended the other copy {} (pid {pid})", path.display()),
+      Err(e) => warn!("[GamersEqualizer] could not end the other copy {} (pid {pid}): {e}", path.display()),
     }
   }
-  true
 }
 
 /// (pid, exe file) of each running copy of the app that this one replaces.

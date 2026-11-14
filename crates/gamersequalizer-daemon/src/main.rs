@@ -11,6 +11,7 @@ pub mod i18n_cs;
 pub mod mic_usage;
 pub mod notify;
 pub mod output_eq;
+pub mod setup_cli;
 pub mod sonar_importer;
 pub mod takeover;
 pub mod tray;
@@ -67,6 +68,10 @@ fn main() {
   }
   let is_daemon = args.iter().any(|a| a == "--daemon");
   app_log::init(if is_daemon { "service" } else { "ui" });
+  // Before the handover: `--install` from the ZIP must install this copy, not start the old one.
+  if let Some(code) = setup_cli::run(&args) {
+    std::process::exit(code);
+  }
   // Once installed, the app lives next to its effects in Program Files: a copy started from
   // elsewhere (the unzipped folder, an old autostart entry) starts that one instead.
   if !args.iter().any(|a| a == NO_HANDOVER_ARG) && hand_over_to_installed(args.get(1..).unwrap_or_default()) {

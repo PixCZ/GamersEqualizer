@@ -11,6 +11,9 @@
     'Capture:{guid}:MFX' / ':EFX' moves the mic chain to that slot (the app's "try another
     effect slot"): some mic arrays never start an endpoint effect but run mode effects.
   The mic chain sits in ONE slot per microphone; without a slot it stays where it is (EFX first).
+  -AppOnly: installs the app (with its DLL, the "Add or remove programs" entry and the Start
+    menu shortcut) without touching any endpoint: `gamersequalizer.exe --install` on a PC
+    without audio devices; the effects follow from the app later.
   -AppExe (the app's exe, passed by the app): it is installed next to the effects
     (%ProgramFiles%\GamersEqualizer\gamersequalizer.exe; the app then continues from there and
     "start with Windows" points there), unless it runs from there already or -NoAppInstall (a
@@ -58,7 +61,11 @@ param(
   [string]$AppExeSha256,
   [string]$SourceDllSha256,
   # A developer's build: it runs in place, only a temporary copy is made for the self-test.
-  [switch]$NoAppInstall
+  [switch]$NoAppInstall,
+  # The app's version, for the "Add or remove programs" entry (winget compares it).
+  [string]$AppVersion,
+  # Only the app and its DLL, no endpoint (see .SYNOPSIS).
+  [switch]$AppOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -155,6 +162,36 @@ $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
 $InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
 # Must match $BackupDir in apo-uninstall.ps1.
 $BackupDir = Join-Path $ProgramDir 'apo-backup'
+# Must match apo-uninstall.ps1, which removes both. winget finds the installed app by this key.
+$UninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GamersEqualizer'
+$StartMenuLink = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'GamersEqualizer.lnk'
+
+# "Add or remove programs" entry and Start menu shortcut of the installed app. Not fatal: the
+# effects work without them.
+function Register-App {
+  try {
+    New-Item -Force $UninstallKey | Out-Null
+    $sizeKb = [int]((Get-ChildItem $ProgramDir -Recurse -File | Measure-Object Length -Sum).Sum / 1KB)
+    $strings = [ordered]@{
+      DisplayName          = 'GamersEqualizer'
+      Publisher            = 'Jiri Nemec'
+      DisplayIcon          = "$InstalledExe,0"
+      InstallLocation      = $ProgramDir
+      UninstallString      = "`"$InstalledExe`" --uninstall"
+      QuietUninstallString = "`"$InstalledExe`" --uninstall --silent"
+      URLInfoAbout         = 'https://github.com/PixCZ/GamersEqualizer'
+    }
+    if ($AppVersion) { $strings.DisplayVersion = $AppVersion }
+    foreach ($k in $strings.Keys) { New-ItemProperty $UninstallKey -Name $k -Value $strings[$k] -PropertyType String -Force | Out-Null }
+    foreach ($k in 'NoModify', 'NoRepair') { New-ItemProperty $UninstallKey -Name $k -Value 1 -PropertyType DWord -Force | Out-Null }
+    New-ItemProperty $UninstallKey -Name EstimatedSize -Value $sizeKb -PropertyType DWord -Force | Out-Null
+    $link = (New-Object -ComObject WScript.Shell).CreateShortcut($StartMenuLink)
+    $link.TargetPath = $InstalledExe
+    $link.WorkingDirectory = $ProgramDir
+    $link.Save()
+  }
+  catch { Say "The Add or remove programs entry or the Start menu shortcut could not be made: $_" Yellow }
+}
 
 $AudioRoot = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio'
 $FxGuid = '{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}'
@@ -754,6 +791,28 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
   }
 }
 
+# --- App only (no audio device): exe, DLL, entry; no endpoint, no audio restart -----------
+if ($AppOnly) {
+  if (-not ($AppExe -and $AppExeSha256 -and (Test-Path $AppExe))) { throw '-AppOnly needs -AppExe and -AppExeSha256.' }
+  New-Item -ItemType Directory -Force $InstallDir | Out-Null
+  # Staged and hash-checked like the full install below: both come from a user-writable folder.
+  foreach ($copy in @(@($SourceDll, $InstalledDll, $SourceDllSha256), @($AppExe, $InstalledExe, $AppExeSha256))) {
+    $source, $target, $hash = $copy
+    if ([IO.Path]::GetFullPath($source) -ieq $target) { continue }
+    Copy-Item $source "$target.new" -Force
+    if ($hash -and (Get-FileHash "$target.new" -Algorithm SHA256).Hash -ne $hash) {
+      Remove-Item "$target.new" -Force
+      throw "$source changed after the app checked it; nothing installed."
+    }
+    Get-Process gamersequalizer -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $target } | Stop-Process -Force
+    Move-Item "$target.new" $target -Force
+    Unblock-File $target
+  }
+  Register-App
+  Say "App: $InstalledExe (no audio device: the effects are added from the app later)"
+  return
+}
+
 # --- Check every endpoint first: an error leaves the system untouched ----------------------
 $jobs = @()
 $skipped = @()
@@ -932,6 +991,7 @@ catch {
 finally {
   $audioStarted = Start-Audio
 }
+if (-not $NoAppInstall -and (Test-Path $InstalledExe)) { Register-App }
 
 foreach ($job in $jobs) {
   if (Test-EnhancementsOff $job) {

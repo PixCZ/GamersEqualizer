@@ -73,6 +73,9 @@ $ProgramDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'GamersEq
 $InstallDir = Join-Path $ProgramDir 'apo'
 $InstalledExe = Join-Path $ProgramDir 'gamersequalizer.exe'
 $BackupDir = Join-Path $ProgramDir 'apo-backup'
+# Must match apo-install.ps1 (Register-App).
+$UninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GamersEqualizer'
+$StartMenuLink = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'GamersEqualizer.lnk'
 # Older versions backed up here. Any user can create this folder (or a junction to a system
 # folder), so it is never deleted recursively: only our .reg files, and not through a link.
 $LegacyBackupRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'GamersEqualizer'
@@ -468,7 +471,8 @@ try {
     }
   }
 
-  $keys = @('HKLM:\SOFTWARE\GamersEqualizer')
+  $keys = @('HKLM:\SOFTWARE\GamersEqualizer', $UninstallKey)
+  if (Test-Path $StartMenuLink) { Remove-Item $StartMenuLink -Force }
   foreach ($c in $Clsids) {
     $keys += "HKLM:\SOFTWARE\Classes\CLSID\$c", "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$c"
   }
@@ -505,13 +509,18 @@ finally {
 }
 
 
-# The installed app started this and exits right after; its exe cannot go while it runs.
+# The installed app started this: the window exits right after, `gamersequalizer.exe
+# --uninstall` (Add or remove programs, winget) waits for this script. A running exe cannot be
+# deleted but can be renamed, so what is still held moves out of the app folder.
+# shortcut: a moved file stays in the temp folder until Windows cleans it up; delete it on
+# reboot (MoveFileEx) if leftovers there ever matter.
 foreach ($file in $InstalledExe, "$InstalledExe.new") {
-  for ($try = 0; $try -lt 20 -and (Test-Path $file); $try++) {
-    Remove-Item $file -Force -ErrorAction SilentlyContinue
-    if (Test-Path $file) { Start-Sleep -Seconds 1 }
+  if (-not (Test-Path $file)) { continue }
+  Remove-Item $file -Force -ErrorAction SilentlyContinue
+  if (Test-Path $file) {
+    try { Move-Item $file (Join-Path ([IO.Path]::GetTempPath()) "gamersequalizer-removed-$([guid]::NewGuid()).exe") -Force }
+    catch { Say "Could not delete $file (still running?); delete it by hand." Yellow }
   }
-  if (Test-Path $file) { Say "Could not delete $file (still running?); delete it by hand." Yellow }
 }
 if ((Test-Path $ProgramDir) -and -not (Get-ChildItem $ProgramDir -Force)) { Remove-Item $ProgramDir -Force }
 

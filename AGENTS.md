@@ -25,7 +25,7 @@ Target layout (created as the work needs it, not up front):
 | `frontend/`           | React + Vite + Zustand (+ Three.js)                      |
 | `_database/`          | SQLite migrations; `.sqlx/` holds offline query metadata |
 | `test_data/`          | Test fixtures                                            |
-| `packaging/`          | winget manifest draft                                    |
+| `packaging/`          | winget manifest drafts                                   |
 | `.claude/rules/`      | Detailed agent rules: architecture, code style, testing  |
 | `secrets/`            | Never read, edit, or commit                              |
 
@@ -104,6 +104,15 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   (`handover_target` in `apo_install.rs`), and "start with Windows" points there. A newer copy ends
   an older running one first (`takeover.rs`), so an update is "unpack, start, click Update". A dev build
   (`target\<profile>\`) runs in place and is never installed. User data stays in `%APPDATA%\GamersEqualizer`.
+- The installer registers the app in "Add or remove programs" (`HKLM\...\Uninstall\GamersEqualizer`,
+  `DisplayVersion` = the build's version, which winget compares) and adds a Start-menu shortcut; the
+  uninstaller removes both and moves its own locked exe to `%TEMP%` when run from it.
+- Without a window (`setup_cli.rs`, for winget/scripts): `--install` installs on the endpoints that
+  already carry our effects, else on the devices in use, else the app alone (`-AppOnly`, no audio
+  device); `--uninstall` ends the other copies, then uninstalls. `--silent` hides the elevated window
+  and drops `-FromApp` (no key prompts). The process waits and exits with the script's exit code.
+- winget: draft manifests in `packaging/winget/PixCZ.GamersEqualizer/` (zip with nested exe,
+  `elevatesSelf`); URL and SHA-256 are filled from the GitHub release at submission.
 
 - `scripts/package.ps1`: final build from scratch (`dist` + `apo-dist` profiles, fat LTO, minutes; verifies
   the rustc flags in the verbose log). `-Fast` packages the `release`
