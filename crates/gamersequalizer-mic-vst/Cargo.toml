@@ -1,6 +1,7 @@
 [package]
 name = "gamersequalizer-mic-vst"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 edition = "2021"
 
 # A library for the APO and the daemon only. It once was a VST2 plugin for Equalizer APO

@@ -96,7 +96,8 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 ## Tester package
 
 ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself and its system parts):
-`gamersequalizer.exe` + `gamersequalizer_apo.dll`; what testers need to know is in `README.md`.
+`gamersequalizer.exe` + `gamersequalizer_apo.dll` + `LICENSE.txt` (GPL-3.0); what testers need to know is in
+`README.md`.
 
 - Installed layout: the installer (one admin prompt) copies the exe to `%ProgramFiles%\GamersEqualizer\`
   next to `apo\gamersequalizer_apo.dll`. A copy started from elsewhere then starts the installed one

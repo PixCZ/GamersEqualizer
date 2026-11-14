@@ -14,7 +14,7 @@
   4. Reads the real rustc command lines from the verbose log and fails unless the exe and the
      DLL were linked with exactly those flags (and without the debug-capture feature).
   5. Checks both binaries were written by this build and import no VCRUNTIME140.dll.
-  6. Stages gamersequalizer.exe + gamersequalizer_apo.dll and zips them under a new,
+  6. Stages gamersequalizer.exe + gamersequalizer_apo.dll + LICENSE.txt and zips them under a new,
      time-stamped name. Next to the ZIP: <name>.build.log (full cargo output) and
      <name>.build.txt (toolchain, commit, flags, SHA256 of each file).
      Older ZIPs are never deleted or overwritten; only target\package\staging is cleared.
@@ -164,6 +164,8 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 
 Copy-Item $exe $stage
 Copy-Item $dll $stage
+# GPL: the licence text travels with the binaries.
+Copy-Item 'LICENSE' (Join-Path $stage 'LICENSE.txt')
 
 # Sign the staged binaries on -Sign, or without asking when a .pfx is around and its password is
 # in GAMERSEQUALIZER_PFX_PASSWORD (a password prompt would hang dev-rebuild.ps1 -Package).

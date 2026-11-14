@@ -1,6 +1,7 @@
 [package]
 name = "gamersequalizer-apo"
 version = "0.1.0"
+license = "GPL-3.0-or-later"
 authors = ["Jiří Němec"]
 edition = "2021"
 description = "Prototype capture APO (gain only) loaded by audiodg on a physical microphone"

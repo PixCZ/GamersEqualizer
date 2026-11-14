@@ -164,5 +164,20 @@ DPDFNet and [Silero VAD](https://github.com/snakers4/silero-vad). Headphone data
 
 Not affiliated with SteelSeries. "Sonar" is a trademark of its owner.
 
+## License
+
+GamersEqualizer is free software under the [GNU General Public License v3.0](LICENSE) or later.
+Copyright © 2026 Jiří Němec.
+
+You may use, study, change and share it. If you distribute it or a version you changed, you must do so
+under the same license, with the source code and with the copyright notices kept.
+
+- The name "GamersEqualizer" and its logo are not part of that license. A modified version must use a
+  different name and logo, and say that it is based on GamersEqualizer.
+- Bundled third-party code and models keep their own licenses (MIT, Apache-2.0, BSD-3-Clause); see
+  `crates/vendor/*/` and `crates/gamersequalizer-mic-vst/models/README.md`.
+- The test recordings in `test_data/denoise/` are not covered. They are third-party clips for
+  non-commercial use only; see the README in that folder. They are never part of the app.
+
 Developer notes: [AGENTS.md](AGENTS.md), [docs/building.md](docs/building.md), history in
 [DEVLOG.md](DEVLOG.md).
