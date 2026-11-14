@@ -52,13 +52,13 @@ choice adds. It should be just as useful outside games.
 get it)
 
 1. Speaker echo cancellation (a Rust port of WebRTC AEC3).
-2. AI noise suppression. Pick a model by the delay you can live with:
+2. AI noise suppression. Each model trades delay against how much noise it removes:
 
-   | Model            | Added delay |
-   | ---------------- | ----------- |
-   | RNNoise          | 20 ms       |
-   | DeepFilterNet 3  | 40 ms       |
-   | DPDFNet          | 60 ms       |
+   | Model            | Added delay | What to expect                                                         |
+   | ---------------- | ----------- | ---------------------------------------------------------------------- |
+   | RNNoise          | 20 ms       | Lightest; removes very little noise                                    |
+   | DeepFilterNet 3  | 40 ms       | Removes noise well; a keystroke during speech sometimes gets through   |
+   | DPDFNet          | 60 ms       | Best at removing noise, but slightly changes the tone of your voice    |
 
 3. Voice EQ, voice leveler, and boost with a limiter.
 

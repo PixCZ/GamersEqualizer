@@ -686,15 +686,15 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
 
 const RNNOISE_ABOUT: &str = "RNNoise: light classic model (nnnoiseless), ~0.1 % CPU.\n\
   Voice: stays natural, the model itself never cuts it.\n\
-  Keyboard: removed the least (~12-15 dB); loud typing stays audible and can keep the gate open.\n\
+  Noise: removes very little; keyboard only ~12-15 dB, loud typing stays audible and can keep the gate open.\n\
   Pick it for a quiet room or a weak CPU.";
 const DEEPFILTER_ABOUT: &str = "DeepFilterNet 3: best open-source quality, full-band 48 kHz, ~1 % CPU.\n\
-  Keyboard: removed well (~20-30 dB).\n\
+  Keyboard: removed well (~20-30 dB), but a keystroke during speech sometimes gets through.\n\
   Voice: a very quiet voice under loud typing can lose some soft syllables.\n\
   Switching during a call loads the model (~0.2 s gap).";
 const DPDFNET_ABOUT: &str =
   "DPDFNet: strongest keyboard removal (~47-50 dB); the gate almost never lets keys through.\n\
-  Voice: best on quiet speech; very loud typing right over a word can thin it out.\n\
+  Voice: slightly changes its tone; very loud typing right over a word can thin it out.\n\
   About 3x the CPU of DeepFilterNet 3. Switching during a call loads the model (~0.1 s gap).";
 
 /// Delay the mic gets with this model: its own (measured, see the denoiser's latency test)
