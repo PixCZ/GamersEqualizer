@@ -549,7 +549,9 @@ fn elevated_bootstrap(script_path: &str, sha256_hex: &str, args: &str) -> String
     format!(
       "if ($h -ne '{sha256_hex}') {{ Write-Host 'The script was changed after the app wrote it; not running it.' -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 1 }}"
     ),
-    format!("& ([scriptblock]::Create($c)) {args}"),
+    // Dot-sourced: its top-level variables must land in the script scope, which the scripts'
+    // functions use as `$script:X` (`&` would give them a child scope; `$script:X` was then null).
+    format!(". ([scriptblock]::Create($c)) {args}"),
   ]
   .join("\n")
 }
@@ -920,7 +922,8 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("ge-bootstrap-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("s.ps1");
-    let content = "param([string]$Endpoint, [switch]$FromApp)\r\n\"ran $Endpoint $FromApp\"\r\n";
+    // `Get-Seen` reads a top-level variable the way the installer's functions do (`$script:`).
+    let content = "param([string]$Endpoint, [switch]$FromApp)\r\n$Seen = @{ a = 1 }\r\nfunction Get-Seen { $script:Seen['a'] }\r\n\"ran $Endpoint $FromApp $(Get-Seen)\"\r\n";
     let run = |file_text: &str| {
       std::fs::write(&path, file_text).unwrap();
       let hash = sha256_hex(content.as_bytes()).unwrap();
@@ -932,7 +935,7 @@ mod tests {
         .unwrap()
     };
     let ok = run(content);
-    assert!(String::from_utf8_lossy(&ok.stdout).contains("ran Capture:{a-1},Render:{b-2} True"), "{ok:?}");
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("ran Capture:{a-1},Render:{b-2} True 1"), "{ok:?}");
     let swapped = run(&content.replace("ran", "evil"));
     assert!(!swapped.status.success() && !String::from_utf8_lossy(&swapped.stdout).contains("evil"), "{swapped:?}");
     let _ = std::fs::remove_dir_all(&dir);
