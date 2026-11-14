@@ -89,11 +89,13 @@ if ($PfxPath) {
   } else {
     Read-Host -AsSecureString "Password for $pfxFull"
   }
-  $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+  # The constructor, not .Import(): PowerShell 7 (.NET Core, `shell: pwsh` in CI) refuses Import
+  # with "X509Certificate is immutable on this platform"; Windows PowerShell 5.1 takes both.
   try {
-    $cert.Import($pfxFull, $secure, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
+    $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($pfxFull, $secure,
+      [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
   } catch {
-    throw "Failed to import PFX ($pfxFull), wrong password?: $_"
+    throw "Failed to import PFX ($pfxFull), wrong password or not a PFX?: $_"
   }
   Write-Host "Using PFX certificate: $($cert.Subject) ($($cert.Thumbprint))" -ForegroundColor Cyan
 }
