@@ -49,26 +49,29 @@ mod tests {
     assert_eq!(parse_game_ids("1_3932890, 15_Escape from Tarkov,"), vec!["1_3932890", "15_Escape from Tarkov"]);
     assert!(parse_game_ids("").is_empty());
   }
-  use std::path::PathBuf;
 
+  /// The fixture is made up (`test_data/make_sonar_fixture.py`), in the layout of a Sonar database.
   #[test]
-  fn test_read_real_sonar_database() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-      .parent()
-      .unwrap()
-      .parent()
-      .unwrap()
-      .join("test_data")
-      .join("sonar_database.db");
+  fn reads_a_sonar_database_file() {
+    use gamersequalizer_common::profile::{FilterType, VadType};
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_data/sonar_fixture.db");
+    let profiles = SonarDbReader::read_all_profiles(&fixture).unwrap();
+    // 8 rows, the one with broken JSON is skipped.
+    assert_eq!(profiles.len(), 7);
+    let by_name = |name: &str| profiles.iter().find(|p| p.name == name).unwrap();
 
-    if fixture.exists() {
-      let profiles = SonarDbReader::read_all_profiles(&fixture).unwrap();
-      assert!(!profiles.is_empty(), "Profiles should not be empty");
-      let game_profiles: Vec<_> =
-        profiles.iter().filter(|p| p.vad_type == gamersequalizer_common::profile::VadType::Game).collect();
-      assert!(game_profiles.len() >= 50, "Should have dozens of game profiles");
-      let division = game_profiles.iter().find(|p| p.name == "The Division 2");
-      assert!(division.is_some_and(|p| p.game_ids.iter().any(|id| id == "1_2221490")));
-    }
+    let shooter = by_name("Fixture Shooter");
+    assert_eq!(shooter.vad_type, VadType::Game);
+    assert!(!shooter.is_custom);
+    assert_eq!(shooter.game_ids, vec!["1_100001", "15_Fixture Shooter"]);
+    assert_eq!(shooter.preamp_db, -1.5);
+    assert_eq!(shooter.bands.len(), 2);
+    assert_eq!(shooter.bands[0].filter_type, FilterType::LowShelf);
+    assert_eq!(shooter.bands[1].frequency, 3200.0);
+
+    assert!(by_name("My game tweak").is_custom);
+    assert_eq!(by_name("Fixture Voice").vad_type, VadType::Mic);
+    assert_eq!(by_name("Fixture Music").vad_type, VadType::Media);
+    assert!(by_name("No EQ block").bands.is_empty());
   }
 }
