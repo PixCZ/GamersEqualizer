@@ -177,11 +177,10 @@ jobs:
             ${{ env.BUILD_TXT }}
           retention-days: 14
 
+      # Only the zip: build.txt (commit, flags, toolchain, hashes) stays in the workflow artifact.
       - name: GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: |
-            ${{ env.ZIP }}
-            ${{ env.BUILD_TXT }}
+          files: ${{ env.ZIP }}
           generate_release_notes: true
