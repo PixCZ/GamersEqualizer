@@ -101,7 +101,7 @@ static SIDETONE_INSTANCE: AtomicU32 = AtomicU32::new(0);
 /// interactively logged-on users (the daemon) only map read/write (`0x6` =
 /// SECTION_MAP_WRITE | SECTION_MAP_READ), so they cannot rewrite the DACL and lock audiodg out.
 /// Known limit: every interactive user on the PC still shares one mapping (not supported for
-/// several users at once, see CTI-ME); per-user mappings would be the upgrade.
+/// several users at once, see README "Known limits"); per-user mappings would be the upgrade.
 const APO_SHM_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;;0x6;;;IU)";
 
 /// `PKEY_AudioEndpoint_GUID` (`{1DA5D803-D492-4EDD-8C23-E0C0FFEE7F0E}, 4`): carried on

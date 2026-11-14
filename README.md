@@ -5,6 +5,12 @@ correction EQ, game profiles, sidetone, and a low-latency microphone chain with 
 AI noise suppression. It works in every app, because the processing runs as a Windows audio effect
 (APO) on your real devices: no virtual sound card, no network access.
 
+> **Status: in development.** Only a handful of people test it, while Windows setups vary enormously
+> (sound cards, drivers, other audio software, Windows versions and builds). It works on the machines
+> it has been tried on, but I can't guarantee it will work on yours. If something goes wrong, the app's
+> log usually says why. Please send it along with your report (see
+> [Reporting problems](#reporting-problems)).
+
 ![Mixer & device](docs/screenshots/mixer.png)
 
 ## Why this exists
@@ -82,21 +88,66 @@ and for that GamersEqualizer does the job.
 
 ## Install
 
-Requires Windows 10 version 1803 or newer, x64. So far it has been tried on real hardware only on
-Windows 11.
+Developed for Windows 11 (x64). It starts on Windows 10 version 1803 or newer and has been lightly
+tested there, but trouble-free operation on Windows 10 can't be guaranteed: Windows 10 offers far fewer
+audio capabilities than Windows 11.
 
-1. Unpack the ZIP anywhere and run `gamersequalizer.exe`.
-2. The binaries aren't signed by a trusted publisher, so Windows SmartScreen warns. Choose
-   **More info > Run anyway**. Smart App Control blocks unsigned apps entirely.
-3. Click install in the app. One administrator prompt copies the app to
+1. Unpack the ZIP into any folder; don't run it from inside the ZIP. Keep the `.exe` and `.dll`
+   together, because the app installs itself from that folder.
+2. Run `gamersequalizer.exe`.
+3. Click the install bar in the app and confirm the administrator prompt. The app copies itself to
    `%ProgramFiles%\GamersEqualizer\` and adds its effects to your microphone and output. Windows audio
-   restarts for a few seconds.
+   cuts out for a few seconds, then the installer opens the microphone briefly to check that the
+   effect runs. Don't click into the installer window, because a click pauses it until you press
+   Enter. Afterwards, reopen any app that had the microphone open (Discord, a game).
+
+### Microsoft SmartScreen warning
+
+Windows will most likely show a blue **"Windows protected your PC"** screen. The reason isn't anything
+wrong with the app. Microsoft Defender SmartScreen trusts a program by its *reputation*, which builds
+up as many people download and run it. GamersEqualizer has few users and isn't signed by a
+commercially trusted publisher, so it has no reputation yet. Choose **More info > Run anyway**.
+
+- **Smart App Control** (Windows 11) blocks such apps completely, and there is no "Run anyway".
+  If you turn it off, Windows only lets you turn it back on by reinstalling Windows.
+- Don't install any certificate to get rid of the warning. Neither SmartScreen nor Smart App Control
+  accepts one you install yourself.
 
 To update, unpack the newer ZIP, run it and click **Update**.
 
 To uninstall, open **Settings > Uninstall from Windows**. This removes the effects from every device,
 restores the original driver effects, and removes the app from Program Files and from startup. Your
 settings live in `%APPDATA%\GamersEqualizer`; you can tick an option to delete them too.
+
+## Troubleshooting
+
+**The Microphone page says the mic effect isn't working (red).**
+
+1. Click **Try another effect slot (administrator)...** and confirm the administrator prompt. Some microphones, mostly
+   notebook mic arrays, start the effect in only one of two places.
+2. Reopen the app that records and record for at least 15 seconds.
+3. Check that audio enhancements are on: **Settings > System > Sound >** your device **> Audio
+   enhancements**.
+
+If it still doesn't work, send the log (see below).
+
+**The output EQ doesn't change the sound.** Apps that play in exclusive mode bypass Windows audio
+effects. Check that the app isn't set to exclusive mode.
+
+## Known limits
+
+- Built for one signed-in user per PC. With fast user switching or Remote Desktop, the signed-in users
+  share the audio effect settings.
+
+## Reporting problems
+
+Send a short description of what you did, plus `gamersequalizer.log` from
+`%APPDATA%\GamersEqualizer\logs` (paste that path into the File Explorer address bar).
+
+If the effects seem to do nothing, start by leaving the app running. Record the microphone for at
+least 15 seconds (for example with Sound Recorder) while some sound plays. Stop the recording, wait
+half a minute, then send the log. It has everything needed: the state of the effects in Windows, notes
+from inside the Windows audio system, crashes, and antivirus detections.
 
 ## Privacy
 

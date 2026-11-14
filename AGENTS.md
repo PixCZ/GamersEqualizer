@@ -25,7 +25,7 @@ Target layout (created as the work needs it, not up front):
 | `frontend/`           | React + Vite + Zustand (+ Three.js)                      |
 | `_database/`          | SQLite migrations; `.sqlx/` holds offline query metadata |
 | `test_data/`          | Test fixtures                                            |
-| `packaging/`          | Tester guide (`CTI-ME.txt`), winget manifest draft       |
+| `packaging/`          | winget manifest draft                                    |
 | `.claude/rules/`      | Detailed agent rules: architecture, code style, testing  |
 | `secrets/`            | Never read, edit, or commit                              |
 
@@ -76,8 +76,8 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   older Windows it stops before anything changes; the app checks the build before it asks for admin. An
   endpoint whose driver effects it could not keep (`Get-EndpointBlocker`) is never touched: it is skipped
   and named, and when none is left nothing changes. Self-check of that rule:
-  `scripts/tests/apo-install.tests.ps1` (part of `-Test`, also runs under `pwsh` on macOS). Only Windows 11
-  has been tried on real hardware so far.
+  `scripts/tests/apo-install.tests.ps1` (part of `-Test`, also runs under `pwsh` on macOS). Developed and
+  tested on Windows 11; Windows 10 only lightly tested, no guarantee there (fewer audio capabilities).
 - Devices: the setup card installs on the microphone and output in use; other connected devices are
   opt-in checkboxes. A device whose install the installer rolled back is not offered again until "Try
   again". Before changing an endpoint the installer saves its original effect lists once to
@@ -96,7 +96,7 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 ## Tester package
 
 ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself and its system parts):
-`gamersequalizer.exe` + `gamersequalizer_apo.dll` + `CTI-ME.txt` (Czech tester guide, `packaging/CTI-ME.txt`).
+`gamersequalizer.exe` + `gamersequalizer_apo.dll`; what testers need to know is in `README.md`.
 
 - Installed layout: the installer (one admin prompt) copies the exe to `%ProgramFiles%\GamersEqualizer\`
   next to `apo\gamersequalizer_apo.dll`. A copy started from elsewhere then starts the installed one
