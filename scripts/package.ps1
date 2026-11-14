@@ -53,7 +53,7 @@ $apoProfile = if ($Fast) { 'apo' } else { 'apo-dist' }
 
 # Flags the final rustc call of each binary must carry (verbose cargo output, see step 4).
 $commonFlags = @('-C opt-level=3', '-C lto=fat', '-C codegen-units=1', '-C strip=symbols',
-  '-C target-feature=+crt-static')
+  '-C target-feature=+crt-static', '-C control-flow-guard=checks')
 
 function Invoke-Cargo([string[]]$cargoArgs) {
   & cargo @cargoArgs
@@ -187,6 +187,12 @@ if (($Sign -or $pfxAround) -and -not $NoSign) {
 foreach ($bin in 'gamersequalizer.exe', 'gamersequalizer_apo.dll') {
   $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $stage $bin)))
   if ($text -match '(?i)vcruntime140\.dll') { throw "$bin still needs VCRUNTIME140.dll (Visual C++ runtime)" }
+  # The linker sets IMAGE_DLLCHARACTERISTICS_GUARD_CF only when it really built the CFG table.
+  $bytes = [IO.File]::ReadAllBytes((Join-Path $stage $bin))
+  $dllCharacteristics = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3C) + 24 + 70)
+  if (-not ($dllCharacteristics -band 0x4000)) { throw "$bin was linked without Control Flow Guard" }
+  # The mic chain's old VST2 entry point must not come back as an export of the APO DLL.
+  if ($text -match 'VSTPluginMain') { throw "$bin exports VSTPluginMain" }
 }
 
 Compress-Archive -Path $stage -DestinationPath $zip

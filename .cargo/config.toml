@@ -1,5 +1,11 @@
 # Link the C runtime statically: without it the exe and the APO DLL need VCRUNTIME140.dll
 # (Visual C++ Redistributable), which a tester's PC may not have. audiodg would then fail to
 # load the APO. Applies to dev builds too, so what we test is what we ship.
+#
+# Control Flow Guard: every indirect call (fn pointer, dyn Trait, COM vtable) is checked against
+# the table of real function starts, so a corrupted pointer ends the process instead of running
+# an attacker's code. Costs a bitmap lookup per indirect call; the DSP hot loops call directly.
+# Compare "load avg/peak" in the app log when in doubt. Covers our code and every dependency;
+# Rust's prebuilt std stays without checks (would need -Zbuild-std).
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "control-flow-guard=checks"]

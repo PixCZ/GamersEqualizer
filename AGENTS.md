@@ -114,7 +114,8 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   `win_audio/apo_install.rs`) and written to `%LOCALAPPDATA%\GamersEqualizer\scripts` before each
   elevated run. The DLL stays a separate file next to the exe (audiodg loads it from disk).
 - The C runtime is linked statically (`.cargo/config.toml`), so testers need no Visual C++ Redistributable;
-  `package.ps1` fails if a binary still imports `VCRUNTIME140.dll`.
+  `package.ps1` fails if a binary still imports `VCRUNTIME140.dll`. The same file turns on Control
+  Flow Guard for every build; `package.ps1` fails if a binary lacks it or exports `VSTPluginMain`.
 - Never package a `-DebugCapture` APO (`dev-rebuild.ps1` skips `-Package` with it).
 - Binaries are unsigned or signed with our self-signed certificate. Testers install no certificate (neither
   SmartScreen nor Smart App Control accepts a local root): SmartScreen "More info > Run anyway"; Smart App
