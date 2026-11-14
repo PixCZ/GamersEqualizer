@@ -407,19 +407,15 @@ pub fn installed_on_any(flow: Flow) -> bool {
   hklm_subkeys(&endpoints_root(flow)).iter().any(|guid| endpoint_has_any_clsid(flow, guid))
 }
 
-/// Active physical endpoints in `endpoints` that have `FxProperties` and lack our effect (not
-/// installed, or shadowed by legacy values: `!endpoint_has_apo`). Virtual devices, Bluetooth
-/// hands-free and VR headsets are left out. Returns `(guid, name)` pairs; the setup card offers
-/// them unticked next to the devices in use.
+/// Active physical endpoints in `endpoints` that lack our effect (not installed, or shadowed by
+/// legacy values: `!endpoint_has_apo`). One without `FxProperties` gets the key from the
+/// installer. Virtual devices, Bluetooth hands-free and VR headsets are left out. Returns
+/// `(guid, name)` pairs; the setup card offers them unticked next to the devices in use.
 pub fn targets_to_install(flow: Flow, endpoints: &[super::AudioEndpointInfo]) -> Vec<(String, String)> {
-  let root = endpoints_root(flow);
   let eligible: Vec<(&super::AudioEndpointInfo, String)> = endpoints
     .iter()
     .filter(|ep| offered_for_effects(&ep.name.to_lowercase()))
-    .filter_map(|ep| {
-      let guid = endpoint_guid_of(&ep.id)?;
-      hklm_key_exists(&format!("{root}\\{guid}\\FxProperties")).then_some((ep, guid))
-    })
+    .filter_map(|ep| Some((ep, endpoint_guid_of(&ep.id)?)))
     .filter(|(_, guid)| !endpoint_has_apo(flow, guid))
     .collect();
   dedup_target_guids(eligible.into_iter().map(|(ep, guid)| (guid, ep.name.clone())))

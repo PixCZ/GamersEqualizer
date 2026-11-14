@@ -5,8 +5,8 @@ $script = Join-Path (Split-Path $PSScriptRoot) 'apo-install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
-  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen'
-$variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues'
+  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot'
+$variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
 $pieces = $ast.FindAll({
     param($n)
     ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions) -or
@@ -126,6 +126,19 @@ Check 'json: one-entry multi-string stays a list' (@($byName["$FxGuid,15"].Value
 Check 'json: string' ($byName["$FxGuid,5"].Value -eq $oem -and $byName["$FxGuid,5"].Kind -eq 'String') ''
 Check 'json: binary as base64' ((([Convert]::FromBase64String($byName['bin'].Value)) -join ',') -eq '1,2,255') ''
 Check 'json: dword' ($byName['dw'].Value -eq 7 -and $byName['dw'].Kind -eq 'DWord') ''
+Check 'json: an existing key is not marked created' ($back.Created -eq $false) ''
+$made = ConvertTo-FxJson ([pscustomobject]@{ Flow = 'Capture'; Id = $guid; Records = @(); Created = $true }) | ConvertFrom-Json
+Check 'json: a made key is marked created, no values' ($made.Created -eq $true -and @($made.Values).Count -eq 0) "got $($made | ConvertTo-Json -Compress)"
+
+# --- Made FxProperties keys -------------------------------------------------------------------
+# Compiles here too (pwsh), so a C# error shows before the script reaches Windows; the
+# registry calls themselves run only there.
+Add-Type -TypeDefinition $RestoreKeySource
+Check 'restore-key helper compiles' ([bool]('GamersEqualizer.RestoreKey' -as [type])) ''
+$keyCalls = New-Object System.Collections.Generic.List[string]
+function Remove-FxKey([string]$subKey) { $keyCalls.Add("remove $subKey") }
+Restore-FxSnapshot ([pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Records = @(); Created = $true })
+Check 'rollback of a made key deletes it' (($keyCalls -join '|') -eq 'remove SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{id}\FxProperties') "got '$($keyCalls -join '|')'"
 
 # --- Get-MigrationSlots ---------------------------------------------------------------------
 $migrationCases = @(

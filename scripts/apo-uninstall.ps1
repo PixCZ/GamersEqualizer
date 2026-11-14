@@ -7,7 +7,8 @@
   First puts back the effect settings each endpoint had before GamersEqualizer first touched it
   (the JSON backups apo-install.ps1 keeps in %ProgramFiles%\GamersEqualizer\apo-backup: the
   effect lists and their processing modes only, so a legacy value the installer folded into a
-  composite list comes back). Then removes our CLSIDs from every capture/render endpoint's effect
+  composite list comes back; an FxProperties key the installer made, backup marked Created, is
+  deleted). Then removes our CLSIDs from every capture/render endpoint's effect
   lists (other effects stay, String vs MultiString kinds are preserved), cleans up Default-only
   streaming modes on endpoints without a backup where the slot has no effects left, unregisters
   the COM classes and APOs, deletes the config key, the installed DLL, the installed app (once it
@@ -45,7 +46,7 @@ trap {
 }
 
 # shortcut: the registry helpers and constants below are copies of apo-install.ps1's (Set-FxValue,
-# the restore, CLSIDs, value names, Say). Merge both into one script with an -Uninstall mode once
+# the restore, RestoreKey / Remove-FxKey, CLSIDs, value names, Say). Merge both into one script with an -Uninstall mode once
 # the merged script can be tried on Windows; a dot-sourced module would be a third file outside
 # the hash check in elevated_bootstrap.
 
@@ -121,6 +122,133 @@ function Set-FxValue([string]$subKey, [string]$name, [string[]]$value, [Microsof
     }
   }
   finally { $key.Dispose() }
+}
+
+# An endpoint whose driver declares no effects (inbox "High Definition Audio Device", VMs) has no
+# FxProperties, and Administrators may not create subkeys under an endpoint (SetValue + ReadKey
+# only). The backup/restore privileges, which Administrators hold but must enable, create and
+# delete the key without changing the owner or ACL of anything that exists; the new key inherits
+# the endpoint's ACL. C# 5 (Windows PowerShell's compiler). Copy of apo-install.ps1's.
+$RestoreKeySource = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace GamersEqualizer {
+  public static class RestoreKey {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct TokenPrivilege { public uint Count; public long Luid; public uint Attributes; }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, IntPtr previous, IntPtr returnLength);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegCreateKeyExW(UIntPtr root, string subKey, uint reserved, string cls, uint options, uint access, IntPtr security, out IntPtr key, out uint disposition);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegEnumKeyExW(IntPtr key, uint index, StringBuilder name, ref uint nameLength, IntPtr reserved, IntPtr cls, IntPtr clsLength, IntPtr lastWrite);
+    [DllImport("advapi32.dll")]
+    static extern int RegCloseKey(IntPtr key);
+    [DllImport("ntdll.dll")]
+    static extern int NtDeleteKey(IntPtr key);
+
+    static readonly UIntPtr LocalMachine = new UIntPtr(0x80000002u);
+
+    static void Enable(string privilege) {
+      IntPtr token;
+      // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+      if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
+      try {
+        TokenPrivilege state = new TokenPrivilege();
+        state.Count = 1;
+        state.Attributes = 2; // SE_PRIVILEGE_ENABLED
+        if (!LookupPrivilegeValueW(null, privilege, out state.Luid)) throw new Win32Exception();
+        if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+        // ERROR_NOT_ALL_ASSIGNED: the token lacks the privilege.
+        int error = Marshal.GetLastWin32Error();
+        if (error != 0) throw new Win32Exception(error, privilege + ": " + new Win32Exception(error).Message);
+      }
+      finally { CloseHandle(token); }
+    }
+
+    // REG_OPTION_BACKUP_RESTORE: the access comes from the privileges, not from the key's ACL.
+    static IntPtr Open(string subKey, out bool created) {
+      Enable("SeBackupPrivilege");
+      Enable("SeRestorePrivilege");
+      IntPtr key;
+      uint disposition;
+      int rc = RegCreateKeyExW(LocalMachine, subKey, 0, null, 4, 0, IntPtr.Zero, out key, out disposition);
+      if (rc != 0) throw new Win32Exception(rc);
+      created = disposition == 1; // REG_CREATED_NEW_KEY
+      return key;
+    }
+
+    // True when the key was new.
+    public static bool Create(string subKey) {
+      bool created;
+      RegCloseKey(Open(subKey, out created));
+      return created;
+    }
+
+    // The key and every subkey (Windows adds some under FxProperties).
+    public static void Delete(string subKey) {
+      bool created;
+      IntPtr key = Open(subKey, out created);
+      try {
+        List<string> children = new List<string>();
+        for (uint i = 0; ; i++) {
+          StringBuilder name = new StringBuilder(256);
+          uint length = (uint)name.Capacity;
+          int rc = RegEnumKeyExW(key, i, name, ref length, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+          if (rc == 259) break; // ERROR_NO_MORE_ITEMS
+          if (rc != 0) throw new Win32Exception(rc);
+          children.Add(name.ToString());
+        }
+        foreach (string child in children) Delete(subKey + "\\" + child);
+        int status = NtDeleteKey(key);
+        if (status != 0) throw new Win32Exception("NtDeleteKey failed: 0x" + status.ToString("X8"));
+      }
+      finally { RegCloseKey(key); }
+    }
+  }
+}
+'@
+
+function Use-RestoreKey {
+  if (-not ('GamersEqualizer.RestoreKey' -as [type])) { Add-Type -TypeDefinition $RestoreKeySource }
+}
+
+# $subKey under HKLM. True when the key was new.
+function New-FxKey([string]$subKey) {
+  # The privileged create would also make a missing endpoint key (device removed meanwhile).
+  $endpoint = $subKey.Substring(0, $subKey.LastIndexOf('\'))
+  if (-not (Test-RegKey $endpoint)) { throw "Endpoint not found: HKLM\$endpoint" }
+  Use-RestoreKey
+  [GamersEqualizer.RestoreKey]::Create($subKey)
+}
+
+# Looked up in the parent's subkey names: a key the ACL hides from Administrators still counts.
+function Test-RegKey([string]$subKey) {
+  $cut = $subKey.LastIndexOf('\')
+  $parent = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey.Substring(0, $cut), $false)
+  if ($null -eq $parent) { return $false }
+  try { @($parent.GetSubKeyNames()) -contains $subKey.Substring($cut + 1) }
+  finally { $parent.Dispose() }
+}
+
+# Never on a missing key: the privileged open would create it, and every missing parent.
+function Remove-FxKey([string]$subKey) {
+  if (-not (Test-RegKey $subKey)) { return }
+  Use-RestoreKey
+  [GamersEqualizer.RestoreKey]::Delete($subKey)
 }
 
 # Only delete our own staged scripts, never through a junction/reparse point.
@@ -240,7 +368,24 @@ try {
     try {
       $backup = Get-Content $jf.FullName -Raw -Encoding UTF8
       $parsed = $backup | ConvertFrom-Json
-      if (-not (Test-HoldsOurEffects (Get-FxText ([string]$parsed.Flow) ([string]$parsed.Id)))) {
+      $fxText = Get-FxText ([string]$parsed.Flow) ([string]$parsed.Id)
+      if ($parsed.Created) {
+        # The endpoint had no FxProperties. The key made for ours goes, unless other effects (another
+        # equalizer, a driver update) use it now: then only ours are removed, by the loop below.
+        $foreign = @([regex]::Matches($fxText, '\{[0-9a-fA-F-]{36}\}') | ForEach-Object { $_.Value } |
+          Where-Object { $Clsids -notcontains $_ -and $_ -ne $NullGuid -and $_ -ne $DefaultProcessingMode })
+        if ($foreign) {
+          Say "Kept the effect list the installer made for $($parsed.Flow) $($parsed.Id): other effects use it now"
+          continue
+        }
+        if (@('Capture', 'Render') -notcontains $parsed.Flow -or [string]$parsed.Id -notmatch '^\{[0-9a-fA-F-]+\}$') {
+          throw "Invalid JSON backup (Flow or Id): $($jf.Name)"
+        }
+        Remove-FxKey "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($parsed.Flow)\$($parsed.Id)\FxProperties"
+        Say "Removed the effect list the installer made for $($parsed.Flow) $($parsed.Id)"
+        continue
+      }
+      if (-not (Test-HoldsOurEffects $fxText)) {
         # None of ours there any more (a driver update or a rollback since): the endpoint's
         # current settings are newer than the backup and are kept.
         Say "Skipping $($jf.Name): the endpoint no longer has our effects"

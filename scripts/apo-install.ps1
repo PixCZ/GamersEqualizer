@@ -27,6 +27,9 @@
   - Promotes any legacy single-CLSID values (,1 / ,5 / ,6 / ,7) into composite lists (,13 / ,14 / ,15)
     without dropping existing OEM effects, ensures the default processing mode is registered on each
     configured slot, and appends our CLSIDs.
+  - An endpoint without an FxProperties key (inbox "High Definition Audio Device", VMs) gets one,
+    made with the backup/restore privileges (owner and ACL of existing keys unchanged); its backup
+    is marked Created, so rollback and apo-uninstall.ps1 delete the key again.
   - Restarts the Windows Audio service once (all audio stops for a few seconds).
   - Needs Windows 10 version 1803 or newer (composite effect lists): an older Windows stops it before
     anything changes. An endpoint whose driver effects would be lost (Get-EndpointBlocker) is never
@@ -64,6 +67,12 @@ trap {
   # `finally` that restarts audio never runs. Start it here first (no-op when it is running).
   Start-Service Audiosrv -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
   $script:AudioStopped = $false
+  # Stopped before the install began: FxProperties keys made for it go again ("nothing changed").
+  if ($script:MadeKeysPending) {
+    foreach ($made in @($script:FxSnapshots.Values | Where-Object { $_.Created })) {
+      try { Restore-FxSnapshot $made } catch { Say "Removing the effect list made for $($made.Flow) $($made.Id) failed: $_" Red }
+    }
+  }
   if ($FromApp) {
     $loc = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) {
       " (line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim()))"
@@ -82,6 +91,8 @@ trap {
 # the PC without sound.
 $AudioStopped = $false
 $Held = New-Object System.Collections.Generic.List[string]
+# An FxProperties key was made and the install has not begun: the trap deletes it on an error.
+$MadeKeysPending = $false
 
 # One line for the window and for the app's log: the app's service copies Application-log
 # entries of this source into it ([ApoNote] ... installer: ...), so the log shows how far an
@@ -175,6 +186,133 @@ function Set-FxValue([string]$subKey, [string]$name, [string[]]$value) {
   finally { $key.Dispose() }
 }
 
+# An endpoint whose driver declares no effects (inbox "High Definition Audio Device", VMs) has no
+# FxProperties, and Administrators may not create subkeys under an endpoint (SetValue + ReadKey
+# only). The backup/restore privileges, which Administrators hold but must enable, create and
+# delete the key without changing the owner or ACL of anything that exists; the new key inherits
+# the endpoint's ACL. C# 5 (Windows PowerShell's compiler). Must match apo-uninstall.ps1.
+$RestoreKeySource = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace GamersEqualizer {
+  public static class RestoreKey {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    struct TokenPrivilege { public uint Count; public long Luid; public uint Attributes; }
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool LookupPrivilegeValueW(string system, string name, out long luid);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivilege state, uint length, IntPtr previous, IntPtr returnLength);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegCreateKeyExW(UIntPtr root, string subKey, uint reserved, string cls, uint options, uint access, IntPtr security, out IntPtr key, out uint disposition);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegEnumKeyExW(IntPtr key, uint index, StringBuilder name, ref uint nameLength, IntPtr reserved, IntPtr cls, IntPtr clsLength, IntPtr lastWrite);
+    [DllImport("advapi32.dll")]
+    static extern int RegCloseKey(IntPtr key);
+    [DllImport("ntdll.dll")]
+    static extern int NtDeleteKey(IntPtr key);
+
+    static readonly UIntPtr LocalMachine = new UIntPtr(0x80000002u);
+
+    static void Enable(string privilege) {
+      IntPtr token;
+      // TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+      if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) throw new Win32Exception();
+      try {
+        TokenPrivilege state = new TokenPrivilege();
+        state.Count = 1;
+        state.Attributes = 2; // SE_PRIVILEGE_ENABLED
+        if (!LookupPrivilegeValueW(null, privilege, out state.Luid)) throw new Win32Exception();
+        if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) throw new Win32Exception();
+        // ERROR_NOT_ALL_ASSIGNED: the token lacks the privilege.
+        int error = Marshal.GetLastWin32Error();
+        if (error != 0) throw new Win32Exception(error, privilege + ": " + new Win32Exception(error).Message);
+      }
+      finally { CloseHandle(token); }
+    }
+
+    // REG_OPTION_BACKUP_RESTORE: the access comes from the privileges, not from the key's ACL.
+    static IntPtr Open(string subKey, out bool created) {
+      Enable("SeBackupPrivilege");
+      Enable("SeRestorePrivilege");
+      IntPtr key;
+      uint disposition;
+      int rc = RegCreateKeyExW(LocalMachine, subKey, 0, null, 4, 0, IntPtr.Zero, out key, out disposition);
+      if (rc != 0) throw new Win32Exception(rc);
+      created = disposition == 1; // REG_CREATED_NEW_KEY
+      return key;
+    }
+
+    // True when the key was new.
+    public static bool Create(string subKey) {
+      bool created;
+      RegCloseKey(Open(subKey, out created));
+      return created;
+    }
+
+    // The key and every subkey (Windows adds some under FxProperties).
+    public static void Delete(string subKey) {
+      bool created;
+      IntPtr key = Open(subKey, out created);
+      try {
+        List<string> children = new List<string>();
+        for (uint i = 0; ; i++) {
+          StringBuilder name = new StringBuilder(256);
+          uint length = (uint)name.Capacity;
+          int rc = RegEnumKeyExW(key, i, name, ref length, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+          if (rc == 259) break; // ERROR_NO_MORE_ITEMS
+          if (rc != 0) throw new Win32Exception(rc);
+          children.Add(name.ToString());
+        }
+        foreach (string child in children) Delete(subKey + "\\" + child);
+        int status = NtDeleteKey(key);
+        if (status != 0) throw new Win32Exception("NtDeleteKey failed: 0x" + status.ToString("X8"));
+      }
+      finally { RegCloseKey(key); }
+    }
+  }
+}
+'@
+
+function Use-RestoreKey {
+  if (-not ('GamersEqualizer.RestoreKey' -as [type])) { Add-Type -TypeDefinition $RestoreKeySource }
+}
+
+# $subKey under HKLM. True when the key was new.
+function New-FxKey([string]$subKey) {
+  # The privileged create would also make a missing endpoint key (device removed meanwhile).
+  $endpoint = $subKey.Substring(0, $subKey.LastIndexOf('\'))
+  if (-not (Test-RegKey $endpoint)) { throw "Endpoint not found: HKLM\$endpoint" }
+  Use-RestoreKey
+  [GamersEqualizer.RestoreKey]::Create($subKey)
+}
+
+# Looked up in the parent's subkey names: a key the ACL hides from Administrators still counts.
+function Test-RegKey([string]$subKey) {
+  $cut = $subKey.LastIndexOf('\')
+  $parent = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($subKey.Substring(0, $cut), $false)
+  if ($null -eq $parent) { return $false }
+  try { @($parent.GetSubKeyNames()) -contains $subKey.Substring($cut + 1) }
+  finally { $parent.Dispose() }
+}
+
+# Never on a missing key: the privileged open would create it, and every missing parent.
+function Remove-FxKey([string]$subKey) {
+  if (-not (Test-RegKey $subKey)) { return }
+  Use-RestoreKey
+  [GamersEqualizer.RestoreKey]::Delete($subKey)
+}
+
 function Read-FxList($rawValue) {
   $res = New-Object System.Collections.Generic.List[string]
   foreach ($item in @($rawValue)) {
@@ -226,12 +364,21 @@ function ConvertTo-FxJson($snapshot) {
       }
       [pscustomobject]@{ Name = [string]$rec.Name; Kind = $kind.ToString(); Value = $value }
     })
-  [pscustomobject]@{ Flow = $snapshot.Flow; Id = $snapshot.Id; Values = $values } | ConvertTo-Json -Depth 5
+  # Created: the endpoint had no FxProperties key; apo-uninstall.ps1 deletes the one made for ours.
+  [pscustomobject]@{ Flow = $snapshot.Flow; Id = $snapshot.Id; Created = [bool]$snapshot.Created; Values = $values } |
+    ConvertTo-Json -Depth 5
 }
 
 # Exact value-only restore via SetValue + QueryValues (reg.exe import fails on TrustedInstaller subkeys).
 function Restore-FxSnapshot($snapshot) {
   $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($snapshot.Flow)\$($snapshot.Id)\FxProperties"
+  # The install made this key (New-FxKey): back to no key at all.
+  if ($snapshot.Created) {
+    Remove-FxKey $subKey
+    return
+  }
+  # Putting ours back after a rollback removed the key made for them.
+  if (-not (Test-RegKey $subKey)) { $null = New-FxKey $subKey }
   $origRecords = @($snapshot.Records)
   $origNames = @($origRecords | ForEach-Object { [string]$_.Name })
   $rights = [System.Security.AccessControl.RegistryRights]'SetValue, QueryValues'
@@ -561,7 +708,7 @@ function Move-EndpointSlot($job, [string]$class, [string]$slot) {
 # Capture keeps the slot it was moved to, so an update does not undo the move.
 function Get-DefaultSlot([string]$flow, [string]$endpointKey) {
   if ($flow -ne 'Capture') { return 'EFX' }
-  $mfx = (Get-ItemProperty (Join-Path $endpointKey 'FxProperties')).($CompositeValues.MFX)
+  $mfx = (Get-ItemProperty (Join-Path $endpointKey 'FxProperties') -ErrorAction SilentlyContinue).($CompositeValues.MFX)
   if (@($mfx) -contains $Classes.Capture.Clsid) { return 'MFX' }
   'EFX'
 }
@@ -592,9 +739,7 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
   $ep = $active | Where-Object { $_.Id -ieq $endpointId }
   if (-not $ep) { throw "Endpoint $endpointId is not an active $flow device." }
   $endpointKey = Join-Path (Join-Path $AudioRoot $flow) $endpointId
-  if (-not (Test-Path (Join-Path $endpointKey 'FxProperties'))) {
-    throw "$($ep.Name) has no FxProperties key (no effects configured); not supported by this prototype."
-  }
+  $fxKey = Join-Path $endpointKey 'FxProperties'
   if (-not $slot) { $slot = Get-DefaultSlot $flow $endpointKey }
   if ($CompositeValues.Keys -notcontains $slot) { throw "No effect slot for $($ep.Name) ('$slot'); nothing changed." }
   [pscustomobject]@{
@@ -602,8 +747,10 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
     Targets = Get-Targets $flow $slot $noStreamEq
     # Set by Migrate-LegacySlots: the driver's own effects were moved into composite lists.
     Migrated = $false
+    # No effect list yet (inbox "High Definition Audio Device", VMs): the install makes one (New-FxKey).
+    NoFx = -not (Test-Path $fxKey)
     # Why this endpoint must stay as it is, or nothing; the callers below never install such a job.
-    Blocker = Get-EndpointBlocker (Get-ItemProperty (Join-Path $endpointKey 'FxProperties'))
+    Blocker = Get-EndpointBlocker (Get-ItemProperty $fxKey -ErrorAction SilentlyContinue)
   }
 }
 
@@ -648,10 +795,39 @@ foreach ($job in $jobs) {
 # kept while ours are in it: then it is the last state from before GamersEqualizer.
 $FxSnapshots = @{}
 New-Item -ItemType Directory -Force $BackupDir | Out-Null
-foreach ($job in $jobs) {
-  $snap = Get-FxSnapshot $job.Flow $job.Id
-  $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap
+foreach ($job in @($jobs)) {
+  $made = $false
+  if ($job.NoFx) {
+    # The first change to such an endpoint: when it fails, the endpoint is left as it was and skipped.
+    # Only a key this run made counts as made: one that appeared since Resolve-Job is the driver's.
+    $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($job.Flow)\$($job.Id)\FxProperties"
+    try {
+      $made = New-FxKey $subKey
+      $script:MadeKeysPending = $script:MadeKeysPending -or $made
+      $snap = Get-FxSnapshot $job.Flow $job.Id
+    }
+    catch {
+      $reason = $_
+      if ($made) {
+        try { Remove-FxKey $subKey } catch { Say "Removing the effect list made for $($job.Name) failed: $_" Red }
+      }
+      $skipped += "Skipped $($job.Name): it had no Windows effect list and making one failed ($reason). It was not changed."
+      $jobs = @($jobs | Where-Object { $_ -ne $job })
+      continue
+    }
+    if ($made) {
+      $sddl = try { (Get-Acl "HKLM:\$subKey").Sddl } catch { "unreadable: $_" }
+      Say "$($job.Name) had no Windows effect list: made one (rollback and uninstall delete it). ACL: $sddl"
+    }
+  }
+  else { $snap = Get-FxSnapshot $job.Flow $job.Id }
   $backupFile = Join-Path $BackupDir "$($job.Id)-FxProperties-original.json"
+  # A key an earlier install made, left empty by a failed delete, is still to be deleted.
+  if (-not $made -and @($snap.Records).Count -eq 0 -and (Test-Path $backupFile)) {
+    $made = [bool](try { (Get-Content $backupFile -Raw | ConvertFrom-Json).Created } catch { $false })
+  }
+  if ($made) { $snap | Add-Member -NotePropertyName Created -NotePropertyValue $true }
+  $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap
   $json = ConvertTo-FxJson $snap
   $holdsOurs = @($Classes.Values | Where-Object { $json -match [regex]::Escape($_.Clsid) }).Count -gt 0
   if (-not $holdsOurs -or -not (Test-Path $backupFile)) {
@@ -659,6 +835,7 @@ foreach ($job in $jobs) {
     Say "Backup of $($job.Name)'s effect settings: $backupFile"
   }
 }
+if (-not $jobs) { throw "$($skipped -join ' ') Nothing was changed." }
 
 # --- The app itself: staged and checked before anything changes ---------------------------
 # It moves next to its effects, unless it runs from there already or is a developer's build.
@@ -676,6 +853,8 @@ if ($installApp) {
 }
 
 # --- Install (audio service stopped once, so audiodg releases an older DLL) ---------------
+# From here the catch below and the self-test's rollbacks undo made keys (Restore-FxSnapshot).
+$MadeKeysPending = $false
 Stop-Audio
 $installComplete = $false
 try {
