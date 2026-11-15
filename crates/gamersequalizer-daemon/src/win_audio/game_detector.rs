@@ -1,18 +1,18 @@
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
-use windows::core::PWSTR;
 use windows::Win32::Foundation::STILL_ACTIVE;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Threading::{
-  GetCurrentThreadId, GetExitCodeProcess, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-  PROCESS_QUERY_LIMITED_INFORMATION,
+  GetCurrentThreadId, GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+  QueryFullProcessImageNameW,
 };
-use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-  DispatchMessageW, GetMessageW, GetWindowThreadProcessId, PeekMessageW, PostThreadMessageW, EVENT_SYSTEM_FOREGROUND,
-  MSG, PM_NOREMOVE, WINEVENT_OUTOFCONTEXT, WM_QUIT,
+  DispatchMessageW, EVENT_SYSTEM_FOREGROUND, GetMessageW, GetWindowThreadProcessId, MSG, PM_NOREMOVE, PeekMessageW,
+  PostThreadMessageW, WINEVENT_OUTOFCONTEXT, WM_QUIT,
 };
+use windows::core::PWSTR;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameForegroundEvent {
@@ -106,10 +106,10 @@ impl Drop for GameDetector {
   fn drop(&mut self) {
     unsafe {
       // Ends the message loop; the hook thread unhooks itself.
-      if PostThreadMessageW(self.hook_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)).is_ok() {
-        if let Some(t) = self.hook_thread.take() {
-          let _ = t.join();
-        }
+      if PostThreadMessageW(self.hook_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)).is_ok()
+        && let Some(t) = self.hook_thread.take()
+      {
+        let _ = t.join();
       }
     }
     *HOOK_SENDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
@@ -154,10 +154,11 @@ unsafe extern "system" fn win_event_proc(
   _id_event_thread: u32,
   _dwms_event_time: u32,
 ) {
-  if event == EVENT_SYSTEM_FOREGROUND && !hwnd.is_invalid() {
-    if let Some(tx) = HOOK_SENDER.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-      let _ = tx.send(hwnd.0 as isize);
-    }
+  if event == EVENT_SYSTEM_FOREGROUND
+    && !hwnd.is_invalid()
+    && let Some(tx) = HOOK_SENDER.lock().unwrap_or_else(PoisonError::into_inner).as_ref()
+  {
+    let _ = tx.send(hwnd.0 as isize);
   }
 }
 

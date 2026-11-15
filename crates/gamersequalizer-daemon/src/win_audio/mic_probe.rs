@@ -7,12 +7,12 @@ use log::{info, warn};
 use std::ptr::{null_mut, write_bytes};
 use std::time::{Duration, Instant};
 
-use windows::core::PCWSTR;
 use windows::Win32::Media::Audio::{
-  IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-  AUDCLNT_SHAREMODE_SHARED,
+  AUDCLNT_SHAREMODE_SHARED, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator,
+  MMDeviceEnumerator,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+use windows::core::PCWSTR;
 
 /// Long enough for the audio engine to build the graph and start the capture effect.
 const CAPTURE_PROBE_TIME: Duration = Duration::from_secs(3);

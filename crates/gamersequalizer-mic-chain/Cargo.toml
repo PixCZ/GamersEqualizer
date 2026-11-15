@@ -2,7 +2,7 @@
 name = "gamersequalizer-mic-chain"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
-edition = "2021"
+edition.workspace = true
 
 # A library for the APO and the daemon only. It once was a VST2 plugin for Equalizer APO
 # (`VSTPluginMain`, removed): as a cdylib it built an unused DLL and leaked that export into ours.

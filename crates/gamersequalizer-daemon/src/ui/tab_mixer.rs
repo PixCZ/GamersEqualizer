@@ -1,5 +1,5 @@
 use super::state::{ActiveTab, AppState};
-use super::theme::{self, icons, Icon};
+use super::theme::{self, Icon, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::app_channels::{self, AppChannel};
 use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
@@ -605,10 +605,10 @@ fn render_apps_box(ui: &mut Ui, title: &str, color: Color32, list_h: f32, apps: 
           }
         });
       });
-      if let Some(exe) = dropped {
-        if !apps.iter().any(|a| a.exe.eq_ignore_ascii_case(&exe)) {
-          *moved = Some(((*exe).clone(), Some(channel)));
-        }
+      if let Some(exe) = dropped
+        && !apps.iter().any(|a| a.exe.eq_ignore_ascii_case(&exe))
+      {
+        *moved = Some(((*exe).clone(), Some(channel)));
       }
     }
   }

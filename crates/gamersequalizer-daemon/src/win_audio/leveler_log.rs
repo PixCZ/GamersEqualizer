@@ -164,11 +164,7 @@ fn db(x10: i32) -> String {
 }
 
 fn level(x10: i32) -> String {
-  if x10 == 0 {
-    "none".to_string()
-  } else {
-    format!("{:.1}", x10 as f32 / 10.0)
-  }
+  if x10 == 0 { "none".to_string() } else { format!("{:.1}", x10 as f32 / 10.0) }
 }
 
 fn state(s: &LevelerSnapshot) -> String {

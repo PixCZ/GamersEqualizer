@@ -9,9 +9,9 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use gamersequalizer_common::BiquadBand;
 use gamersequalizer_common::biquad::{BiquadCascade, BiquadCoefficients};
 use gamersequalizer_common::limiter::PeakLimiter;
-use gamersequalizer_common::BiquadBand;
 
 const RATE: f32 = 48_000.0;
 /// One 10 ms engine period.

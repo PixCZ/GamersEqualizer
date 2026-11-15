@@ -91,11 +91,7 @@ impl SidetoneDenoiser {
 
   /// The mode that runs when `mode` is asked for (RNNoise 0.2 without weights = RNNoise).
   pub fn available(&self, mode: NoiseMode) -> NoiseMode {
-    if mode == NoiseMode::RnNoise2 && self.rnnoise2.is_none() {
-      NoiseMode::RnNoise
-    } else {
-      mode
-    }
+    if mode == NoiseMode::RnNoise2 && self.rnnoise2.is_none() { NoiseMode::RnNoise } else { mode }
   }
 
   /// Delay `process` adds right now in `mode`, in samples at 48 kHz (0 for the other modes).
@@ -218,11 +214,9 @@ impl SidetoneDenoiser {
     if let (Some(d0), Some(src)) = (self.dry.first_mut(), frame.get(..FRAME)) {
       d0.copy_from_slice(src);
     }
-    if ran {
-      if let Some(dst) = frame.get_mut(..FRAME) {
-        for (dst, src) in dst.iter_mut().zip(self.scratch_out.iter()) {
-          *dst = if src.is_finite() { *src } else { 0.0 };
-        }
+    if ran && let Some(dst) = frame.get_mut(..FRAME) {
+      for (dst, src) in dst.iter_mut().zip(self.scratch_out.iter()) {
+        *dst = if src.is_finite() { *src } else { 0.0 };
       }
     }
   }

@@ -21,8 +21,8 @@ use egui::Ui;
 use super::state::AppState;
 use super::theme::{self, Severity};
 use crate::i18n::{tr, trf};
-use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus, Flow};
 use crate::win_audio::WinAudioSystem;
+use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus, Flow};
 
 /// Registry + file metadata only, like the health bar.
 const RECHECK_INTERVAL: Duration = Duration::from_secs(3);

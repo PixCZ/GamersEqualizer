@@ -1,8 +1,8 @@
 use crate::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
-use crate::profile::{expand_slopes, BiquadBand, FilterType};
+use crate::profile::{BiquadBand, FilterType, expand_slopes};
 use crate::sidetone::{NoiseMode, SidetoneRing, SidetoneSettings};
-use crate::streams::{StreamTable, STREAM_EQ_BUSES};
-use std::sync::atomic::{fence, AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use crate::streams::{STREAM_EQ_BUSES, StreamTable};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering, fence};
 use std::time::{Duration, Instant};
 
 /// Name carries the layout version: a process still running an older build keeps its own
@@ -671,11 +671,7 @@ impl ShmHeader {
 
   pub fn get_selected_mic_id(&self) -> Option<String> {
     let len = self.selected_mic_id.iter().position(|&c| c == 0).unwrap_or(64);
-    if len == 0 {
-      None
-    } else {
-      self.selected_mic_id.get(..len).and_then(|s| String::from_utf16(s).ok())
-    }
+    if len == 0 { None } else { self.selected_mic_id.get(..len).and_then(|s| String::from_utf16(s).ok()) }
   }
 
   pub fn init_defaults(&mut self) {

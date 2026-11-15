@@ -15,8 +15,8 @@ use super::state::AppState;
 use super::theme::{self, Severity};
 use crate::health::{Fix, Issue, RunStatus};
 use crate::i18n::{tk, tr, trf};
-use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus};
 use crate::win_audio::WinAudioSystem;
+use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus};
 use gamersequalizer_common::shm::MIC_CHAIN_OTHERS;
 
 /// Registry + file metadata only: cheap enough to notice a finished install quickly.
@@ -377,10 +377,8 @@ fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem
       .on_hover_text(tr("Sets it as the Windows default and communications microphone. No admin rights needed."))
       .clicked();
   });
-  if clicked {
-    if let Some(id) = state.selected_mic_endpoint_id.clone() {
-      set_default_mic(state, win_audio, &id);
-    }
+  if clicked && let Some(id) = state.selected_mic_endpoint_id.clone() {
+    set_default_mic(state, win_audio, &id);
   }
 }
 

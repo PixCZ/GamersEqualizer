@@ -9,20 +9,20 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use windows::core::{w, GUID, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS};
-use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
+use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD,
-  RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
+  HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_DWORD, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW,
+  RegGetValueW, RegOpenKeyExW,
 };
-use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
 use windows::Win32::UI::Shell::{
-  FOLDERID_ProgramFiles, FOLDERID_System, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DEFAULT,
-  SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+  FOLDERID_ProgramFiles, FOLDERID_System, KF_FLAG_DEFAULT, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+  SHGetKnownFolderPath, ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+use windows::core::{GUID, PCWSTR, PWSTR, w};
 
 use crate::i18n::tr;
 
@@ -786,10 +786,10 @@ fn prune_empty_script_dirs(dir: &Path) {
   if std::fs::symlink_metadata(dir).is_ok_and(|m| !m.file_type().is_symlink()) {
     let _ = std::fs::remove_dir(dir);
   }
-  if let Some(parent) = dir.parent() {
-    if std::fs::symlink_metadata(parent).is_ok_and(|m| !m.file_type().is_symlink()) {
-      let _ = std::fs::remove_dir(parent);
-    }
+  if let Some(parent) = dir.parent()
+    && std::fs::symlink_metadata(parent).is_ok_and(|m| !m.file_type().is_symlink())
+  {
+    let _ = std::fs::remove_dir(parent);
   }
 }
 

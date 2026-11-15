@@ -4,13 +4,13 @@
 
 use crate::shared_memory::{create_mapping, wide};
 use gamersequalizer_common::debug_capture::*;
-use std::ptr::{addr_of, NonNull};
+use std::ptr::{NonNull, addr_of};
 use std::sync::atomic::Ordering;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::{
-  MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS,
+  FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
 };
+use windows::core::PCWSTR;
 
 pub struct DebugCaptureMap {
   handle: HANDLE,

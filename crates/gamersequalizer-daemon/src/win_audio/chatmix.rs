@@ -1,5 +1,5 @@
 use super::app_channels::{self, AppChannel};
-use super::endpoint_lock::{get_endpoint_info, AudioEndpointInfo};
+use super::endpoint_lock::{AudioEndpointInfo, get_endpoint_info};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::thread::LocalKey;
@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
-  eCapture, eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
-  IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+  AudioSessionStateActive, DEVICE_STATE_ACTIVE, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
+  IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
 use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_core::Interface;
@@ -365,31 +365,31 @@ impl ChatMixController {
 
   /// Game / Chat / Media levels from their own endpoints, where bound.
   fn read_channel_levels(&mut self) {
-    if let Some(ref id) = self.game_device_id {
-      if let Some((v, m)) = get_endpoint_volume(id) {
-        self.game_volume = v;
-        self.game_muted = m;
-        self.last_applied_game_vol = v;
-        self.last_applied_game_muted = m;
-      }
+    if let Some(ref id) = self.game_device_id
+      && let Some((v, m)) = get_endpoint_volume(id)
+    {
+      self.game_volume = v;
+      self.game_muted = m;
+      self.last_applied_game_vol = v;
+      self.last_applied_game_muted = m;
     }
 
-    if let Some(ref id) = self.chat_device_id {
-      if let Some((v, m)) = get_endpoint_volume(id) {
-        self.chat_volume = v;
-        self.chat_muted = m;
-        self.last_applied_chat_vol = v;
-        self.last_applied_chat_muted = m;
-      }
+    if let Some(ref id) = self.chat_device_id
+      && let Some((v, m)) = get_endpoint_volume(id)
+    {
+      self.chat_volume = v;
+      self.chat_muted = m;
+      self.last_applied_chat_vol = v;
+      self.last_applied_chat_muted = m;
     }
 
-    if let Some(ref id) = self.media_device_id {
-      if let Some((v, m)) = get_endpoint_volume(id) {
-        self.media_volume = v;
-        self.media_muted = m;
-        self.last_applied_media_vol = v;
-        self.last_applied_media_muted = m;
-      }
+    if let Some(ref id) = self.media_device_id
+      && let Some((v, m)) = get_endpoint_volume(id)
+    {
+      self.media_volume = v;
+      self.media_muted = m;
+      self.last_applied_media_vol = v;
+      self.last_applied_media_muted = m;
     }
   }
 
@@ -414,50 +414,50 @@ impl ChatMixController {
     }
 
     // 2. GAME: Sync with dedicated Game endpoint if present
-    if let Some(ref id) = self.game_device_id {
-      if let Some((sys_vol, sys_muted)) = get_endpoint_volume(id) {
-        if (sys_vol - self.last_applied_game_vol).abs() > 0.005 {
-          self.game_volume = sys_vol;
-          self.last_applied_game_vol = sys_vol;
-          changed = true;
-        }
-        if sys_muted != self.last_applied_game_muted {
-          self.game_muted = sys_muted;
-          self.last_applied_game_muted = sys_muted;
-          changed = true;
-        }
+    if let Some(ref id) = self.game_device_id
+      && let Some((sys_vol, sys_muted)) = get_endpoint_volume(id)
+    {
+      if (sys_vol - self.last_applied_game_vol).abs() > 0.005 {
+        self.game_volume = sys_vol;
+        self.last_applied_game_vol = sys_vol;
+        changed = true;
+      }
+      if sys_muted != self.last_applied_game_muted {
+        self.game_muted = sys_muted;
+        self.last_applied_game_muted = sys_muted;
+        changed = true;
       }
     }
 
     // 3. CHAT: Sync with dedicated Chat endpoint if present
-    if let Some(ref id) = self.chat_device_id {
-      if let Some((sys_vol, sys_muted)) = get_endpoint_volume(id) {
-        if (sys_vol - self.last_applied_chat_vol).abs() > 0.005 {
-          self.chat_volume = sys_vol;
-          self.last_applied_chat_vol = sys_vol;
-          changed = true;
-        }
-        if sys_muted != self.last_applied_chat_muted {
-          self.chat_muted = sys_muted;
-          self.last_applied_chat_muted = sys_muted;
-          changed = true;
-        }
+    if let Some(ref id) = self.chat_device_id
+      && let Some((sys_vol, sys_muted)) = get_endpoint_volume(id)
+    {
+      if (sys_vol - self.last_applied_chat_vol).abs() > 0.005 {
+        self.chat_volume = sys_vol;
+        self.last_applied_chat_vol = sys_vol;
+        changed = true;
+      }
+      if sys_muted != self.last_applied_chat_muted {
+        self.chat_muted = sys_muted;
+        self.last_applied_chat_muted = sys_muted;
+        changed = true;
       }
     }
 
     // 4. MEDIA: Sync with dedicated Media endpoint if present
-    if let Some(ref id) = self.media_device_id {
-      if let Some((sys_vol, sys_muted)) = get_endpoint_volume(id) {
-        if (sys_vol - self.last_applied_media_vol).abs() > 0.005 {
-          self.media_volume = sys_vol;
-          self.last_applied_media_vol = sys_vol;
-          changed = true;
-        }
-        if sys_muted != self.last_applied_media_muted {
-          self.media_muted = sys_muted;
-          self.last_applied_media_muted = sys_muted;
-          changed = true;
-        }
+    if let Some(ref id) = self.media_device_id
+      && let Some((sys_vol, sys_muted)) = get_endpoint_volume(id)
+    {
+      if (sys_vol - self.last_applied_media_vol).abs() > 0.005 {
+        self.media_volume = sys_vol;
+        self.last_applied_media_vol = sys_vol;
+        changed = true;
+      }
+      if sys_muted != self.last_applied_media_muted {
+        self.media_muted = sys_muted;
+        self.last_applied_media_muted = sys_muted;
+        changed = true;
       }
     }
 
@@ -548,11 +548,7 @@ impl ChatMixController {
   }
 
   pub fn get_media_volume(&self) -> f32 {
-    if self.media_muted || self.master_muted {
-      0.0
-    } else {
-      self.media_volume.clamp(0.0, 1.0)
-    }
+    if self.media_muted || self.master_muted { 0.0 } else { self.media_volume.clamp(0.0, 1.0) }
   }
 
   /// Apply calculated volumes to live Windows Audio System and Sessions
@@ -668,11 +664,11 @@ impl ChatMixController {
           }
           SessionAction::Set => {
             let current = session_vol.GetMasterVolume().unwrap_or(-1.0);
-            if (current - target).abs() > VOLUME_EPSILON {
-              if let Err(e) = session_vol.SetMasterVolume(target, std::ptr::null()) {
-                log::debug!("[ChatMix] SetMasterVolume failed: {e}");
-                continue;
-              }
+            if (current - target).abs() > VOLUME_EPSILON
+              && let Err(e) = session_vol.SetMasterVolume(target, std::ptr::null())
+            {
+              log::debug!("[ChatMix] SetMasterVolume failed: {e}");
+              continue;
             }
             seen.insert(key, target);
           }
@@ -691,30 +687,29 @@ impl ChatMixController {
         if let Ok(enumerator) = manager.GetSessionEnumerator() {
           let count = enumerator.GetCount().unwrap_or(0);
           for i in 0..count {
-            if let Ok(control) = enumerator.GetSession(i) {
-              if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
-                if let Ok(pid) = control2.GetProcessId() {
-                  if pid > 0 && !seen_pids.contains(&pid) {
-                    seen_pids.insert(pid);
-                    let exe_name = get_exe_name_from_pid(pid).unwrap_or_else(|| format!("PID: {}", pid));
-                    if is_own_exe(&exe_name) {
-                      continue;
-                    }
-                    let bus = self.classify_exe(&exe_name);
-                    let mut vol = 1.0;
-                    let mut muted = false;
-                    if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
-                      if let Ok(v) = vol_ctl.GetMasterVolume() {
-                        vol = v;
-                      }
-                      if let Ok(m) = vol_ctl.GetMute() {
-                        muted = m.as_bool();
-                      }
-                    }
-                    result.push(AudioSessionInfo { pid, exe_name, volume: vol, is_muted: muted, bus });
-                  }
+            if let Ok(control) = enumerator.GetSession(i)
+              && let Ok(control2) = control.cast::<IAudioSessionControl2>()
+              && let Ok(pid) = control2.GetProcessId()
+              && pid > 0
+              && !seen_pids.contains(&pid)
+            {
+              seen_pids.insert(pid);
+              let exe_name = get_exe_name_from_pid(pid).unwrap_or_else(|| format!("PID: {}", pid));
+              if is_own_exe(&exe_name) {
+                continue;
+              }
+              let bus = self.classify_exe(&exe_name);
+              let mut vol = 1.0;
+              let mut muted = false;
+              if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
+                if let Ok(v) = vol_ctl.GetMasterVolume() {
+                  vol = v;
+                }
+                if let Ok(m) = vol_ctl.GetMute() {
+                  muted = m.as_bool();
                 }
               }
+              result.push(AudioSessionInfo { pid, exe_name, volume: vol, is_muted: muted, bus });
             }
           }
         }
@@ -731,21 +726,19 @@ impl ChatMixController {
         if let Ok(enumerator) = manager.GetSessionEnumerator() {
           let count = enumerator.GetCount().unwrap_or(0);
           for i in 0..count {
-            if let Ok(control) = enumerator.GetSession(i) {
-              if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
-                if let Ok(pid) = control2.GetProcessId() {
-                  if pid > 0 {
-                    let exe_name = get_exe_name_from_pid(pid).unwrap_or_default();
-                    if is_own_exe(&exe_name) {
-                      continue;
-                    }
-                    let bus = self.classify_exe(&exe_name);
-                    let key = session_instance_id(&control2).unwrap_or_else(|| format!("pid:{pid}:{i}"));
-                    if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
-                      list.push((key, vol_ctl, bus));
-                    }
-                  }
-                }
+            if let Ok(control) = enumerator.GetSession(i)
+              && let Ok(control2) = control.cast::<IAudioSessionControl2>()
+              && let Ok(pid) = control2.GetProcessId()
+              && pid > 0
+            {
+              let exe_name = get_exe_name_from_pid(pid).unwrap_or_default();
+              if is_own_exe(&exe_name) {
+                continue;
+              }
+              let bus = self.classify_exe(&exe_name);
+              let key = session_instance_id(&control2).unwrap_or_else(|| format!("pid:{pid}:{i}"));
+              if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
+                list.push((key, vol_ctl, bus));
               }
             }
           }
@@ -905,12 +898,11 @@ pub fn get_system_master_volume() -> Option<(f32, bool)> {
 pub fn set_system_master_volume(level: f32) {
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-        if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null());
-        }
-      }
+    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+      && let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+      && let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+    {
+      let _ = endpoint_vol.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null());
     }
   }
 }
@@ -918,12 +910,11 @@ pub fn set_system_master_volume(level: f32) {
 pub fn set_system_master_mute(muted: bool) {
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-        if let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
-          let _ = endpoint_vol.SetMute(muted, std::ptr::null());
-        }
-      }
+    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+      && let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+      && let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+    {
+      let _ = endpoint_vol.SetMute(muted, std::ptr::null());
     }
   }
 }
@@ -969,16 +960,15 @@ unsafe fn get_all_session_managers() -> Vec<IAudioSessionManager2> {
   unsafe {
     let mut managers = Vec::new();
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
-        if let Ok(count) = collection.GetCount() {
-          for i in 0..count {
-            if let Ok(device) = collection.Item(i) {
-              if let Ok(mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                managers.push(mgr);
-              }
-            }
-          }
+    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+      && let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+      && let Ok(count) = collection.GetCount()
+    {
+      for i in 0..count {
+        if let Ok(device) = collection.Item(i)
+          && let Ok(mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)
+        {
+          managers.push(mgr);
         }
       }
     }
@@ -1034,7 +1024,7 @@ pub fn physical_endpoint_id(devices: &[AudioEndpointInfo], default_id: Option<&s
 #[cfg(test)]
 mod tests {
   use super::*;
-  use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+  use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
   #[test]
   fn session_volume_is_left_to_the_user_unless_our_target_moves() {

@@ -26,11 +26,11 @@ pub mod settings;
 pub mod share_text;
 
 use crate::sonar_importer::ProfileStorage;
-use crate::win_audio::game_detector::{is_process_running, GameForegroundEvent};
-use auto_preamp::{compute_combined_engine, CombinedEngineResult};
+use crate::win_audio::game_detector::{GameForegroundEvent, is_process_running};
+use auto_preamp::{CombinedEngineResult, compute_combined_engine};
 use game_match::{GameFacts, GameMatch};
 use gamersequalizer_common::biquad::{MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
-use gamersequalizer_common::profile::{expand_slopes, invert_bands, BiquadBand, ParametricProfile, VadType};
+use gamersequalizer_common::profile::{BiquadBand, ParametricProfile, VadType, expand_slopes, invert_bands};
 use gamersequalizer_common::shm::{ActiveGame, ShmHeader};
 use gamersequalizer_common::streams::StreamBus;
 use log::{info, warn};
@@ -322,10 +322,10 @@ impl OutputEq {
   }
 
   pub fn save_bus_profile(&mut self, bus: StreamBus, shm: Option<&ShmHeader>) {
-    if let Some(p) = self.bus_profile(bus).cloned() {
-      if let Err(e) = self.storage.save_profile(&p) {
-        warn!("[OutputEq] could not save {bus:?} profile {}: {e}", p.name);
-      }
+    if let Some(p) = self.bus_profile(bus).cloned()
+      && let Err(e) = self.storage.save_profile(&p)
+    {
+      warn!("[OutputEq] could not save {bus:?} profile {}: {e}", p.name);
     }
     self.notify(shm);
   }
@@ -421,19 +421,19 @@ impl OutputEq {
 
   /// Save the active headphone profile's edits (after a slider is released).
   pub fn save_headphone_profile(&mut self, shm: Option<&ShmHeader>) {
-    if let Some(p) = self.headphone_profile().cloned() {
-      if let Err(e) = self.save_headphone_to_disk(&p) {
-        warn!("[OutputEq] {e}");
-      }
+    if let Some(p) = self.headphone_profile().cloned()
+      && let Err(e) = self.save_headphone_to_disk(&p)
+    {
+      warn!("[OutputEq] {e}");
     }
     self.notify(shm);
   }
 
   pub fn save_game_profile(&mut self, shm: Option<&ShmHeader>) {
-    if let Some(p) = self.game_profile().cloned() {
-      if let Err(e) = self.storage.save_profile(&p) {
-        warn!("[OutputEq] could not save game profile {}: {e}", p.name);
-      }
+    if let Some(p) = self.game_profile().cloned()
+      && let Err(e) = self.storage.save_profile(&p)
+    {
+      warn!("[OutputEq] could not save game profile {}: {e}", p.name);
     }
     self.notify(shm);
   }
@@ -775,11 +775,7 @@ fn average_gain(result: &CombinedEngineResult) -> f32 {
     .zip(&c.gains_db)
     .filter(|(f, _)| (LOUDNESS_BAND_HZ.0..=LOUDNESS_BAND_HZ.1).contains(*f))
     .fold((0.0f32, 0usize), |(s, n), (_, g)| (s + g, n + 1));
-  if n == 0 {
-    0.0
-  } else {
-    sum / n as f32
-  }
+  if n == 0 { 0.0 } else { sum / n as f32 }
 }
 
 #[cfg(test)]

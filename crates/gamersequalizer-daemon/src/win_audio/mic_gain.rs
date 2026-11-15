@@ -6,7 +6,7 @@
 //! is left alone, wherever it is. Hysteresis comes from the step size: after +6 dB worth of
 //! volume the leveler needs ~6 dB less, far from the edge that triggered it.
 
-use super::chatmix::{get_endpoint_volume_db, ChatMixController};
+use super::chatmix::{ChatMixController, get_endpoint_volume_db};
 use gamersequalizer_common::shm::ShmHeader;
 use log::info;
 use std::sync::atomic::Ordering;
@@ -224,11 +224,7 @@ mod tests {
 
   /// Talks 3 ticks, pauses 1 (a pause every second).
   fn talking(n: u32) -> u32 {
-    if n % 4 == 3 {
-      0
-    } else {
-      250
-    }
+    if n % 4 == 3 { 0 } else { 250 }
   }
 
   #[test]
@@ -279,7 +275,7 @@ mod tests {
   #[test]
   fn a_weak_input_is_raised_after_20_s_of_speech_and_then_waits() {
     let steps = drive(400, 0.4, |n| (0, talking(n), 22.0)); // leveler near its +24 cap
-                                                            // 20 s of speech at 750 ms per second -> ~27 s, then one step every 30 s at most.
+    // 20 s of speech at 750 ms per second -> ~27 s, then one step every 30 s at most.
     assert!(steps.len() >= 2, "{steps:?}");
     assert!(steps[0].0 >= 100 && steps[0].0 <= 120, "{steps:?}");
     assert!(steps[1].0 - steps[0].0 >= 120, "cooldown: {steps:?}");
@@ -291,11 +287,7 @@ mod tests {
     // Clips at 0.88 for the first 10 s, then the leveler reads "weak" for 5 minutes.
     let steps = drive(1200, 0.88, |n| {
       let s = talking(n);
-      if n < 40 {
-        (if s > 0 { 30 } else { 0 }, s, 24.0)
-      } else {
-        (0, s, 24.0)
-      }
+      if n < 40 { (if s > 0 { 30 } else { 0 }, s, 24.0) } else { (0, s, 24.0) }
     });
     let (_, ceiling) = steps[0];
     assert!((ceiling - 0.73).abs() < 1e-6, "{steps:?}");

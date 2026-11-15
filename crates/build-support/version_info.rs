@@ -71,11 +71,7 @@ pub fn version(sources: &[&str]) -> String {
   let mut status = vec!["--no-optional-locks", "status", "--porcelain", "--untracked-files=no", "--"];
   status.extend(&watched);
   // shortcut: a failing `git status` reads as clean; it only fails on a broken checkout.
-  if git(&status).is_some() {
-    format!("{hash}-dirty")
-  } else {
-    hash
-  }
+  if git(&status).is_some() { format!("{hash}-dirty") } else { hash }
 }
 
 /// Short commit hash. Also tells cargo to rerun the build script when HEAD moves (commit,

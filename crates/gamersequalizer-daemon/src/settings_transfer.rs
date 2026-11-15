@@ -20,9 +20,9 @@
 
 use crate::output_eq::settings::write_atomic;
 use crate::win_audio::device_ids::{self, KnownDevices};
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use gamersequalizer_common::profile::ParametricProfile;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};

@@ -620,11 +620,7 @@ fn stepped(want: f32, current: f32) -> f32 {
 }
 
 fn finite(x: f32) -> f32 {
-  if x.is_finite() {
-    x
-  } else {
-    0.0
-  }
+  if x.is_finite() { x } else { 0.0 }
 }
 
 #[cfg(test)]

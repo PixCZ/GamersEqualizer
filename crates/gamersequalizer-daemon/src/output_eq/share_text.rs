@@ -5,7 +5,7 @@
 use super::autoeq::parse_parametric_eq;
 use crate::i18n::trf;
 use gamersequalizer_common::profile::{
-  collapse_slopes, expand_slopes, slots_used, BiquadBand, FilterType, ParametricProfile,
+  BiquadBand, FilterType, ParametricProfile, collapse_slopes, expand_slopes, slots_used,
 };
 
 pub const SHARE_HEADER: &str = "# GamersEqualizer EQ preset";

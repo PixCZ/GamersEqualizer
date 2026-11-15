@@ -1,15 +1,15 @@
 use super::state::AppState;
 use super::tab_mic::{ACCENT, EQ_COLOR};
-use super::theme::{self, icons, Severity};
+use super::theme::{self, Severity, icons};
 use crate::i18n::{tr, trf};
 use crate::win_audio::apo_install::ApoStatus;
-use crate::win_audio::sidetone::{self, Verdict, BEAT_FRESH};
+use crate::win_audio::sidetone::{self, BEAT_FRESH, Verdict};
 use crate::win_audio::{AudioEndpointInfo, WinAudioSystem};
 use egui::{RichText, Ui};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::sidetone::{
-  device_hash, NoiseMode, SidetonePair, SidetonePairs, GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX,
-  VOLUME_MAX,
+  GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX, NoiseMode, SidetonePair, SidetonePairs, VOLUME_MAX,
+  device_hash,
 };
 use gamersequalizer_mic_chain::sidetone_denoise::nominal_delay_ms;
 use std::sync::atomic::Ordering;
@@ -70,10 +70,10 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   let reader_running = state.sidetone_ui.last_reader_beat_time.is_some_and(|t| now.duration_since(t) < BEAT_FRESH);
   let writer_running = state.sidetone_ui.last_writer_beat_time.is_some_and(|t| now.duration_since(t) < BEAT_FRESH);
 
-  if state.sidetone_ui.testing {
-    if let Some(h) = state.shm_header() {
-      h.sidetone_test_beat.fetch_add(1, Ordering::Relaxed);
-    }
+  if state.sidetone_ui.testing
+    && let Some(h) = state.shm_header()
+  {
+    h.sidetone_test_beat.fetch_add(1, Ordering::Relaxed);
   }
 
   let mut pair = state.sidetone_ui.pair.clone().unwrap_or_default();
@@ -159,44 +159,42 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     });
 
     // Latency report when reader is active
-    if reader_running {
-      if let Some(h) = state.shm_header() {
-        let r = Ordering::Relaxed;
-        let age_us = h.sidetone_age_us.load(r);
-        let noise_delay_us = h.sidetone_noise_delay_us.load(r);
-        let out_rate = h.sidetone_out_rate.load(r).max(1);
-        let out_block_frames = h.sidetone_out_block_frames.load(r);
-        let out_block_us = (out_block_frames as u64 * 1_000_000 / out_rate as u64) as u32;
-        let latence_us = age_us.saturating_add(noise_delay_us).saturating_add(out_block_us);
-        let delay_ms = latence_us as f32 / 1000.0;
-        let p = theme::palette(ui);
-        let col = if delay_ms <= 10.0 {
-          p.ok
-        } else if delay_ms <= 20.0 {
-          p.warn
-        } else {
-          p.err
-        };
-        ui.add_space(8.0);
-        ui.label(
-          RichText::new(trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]))
-            .color(col)
-            .strong(),
-        );
-        let mic_rate = h.sidetone_mic_rate.load(r).max(1);
-        let mic_block_frames = h.sidetone_mic_block_frames.load(r);
-        let mic_period_ms = mic_block_frames as f32 * 1000.0 / mic_rate as f32;
-        let out_period_ms = out_block_frames as f32 * 1000.0 / out_rate as f32;
-        let underruns = h.sidetone_underruns.load(r);
-        ui.horizontal(|ui| {
-          ui.label(theme::caption(trf(
-            "Microphone {} ms, output {} ms",
-            &[&format!("{:.1}", mic_period_ms), &format!("{:.1}", out_period_ms)],
-          )));
-          ui.label(theme::caption("·"));
-          ui.label(theme::caption(trf("Dropouts: {}", &[&underruns.to_string()])));
-        });
-      }
+    if reader_running && let Some(h) = state.shm_header() {
+      let r = Ordering::Relaxed;
+      let age_us = h.sidetone_age_us.load(r);
+      let noise_delay_us = h.sidetone_noise_delay_us.load(r);
+      let out_rate = h.sidetone_out_rate.load(r).max(1);
+      let out_block_frames = h.sidetone_out_block_frames.load(r);
+      let out_block_us = (out_block_frames as u64 * 1_000_000 / out_rate as u64) as u32;
+      let latence_us = age_us.saturating_add(noise_delay_us).saturating_add(out_block_us);
+      let delay_ms = latence_us as f32 / 1000.0;
+      let p = theme::palette(ui);
+      let col = if delay_ms <= 10.0 {
+        p.ok
+      } else if delay_ms <= 20.0 {
+        p.warn
+      } else {
+        p.err
+      };
+      ui.add_space(8.0);
+      ui.label(
+        RichText::new(trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]))
+          .color(col)
+          .strong(),
+      );
+      let mic_rate = h.sidetone_mic_rate.load(r).max(1);
+      let mic_block_frames = h.sidetone_mic_block_frames.load(r);
+      let mic_period_ms = mic_block_frames as f32 * 1000.0 / mic_rate as f32;
+      let out_period_ms = out_block_frames as f32 * 1000.0 / out_rate as f32;
+      let underruns = h.sidetone_underruns.load(r);
+      ui.horizontal(|ui| {
+        ui.label(theme::caption(trf(
+          "Microphone {} ms, output {} ms",
+          &[&format!("{:.1}", mic_period_ms), &format!("{:.1}", out_period_ms)],
+        )));
+        ui.label(theme::caption("·"));
+        ui.label(theme::caption(trf("Dropouts: {}", &[&underruns.to_string()])));
+      });
     }
   });
 
@@ -248,10 +246,10 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
 
       ui.label(tr("Low latency"));
       ui.vertical(|ui| {
-        if theme::toggle_labeled(ui, low_lat, "") {
-          if let Some(h) = state.shm_header() {
-            h.sidetone_low_latency.store(!low_lat, Ordering::Relaxed);
-          }
+        if theme::toggle_labeled(ui, low_lat, "")
+          && let Some(h) = state.shm_header()
+        {
+          h.sidetone_low_latency.store(!low_lat, Ordering::Relaxed);
         }
         ui.label(theme::caption(tr("Asks Windows for its shortest audio period on both devices. Uses more CPU.")));
       });

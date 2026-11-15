@@ -7,20 +7,19 @@
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::RwLock;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use gamersequalizer_common::shm::ShmHeader;
-use gamersequalizer_common::sidetone::{device_hash, SidetonePairs};
+use gamersequalizer_common::sidetone::{SidetonePairs, device_hash};
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
-use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::Audio::{
-  IAudioCaptureClient, IAudioClient, IAudioClient3, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-  MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_ENGINE_PERIODICITY_LOCKED, AUDCLNT_SHAREMODE_SHARED,
-  WAVEFORMATEX,
+  AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_ENGINE_PERIODICITY_LOCKED, AUDCLNT_SHAREMODE_SHARED, IAudioCaptureClient,
+  IAudioClient, IAudioClient3, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+use windows::core::{Interface, PCWSTR};
 
 use super::loopback;
 use crate::output_eq::settings::write_atomic;

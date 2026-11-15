@@ -499,11 +499,7 @@ impl SidetoneRing {
   fn sample(&self, index: u32) -> f32 {
     let value =
       self.samples.get((index & RING_MASK) as usize).map_or(0.0, |s| f32::from_bits(s.load(Ordering::Relaxed)));
-    if value.is_finite() && value.abs() <= SAMPLE_MAX {
-      value
-    } else {
-      0.0
-    }
+    if value.is_finite() && value.abs() <= SAMPLE_MAX { value } else { 0.0 }
   }
 }
 
@@ -1343,10 +1339,11 @@ mod tests {
     while next_read < sim.seconds {
       if next_write <= next_read {
         let paused = sim.writer_pause.is_some_and(|(from, to)| next_write >= from && next_write < to);
-        if paused && sim.release_in_pause {
-          if let Some(owner) = owner.take() {
-            ring.release_writer(owner);
-          }
+        if paused
+          && sim.release_in_pause
+          && let Some(owner) = owner.take()
+        {
+          ring.release_writer(owner);
         }
         if !paused {
           let owner = *owner.get_or_insert_with(|| ring.claim_writer(OWNER_PID, 1).unwrap());

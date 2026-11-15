@@ -5,10 +5,10 @@ pub mod storage;
 pub mod winsqlite;
 
 pub use converter::convert_sonar_config;
-pub use reader::{SonarDbReader, DEFAULT_SONAR_DB_PATH};
-pub use storage::{ProfileStorage, DELETED_DIR};
+pub use reader::{DEFAULT_SONAR_DB_PATH, SonarDbReader};
+pub use storage::{DELETED_DIR, ProfileStorage};
 
-use crate::output_eq::settings::{write_atomic, OutputEqSettings, SETTINGS_FILE};
+use crate::output_eq::settings::{OutputEqSettings, SETTINGS_FILE, write_atomic};
 use gamersequalizer_common::profile::ParametricProfile;
 use log::{info, warn};
 use std::collections::BTreeSet;
@@ -38,11 +38,11 @@ pub fn import_sonar(profiles: &[ParametricProfile], storage: &ProfileStorage) ->
     let path = storage.get_vad_directory(profile.vad_type).join(file);
     if let Ok(old) = std::fs::read_to_string(&path) {
       // The same text `save_profile` writes: an untouched import is not moved.
-      if serde_json::to_string_pretty(profile).ok().as_deref() != Some(old.as_str()) {
-        if let Err(e) = storage.move_to_deleted(&path) {
-          warn!("[Sonar] kept {} (not replaced): {e}", path.display());
-          continue;
-        }
+      if serde_json::to_string_pretty(profile).ok().as_deref() != Some(old.as_str())
+        && let Err(e) = storage.move_to_deleted(&path)
+      {
+        warn!("[Sonar] kept {} (not replaced): {e}", path.display());
+        continue;
       }
     }
     match storage.save_profile(profile) {

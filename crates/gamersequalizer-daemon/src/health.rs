@@ -28,9 +28,9 @@ use crate::i18n::{tr, trf};
 use crate::mic_usage::{self, Silenced};
 use crate::output_eq::settings::write_atomic;
 use crate::win_audio::apo_install::{self, ApoStatus, Flow};
-use crate::win_audio::dolby_atmos::{active_format, spatial_status, SpatialAudioStatus, SpatialFormat};
-use crate::win_audio::{chatmix, console_owner, shell};
+use crate::win_audio::dolby_atmos::{SpatialAudioStatus, SpatialFormat, active_format, spatial_status};
 use crate::win_audio::{AudioEndpointInfo, WinAudioSystem};
+use crate::win_audio::{chatmix, console_owner, shell};
 use gamersequalizer_common::shm::ShmHeader;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -319,7 +319,9 @@ impl Issue {
       Issue::OutputProcessing { .. } => tr(
         "A new sound device? Your headphone correction and EQ are not applied on it. Open GamersEqualizer to set it up.",
       ),
-      Issue::MicSilenced { .. } => tr("Nobody hears you. Fix it from the GamersEqualizer icon in the notification area."),
+      Issue::MicSilenced { .. } => {
+        tr("Nobody hears you. Fix it from the GamersEqualizer icon in the notification area.")
+      }
       // Only what was seen: it processed nothing. Why is in the log ([ApoNote], [ApoLink]).
       Issue::NotRunning { flow: Flow::Capture, .. } => tr(
         "It is installed, but processed nothing while apps recorded: they get the raw microphone. The reason is in the app's log.",
@@ -516,14 +518,14 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
     }
   }
 
-  if let Some((status, bundled)) = &snap.apo {
-    if matches!(status, ApoStatus::NotInstalled | ApoStatus::Outdated | ApoStatus::NotOnThisMic) {
-      // Bundled build in the key: a new app version asks again.
-      let mic = snap.selected_mic.as_deref().or(snap.default_mic.as_deref()).unwrap_or("");
-      let key = format!("apo:{status:?}:{bundled}:{mic}");
-      if !memory.ignored.contains(&key) {
-        issues.push(Issue::MicProcessing { status: status.clone(), key });
-      }
+  if let Some((status, bundled)) = &snap.apo
+    && matches!(status, ApoStatus::NotInstalled | ApoStatus::Outdated | ApoStatus::NotOnThisMic)
+  {
+    // Bundled build in the key: a new app version asks again.
+    let mic = snap.selected_mic.as_deref().or(snap.default_mic.as_deref()).unwrap_or("");
+    let key = format!("apo:{status:?}:{bundled}:{mic}");
+    if !memory.ignored.contains(&key) {
+      issues.push(Issue::MicProcessing { status: status.clone(), key });
     }
   }
 
@@ -895,11 +897,7 @@ pub fn mic_silenced_issue(default_mic: Option<String>) -> Option<Issue> {
 pub fn join_apps(apps: &[String]) -> String {
   let shown: Vec<&str> = apps.iter().take(MAX_APPS_IN_TITLE).map(String::as_str).collect();
   let rest = apps.len().saturating_sub(MAX_APPS_IN_TITLE);
-  if rest > 0 {
-    format!("{} +{rest}", shown.join(", "))
-  } else {
-    shown.join(", ")
-  }
+  if rest > 0 { format!("{} +{rest}", shown.join(", ")) } else { shown.join(", ") }
 }
 
 fn name_of(devices: &[AudioEndpointInfo], id: &str) -> String {

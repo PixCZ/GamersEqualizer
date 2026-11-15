@@ -17,19 +17,19 @@ use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::APO_SHM_NAME;
 use gamersequalizer_common::streams::{
-  hold_match, pick_session, StreamBus, ENVELOPE_BLOCK_HNS, ENVELOPE_LEN, HOLD_PAD_AFTER, HOLD_PAD_BEFORE, SILENCE,
+  ENVELOPE_BLOCK_HNS, ENVELOPE_LEN, HOLD_PAD_AFTER, HOLD_PAD_BEFORE, SILENCE, StreamBus, hold_match, pick_session,
 };
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use log::{error, info};
-use windows::core::Interface;
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
 use windows::Win32::Media::Audio::{
-  eConsole, eRender, AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
-  MMDeviceEnumerator,
+  AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
+  eConsole, eRender,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::core::Interface;
 
 use super::app_channels::{self, AppChannel};
 use super::chatmix::get_exe_name_from_pid;
@@ -263,21 +263,21 @@ impl Router {
       if envelope.iter().any(|v| *v > SILENCE) {
         let matches: Vec<(&String, _)> =
           meters.iter().filter_map(|(key, meter)| hold_match(&envelope, meter).map(|m| (*key, m))).collect();
-        if let Some((key, m, runner_up)) = pick_session(&matches) {
-          if self.pairs.get(&owner) != Some(key) {
-            if let Some(s) = self.sessions.get(key) {
-              info!(
-                "[StreamRouter] stream #{} -> {} (pid {}, {:?}): {:.0} % match, runner-up {:.0} %",
-                owner as u32,
-                if s.exe.is_empty() { "system sounds" } else { &s.exe },
-                s.pid,
-                s.bus,
-                m.score * 100.0,
-                runner_up * 100.0
-              );
-            }
-            self.pairs.insert(owner, key.clone());
+        if let Some((key, m, runner_up)) = pick_session(&matches)
+          && self.pairs.get(&owner) != Some(key)
+        {
+          if let Some(s) = self.sessions.get(key) {
+            info!(
+              "[StreamRouter] stream #{} -> {} (pid {}, {:?}): {:.0} % match, runner-up {:.0} %",
+              owner as u32,
+              if s.exe.is_empty() { "system sounds" } else { &s.exe },
+              s.pid,
+              s.bus,
+              m.score * 100.0,
+              runner_up * 100.0
+            );
           }
+          self.pairs.insert(owner, key.clone());
         }
       }
       let bus = self.pairs.get(&owner).and_then(|k| self.sessions.get(k)).map_or(StreamBus::None, |s| s.bus);

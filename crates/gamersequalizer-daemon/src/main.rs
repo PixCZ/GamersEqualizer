@@ -33,11 +33,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ui::{AppState, GamersEqualizerApp};
 use win_audio::WinAudioSystem;
-use windows::core::w;
-use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoInitializeEx};
 use windows::Win32::System::Memory::UnmapViewOfFile;
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::core::w;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
@@ -625,12 +625,12 @@ pub(crate) fn daemon_running() -> bool {
 /// Also called periodically by the UI: the mutex disappears with the daemon process (crash,
 /// kill), unlike the `daemon_active` flag in shared memory, which a killed daemon leaves set.
 pub(crate) fn ensure_daemon_running() {
-  if !daemon_running() {
-    if let Ok(exe_path) = std::env::current_exe() {
-      info!("[GamersEqualizer] Spawning detached background daemon: {:?}", exe_path);
-      let _ = Command::new(&exe_path).arg("--daemon").creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn();
-      std::thread::sleep(Duration::from_millis(150));
-    }
+  if !daemon_running()
+    && let Ok(exe_path) = std::env::current_exe()
+  {
+    info!("[GamersEqualizer] Spawning detached background daemon: {:?}", exe_path);
+    let _ = Command::new(&exe_path).arg("--daemon").creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS).spawn();
+    std::thread::sleep(Duration::from_millis(150));
   }
 }
 

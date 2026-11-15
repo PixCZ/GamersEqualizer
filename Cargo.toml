@@ -9,6 +9,9 @@ members = [
 exclude = ["crates/vendor/deep_filter", "crates/vendor/rnnoise2", "crates/vendor/silero_vad"]
 resolver = "2"
 
+[workspace.package]
+edition = "2024"
+
 [workspace.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",

@@ -88,7 +88,9 @@ pub fn check_file(text: &str, file_name: &str) -> (Option<ParsedEq>, Vec<Check>)
   let lower = text.to_lowercase();
   let lower_name = file_name.to_lowercase();
   if lower.contains("graphiceq:") || lower_name.contains("graphiceq") {
-    let msg = tr("This is the GraphicEQ file (one long line of points). Download the ParametricEQ file instead: \"<model> ParametricEQ.txt\".");
+    let msg = tr(
+      "This is the GraphicEQ file (one long line of points). Download the ParametricEQ file instead: \"<model> ParametricEQ.txt\".",
+    );
     push(&mut checks, CheckLevel::Error, msg.to_string());
     return (None, checks);
   }

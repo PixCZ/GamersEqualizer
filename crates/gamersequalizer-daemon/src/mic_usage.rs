@@ -6,11 +6,11 @@
 //! Also: "an app records, but the microphone is muted / at 0 % / gone" (`silenced`), the
 //! classic "I talked for a minute and nobody heard me". The tray and the window warn about it.
 
-use windows::core::{HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_QWORD,
+  HKEY, HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_QWORD, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
 };
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 const MIC_STORE: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
 /// Desktop (non-Store) apps live one level deeper, one key per exe path with `\` written as `#`.
@@ -87,10 +87,10 @@ fn recording() -> Vec<(u64, String)> {
   type Scan = (Instant, Vec<(u64, String)>);
   static LAST: Mutex<Option<Scan>> = Mutex::new(None);
   let Ok(mut last) = LAST.lock() else { return scan_recording_apps() };
-  if let Some((at, apps)) = last.as_ref() {
-    if at.elapsed() < SCAN_MAX_AGE {
-      return apps.clone();
-    }
+  if let Some((at, apps)) = last.as_ref()
+    && at.elapsed() < SCAN_MAX_AGE
+  {
+    return apps.clone();
   }
   let apps = scan_recording_apps();
   *last = Some((Instant::now(), apps.clone()));

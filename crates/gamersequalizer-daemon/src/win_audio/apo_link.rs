@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use gamersequalizer_common::shm::{AecState, CopiedEqVersions, StereoFrame, APO_SHM_NAME};
+use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, CopiedEqVersions, StereoFrame};
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::aec_delay_cache;
@@ -303,12 +303,12 @@ impl ApoLink {
       return;
     }
     let delay = (delay_us as u64 * 48 / 1000) as usize;
-    if let Some(key) = self.cache_key.as_deref() {
-      if self.saved_delay.is_none_or(|s| s.abs_diff(delay) > DELAY_SAVE_MIN_CHANGE) {
-        info!("[ApoLink] saving echo delay {:.1} ms", delay as f32 / 48.0);
-        aec_delay_cache::save(&self.cache_path, key, delay);
-        self.saved_delay = Some(delay);
-      }
+    if let Some(key) = self.cache_key.as_deref()
+      && self.saved_delay.is_none_or(|s| s.abs_diff(delay) > DELAY_SAVE_MIN_CHANGE)
+    {
+      info!("[ApoLink] saving echo delay {:.1} ms", delay as f32 / 48.0);
+      aec_delay_cache::save(&self.cache_path, key, delay);
+      self.saved_delay = Some(delay);
     }
   }
 }

@@ -1,10 +1,10 @@
 use log::info;
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_READ,
-  KEY_WRITE, REG_SZ, REG_VALUE_TYPE,
+  HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegDeleteValueW, RegOpenKeyExW,
+  RegQueryValueExW, RegSetValueExW,
 };
+use windows::core::{PCWSTR, w};
 
 const RUN_KEY_SUBKEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
 const RUN_VALUE_NAME: PCWSTR = w!("GamersEqualizer");
@@ -78,9 +78,9 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
 /// Rewrites an enabled autostart entry, so it follows the app into its installed place
 /// (`autostart_exe`). No entry: nothing happens.
 pub fn repoint() {
-  if is_autostart_enabled() {
-    if let Err(e) = set_autostart(true) {
-      log::warn!("[GamersEqualizer] could not update the autostart entry: {e}");
-    }
+  if is_autostart_enabled()
+    && let Err(e) = set_autostart(true)
+  {
+    log::warn!("[GamersEqualizer] could not update the autostart entry: {e}");
   }
 }

@@ -170,14 +170,13 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     .on_hover_text(tr("Save a copy of this profile under a new name."))
     .on_disabled_hover_text(tr("Select a profile first."))
     .clicked()
+    && let Some(p) = active_profile(state, target).cloned()
   {
-    if let Some(p) = active_profile(state, target).cloned() {
-      let suggested = match target {
-        EqTarget::Mic => suggested_mic_name(state, true),
-        EqTarget::Output(_) => unique_name(state, target, &trf("{} (copy)", &[&tr(&p.name)])),
-      };
-      open_save_dialog(state, target, SaveMode::SaveAs, suggested, SaveDraft::of(&p));
-    }
+    let suggested = match target {
+      EqTarget::Mic => suggested_mic_name(state, true),
+      EqTarget::Output(_) => unique_name(state, target, &trf("{} (copy)", &[&tr(&p.name)])),
+    };
+    open_save_dialog(state, target, SaveMode::SaveAs, suggested, SaveDraft::of(&p));
   }
 
   if target == EqTarget::Mic
@@ -187,11 +186,10 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
       .button(format!("↺  {}", tr("Reset")))
       .on_hover_text(tr("Throw away the changes, back to the preset."))
       .clicked()
+    && let Some(p) = mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name)
   {
-    if let Some(p) = mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name) {
-      let p = p.profile.clone();
-      state.use_mic_profile(p);
-    }
+    let p = p.profile.clone();
+    state.use_mic_profile(p);
   }
 
   let (can_delete, delete_disabled_hint) = match target {
@@ -203,13 +201,12 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     .on_hover_text(tr("Delete this profile"))
     .on_disabled_hover_text(delete_disabled_hint)
     .clicked()
+    && let Some(name) = active_profile(state, target).map(|p| p.name.clone())
   {
-    if let Some(name) = active_profile(state, target).map(|p| p.name.clone()) {
-      let sonar_hint =
-        matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && super::setup::sonar_profiles(state) > 0;
-      state.profile_bar.dialog = Some((target, Dialog::Delete { name, sonar_hint }));
-      state.profile_bar.notice = None;
-    }
+    let sonar_hint =
+      matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && super::setup::sonar_profiles(state) > 0;
+    state.profile_bar.dialog = Some((target, Dialog::Delete { name, sonar_hint }));
+    state.profile_bar.notice = None;
   }
 
   ui.add_space(12.0);
@@ -219,15 +216,14 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     .on_hover_text(tr("Copies the EQ as text: paste it into a chat or pastebin.com. Works in Equalizer APO too."))
     .on_disabled_hover_text(tr("Select a profile first."))
     .clicked()
+    && let Some(text) = active_profile(state, target).map(share_text::to_share_text)
   {
-    if let Some(text) = active_profile(state, target).map(share_text::to_share_text) {
-      ui.ctx().copy_text(text);
-      state.profile_bar.notice = Some((
-        target,
-        true,
-        tr("Copied. Paste it anywhere (chat, pastebin.com); the other side uses \"Import…\".").to_string(),
-      ));
-    }
+    ui.ctx().copy_text(text);
+    state.profile_bar.notice = Some((
+      target,
+      true,
+      tr("Copied. Paste it anywhere (chat, pastebin.com); the other side uses \"Import…\".").to_string(),
+    ));
   }
 
   if ui
@@ -242,10 +238,10 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
 }
 
 fn render_notice_and_dialogs(ui: &mut Ui, state: &mut AppState, target: EqTarget) {
-  if let Some((notice_target, ok, msg)) = state.profile_bar.notice.clone() {
-    if notice_target == target {
-      theme::status_line(ui, if ok { Severity::Success } else { Severity::Error }, &msg);
-    }
+  if let Some((notice_target, ok, msg)) = state.profile_bar.notice.clone()
+    && notice_target == target
+  {
+    theme::status_line(ui, if ok { Severity::Success } else { Severity::Error }, &msg);
   }
 
   let Some((dlg_target, dlg)) = state.profile_bar.dialog.take() else {
@@ -349,11 +345,11 @@ fn save_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget, mode
         commit_save(state, target, mode, &name, draft.clone());
         keep_open = false;
       }
-      if let Some(p) = draft.switch_to.as_ref() {
-        if ui.button(tr("Switch without saving")).clicked() {
-          state.use_mic_profile(p.clone());
-          keep_open = false;
-        }
+      if let Some(p) = draft.switch_to.as_ref()
+        && ui.button(tr("Switch without saving")).clicked()
+      {
+        state.use_mic_profile(p.clone());
+        keep_open = false;
       }
       if ui.button(tr("Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         keep_open = false;
@@ -433,13 +429,13 @@ fn import_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
       let ok = parsed.as_ref().ok();
-      if ui.add_enabled(ok.is_some(), theme::accent_button(ui, tr("Import"))).clicked() {
-        if let Some(p) = ok {
-          let suggested = unique_name(state, target, p.name.as_deref().unwrap_or(tr("Imported")));
-          open_save_dialog(state, target, SaveMode::Import, suggested, SaveDraft::flat(p.bands.clone()));
-          keep_open = false;
-          return;
-        }
+      if ui.add_enabled(ok.is_some(), theme::accent_button(ui, tr("Import"))).clicked()
+        && let Some(p) = ok
+      {
+        let suggested = unique_name(state, target, p.name.as_deref().unwrap_or(tr("Imported")));
+        open_save_dialog(state, target, SaveMode::Import, suggested, SaveDraft::flat(p.bands.clone()));
+        keep_open = false;
+        return;
       }
       if ui.button(tr("Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         keep_open = false;

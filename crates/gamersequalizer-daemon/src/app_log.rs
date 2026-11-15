@@ -82,9 +82,11 @@ pub fn init(process: &'static str) {
     orig_hook(info);
   }));
   // The other process may switch it: follow the marker file.
-  let spawned = std::thread::Builder::new().name("log-debug-marker".into()).spawn(|| loop {
-    std::thread::sleep(DEBUG_MARKER_CHECK);
-    DEBUG_TO_DISK.store(debug_marker().exists(), Ordering::Relaxed);
+  let spawned = std::thread::Builder::new().name("log-debug-marker".into()).spawn(|| {
+    loop {
+      std::thread::sleep(DEBUG_MARKER_CHECK);
+      DEBUG_TO_DISK.store(debug_marker().exists(), Ordering::Relaxed);
+    }
   });
   if let Err(e) = spawned {
     log::warn!("[Log] could not watch the debug setting ({e}): it applies from the next start");
@@ -137,10 +139,10 @@ impl Write for TeeWriter {
   fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
     // Dev builds only have a console; failures to write it are irrelevant.
     let _ = io::stderr().write_all(buf);
-    if let Some(f) = self.file.as_mut() {
-      if f.write_all(buf).is_err() {
-        self.file = None; // disk gone / full: keep running, stderr only
-      }
+    if let Some(f) = self.file.as_mut()
+      && f.write_all(buf).is_err()
+    {
+      self.file = None; // disk gone / full: keep running, stderr only
     }
     Ok(buf.len())
   }

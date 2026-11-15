@@ -119,10 +119,10 @@ impl DpdfEngine {
     let onnx = tract_onnx_23::onnx();
     let proto = onnx.proto_model_for_read(&mut Cursor::new(MODEL_ONNX))?;
     let meta = |key: &str| proto.metadata_props.iter().find(|p| p.key == key).map(|p| p.value.as_str());
-    if let Some(sr) = meta("sample_rate") {
-      if sr != "48000" {
-        bail!("unexpected model sample rate {sr}");
-      }
+    if let Some(sr) = meta("sample_rate")
+      && sr != "48000"
+    {
+      bail!("unexpected model sample rate {sr}");
     }
     let floats = |key: &str| -> TractResult<Vec<f32>> {
       meta(key)

@@ -3,7 +3,7 @@
 //! a row of filter chips, and the settings of the selected filter below.
 
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
-use gamersequalizer_common::profile::{slots_used, BiquadBand, FilterType, SLOPES_DB};
+use gamersequalizer_common::profile::{BiquadBand, FilterType, SLOPES_DB, slots_used};
 
 use super::eq_editor::Curve;
 use super::theme;
@@ -113,34 +113,36 @@ fn graph(
     }
   }
   let dragging: Option<usize> = ui.data(|d| d.get_temp::<Option<usize>>(drag_id)).flatten();
-  if let (true, Some(i), Some(p)) = (resp.dragged(), dragging, resp.interact_pointer_pos()) {
-    if let Some(band) = bands.get_mut(i) {
-      band.frequency = axes.freq_at(p.x).round().clamp(F_MIN, F_MAX);
-      if band.filter_type.uses_gain() {
-        band.gain_db = ((axes.db_at(p.y) * 2.0).round() / 2.0).clamp(-axes.range_db, axes.range_db);
-      }
-      changed = true;
+  if let (true, Some(i), Some(p)) = (resp.dragged(), dragging, resp.interact_pointer_pos())
+    && let Some(band) = bands.get_mut(i)
+  {
+    band.frequency = axes.freq_at(p.x).round().clamp(F_MIN, F_MAX);
+    if band.filter_type.uses_gain() {
+      band.gain_db = ((axes.db_at(p.y) * 2.0).round() / 2.0).clamp(-axes.range_db, axes.range_db);
     }
+    changed = true;
   }
   if resp.drag_stopped() {
     ui.data_mut(|d| d.insert_temp::<Option<usize>>(drag_id, None));
   }
-  if resp.clicked() {
-    if let Some(i) = hovered {
-      *selected = Some(i);
-    }
+  if resp.clicked()
+    && let Some(i) = hovered
+  {
+    *selected = Some(i);
   }
-  if resp.double_clicked() && hovered.is_none() && slots_used(bands) < max_slots {
-    if let Some(p) = resp.interact_pointer_pos() {
-      bands.push(BiquadBand {
-        frequency: axes.freq_at(p.x).round().clamp(F_MIN, F_MAX),
-        gain_db: ((axes.db_at(p.y) * 2.0).round() / 2.0).clamp(-12.0, 12.0),
-        q: 1.0,
-        ..BiquadBand::default()
-      });
-      *selected = Some(bands.len() - 1);
-      changed = true;
-    }
+  if resp.double_clicked()
+    && hovered.is_none()
+    && slots_used(bands) < max_slots
+    && let Some(p) = resp.interact_pointer_pos()
+  {
+    bands.push(BiquadBand {
+      frequency: axes.freq_at(p.x).round().clamp(F_MIN, F_MAX),
+      gain_db: ((axes.db_at(p.y) * 2.0).round() / 2.0).clamp(-12.0, 12.0),
+      q: 1.0,
+      ..BiquadBand::default()
+    });
+    *selected = Some(bands.len() - 1);
+    changed = true;
   }
   if let Some(i) = hovered.filter(|_| resp.hovered()) {
     ui.ctx().set_cursor_icon(if dragging.is_some() { CursorIcon::Grabbing } else { CursorIcon::Grab });

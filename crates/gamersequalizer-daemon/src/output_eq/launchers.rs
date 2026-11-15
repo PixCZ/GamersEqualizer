@@ -4,13 +4,13 @@
 
 use super::game_match::GameFacts;
 use std::path::{Path, PathBuf};
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
-  RRF_RT_REG_SZ,
+  HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ, RegCloseKey, RegEnumKeyExW, RegGetValueW,
+  RegOpenKeyExW,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 const EPIC_MANIFESTS: &str = r"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests";
 const GOG_GAMES_KEY: &str = r"SOFTWARE\WOW6432Node\GOG.com\Games";
@@ -218,10 +218,10 @@ fn microsoft_store(path: &Path, facts: &mut GameFacts) {
     };
     if c.eq_ignore_ascii_case("WindowsApps") {
       let parts: Vec<&str> = next.split('_').collect();
-      if let (Some(name), Some(publisher)) = (parts.first(), parts.last()) {
-        if parts.len() >= 5 {
-          facts.launcher_ids.push(format!("10_{name}_{publisher}").to_uppercase());
-        }
+      if let (Some(name), Some(publisher)) = (parts.first(), parts.last())
+        && parts.len() >= 5
+      {
+        facts.launcher_ids.push(format!("10_{name}_{publisher}").to_uppercase());
       }
       return;
     }

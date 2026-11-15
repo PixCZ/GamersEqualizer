@@ -10,14 +10,14 @@
 //! Known limit: no click handling (that needs a COM activator); the tray menu has the fixes.
 
 use log::{info, warn};
-use windows::core::{w, HSTRING, PCWSTR};
 use windows::Data::Xml::Dom::XmlDocument;
+use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-  REG_OPTION_NON_VOLATILE, REG_SZ,
+  HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+  RegSetValueExW,
 };
-use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+use windows::core::{HSTRING, PCWSTR, w};
 
 const AUMID: &str = "GamersEqualizer";
 const AUMID_KEY: PCWSTR = w!(r"Software\Classes\AppUserModelId\GamersEqualizer");

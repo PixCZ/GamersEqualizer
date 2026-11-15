@@ -12,10 +12,10 @@ use gamersequalizer_common::shm::SHM_NAME;
 use gamersequalizer_common::sidetone::device_hash;
 use gamersequalizer_mic_chain::SharedMemoryClient;
 use windows::Win32::Media::Audio::{
-  eCapture, eConsole, eRender, EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator,
-  MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+  AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, EDataFlow, IAudioCaptureClient, IAudioClient,
+  IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 
 fn main() -> windows::core::Result<()> {
   let arg = |n: usize| std::env::args().nth(n);

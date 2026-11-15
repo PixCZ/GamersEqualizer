@@ -6,16 +6,16 @@
 
 use super::eq_editor::{band_editor, response_plot};
 use super::state::{AppState, OutputLayer};
-use super::theme::{self, icons, Severity};
+use super::theme::{self, Severity, icons};
 use crate::i18n::{tr, trf};
 use crate::output_eq::autoeq::{self, AutoEqEntry, Check, CheckLevel, DownloadsScan, ParsedEq};
 use crate::win_audio::apo_install::{self, ApoStatus, Flow};
-use crate::win_audio::{shell, WinAudioSystem};
+use crate::win_audio::{WinAudioSystem, shell};
 use egui::{Color32, RichText, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::profile::{ParametricProfile, VadType};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 const AUTOEQ_REPO_URL: &str = "https://github.com/jaakkopasanen/AutoEq";
@@ -251,10 +251,10 @@ fn step_choose(ui: &mut Ui, state: &mut AppState) {
   ) {
     go(state, Step::ZipDownload);
   }
-  if ui.button(tr("C)  I already have a ParametricEQ.txt file...")).clicked() {
-    if let Some(path) = shell::pick_text_file(tr("AutoEQ / Equalizer APO parametric EQ")) {
-      review_file(state, &path, None, Step::Choose);
-    }
+  if ui.button(tr("C)  I already have a ParametricEQ.txt file...")).clicked()
+    && let Some(path) = shell::pick_text_file(tr("AutoEQ / Equalizer APO parametric EQ"))
+  {
+    review_file(state, &path, None, Step::Choose);
   }
   ui.add_space(4.0);
   egui::CollapsingHeader::new(tr("D)  Paste the text instead")).show(ui, |ui| paste_box(ui, state));
@@ -306,10 +306,10 @@ fn step_web_find(ui: &mut Ui, state: &mut AppState) {
       &trf("\"{}\" is a different variant. On autoeq.app choose a Parametric EQ app and download again.", &[&name]),
     );
   }
-  if ui.button(format!("📂  {}", tr("Pick the file myself..."))).clicked() {
-    if let Some(path) = shell::pick_text_file(tr("AutoEQ / Equalizer APO parametric EQ")) {
-      review_file(state, &path, None, Step::WebFind);
-    }
+  if ui.button(format!("📂  {}", tr("Pick the file myself..."))).clicked()
+    && let Some(path) = shell::pick_text_file(tr("AutoEQ / Equalizer APO parametric EQ"))
+  {
+    review_file(state, &path, None, Step::WebFind);
   }
   nav(ui, state, Step::WebDownload, None);
 }
@@ -346,10 +346,10 @@ fn step_zip_download(ui: &mut Ui, state: &mut AppState) {
       });
     }
   }
-  if let Some(dir) = found {
-    if state.headphones_ui.folder_text.is_empty() {
-      state.headphones_ui.folder_text = dir.display().to_string();
-    }
+  if let Some(dir) = found
+    && state.headphones_ui.folder_text.is_empty()
+  {
+    state.headphones_ui.folder_text = dir.display().to_string();
   }
   nav(ui, state, Step::Choose, Some((tr("Next: index it"), Step::ZipFolder)));
 }
@@ -458,18 +458,16 @@ fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     let label = trf("💾  Save and use on {}", &[&super::truncate_chars(device_name, 28)]);
     save = ui.add_enabled(usable && !candidate.name.trim().is_empty(), theme::accent_button(ui, &label)).clicked();
   });
-  if save {
-    if let Some(parsed) = candidate.parsed.clone() {
-      let name = candidate.name.trim().to_string();
-      let mut profile = ParametricProfile::new(name.clone(), VadType::Media);
-      profile.bands = parsed.bands;
-      profile.preamp_db = parsed.preamp_db;
-      profile.is_custom = false;
-      state.output_eq_do(|eq, shm| eq.add_headphone_profile(profile, shm));
-      state.headphones_ui.saved_name = Some(name);
-      go(state, Step::Done);
-      return;
-    }
+  if save && let Some(parsed) = candidate.parsed.clone() {
+    let name = candidate.name.trim().to_string();
+    let mut profile = ParametricProfile::new(name.clone(), VadType::Media);
+    profile.bands = parsed.bands;
+    profile.preamp_db = parsed.preamp_db;
+    profile.is_custom = false;
+    state.output_eq_do(|eq, shm| eq.add_headphone_profile(profile, shm));
+    state.headphones_ui.saved_name = Some(name);
+    go(state, Step::Done);
+    return;
   }
   state.headphones_ui.candidate = Some(candidate);
 }
@@ -528,10 +526,10 @@ fn nav(ui: &mut Ui, state: &mut AppState, back: Step, next: Option<(&str, Step)>
     if ui.button(format!("◀  {}", tr("Back"))).clicked() {
       go(state, back);
     }
-    if let Some((label, step)) = next {
-      if ui.add(theme::accent_button(ui, &format!("{label}  ▶"))).clicked() {
-        go(state, step);
-      }
+    if let Some((label, step)) = next
+      && ui.add(theme::accent_button(ui, &format!("{label}  ▶"))).clicked()
+    {
+      go(state, step);
     }
   });
 }
@@ -616,11 +614,7 @@ fn device_query(device_name: &str) -> String {
   let inner = device_name.split_once('(').map_or(device_name, |(_, rest)| rest.trim_end_matches(')'));
   let generic = ["realtek", "high definition", "audio", "speakers", "headphones", "nvidia", "amd", "usb"];
   let lower = inner.to_lowercase();
-  if generic.iter().any(|g| lower.contains(g)) {
-    String::new()
-  } else {
-    inner.trim().to_string()
-  }
+  if generic.iter().any(|g| lower.contains(g)) { String::new() } else { inner.trim().to_string() }
 }
 
 fn start_scan(ui_state: &mut HeadphonesUi, dir: PathBuf) {

@@ -1,5 +1,5 @@
 use super::state::{AecTelemetry, AppState, DenoiseStatus};
-use super::theme::{self, icons, Severity};
+use super::theme::{self, Severity, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::WinAudioSystem;
 use egui::{Color32, RichText, Stroke, Ui};

@@ -1,7 +1,7 @@
 use crate::aec3::{EchoCanceller3, PRE_DELAY_SAMPLES};
 use crate::ai_denoiser::{AiVoiceIsolator, DenoiseDebug};
 use crate::clip_detector::ClipDetector;
-use crate::delay_estimator::{DelayEstimator, LockChange, WindowOutcome, FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
+use crate::delay_estimator::{DelayEstimator, FULL_SCALE_PEAK_RATIO, LockChange, MIN_PEAK_RATIO, WindowOutcome};
 use crate::latency_meter::LatencyMeter;
 use crate::shared_memory::SharedMemoryClient;
 use crate::voice_leveler::VoiceLeveler;
@@ -9,9 +9,9 @@ use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
-  AecState, DenoiseModel, ShmHeader, ShmLayout, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
-  MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS, MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
-  NOISE_GATE_AUTO_LOOKAHEAD,
+  AEC_IMPULSE_POINTS, AecState, DenoiseModel, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED, MIC_CHAIN_LOOKAHEAD,
+  MIC_CHAIN_OTHERS, MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
+  NOISE_GATE_AUTO_LOOKAHEAD, ShmHeader, ShmLayout,
 };
 use std::sync::atomic::Ordering;
 
@@ -598,11 +598,7 @@ impl MicChain {
     aec.process_block_stereo(left, right, mic);
     *aec_idle = false;
 
-    if stale || *ref_rms < REF_SILENT_RMS {
-      AecState::ReferenceSilent
-    } else {
-      AecState::Locked
-    }
+    if stale || *ref_rms < REF_SILENT_RMS { AecState::ReferenceSilent } else { AecState::Locked }
   }
 
   fn publish_telemetry(&self) {
@@ -675,11 +671,7 @@ impl MicChain {
     // 0 = no echo strength yet: a measured one is negative (-0.1 dB at most), a bound positive.
     let echo_x10 = self.aec.echo_strength_db().map_or(0, |(db, bound)| {
       let x10 = ((db * 10.0).round() as i32).clamp(-1200, -1);
-      if bound {
-        -x10
-      } else {
-        x10
-      }
+      if bound { -x10 } else { x10 }
     });
     h.aec_echo_db_x10.store(echo_x10, Ordering::Relaxed);
     h.aec_fallback_echo_db_x10.store((self.aec.fallback_echo_db() * 10.0).round() as i32, Ordering::Relaxed);
@@ -894,11 +886,7 @@ impl DspLoad {
   }
 
   fn average(&self) -> f32 {
-    if self.blocks == 0 {
-      0.0
-    } else {
-      self.sum / self.blocks as f32
-    }
+    if self.blocks == 0 { 0.0 } else { self.sum / self.blocks as f32 }
   }
 
   /// True when the heavy model should give way (only counted while one runs).
@@ -955,11 +943,7 @@ fn pre_high_pass() -> BiquadCascade {
 
 /// Delay the echo canceller adds right now (0 while it doesn't run, idle or switched off).
 fn aec_latency_samples(aec_idle: bool, aec_state: AecState, aec: &EchoCanceller3) -> usize {
-  if !aec_idle && aec_state != AecState::Disabled {
-    aec.latency_samples()
-  } else {
-    0
-  }
+  if !aec_idle && aec_state != AecState::Disabled { aec.latency_samples() } else { 0 }
 }
 
 #[cfg(test)]

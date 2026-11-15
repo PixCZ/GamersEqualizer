@@ -10,9 +10,9 @@ use crate::output_eq::autoeq::downloads_dir;
 use egui::{Color32, RichText, Ui};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use windows::core::{w, PCWSTR};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{PCWSTR, w};
 
 const REFRESH: Duration = Duration::from_secs(1);
 /// ~2000 typical lines; older entries stay in the file.
@@ -112,7 +112,9 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     icons::LOG,
     Color32::from_rgb(150, 150, 150),
     tr("Log"),
-    Some(tr("What the app and the background service detected and did: game detection, profile changes, microphone processing, CPU overload.")),
+    Some(tr(
+      "What the app and the background service detected and did: game detection, profile changes, microphone processing, CPU overload.",
+    )),
   );
   let mut filters_changed = false;
   ui.horizontal_wrapped(|ui| {
@@ -262,11 +264,11 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   // Ctrl+C needs nothing here: the text field emits `CopyText`, which `app.rs` forwards.
   // Clipboard failures are logged inside `set_clipboard_text`.
   out.inner.response.context_menu(|ui| {
-    if let Some(range) = view.selection {
-      if ui.button(tr("Copy selection")).clicked() {
-        let _ = crate::win_clipboard::set_clipboard_text(range.slice_str(&view.buffer));
-        ui.close();
-      }
+    if let Some(range) = view.selection
+      && ui.button(tr("Copy selection")).clicked()
+    {
+      let _ = crate::win_clipboard::set_clipboard_text(range.slice_str(&view.buffer));
+      ui.close();
     }
     if ui.button(tr("Copy all")).clicked() {
       let _ = crate::win_clipboard::set_clipboard_text(&view.buffer);

@@ -3,13 +3,13 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use windows::core::{implement, PCWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
-  eCapture, eConsole, eRender, EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
-  IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATE_ACTIVE,
+  DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
+  IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, STGM_READ};
+use windows::core::{PCWSTR, implement};
 
 use super::policy_config::IPolicyConfig;
 
@@ -82,11 +82,7 @@ impl IMMNotificationClient_Impl for EndpointNotificationHandler_Impl {
     }
 
     let current_id = unsafe {
-      if pwstrdefaultdeviceid.is_null() {
-        String::new()
-      } else {
-        pwstrdefaultdeviceid.to_string().unwrap_or_default()
-      }
+      if pwstrdefaultdeviceid.is_null() { String::new() } else { pwstrdefaultdeviceid.to_string().unwrap_or_default() }
     };
 
     if !current_id.is_empty() {
@@ -238,14 +234,14 @@ impl EndpointLockManager {
     let mut list = Vec::new();
     unsafe {
       let default_id = self.get_default_capture_id().unwrap_or_default();
-      if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) {
-        if let Ok(count) = collection.GetCount() {
-          for i in 0..count {
-            if let Ok(dev) = collection.Item(i) {
-              if let Ok(info) = get_endpoint_info(&dev, &default_id) {
-                list.push(info);
-              }
-            }
+      if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
+        && let Ok(count) = collection.GetCount()
+      {
+        for i in 0..count {
+          if let Ok(dev) = collection.Item(i)
+            && let Ok(info) = get_endpoint_info(&dev, &default_id)
+          {
+            list.push(info);
           }
         }
       }
@@ -255,12 +251,12 @@ impl EndpointLockManager {
 
   pub fn get_default_capture_id(&self) -> Option<String> {
     unsafe {
-      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
-        if let Ok(pwstr) = device.GetId() {
-          let s = pwstr.to_string().ok();
-          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-          return s;
-        }
+      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
+        && let Ok(pwstr) = device.GetId()
+      {
+        let s = pwstr.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+        return s;
       }
       None
     }
@@ -271,14 +267,14 @@ impl EndpointLockManager {
     let mut list = Vec::new();
     unsafe {
       let default_id = self.get_default_output_id().unwrap_or_default();
-      if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
-        if let Ok(count) = collection.GetCount() {
-          for i in 0..count {
-            if let Ok(dev) = collection.Item(i) {
-              if let Ok(info) = get_endpoint_info(&dev, &default_id) {
-                list.push(info);
-              }
-            }
+      if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+        && let Ok(count) = collection.GetCount()
+      {
+        for i in 0..count {
+          if let Ok(dev) = collection.Item(i)
+            && let Ok(info) = get_endpoint_info(&dev, &default_id)
+          {
+            list.push(info);
           }
         }
       }
@@ -288,12 +284,12 @@ impl EndpointLockManager {
 
   pub fn get_default_output_id(&self) -> Option<String> {
     unsafe {
-      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-        if let Ok(pwstr) = device.GetId() {
-          let s = pwstr.to_string().ok();
-          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-          return s;
-        }
+      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+        && let Ok(pwstr) = device.GetId()
+      {
+        let s = pwstr.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+        return s;
       }
       None
     }
@@ -302,12 +298,12 @@ impl EndpointLockManager {
   pub fn get_default_communications_id(&self) -> Option<String> {
     unsafe {
       use windows::Win32::Media::Audio::eCommunications;
-      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eCommunications) {
-        if let Ok(pwstr) = device.GetId() {
-          let s = pwstr.to_string().ok();
-          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-          return s;
-        }
+      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
+        && let Ok(pwstr) = device.GetId()
+      {
+        let s = pwstr.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+        return s;
       }
       None
     }
@@ -362,15 +358,14 @@ pub(crate) unsafe fn get_endpoint_info(
     windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
 
     let mut name = "Unknown Device".to_string();
-    if let Ok(props) = device.OpenPropertyStore(STGM_READ) {
-      if let Ok(val) = props.GetValue(&PKEY_DEVICE_FRIENDLY_NAME) {
-        if let Ok(pwstr_name) = windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&val) {
-          if let Ok(s) = pwstr_name.to_string() {
-            name = s;
-          }
-          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr_name.as_ptr() as *const _));
-        }
+    if let Ok(props) = device.OpenPropertyStore(STGM_READ)
+      && let Ok(val) = props.GetValue(&PKEY_DEVICE_FRIENDLY_NAME)
+      && let Ok(pwstr_name) = windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&val)
+    {
+      if let Ok(s) = pwstr_name.to_string() {
+        name = s;
       }
+      windows::Win32::System::Com::CoTaskMemFree(Some(pwstr_name.as_ptr() as *const _));
     }
 
     let is_default = id == default_id;

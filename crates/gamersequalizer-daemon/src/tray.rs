@@ -10,13 +10,13 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, PeekMessageW, PostMessageW, SetForegroundWindow,
-  ShowWindow, TranslateMessage, MSG, PM_REMOVE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE,
+  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, MSG, PM_REMOVE, PeekMessageW, PostMessageW, SW_RESTORE,
+  SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, TranslateMessage, WM_CLOSE,
 };
+use windows::core::{HSTRING, PCWSTR, w};
 
 /// Title of the main window; also how the service finds it (focus, close on exit).
 pub const WINDOW_TITLE: &str = "GamersEqualizer - Audio Control Center";

@@ -360,11 +360,7 @@ fn sample_outer_channel_fma(
 
 #[inline(always)]
 fn mul_add_f64<const FMA: bool>(a: f64, b: f64, c: f64) -> f64 {
-  if FMA {
-    a.mul_add(b, c)
-  } else {
-    a * b + c
-  }
+  if FMA { a.mul_add(b, c) } else { a * b + c }
 }
 
 #[inline(always)]

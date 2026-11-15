@@ -48,38 +48,38 @@ mod rate_bridge;
 use event_log::Level;
 use std::ffi::c_void;
 use std::mem::{offset_of, size_of};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{addr_of, addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use gamersequalizer_common::biquad::BiquadCascade;
-use gamersequalizer_common::limiter::{soft_limit, PeakLimiter};
-use gamersequalizer_common::shm::{OwnerWatch, ShmHeader, ShmLayout, APO_SHM_NAME, REF_SAMPLE_RATE};
-use gamersequalizer_common::sidetone::{device_hash, NoiseMode, SidetoneChain, SidetoneReader};
+use gamersequalizer_common::limiter::{PeakLimiter, soft_limit};
+use gamersequalizer_common::shm::{APO_SHM_NAME, OwnerWatch, REF_SAMPLE_RATE, ShmHeader, ShmLayout};
+use gamersequalizer_common::sidetone::{NoiseMode, SidetoneChain, SidetoneReader, device_hash};
 use gamersequalizer_common::streams::{StreamBus, StreamInfo};
 use gamersequalizer_mic_chain::sidetone_denoise::{self, SidetoneDenoiser};
 use gamersequalizer_mic_chain::{MicChain, SharedMemoryClient};
 use rate_bridge::RateBridge;
-use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, BOOL, GUID, HRESULT};
 use windows::Win32::Foundation::{
   CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, PROPERTYKEY,
   S_FALSE, S_OK,
 };
 use windows::Win32::Media::Audio::Apo::{
-  APOInitSystemEffects, APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject,
-  IAudioProcessingObjectConfiguration, IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT,
-  IAudioProcessingObjectRT_Vtbl, IAudioProcessingObject_Vtbl, IAudioSystemEffects, IAudioSystemEffects_Vtbl,
-  APOERR_ALREADY_UNLOCKED, APOERR_APO_LOCKED, APOERR_FORMAT_NOT_SUPPORTED, APOERR_NUM_CONNECTIONS_INVALID,
   APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_CONNECTION_PROPERTY_V2, APO_FLAG, APO_FLAG_DEFAULT,
-  APO_FLAG_INPLACE, APO_REG_PROPERTIES, BUFFER_SILENT, BUFFER_VALID, UNCOMPRESSEDAUDIOFORMAT,
+  APO_FLAG_INPLACE, APO_REG_PROPERTIES, APOERR_ALREADY_UNLOCKED, APOERR_APO_LOCKED, APOERR_FORMAT_NOT_SUPPORTED,
+  APOERR_NUM_CONNECTIONS_INVALID, APOInitSystemEffects, APOInitSystemEffects2, BUFFER_SILENT, BUFFER_VALID,
+  IAudioMediaType, IAudioProcessingObject, IAudioProcessingObject_Vtbl, IAudioProcessingObjectConfiguration,
+  IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT, IAudioProcessingObjectRT_Vtbl,
+  IAudioSystemEffects, IAudioSystemEffects_Vtbl, UNCOMPRESSEDAUDIOFORMAT,
 };
 use windows::Win32::Media::Audio::IMMDeviceCollection;
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree, IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::core::{BOOL, GUID, HRESULT, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, implement};
 
 // ---------------------------------------------------------------------------------------
 // Constants
@@ -721,10 +721,10 @@ unsafe extern "system" fn rt_apo_process(
     let qpc_hns = capture_time_hns(&*input, st.rate.load(Ordering::Relaxed));
     process_connection(&*input, &mut *output, channels, |buf| {
       // Never block the audio thread: if configuration holds the lock, pass this block through.
-      if let Ok(mut guard) = st.processor.try_lock() {
-        if let Some(processor) = guard.as_mut() {
-          processor.process(buf, channels, qpc_hns);
-        }
+      if let Ok(mut guard) = st.processor.try_lock()
+        && let Some(processor) = guard.as_mut()
+      {
+        processor.process(buf, channels, qpc_hns);
       }
     });
   }
@@ -1346,10 +1346,10 @@ impl MicProcessor {
       }
       return;
     }
-    if !std::mem::replace(was_live, true) {
-      if let Some(bridge) = bridge.as_mut() {
-        bridge.reset();
-      }
+    if !std::mem::replace(was_live, true)
+      && let Some(bridge) = bridge.as_mut()
+    {
+      bridge.reset();
     }
     let (Some(input), Some(output)) = (mono_in.get_mut(..frames), mono_out.get_mut(..frames)) else {
       return;
@@ -1536,10 +1536,10 @@ impl CallTiming {
     if let Some(last) = self.last.replace(now) {
       let interval_us = u64::try_from(now.duration_since(last).as_micros()).unwrap_or(u64::MAX);
       self.jitter_peak_us = self.jitter_peak_us.max(interval_us.abs_diff(block_us));
-      if interval_us.saturating_mul(2) > block_us.saturating_mul(3) {
-        if let Some(h) = h {
-          h.mic_call_gaps.fetch_add(1, Ordering::Relaxed);
-        }
+      if interval_us.saturating_mul(2) > block_us.saturating_mul(3)
+        && let Some(h) = h
+      {
+        h.mic_call_gaps.fetch_add(1, Ordering::Relaxed);
       }
     }
     self.calls += 1;
@@ -1616,15 +1616,14 @@ unsafe fn endpoint_guid_from_init(size: u32, data: *const u8, device_id: Option<
     }
     // Field reads only: `ManuallyDrop` borrows COM pointers without taking ownership or calling Release.
     let props = std::ptr::addr_of!((*init).pAPOEndpointProperties).read_unaligned();
-    if let Some(store) = props.as_ref() {
-      if let Ok(val) = store.GetValue(&PKEY_AUDIO_ENDPOINT_GUID) {
-        if let Ok(pwstr) = PropVariantToStringAlloc(&val) {
-          let text = pwstr.to_string().ok();
-          CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
-          if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
-            return Some(guid);
-          }
-        }
+    if let Some(store) = props.as_ref()
+      && let Ok(val) = store.GetValue(&PKEY_AUDIO_ENDPOINT_GUID)
+      && let Ok(pwstr) = PropVariantToStringAlloc(&val)
+    {
+      let text = pwstr.to_string().ok();
+      CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
+      if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
+        return Some(guid);
       }
     }
     device_id.and_then(normalize_endpoint_guid)

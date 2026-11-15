@@ -294,14 +294,14 @@ impl DelayEstimator {
   }
 
   fn update_lock(&mut self, est: f32) -> LockChange {
-    if let Some(cur) = self.locked {
-      if (est - cur).abs() <= AGREE_SAMPLES {
-        let n = (self.locked_windows + 1).min(REFINE_WINDOWS);
-        self.set_locked(cur + (est - cur) / n as f32, n);
-        self.locked_from_cache = false;
-        self.candidate = None;
-        return LockChange::Refined;
-      }
+    if let Some(cur) = self.locked
+      && (est - cur).abs() <= AGREE_SAMPLES
+    {
+      let n = (self.locked_windows + 1).min(REFINE_WINDOWS);
+      self.set_locked(cur + (est - cur) / n as f32, n);
+      self.locked_from_cache = false;
+      self.candidate = None;
+      return LockChange::Refined;
     }
 
     let needed = if self.locked.is_some() { CONFIRM_SWITCH } else { CONFIRM_FIRST };

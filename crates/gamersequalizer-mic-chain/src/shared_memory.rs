@@ -1,13 +1,13 @@
-use gamersequalizer_common::shm::{ShmLayout, ShmRingBuffer, SHM_MAGIC, SHM_NAME};
+use gamersequalizer_common::shm::{SHM_MAGIC, SHM_NAME, ShmLayout, ShmRingBuffer};
 use std::ptr::NonNull;
-use windows::core::BOOL;
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree};
 use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::System::Memory::{
-  CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE, PAGE_READWRITE,
+  CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile, OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
 };
+use windows::core::BOOL;
+use windows::core::PCWSTR;
 
 pub struct SharedMemoryClient {
   handle: HANDLE,

@@ -1,12 +1,12 @@
 use log::info;
 use serde::{Deserialize, Serialize};
-use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::Audio::{
-  eConsole, eRender, IMMDevice, IMMDeviceEnumerator, ISpatialAudioClient, ISpatialAudioObjectRenderStream,
-  MMDeviceEnumerator,
+  IMMDevice, IMMDeviceEnumerator, ISpatialAudioClient, ISpatialAudioObjectRenderStream, MMDeviceEnumerator, eConsole,
+  eRender,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RegGetValueW};
+use windows::core::{Interface, PCWSTR};
 
 use super::apo_install::endpoint_guid_of;
 
@@ -67,11 +67,7 @@ pub struct SpatialFormat {
 impl SpatialFormat {
   /// Name for the UI; `fallback` when Windows gave none.
   pub fn label<'a>(&'a self, fallback: &'a str) -> &'a str {
-    if self.name.is_empty() {
-      fallback
-    } else {
-      &self.name
-    }
+    if self.name.is_empty() { fallback } else { &self.name }
   }
 }
 

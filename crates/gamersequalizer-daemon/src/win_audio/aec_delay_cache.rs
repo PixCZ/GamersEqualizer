@@ -5,8 +5,8 @@
 //! - the measured echo strength per (microphone, speaker output) pair (dB x 10 under the reference).
 
 use log::warn;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};

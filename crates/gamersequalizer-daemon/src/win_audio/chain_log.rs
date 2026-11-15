@@ -4,11 +4,11 @@
 //! `[MicGain]`, `[DSP]` and `[Mic]` it lets a log reconstruct what the chain did without the audio.
 //! The DSP runs in audiodg without a logger: its state comes through shared memory (layout v19).
 
-use super::chatmix::{get_endpoint_volume, ChatMixController};
+use super::chatmix::{ChatMixController, get_endpoint_volume};
 use super::endpoint_lock::EndpointLockManager;
 use gamersequalizer_common::shm::{
-  AecState, DenoiseLimit, DenoiseModel, ShmHeader, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED, MIC_CHAIN_LOOKAHEAD,
-  MIC_CHAIN_OTHERS, MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
+  AecState, DenoiseLimit, DenoiseModel, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED, MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS,
+  MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF, ShmHeader,
 };
 use log::debug;
 use std::sync::atomic::Ordering;
@@ -372,11 +372,7 @@ fn state(s: &ChainSnapshot) -> String {
 
 /// Counter growth; a smaller value means a new stream started counting at 0.
 fn growth(start: u32, now: u32) -> u32 {
-  if now >= start {
-    now - start
-  } else {
-    now
-  }
+  if now >= start { now - start } else { now }
 }
 
 fn model(v: u32) -> String {
@@ -388,11 +384,7 @@ fn limit(v: u32) -> String {
 }
 
 fn aec(d: &DspSnapshot) -> String {
-  if d.aec_enabled {
-    format!("on {:?}", AecState::from_u32(d.aec_state))
-  } else {
-    "off".to_string()
-  }
+  if d.aec_enabled { format!("on {:?}", AecState::from_u32(d.aec_state)) } else { "off".to_string() }
 }
 
 /// Echo strength: how far under the reference its echo reaches the mic. Not confirmed: no
@@ -445,11 +437,7 @@ fn device(name: &str, id: &str) -> String {
 }
 
 fn ms(us: u32) -> String {
-  if us == 0 {
-    "none".to_string()
-  } else {
-    format!("{:.1} ms", us as f32 / 1000.0)
-  }
+  if us == 0 { "none".to_string() } else { format!("{:.1} ms", us as f32 / 1000.0) }
 }
 
 fn db(x10: i32) -> String {
@@ -457,11 +445,7 @@ fn db(x10: i32) -> String {
 }
 
 fn level(x10: i32) -> String {
-  if x10 == 0 {
-    "none".to_string()
-  } else {
-    format!("{:.1}", x10 as f32 / 10.0)
-  }
+  if x10 == 0 { "none".to_string() } else { format!("{:.1}", x10 as f32 / 10.0) }
 }
 
 #[cfg(test)]

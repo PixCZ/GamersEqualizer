@@ -5,7 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use gamersequalizer_common::shm::{AecState, APO_SHM_NAME, SHM_NAME};
+use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, SHM_NAME};
 use gamersequalizer_mic_chain::SharedMemoryClient;
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 

@@ -4,9 +4,9 @@
 //!   cargo run -p gamersequalizer-apo --example period_probe
 
 use windows::Win32::Media::Audio::{
-  eCapture, eConsole, eRender, IAudioClient3, IMMDeviceEnumerator, MMDeviceEnumerator,
+  IAudioClient3, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 
 fn main() -> windows::core::Result<()> {
   // SAFETY: straightforward WASAPI calls on this thread; the format is only read.

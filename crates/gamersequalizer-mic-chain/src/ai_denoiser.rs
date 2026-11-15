@@ -504,10 +504,10 @@ impl AiVoiceIsolator {
   /// before audio runs. If it fails, RNNoise keeps running and the error is kept for the UI/log.
   pub fn set_model(&mut self, model: DenoiseModel) {
     self.select(model);
-    if self.loading.is_none() {
-      if let Some((_, load)) = self.missing_load() {
-        self.store(load());
-      }
+    if self.loading.is_none()
+      && let Some((_, load)) = self.missing_load()
+    {
+      self.store(load());
     }
   }
 
@@ -565,20 +565,12 @@ impl AiVoiceIsolator {
 
   /// Model latency + gate lookahead (0 while bypassed). The same while a heavy model sleeps.
   pub fn output_lead_samples(&self) -> usize {
-    if self.bypassed {
-      0
-    } else {
-      latency_samples(self.active) + self.delay.len()
-    }
+    if self.bypassed { 0 } else { latency_samples(self.active) + self.delay.len() }
   }
 
   /// Gate lookahead in the output right now (0 while the gate or the lookahead is off).
   pub fn lookahead_now_samples(&self) -> usize {
-    if self.bypassed {
-      0
-    } else {
-      self.delay.len()
-    }
+    if self.bypassed { 0 } else { self.delay.len() }
   }
 
   /// Lookahead for the model producing the output (keyed like its latency).

@@ -3,10 +3,10 @@
 //! shared by the Headphones and Mixer pages.
 
 use super::state::{ActiveTab, AppState};
-use super::theme::{self, icons, Icon};
+use super::theme::{self, Icon, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::dolby_atmos::active_format;
-use crate::win_audio::{shell, SpatialAudioStatus, WinAudioSystem};
+use crate::win_audio::{SpatialAudioStatus, WinAudioSystem, shell};
 use egui::{Color32, RichText, Ui};
 use std::time::{Duration, Instant};
 
@@ -232,11 +232,10 @@ fn render_spatial_row(ui: &mut Ui, state: &mut AppState) {
       );
       ui.label(RichText::new(theme::with_icon(icons::WARNING, &text)).small().color(p.warn))
         .on_hover_text(tr("Something changed spatial sound on this device (a Windows or driver update, another app). Switch it back in the Windows settings, or keep the new one."));
-      if let Some(now) = state.spatial_format.clone() {
-        if ui.small_button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
+      if let Some(now) = state.spatial_format.clone()
+        && ui.small_button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
           keep = Some(now);
         }
-      }
     } else {
       let color = if active { theme::adapt(ui, Color32::from_rgb(0, 180, 216)) } else { p.text_tertiary };
       status_pill(ui, color, &format!("{}: {}", tr("Spatial sound"), current_name))

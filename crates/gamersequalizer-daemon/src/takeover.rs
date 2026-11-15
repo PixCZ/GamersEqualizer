@@ -14,14 +14,14 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gamersequalizer_common::shm::SHM_NAME;
 use gamersequalizer_mic_chain::SharedMemoryClient;
-use windows::core::PWSTR;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::ProcessStatus::EnumProcesses;
 use windows::Win32::System::Threading::{
-  GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
-  PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+  GetCurrentProcessId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+  PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+use windows::core::PWSTR;
 
 /// Room for every process id on the machine.
 const MAX_PROCESSES: usize = 4096;

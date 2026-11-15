@@ -8,8 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Languages the UI is translated to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

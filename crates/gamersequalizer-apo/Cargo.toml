@@ -3,7 +3,7 @@ name = "gamersequalizer-apo"
 version = "0.1.0"
 license = "GPL-3.0-or-later"
 authors = ["Jiří Němec"]
-edition = "2021"
+edition.workspace = true
 description = "Audio effects (mic chain, output EQ, per-app stream EQ) loaded by audiodg on the user's devices"
 
 [lib]

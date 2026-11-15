@@ -141,11 +141,7 @@ pub fn install(ctx: &egui::Context) {
 }
 
 pub fn palette(ui: &Ui) -> Palette {
-  if ui.visuals().dark_mode {
-    DARK
-  } else {
-    LIGHT
-  }
+  if ui.visuals().dark_mode { DARK } else { LIGHT }
 }
 
 /// A bright brand/channel color made readable on the light theme (darkened); unchanged on dark.
@@ -189,11 +185,7 @@ pub fn with_icon(icon: Icon, label: &str) -> String {
 /// Semibold text at `size` (Fluent "Body Strong" / "Subtitle" / "Title").
 pub fn strong(text: impl Into<String>, size: f32) -> RichText {
   let t = RichText::new(text).size(size);
-  if SEMIBOLD_FONT.load(Ordering::Relaxed) {
-    t.family(FontFamily::Name("semibold".into()))
-  } else {
-    t.strong()
-  }
+  if SEMIBOLD_FONT.load(Ordering::Relaxed) { t.family(FontFamily::Name("semibold".into())) } else { t.strong() }
 }
 
 /// Secondary caption text (12 px).
@@ -502,11 +494,7 @@ fn leading_icon(ui: &mut Ui, ic: Icon, size: f32, color: Color32) {
 /// How far a Fluent glyph moves down to look centered on text of row height `text_row`
 /// (between cap-height and x-height middles of Segoe UI). Emoji stand-ins are text, so 0.
 fn icon_drop(text_row: f32) -> f32 {
-  if ICON_FONT.load(Ordering::Relaxed) {
-    ICON_DROP * text_row
-  } else {
-    0.0
-  }
+  if ICON_FONT.load(Ordering::Relaxed) { ICON_DROP * text_row } else { 0.0 }
 }
 
 fn fonts() -> FontDefinitions {
@@ -531,15 +519,11 @@ fn fonts() -> FontDefinitions {
   let mono = load("cascadia", &["CascadiaMono.ttf", "consola.ttf"]);
 
   let proportional = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-  if text {
-    if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
-      list.insert(0, "segoe".into());
-    }
+  if text && let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+    list.insert(0, "segoe".into());
   }
-  if mono {
-    if let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
-      list.insert(0, "cascadia".into());
-    }
+  if mono && let Some(list) = fonts.families.get_mut(&FontFamily::Monospace) {
+    list.insert(0, "cascadia".into());
   }
   if semibold {
     let mut list = vec!["segoe-semibold".to_string()];

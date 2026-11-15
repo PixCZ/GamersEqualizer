@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use crate::output_eq::same_profile_slot;
 use crate::sonar_importer::ProfileStorage;
-use gamersequalizer_common::profile::{collapse_slopes, BiquadBand, FilterType, ParametricProfile, VadType};
+use gamersequalizer_common::profile::{BiquadBand, FilterType, ParametricProfile, VadType, collapse_slopes};
 
 use crate::i18n::tk;
 

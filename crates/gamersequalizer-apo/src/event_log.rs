@@ -11,10 +11,10 @@
 //! the text itself is the event's first string.
 
 use std::sync::Mutex;
-use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::System::EventLog::{
-  DeregisterEventSource, RegisterEventSourceW, ReportEventW, EVENTLOG_INFORMATION_TYPE, EVENTLOG_WARNING_TYPE,
+  DeregisterEventSource, EVENTLOG_INFORMATION_TYPE, EVENTLOG_WARNING_TYPE, RegisterEventSourceW, ReportEventW,
 };
+use windows::core::{HSTRING, PCWSTR, w};
 
 /// Bound per process run, so a long session cannot grow the list (or the log) forever. Roomy:
 /// multi-device installs and render format queries must not use up the budget before streams start.

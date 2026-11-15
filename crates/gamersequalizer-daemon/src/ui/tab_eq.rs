@@ -3,11 +3,11 @@
 
 use super::eq_editor::{band_editor, curves_plot, profile_picker};
 use super::state::{ActiveTab, AppState, OutputLayer};
-use super::theme::{self, icons, Severity};
+use super::theme::{self, Severity, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::output_eq::auto_preamp::generate_log_frequencies;
 use crate::output_eq::game_match::MatchMethod;
-use crate::sonar_importer::{import_sonar, read_sonar_sources, DEFAULT_SONAR_DB_PATH};
+use crate::sonar_importer::{DEFAULT_SONAR_DB_PATH, import_sonar, read_sonar_sources};
 use egui::{Color32, RichText, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::streams::StreamBus;

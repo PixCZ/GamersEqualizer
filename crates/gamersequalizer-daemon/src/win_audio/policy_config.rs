@@ -1,6 +1,6 @@
-use windows::core::{GUID, HRESULT, PCWSTR};
 use windows::Win32::Media::Audio::ERole;
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::core::{GUID, HRESULT, PCWSTR};
 use windows_core::Interface;
 
 pub const CLSID_POLICY_CONFIG_CLIENT: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);

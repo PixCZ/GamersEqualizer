@@ -2,8 +2,8 @@ pub use crate::output_eq::{OutputEq, OutputLayer};
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
-use gamersequalizer_common::profile::{collapse_slopes, slots_used, ParametricProfile, VadType};
-use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout, APO_SHM_NAME, SHM_NAME};
+use gamersequalizer_common::profile::{ParametricProfile, VadType, collapse_slopes, slots_used};
+use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, SHM_NAME, ShmHeader, ShmLayout};
 use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
@@ -11,11 +11,11 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Memory::{
-  CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+  CreateFileMappingW, FILE_MAP_ALL_ACCESS, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
 };
+use windows::core::PCWSTR;
 
 /// File holding the microphone EQ the user is currently editing.
 const MIC_EQ_FILE: &str = "mic_active.json";

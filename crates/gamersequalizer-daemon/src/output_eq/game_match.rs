@@ -106,17 +106,16 @@ pub fn resolve(settings: &OutputEqSettings, profiles: &[ParametricProfile], fact
       }
     }
   }
-  if settings.detect_names {
-    if let Some(p) = best_name_match(profiles, facts) {
-      return found(p, MatchMethod::Name);
-    }
+  if settings.detect_names
+    && let Some(p) = best_name_match(profiles, facts)
+  {
+    return found(p, MatchMethod::Name);
   }
-  if settings.detect_genres {
-    if let Some((genre, _)) = &facts.genre {
-      if let Some(p) = profiles.iter().find(|p| p.name == genre.preset_name()) {
-        return found(p, MatchMethod::Genre);
-      }
-    }
+  if settings.detect_genres
+    && let Some((genre, _)) = &facts.genre
+    && let Some(p) = profiles.iter().find(|p| p.name == genre.preset_name())
+  {
+    return found(p, MatchMethod::Genre);
   }
   (facts.from_launcher || facts.genre.is_some()).then_some(GameMatch {
     profile: None,
@@ -216,10 +215,10 @@ fn roman_to_digit(w: &str) -> Option<&'static str> {
 /// Profile name without Sonar's suffixes ("Rainbow Six Siege by Ubisoft", "CS2 Pro Preset").
 fn profile_tokens(name: &str) -> Vec<String> {
   let mut tokens = tokenize(name);
-  if let Some(by) = tokens.iter().position(|t| t == "by") {
-    if by > 0 {
-      tokens.truncate(by);
-    }
+  if let Some(by) = tokens.iter().position(|t| t == "by")
+    && by > 0
+  {
+    tokens.truncate(by);
   }
   tokens
 }
@@ -251,10 +250,10 @@ fn best_name_match<'a>(profiles: &'a [ParametricProfile], facts: &GameFacts) -> 
     let names = std::iter::once(profile_tokens(&profile.name)).chain(alias_names(profile).map(profile_tokens));
     for wanted in names {
       for candidate in &candidates {
-        if let Some(score) = name_score(&wanted, candidate) {
-          if best.is_none_or(|(s, _)| score > s) {
-            best = Some((score, profile));
-          }
+        if let Some(score) = name_score(&wanted, candidate)
+          && best.is_none_or(|(s, _)| score > s)
+        {
+          best = Some((score, profile));
         }
       }
     }

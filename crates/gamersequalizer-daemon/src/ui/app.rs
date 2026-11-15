@@ -1,4 +1,4 @@
-use super::header::{render_nav, render_top_bar, NAV_WIDTH};
+use super::header::{NAV_WIDTH, render_nav, render_top_bar};
 use super::state::{ActiveTab, AppState};
 use super::tab_eq::render_tab_eq;
 use super::tab_mic::render_tab_mic;
@@ -73,10 +73,10 @@ impl eframe::App for GamersEqualizerApp {
     self.state.output_eq_do(|eq, shm| eq.tick(owner, output, shm));
     self.state.active_game_name = self.state.output_eq.active_game.as_ref().map(|g| g.label.clone());
     // Save an output EQ band edit once the slider is released, not on every drag frame.
-    if !ctx.input(|i| i.pointer.any_down()) {
-      if let Some(layer) = self.state.out_eq_unsaved.take() {
-        self.state.output_eq_do(|eq, shm| eq.save_layer_profile(layer, shm));
-      }
+    if !ctx.input(|i| i.pointer.any_down())
+      && let Some(layer) = self.state.out_eq_unsaved.take()
+    {
+      self.state.output_eq_do(|eq, shm| eq.save_layer_profile(layer, shm));
     }
 
     // 3. Refresh endpoints and track Windows system default device changes in real time

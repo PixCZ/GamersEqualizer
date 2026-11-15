@@ -4,10 +4,10 @@
 //! audiodg crashes, Defender detections, Code Integrity blocks. The service copies new ones
 //! into its own log and hands the newest to the window, so the log alone tells what happened.
 
-use windows::core::{w, HRESULT, PCWSTR};
 use windows::Win32::System::EventLog::{
-  EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender, EvtRenderEventXml, EVT_HANDLE,
+  EVT_HANDLE, EvtClose, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender, EvtRenderEventXml,
 };
+use windows::core::{HRESULT, PCWSTR, w};
 
 /// Newest notes read per check (every 30 s); a stream start writes several, so keep it roomy.
 const MAX_NOTES: usize = 100;
@@ -180,8 +180,7 @@ mod tests {
     let note = windows_note(crash);
     assert_eq!(note.time, "2026-11-11T07:00:00.1Z");
     assert_eq!(note.text, "Windows: audiodg.exe crashed in gamersequalizer_apo.dll (exception c0000005)");
-    let defender =
-      "<Event><System><Provider Name='Microsoft-Windows-Windows Defender' Guid='{b}'/><EventID>1116</EventID>\
+    let defender = "<Event><System><Provider Name='Microsoft-Windows-Windows Defender' Guid='{b}'/><EventID>1116</EventID>\
                     </System><EventData><Data Name='Threat Name'>Trojan:Win32/Cloxer</Data>\
                     <Data Name='Path'>file:_C:\\x\\gamersequalizer.exe</Data></EventData></Event>";
     assert_eq!(

@@ -1,7 +1,7 @@
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::Path;
-use windows::core::w;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::core::w;
 
 pub const SQLITE_OK: c_int = 0;
 pub const SQLITE_ROW: c_int = 100;
@@ -148,11 +148,7 @@ impl<'a> WinSqliteConn<'a> {
             (0..columns)
               .map(|i| {
                 let p = (self.lib.fn_column_text)(stmt, i);
-                if p.is_null() {
-                  String::new()
-                } else {
-                  CStr::from_ptr(p).to_string_lossy().into_owned()
-                }
+                if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
               })
               .collect(),
           ),

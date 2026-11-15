@@ -3,8 +3,8 @@
 
 use super::prefs::ThemePref;
 use super::state::AppState;
-use super::theme::{self, icons, Severity};
-use crate::i18n::{self, tr, trf, LanguagePref, LANGUAGES};
+use super::theme::{self, Severity, icons};
+use crate::i18n::{self, LANGUAGES, LanguagePref, tr, trf};
 use crate::settings_transfer::{self, Part, Selection, Summary};
 use crate::win_audio::shell;
 use egui::{Color32, RichText, Ui};
@@ -163,17 +163,17 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
         t.pending = None;
         t.message = None;
       }
-      if ui.button(theme::with_icon(icons::OPEN, tr("Import settings..."))).clicked() {
-        if let Some(path) = shell::pick_settings_file(tr("Import settings")) {
-          match settings_transfer::inspect(&path) {
-            Ok(s) => {
-              let parts = s.parts.iter().map(|p| (p.clone(), true)).collect();
-              t.pending = Some((s, parts));
-              t.export = None;
-              t.message = None;
-            }
-            Err(e) => t.message = Some((Severity::Error, trf("Import failed: {}", &[&e]))),
+      if ui.button(theme::with_icon(icons::OPEN, tr("Import settings..."))).clicked()
+        && let Some(path) = shell::pick_settings_file(tr("Import settings"))
+      {
+        match settings_transfer::inspect(&path) {
+          Ok(s) => {
+            let parts = s.parts.iter().map(|p| (p.clone(), true)).collect();
+            t.pending = Some((s, parts));
+            t.export = None;
+            t.message = None;
           }
+          Err(e) => t.message = Some((Severity::Error, trf("Import failed: {}", &[&e]))),
         }
       }
     });
@@ -188,16 +188,15 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
       let only = selection(parts);
       let mut close = false;
       ui.horizontal(|ui| {
-        if ui.add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::SAVE, tr("Save...")))).clicked() {
-          if let Some(path) =
+        if ui.add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::SAVE, tr("Save...")))).clicked()
+          && let Some(path) =
             shell::pick_settings_save_path(tr("Export settings"), &settings_transfer::default_file_name())
-          {
-            t.message = Some(match settings_transfer::export(&base_dir, &path, Some(&only)) {
-              Ok(s) => (Severity::Success, trf("Saved {} profiles to {}", &[&s.profiles, &path.display()])),
-              Err(e) => (Severity::Error, trf("Export failed: {}", &[&e])),
-            });
-            close = true;
-          }
+        {
+          t.message = Some(match settings_transfer::export(&base_dir, &path, Some(&only)) {
+            Ok(s) => (Severity::Success, trf("Saved {} profiles to {}", &[&s.profiles, &path.display()])),
+            Err(e) => (Severity::Error, trf("Export failed: {}", &[&e])),
+          });
+          close = true;
         }
         close |= ui.button(tr("Cancel")).clicked();
       });
@@ -220,7 +219,9 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
       theme::status_line(
         ui,
         Severity::Warning,
-        tr("Your current settings are backed up first. Checked settings are replaced, profiles with the same name too; everything else stays. The app closes and starts again."),
+        tr(
+          "Your current settings are backed up first. Checked settings are replaced, profiles with the same name too; everything else stays. The app closes and starts again.",
+        ),
       );
       let only = selection(parts);
       ui.horizontal(|ui| {
@@ -279,11 +280,7 @@ fn part_label(part: &Part) -> String {
     "settings/ui_prefs" => tr("Language and theme"),
     other => other,
   };
-  if part.key.starts_with("profiles/") {
-    format!("{name} ({})", part.profiles)
-  } else {
-    name.to_string()
-  }
+  if part.key.starts_with("profiles/") { format!("{name} ({})", part.profiles) } else { name.to_string() }
 }
 
 fn uninstall_card(ui: &mut Ui, state: &mut AppState) {

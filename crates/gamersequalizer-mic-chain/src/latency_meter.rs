@@ -204,7 +204,7 @@ fn downsample(acc: &mut (f32, usize), s: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::aec3::{EchoCanceller3, AEC3_LATENCY_SAMPLES};
+  use crate::aec3::{AEC3_LATENCY_SAMPLES, EchoCanceller3};
   use crate::ai_denoiser::AiVoiceIsolator;
   use gamersequalizer_common::shm::DenoiseModel;
 
