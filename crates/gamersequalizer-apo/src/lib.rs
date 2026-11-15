@@ -1952,7 +1952,6 @@ fn add_sidetone(buf: &mut [f32], channels: usize, mono: &[f32]) {
 // ---------------------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
   use super::*;
   use windows::Win32::System::Com::CoTaskMemFree;

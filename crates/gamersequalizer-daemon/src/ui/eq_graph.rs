@@ -81,7 +81,7 @@ pub fn band_editor(
   changed
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "private helper: `band_editor`'s arguments plus the selection it keeps")]
 fn graph(
   ui: &mut Ui,
   id: &str,

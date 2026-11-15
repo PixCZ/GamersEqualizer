@@ -320,7 +320,6 @@ fn scan(root: &Path, dir: &Path, depth: usize, out: &mut Vec<AutoEqEntry>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
   use super::*;
 

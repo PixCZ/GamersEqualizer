@@ -96,7 +96,6 @@ fn in_bar(x: f32, y: f32) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
 mod tests {
   use super::*;
 

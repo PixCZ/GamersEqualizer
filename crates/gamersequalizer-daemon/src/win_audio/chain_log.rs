@@ -449,7 +449,6 @@ fn level(x10: i32) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
 

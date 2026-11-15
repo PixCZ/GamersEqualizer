@@ -129,7 +129,6 @@ pub fn keep_corrupt(path: &Path) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
 

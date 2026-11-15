@@ -7,7 +7,7 @@ pub const CLSID_POLICY_CONFIG_CLIENT: GUID = GUID::from_u128(0x870af99c_171d_4f9
 pub const IID_IPOLICY_CONFIG: GUID = GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
 
 #[repr(C)]
-#[allow(non_snake_case)]
+#[expect(non_snake_case, reason = "slot names follow the COM interface's method names")]
 pub struct IPolicyConfig_Vtbl {
   pub base: windows_core::IUnknown_Vtbl,
   pub GetMixFormat: unsafe extern "system" fn(*mut std::ffi::c_void, PCWSTR, *mut std::ffi::c_void) -> HRESULT,

@@ -779,7 +779,6 @@ fn average_gain(result: &CombinedEngineResult) -> f32 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
   use crate::sonar_importer::DELETED_DIR;

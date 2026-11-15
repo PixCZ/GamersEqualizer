@@ -174,7 +174,6 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_run
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
   use gamersequalizer_common::shm::DenoiseModel;

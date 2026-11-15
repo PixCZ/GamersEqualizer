@@ -279,7 +279,6 @@ fn name_score(wanted: &[String], candidate: &[String]) -> Option<usize> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
   use gamersequalizer_common::profile::VadType;

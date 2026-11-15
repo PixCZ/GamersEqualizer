@@ -283,7 +283,6 @@ pub fn hold_match(envelope: &[f32], meter: &[f32]) -> Option<HoldMatch> {
 // ---------------------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
   use super::*;
 

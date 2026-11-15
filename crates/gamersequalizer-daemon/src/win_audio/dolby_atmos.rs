@@ -209,7 +209,6 @@ fn read_binary_value(key: &str, value: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
 mod tests {
   use super::*;
 

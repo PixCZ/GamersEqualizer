@@ -1,8 +1,7 @@
 //! Embeds the DLL's version resource (Explorer > Properties > Details).
 
-// Shared with the daemon's build script; each uses one `FileKind`.
 #[path = "../build-support/version_info.rs"]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "shared with the daemon's build script; each uses one `FileKind`")]
 mod version_info;
 
 use std::path::PathBuf;
@@ -20,10 +19,9 @@ fn main() {
     description: "GamersEqualizer audio effects",
     internal_name: "gamersequalizer_apo",
   };
-  // Bootstrap tooling, not the running app: failing the build loudly is the right outcome.
-  #[allow(clippy::expect_used)]
+  #[expect(clippy::expect_used, reason = "build script: a loud failure is the right outcome")]
   let rc_path = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR")).join("apo.rc");
-  #[allow(clippy::expect_used)]
+  #[expect(clippy::expect_used, reason = "build script: a loud failure is the right outcome")]
   std::fs::write(&rc_path, info.rc(&version)).expect("write apo.rc");
   // Only the cdylib: the probe examples are separate exes without it.
   embed_resource::compile_for_cdylib(&rc_path, embed_resource::NONE).manifest_required().unwrap_or_else(|e| {

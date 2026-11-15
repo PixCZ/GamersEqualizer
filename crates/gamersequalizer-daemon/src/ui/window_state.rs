@@ -127,7 +127,6 @@ fn virtual_screen() -> Option<[f32; 4]> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
 

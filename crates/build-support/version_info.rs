@@ -56,8 +56,7 @@ pub fn version(sources: &[&str]) -> String {
   println!("cargo:rerun-if-env-changed={RELEASE_VERSION_ENV}");
   if let Some(tag) = std::env::var(RELEASE_VERSION_ENV).ok().filter(|tag| !tag.trim().is_empty()) {
     let version = tag.trim().trim_start_matches('v').to_string();
-    // A release must not ship a version Explorer cannot show: fail the build instead.
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used, reason = "a release must not ship a version Explorer cannot show: fail the build")]
     numeric_version(&version).expect("GAMERSEQUALIZER_RELEASE_VERSION must look like 1.2.3 or v1.2.3");
     return version;
   }

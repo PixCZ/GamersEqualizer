@@ -36,7 +36,8 @@ logged, shown, retried, never unwound.
 ## Rules for the running phase
 
 - No `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, or slice indexing `v[i]` on untrusted data.
-  Enforced by lints (see `code-style.md`). `#[allow]` needs a comment proving it cannot fail.
+  Enforced by lints (see `code-style.md`). An exception is `#[expect(lint, reason = "...")]`, the
+  reason proving it cannot fail.
 - **Errors**: `Result<T, String>` where the caller only logs or shows the text. Where a caller decides
   by the kind of failure, return an enum. Never compare error text.
 - **Background work = supervised loop.** A worker thread is an outer `loop` around one fallible

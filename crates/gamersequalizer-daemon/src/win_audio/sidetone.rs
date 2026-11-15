@@ -514,7 +514,6 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
   use gamersequalizer_common::sidetone::SidetonePair;

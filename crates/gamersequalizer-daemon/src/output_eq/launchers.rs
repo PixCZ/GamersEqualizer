@@ -286,7 +286,6 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
 

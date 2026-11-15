@@ -100,7 +100,6 @@ fn band(filter_type: FilterType, frequency: f32, gain_db: f32, q: f32) -> Biquad
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::super::game_match::{GameFacts, resolve};
   use super::*;

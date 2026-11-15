@@ -41,7 +41,9 @@ undocumented_unsafe_blocks = "deny"
 
 - Every crate inherits them (`[lints] workspace = true`); `crates/vendor/` is outside the workspace.
 - Tests may unwrap, expect, panic and index (`clippy.toml`).
-- Bootstrap code opts out locally with `#[allow(clippy::expect_used)]` and a reason comment.
+- Bootstrap code opts out locally with `#[expect(clippy::expect_used, reason = "...")]`.
+- An exception is `#[expect(..., reason = "...")]`, so the compiler reports it once it is not needed.
+  `#[allow]` only where the lint fires in some configurations (`cfg`), with a comment saying which.
 
 ## UI (egui)
 

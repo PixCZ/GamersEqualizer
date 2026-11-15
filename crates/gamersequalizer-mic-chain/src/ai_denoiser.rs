@@ -315,7 +315,6 @@ struct HandOver(Loaded);
 // thread ends right after the send. The channel orders
 // the build before any use. Re-check on a tract upgrade: a thread-local caching a model `Rc`
 // (or a warm-up run in `load`) would break this.
-#[allow(unsafe_code)]
 unsafe impl Send for HandOver {}
 
 struct RnNoiseEngine {

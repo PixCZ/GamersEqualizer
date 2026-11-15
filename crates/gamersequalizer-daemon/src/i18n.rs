@@ -120,7 +120,6 @@ fn fill(template: &str, args: &[&dyn std::fmt::Display]) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
   use super::*;
 

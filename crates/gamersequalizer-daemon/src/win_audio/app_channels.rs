@@ -178,7 +178,6 @@ fn modified(path: &Path) -> Option<SystemTime> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
 

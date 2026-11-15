@@ -3,11 +3,9 @@
 //! window and tray use.
 
 #[path = "src/app_icon.rs"]
-#[allow(dead_code)]
 mod app_icon;
-// Shared with the APO's build script; each uses one `FileKind`.
 #[path = "../build-support/version_info.rs"]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "shared with the APO's build script; each uses one `FileKind`")]
 mod version_info;
 
 use std::path::PathBuf;
@@ -28,12 +26,11 @@ fn main() {
   let version =
     VersionInfo { kind: FileKind::App, description: "GamersEqualizer", internal_name: "gamersequalizer" }.rc(&version);
 
-  // Bootstrap tooling, not the running app: failing the build loudly is the right outcome.
-  #[allow(clippy::expect_used)]
+  #[expect(clippy::expect_used, reason = "build script: a loud failure is the right outcome")]
   let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
   let ico_path = out_dir.join("app.ico");
   let rc_path = out_dir.join("app.rc");
-  #[allow(clippy::expect_used)]
+  #[expect(clippy::expect_used, reason = "build script: a loud failure is the right outcome")]
   {
     std::fs::write(&ico_path, ico_bytes()).expect("write app.ico");
     let ico = ico_path.to_string_lossy().replace('\\', "\\\\");
