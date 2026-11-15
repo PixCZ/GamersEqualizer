@@ -137,7 +137,7 @@ function Start-Audio {
   $started
 }
 
-# Must match CLSID_GAIN_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
+# Must match CLSID_MIC_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
 # crates/gamersequalizer-apo/src/lib.rs. All classes live in the same DLL.
 $Classes = @{
   Capture = @{ Clsid = '{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}'; Name = 'GamersEqualizer Mic Chain' }

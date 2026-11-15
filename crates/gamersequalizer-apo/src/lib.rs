@@ -86,7 +86,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 // ---------------------------------------------------------------------------------------
 
 /// Mic chain. Must match `$Clsid` (Capture) in `scripts/apo-install.ps1`.
-pub const CLSID_GAIN_APO: GUID = GUID::from_u128(0x17e8d42e_dc01_4bd0_90ff_ad7c83a5ddea);
+pub const CLSID_MIC_APO: GUID = GUID::from_u128(0x17e8d42e_dc01_4bd0_90ff_ad7c83a5ddea);
 /// Output EQ. Must match `$Clsid` (Render) in `scripts/apo-install.ps1`.
 pub const CLSID_OUTPUT_EQ_APO: GUID = GUID::from_u128(0x6b0f3c1e_8f2a_4d7b_9a51_3e2c7d4b9f10);
 /// Stream probe. Must match `$Clsid` (Render, -Slot SFX) in `scripts/apo-install.ps1`.
@@ -336,7 +336,7 @@ struct ApoObject {
 }
 
 #[implement(IClassFactory)]
-struct GainApoFactory {
+struct ApoFactory {
   kind: ApoKind,
 }
 
@@ -398,7 +398,7 @@ pub unsafe extern "system" fn DllGetClassObject(
   // Each step Windows takes towards a running effect is noted once, so the last note shows
   // where it stopped (class -> instance -> initialized -> formats -> stream).
   note(Level::Info, format!("{}: class requested", kind.friendly_name()));
-  let factory: IClassFactory = GainApoFactory { kind }.into();
+  let factory: IClassFactory = ApoFactory { kind }.into();
   factory.query(riid, ppv)
 }
 
@@ -413,7 +413,7 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
 // Class factory
 // ---------------------------------------------------------------------------------------
 
-impl IClassFactory_Impl for GainApoFactory_Impl {
+impl IClassFactory_Impl for ApoFactory_Impl {
   fn CreateInstance(&self, outer: Ref<'_, IUnknown>, riid: *const GUID, object: *mut *mut c_void) -> Result<()> {
     let outer = outer.as_ref();
     if object.is_null() || riid.is_null() {
@@ -847,7 +847,7 @@ fn describe_format(format: &UNCOMPRESSEDAUDIOFORMAT) -> String {
 impl ApoKind {
   fn from_clsid(clsid: &GUID) -> Option<Self> {
     match *clsid {
-      CLSID_GAIN_APO => Some(ApoKind::Mic),
+      CLSID_MIC_APO => Some(ApoKind::Mic),
       CLSID_OUTPUT_EQ_APO => Some(ApoKind::Output),
       CLSID_STREAM_APO => Some(ApoKind::Stream),
       _ => None,
@@ -856,7 +856,7 @@ impl ApoKind {
 
   fn clsid(self) -> GUID {
     match self {
-      ApoKind::Mic => CLSID_GAIN_APO,
+      ApoKind::Mic => CLSID_MIC_APO,
       ApoKind::Output => CLSID_OUTPUT_EQ_APO,
       ApoKind::Stream => CLSID_STREAM_APO,
     }
@@ -1711,7 +1711,7 @@ fn check_format(opposite: Option<&IAudioMediaType>, requested: Option<&IAudioMed
   let requested = requested.ok_or(E_POINTER)?;
   let wanted = uncompressed_format(requested).filter(is_supported_format).ok_or(APOERR_FORMAT_NOT_SUPPORTED)?;
   if let Some(other) = opposite.and_then(uncompressed_format) {
-    // In-place gain: rate and channel layout cannot change between input and output.
+    // In-place processing: rate and channel layout cannot change between input and output.
     if other.dwSamplesPerFrame != wanted.dwSamplesPerFrame || other.fFramesPerSecond != wanted.fFramesPerSecond {
       return Err(APOERR_FORMAT_NOT_SUPPORTED.into());
     }
@@ -2139,7 +2139,7 @@ mod tests {
 
     let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
     unsafe {
-      assert_eq!((*props).clsid, CLSID_GAIN_APO);
+      assert_eq!((*props).clsid, CLSID_MIC_APO);
       assert_eq!((*props).u32NumAPOInterfaces, 4);
       let list = addr_of_mut!((*props).iidAPOInterfaceList) as *const GUID;
       assert_eq!(*list.add(3), IAudioSystemEffects::IID);
@@ -2187,7 +2187,7 @@ mod tests {
 
   fn factory() -> IClassFactory {
     let mut raw = null_mut();
-    let hr = unsafe { DllGetClassObject(&CLSID_GAIN_APO, &IClassFactory::IID, &mut raw) };
+    let hr = unsafe { DllGetClassObject(&CLSID_MIC_APO, &IClassFactory::IID, &mut raw) };
     assert!(hr.is_ok());
     unsafe { IClassFactory::from_raw(raw) }
   }

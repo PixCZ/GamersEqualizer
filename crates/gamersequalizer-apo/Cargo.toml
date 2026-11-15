@@ -4,7 +4,7 @@ version = "0.1.0"
 license = "GPL-3.0-or-later"
 authors = ["Jiří Němec"]
 edition = "2021"
-description = "Prototype capture APO (gain only) loaded by audiodg on a physical microphone"
+description = "Audio effects (mic chain, output EQ, per-app stream EQ) loaded by audiodg on the user's devices"
 
 [lib]
 crate-type = ["cdylib"]

@@ -564,7 +564,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] C2 `dsp_apo`
 - [x] C3 pokusy v řetězci mikrofonu (komentář „VST host“ zmizel už s `process()` v C1)
 - [x] C4 ostatní mrtvý kód (bez složky `aux`, viz Nepotvrzené nálezy)
-- [ ] C5 jména z prototypu
+- [x] C5 jména z prototypu (`CLSID_MIC_APO`, `ApoFactory`; GUID beze změny)
 - [ ] C6 přejmenování crate
 - [ ] D1 edice 2024
 - [ ] D2 lint SAFETY

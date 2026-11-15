@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
 
 use crate::i18n::tr;
 
-/// Must match CLSID_GAIN_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
+/// Must match CLSID_MIC_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
 /// crates/gamersequalizer-apo/src/lib.rs.
 const MIC_APO_CLSID: &str = "{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}";
 const OUTPUT_APO_CLSID: &str = "{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}";
