@@ -466,6 +466,12 @@ function Test-SlotHadDriverEffects($snapshot, [string]$slot) {
   [bool]((Read-FxList $rec.Value) | Where-Object { $_ -ne $NullGuid -and $ours -notcontains $_ })
 }
 
+# True when a backup file says an earlier install made the FxProperties key; false when it does
+# not or the file cannot be read.
+function Test-BackupCreated([string]$backupFile) {
+  [bool]$(try { (Get-Content $backupFile -Raw | ConvertFrom-Json).Created } catch { $false })
+}
+
 # Our effect runs in a slot only in the modes listed for it, so Default is added. Not where the
 # driver's effects sit with modes of their own: Default would run them in a mode it never declared.
 function Ensure-ProcessingMode($job, [string]$fxSubKey, [string]$slot) {
@@ -883,7 +889,7 @@ foreach ($job in @($jobs)) {
   $backupFile = Join-Path $BackupDir "$($job.Id)-FxProperties-original.json"
   # A key an earlier install made, left empty by a failed delete, is still to be deleted.
   if (-not $made -and @($snap.Records).Count -eq 0 -and (Test-Path $backupFile)) {
-    $made = [bool](try { (Get-Content $backupFile -Raw | ConvertFrom-Json).Created } catch { $false })
+    $made = Test-BackupCreated $backupFile
   }
   if ($made) { $snap | Add-Member -NotePropertyName Created -NotePropertyValue $true }
   $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap

@@ -5,7 +5,7 @@ $script = Join-Path (Split-Path $PSScriptRoot) 'apo-install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
-  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot'
+  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated'
 $variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
 $pieces = $ast.FindAll({
     param($n)
@@ -139,6 +139,20 @@ $keyCalls = New-Object System.Collections.Generic.List[string]
 function Remove-FxKey([string]$subKey) { $keyCalls.Add("remove $subKey") }
 Restore-FxSnapshot ([pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Records = @(); Created = $true })
 Check 'rollback of a made key deletes it' (($keyCalls -join '|') -eq 'remove SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{id}\FxProperties') "got '$($keyCalls -join '|')'"
+
+# --- Test-BackupCreated: a key an earlier install made, read back from its backup -------------
+$backupDir = Join-Path ([IO.Path]::GetTempPath()) "ge-apo-tests-$PID"
+New-Item -ItemType Directory -Force $backupDir | Out-Null
+try {
+  $backup = Join-Path $backupDir 'backup.json'
+  Set-Content $backup (ConvertTo-FxJson ([pscustomobject]@{ Flow = 'Capture'; Id = $guid; Records = @(); Created = $true }))
+  Check 'backup of a made key' (Test-BackupCreated $backup) ''
+  Set-Content $backup (ConvertTo-FxJson $snapshot)
+  Check 'backup of an existing key' (-not (Test-BackupCreated $backup)) ''
+  Set-Content $backup '{ not json'
+  Check 'corrupt backup' (-not (Test-BackupCreated $backup)) ''
+}
+finally { Remove-Item -Recurse -Force $backupDir }
 
 # --- Get-MigrationSlots ---------------------------------------------------------------------
 $migrationCases = @(
