@@ -2859,6 +2859,11 @@ Branch `genre-presets`. Planned as release 0.2.0 "profile edition".
   drag, then browsers on Media, then the chat list, then games game detection recognized, else Media.
   Recognized games are remembered in `detected_apps.json` (on Game after a restart while in the
   background). Steam / launchers / tools are no longer on Game.
+- Voice leveler start (`voice_leveler.rs`), from logs of a real session: settings arriving in the first
+  blocks of a stream no longer count as "learn fast again" (they cut the remembered level's weight
+  before the first word); the remembered level counts as 3 s of speech; after 1 s of speech it is
+  replaced when more than 8 dB off (each frame counted at most 12 dB from it, so a cough or laugh
+  cannot trigger it). Memory 30 s -> 20 s.
 
 **Why**
 
@@ -2871,6 +2876,10 @@ Branch `genre-presets`. Planned as release 0.2.0 "profile edition".
   video-telecommunication lists plus research) has only active desktop clients, no exe from a guess.
 - The Voyager misclassification came from broad labels ("tactical", "strategy") losing to the first
   label seen; fixed in the label order, not with an exe exception.
+- Leveler: a power mean follows a louder voice fast and a quieter one slowly, and after 3 s the foreign
+  drop (12 dB) threw away the real voice when the remembered level was 17 dB too high (gain stuck at
+  +12 instead of +24). Tried and dropped: moving the level only every 3 s (looked like jumps) and 6 s
+  of memory (followed every breath, 0.7 dB swing in the test vs 0.3 dB at 20 s).
 
 **Open**
 

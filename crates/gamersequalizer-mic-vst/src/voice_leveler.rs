@@ -2,7 +2,7 @@
 //! talks today. It learns the speech level only from frames the voice detector heard as speech
 //! (never from noise, keys or whisper, which the detector doesn't hear), fast at first and then
 //! ever slower: a running mean (rate 1/n) until it has `MEMORY_FRAMES` of speech, then a fixed
-//! rate, i.e. it remembers roughly the last 30 s of speech. The gain only moves while it learns,
+//! rate, i.e. it remembers roughly the last 20 s of speech. The gain only moves while it learns,
 //! so it never pumps up the noise in pauses (that is not a compressor).
 //!
 //! The level is learned without the input gain (Windows mic volume, `set_input_gain_db`): when
@@ -18,9 +18,9 @@ pub const DEFAULT_TARGET_DB: f32 = -24.0;
 /// Range of the user's "target loudness" setting.
 pub const MIN_TARGET_DB: f32 = -36.0;
 pub const MAX_TARGET_DB: f32 = -12.0;
-/// A level remembered from an earlier stream counts like this many speech frames (1 s): the first
-/// sentences of a new call can still move it quickly (other room, other mood), then it slows again.
-const WARM_START_FRAMES: u32 = 100;
+/// A level remembered from an earlier stream counts like this many speech frames (3 s), so a loud
+/// first sentence only nudges it; a level that no longer fits is replaced by the checks below.
+const WARM_START_FRAMES: u32 = 300;
 /// Gain range. +24 dB lifts a quiet voice on a mic set 12 dB low (private recording: own voice
 /// ~-31 dBFS active level, so -12 dB needs ~+19); room noise between words stays under -80 dBFS
 /// with the gate on. The cut tames a hot mic before the limiter: -6 dB left a voice at -10 dBFS
@@ -29,8 +29,12 @@ const MAX_BOOST_DB: f32 = 24.0;
 const MAX_CUT_DB: f32 = -18.0;
 /// Speech frames before any gain is applied: one syllable is no level yet.
 const MIN_FRAMES: u32 = 30;
-/// Running mean up to this many speech frames (30 s), then this fixed rate.
-const MEMORY_FRAMES: u32 = 3000;
+/// Running mean up to this many speech frames (20 s), then this fixed rate: ever slower while the
+/// user talks, so breathing (louder on a fresh breath, softer towards its end) barely moves the
+/// gain. 6 s followed every breath (log 2026-11-15 16:15). The start is guarded separately: a
+/// remembered level counts as `WARM_START_FRAMES` and is checked after 1 s (`RECHECK_DB`), and
+/// settings arriving before the first word no longer restart learning (log 2026-11-15 15:38).
+const MEMORY_FRAMES: u32 = 2000;
 /// After `SETTLED_FRAMES` of speech (3 s), one frame moves the estimate as if it were at most this
 /// far from it (a shout, a cough or a desk thump counts as a bit louder speech, not as a new
 /// level). Not earlier: a first estimate from a few soft syllables must be able to jump up.
@@ -42,6 +46,17 @@ const SETTLED_FRAMES: u32 = 300;
 /// estimate, so minutes of such frames walked it down without limit (log 2026-11-06: leveler
 /// pinned at +24 dB while the raw mic clipped, which the limiter then crushed).
 const FOREIGN_DB: f32 = 12.0;
+/// After `seed` or `relearn` the first `RECHECK_FRAMES` of speech (1 s) are also averaged as heard;
+/// when that is more than `RECHECK_DB` from the kept level it replaces it (log 2026-11-15 14:47:
+/// seed -34 dBFS, voice -51.5; a power mean came down so slowly, and `FOREIGN_DB` then dropped the
+/// real voice, that it was still +12 dB instead of +24 after 10 s of speech).
+const RECHECK_FRAMES: u32 = 100;
+const RECHECK_DB: f32 = 8.0;
+/// In that check one frame counts as at most this far from the kept level: a plain power mean of
+/// one second jumped 10 dB on a short loud sound taken for speech (cough, laugh, bump; log
+/// 2026-11-15 16:08: voice -49 dBFS, check -37, gain +20 -> +11). A level that really is off by
+/// more is moved this far, and learning (not yet clamped then) does the rest within a second or two.
+const RECHECK_CLAMP_DB: f32 = 12.0;
 /// Per-sample smoothing of the applied gain (~100 ms), so the fast first second doesn't zip.
 const GAIN_COEF: f32 = 1.0 / (48.0 * 100.0);
 /// Bound on voice flags waiting for their audio to reach the leveler. They expire by time
@@ -71,6 +86,15 @@ pub struct VoiceLeveler {
   input_pow: f32,
   /// Speech frames learned from, all time (wraps).
   speech_frames: u32,
+  /// The 1 s check after `seed` / `relearn`: speech frames so far and their mean, linear power.
+  fresh_frames: u32,
+  fresh_raw: f32,
+  /// The level the check compares against: the one kept when it started (learning moves on).
+  fresh_ref: f32,
+  /// The level came from `seed` or `relearn` (and the check above is due).
+  prior: bool,
+  /// Speech learned since the last `reset` / new stream.
+  heard_here: bool,
 }
 
 impl Default for VoiceLeveler {
@@ -95,6 +119,11 @@ impl VoiceLeveler {
       input_gain_db: 0.0,
       input_pow: 1.0,
       speech_frames: 0,
+      fresh_frames: 0,
+      fresh_raw: 0.0,
+      fresh_ref: 0.0,
+      prior: false,
+      heard_here: false,
     }
   }
 
@@ -110,15 +139,25 @@ impl VoiceLeveler {
     self.acc = 0.0;
     self.acc_len = 0;
     self.started = false; // input gain is a setting: kept
+    self.prior = false;
+    self.heard_here = false;
+    self.restart_check();
   }
 
   /// Something before the leveler changed the speech level (mic volume, denoiser, EQ, ...): learn
   /// fast again. The learned level and the gain stay; the level only counts as `MIN_FRAMES` (0.3 s)
-  /// of speech, so the rate restarts at 1/n and the outlier clamp is off until it settles again.
+  /// of speech, so the next windows outweigh it, and the 1 s check starts over.
+  /// Ignored before any speech in this stream: settings arriving in the first blocks are no change
+  /// the remembered level has seen (log 2026-11-15: every stream start cut the seed's weight).
   /// No allocation: audio thread.
   pub fn relearn(&mut self) {
+    if !self.heard_here {
+      return;
+    }
     // Fewer frames: already learning fast (and below MIN_FRAMES there is no level to keep).
     self.frames = self.frames.min(MIN_FRAMES);
+    self.prior = self.frames >= MIN_FRAMES;
+    self.restart_check();
   }
 
   /// Applied gain in dB (0 until it has heard enough speech).
@@ -166,7 +205,8 @@ impl VoiceLeveler {
   }
 
   /// Start from a level learned in an earlier stream (same mic): the first word already has the
-  /// right gain, and learning stays fast for the first sentences. Ignored once it learned here.
+  /// right gain; it counts as 3 s of speech, and the first second replaces it if the two disagree
+  /// by more than `RECHECK_DB`. Ignored once it learned here.
   pub fn seed(&mut self, level_db: f32) {
     if self.started || !level_db.is_finite() {
       return;
@@ -174,6 +214,8 @@ impl VoiceLeveler {
     self.started = true;
     self.level_pow = 10f32.powf(level_db / 10.0);
     self.frames = WARM_START_FRAMES;
+    self.prior = true;
+    self.restart_check();
     self.update_target_gain();
     self.gain = self.target_gain;
   }
@@ -222,6 +264,21 @@ impl VoiceLeveler {
       return;
     }
     let pow = pow / self.input_pow;
+    self.heard_here = true;
+    if self.prior && self.fresh_frames < RECHECK_FRAMES {
+      self.fresh_frames += 1;
+      let limit = 10f32.powf(RECHECK_CLAMP_DB / 10.0);
+      let heard = pow.clamp(self.fresh_ref / limit, self.fresh_ref * limit);
+      self.fresh_raw += (heard - self.fresh_raw) / self.fresh_frames as f32;
+      let apart_db = 10.0 * (self.fresh_raw / self.fresh_ref.max(1e-12)).log10();
+      if self.fresh_frames == RECHECK_FRAMES && apart_db.abs() > RECHECK_DB {
+        self.speech_frames = self.speech_frames.wrapping_add(1);
+        self.level_pow = self.fresh_raw;
+        self.frames = RECHECK_FRAMES;
+        self.update_target_gain();
+        return;
+      }
+    }
     let pow = if self.frames >= SETTLED_FRAMES {
       if pow < self.level_pow / 10f32.powf(FOREIGN_DB / 10.0) {
         return;
@@ -236,6 +293,12 @@ impl VoiceLeveler {
     self.frames = (self.frames + 1).min(MEMORY_FRAMES);
     self.level_pow += (pow - self.level_pow) / self.frames as f32;
     self.update_target_gain();
+  }
+
+  fn restart_check(&mut self) {
+    self.fresh_frames = 0;
+    self.fresh_raw = 0.0;
+    self.fresh_ref = self.level_pow;
   }
 
   fn update_target_gain(&mut self) {
@@ -330,15 +393,44 @@ mod tests {
   }
 
   #[test]
-  fn a_softer_day_is_followed_slowly() {
+  fn breathing_barely_moves_the_gain_once_settled() {
+    // Log 2026-11-15 16:15: a fresh breath is louder, the end of it softer; 6 s of memory followed
+    // every breath (0.7 dB swing here, 20 s: 0.3).
+    let mut lv = VoiceLeveler::new();
+    run(&mut lv, &tone(30.0, -40.0), true);
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for _ in 0..8 {
+      for (secs, db) in [(1.0, -37.0), (1.5, -40.0), (1.5, -43.0)] {
+        run(&mut lv, &tone(secs, db), true);
+        lo = lo.min(lv.gain_db());
+        hi = hi.max(lv.gain_db());
+      }
+    }
+    assert!(hi - lo < 0.5, "gain swung {lo:.1} .. {hi:.1} dB");
+  }
+
+  #[test]
+  fn a_softer_day_is_followed_slowly_but_surely() {
     let mut lv = VoiceLeveler::new();
     run(&mut lv, &tone(60.0, -30.0), true);
     let normal = lv.gain_db();
-    run(&mut lv, &tone(60.0, -40.0), true);
-    // 10 dB quieter for a minute of speech: well on the way, not instantly. (A power mean
-    // follows a quieter voice slower than a louder one.)
+    // 10 dB quieter after a minute of talking: a few softer sentences (or the end of a breath) barely
+    // move the gain; a voice that stays softer is followed within about a minute of speech.
+    run(&mut lv, &tone(6.0, -40.0), true);
+    let early = lv.gain_db() - normal;
+    assert!(early > 0.5 && early < 3.0, "{normal:.1} -> {:.1} dB", lv.gain_db());
+    run(&mut lv, &tone(84.0, -40.0), true);
     let quieter = lv.gain_db();
-    assert!(quieter - normal > 5.0 && quieter - normal < 10.5, "{normal:.1} -> {quieter:.1} dB");
+    assert!((quieter - normal - 10.0).abs() < 1.0, "{normal:.1} -> {quieter:.1} dB");
+  }
+
+  #[test]
+  fn a_loud_first_sentence_doesnt_hold_the_level_up() {
+    // Log 2026-11-15 15:38: a first second at -44.5 dBFS, then the normal voice at ~-50.
+    let mut lv = VoiceLeveler::new();
+    run(&mut lv, &tone(1.0, -40.5), true); // 4 dB above the log, so +24 dB does not cap it
+    let out = run(&mut lv, &tone(11.0, -46.0), true);
+    assert!((rms_db(&out[9 * SR..]) - DEFAULT_TARGET_DB).abs() < 1.0, "{:.1} dBFS", rms_db(&out[9 * SR..]));
   }
 
   #[test]
@@ -377,12 +469,69 @@ mod tests {
     let mut lv = VoiceLeveler::new();
     lv.seed(-36.0);
     assert!((lv.gain_db() - 12.0).abs() < 0.1, "first word already gets the gain");
-    // Today the voice is 6 dB louder: after 3 s of speech the gain is most of the way there.
-    run(&mut lv, &tone(3.0, -30.0), true);
-    assert!(lv.gain_db() < 7.5, "{:.1} dB", lv.gain_db());
+    // Today the voice is 6 dB louder: the first second only nudges it (the seed counts as 3 s; a
+    // loud first sentence must not drop the gain, log 2026-11-15 15:38), then it follows smoothly.
+    run(&mut lv, &tone(1.0, -30.0), true);
+    assert!(lv.gain_db() > 9.0 && lv.gain_db() < 11.5, "{:.1} dB", lv.gain_db());
+    run(&mut lv, &tone(11.0, -30.0), true);
+    assert!((lv.gain_db() - 6.0).abs() < 1.0, "{:.1} dB", lv.gain_db());
     // A seed never overrides what this stream learned.
+    let learned = lv.gain_db();
     lv.seed(-50.0);
-    assert!(lv.gain_db() < 7.5);
+    assert_eq!(lv.gain_db(), learned);
+  }
+
+  #[test]
+  fn a_loud_first_second_barely_dips_a_remembered_gain() {
+    // Log 2026-11-15 15:38: remembered -51.5 dBFS (+24 dB), first second at -44.5, then ~-50.
+    let mut lv = VoiceLeveler::new();
+    lv.seed(-51.5);
+    lv.relearn(); // settings arriving at the stream start
+    run(&mut lv, &tone(1.0, -44.5), true);
+    let mut lowest = lv.gain_db();
+    for _ in 0..8 {
+      run(&mut lv, &tone(0.5, -50.0), true);
+      lowest = lowest.min(lv.gain_db());
+    }
+    assert!(lowest > 20.0, "dipped to {lowest:.1} dB (was +17 dB)");
+    assert!(lv.gain_db() > 23.0, "{:.1} dB after 5 s", lv.gain_db());
+  }
+
+  #[test]
+  fn a_short_loud_sound_in_the_first_second_keeps_the_remembered_level() {
+    // Log 2026-11-15 16:08: voice and remembered level -49 dBFS, a short loud sound taken for speech.
+    let mut lv = VoiceLeveler::new();
+    lv.seed(-45.0);
+    let mut x = tone(0.5, -45.0);
+    x.extend(tone(0.03, -10.0));
+    x.extend(tone(0.6, -45.0));
+    run(&mut lv, &x, true);
+    assert!(lv.gain_db() > 19.0, "{:.1} dB (was +11)", lv.gain_db());
+  }
+
+  #[test]
+  fn settings_arriving_before_the_first_word_keep_the_remembered_level() {
+    // Log 2026-11-15: every stream start saw "voice EQ changed" before any speech.
+    let mut lv = VoiceLeveler::new();
+    lv.seed(-36.0);
+    lv.relearn();
+    run(&mut lv, &tone(1.1, -30.0), true);
+    assert!(lv.gain_db() > 9.0, "{:.1} dB", lv.gain_db());
+  }
+
+  #[test]
+  fn a_far_off_remembered_level_is_replaced_after_a_second_of_speech() {
+    // Log 2026-11-15: remembered -34 dBFS, today's voice -51.5 (mic further away, other model).
+    let mut lv = VoiceLeveler::new();
+    lv.seed(-34.0);
+    run(&mut lv, &tone(2.5, -51.5), true); // the check moves it 12 dB, learning the rest
+    assert!(lv.gain_db() > 23.5, "{:.1} dB", lv.gain_db());
+    // The same after "learning fast again" with a level that no longer fits.
+    let mut lv = VoiceLeveler::new();
+    run(&mut lv, &tone(60.0, -34.0), true);
+    lv.relearn();
+    let out = run(&mut lv, &tone(2.0, -46.0), true);
+    assert!((rms_db(&out[3 * SR / 2..]) - DEFAULT_TARGET_DB).abs() < 0.5, "{:.1} dBFS", rms_db(&out[3 * SR / 2..]));
   }
 
   #[test]
@@ -399,15 +548,16 @@ mod tests {
     assert!((lv.gain_db() - before).abs() < 0.01, "level and gain kept");
     lv.seed(-50.0); // the remembered level from an earlier stream must not come back
     let out = run(&mut lv, &tone(2.0, -20.0), true);
-    assert!((rms_db(&out[SR..]) - DEFAULT_TARGET_DB).abs() < 1.5, "{:.1} dBFS", rms_db(&out[SR..]));
-    // Mic volume turned down 10 dB: the power mean follows slower down, still far faster than
-    // without the restart.
+    // The 1 s check replaces the level; the gain follows within its ~100 ms smoothing.
+    assert!((rms_db(&out[13 * SR / 10..]) - DEFAULT_TARGET_DB).abs() < 1.0, "{:.1} dBFS", rms_db(&out[13 * SR / 10..]));
+    // Mic volume turned down 10 dB: replaced after 1 s of speech, far faster than without the
+    // restart.
     let (mut fast, mut slow) = (settled(), settled());
     fast.relearn();
-    run(&mut fast, &tone(3.0, -40.0), true);
-    run(&mut slow, &tone(3.0, -40.0), true);
-    assert!(fast.gain_db() - before > 6.5, "{:.1} dB", fast.gain_db() - before);
-    assert!(slow.gain_db() - before < 1.0, "{:.1} dB", slow.gain_db() - before);
+    run(&mut fast, &tone(1.5, -40.0), true);
+    run(&mut slow, &tone(1.5, -40.0), true);
+    assert!((fast.gain_db() - before - 10.0).abs() < 1.0, "{:.1} dB", fast.gain_db() - before);
+    assert!(slow.gain_db() - before < 2.0, "{:.1} dB", slow.gain_db() - before);
   }
 
   #[test]
