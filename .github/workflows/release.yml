@@ -36,7 +36,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustc --version
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
@@ -67,7 +70,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustc --version
 
       # Only the downloaded crates: package.ps1 cleans its profiles and builds from scratch, so a
       # cached target dir would only cost upload time.

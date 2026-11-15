@@ -180,6 +180,9 @@ run it unasked; updates the user picks go into their own commit.
   works on the Mac too. Known vulnerabilities: `cargo audit`, if installed (installing it needs the user's
   okay, see Ground rules). Report what would change, which major bumps need code changes, and any
   advisories. After applying, build, test and clippy (`dev-rebuild` agent).
+- **Rust toolchain** (`rust-toolchain.toml`, used by the dev PC and both workflows): compare the pinned
+  version with the current stable (`rustup check`). A bump goes into its own commit and passes the
+  gate (format and clippy can change with it).
 
 ## Ground rules
 
