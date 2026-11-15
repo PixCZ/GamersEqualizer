@@ -2,26 +2,26 @@
 
 ## General
 
-- Formatting is the formatter's job (`rustfmt`, Prettier); don't hand-format or argue with it.
-- Two-space indentation in Rust and TypeScript.
-- Prefer imports over inline fully-qualified paths; alias name collisions with a suffix (`TaskDb`, `TaskApi`).
+- Formatting is `rustfmt`'s job (`rustfmt.toml`: two-space indentation, 120 columns); don't hand-format.
+- Prefer imports over inline fully-qualified paths; alias name collisions with a suffix.
+- Code, comments, commit messages and docs are in English. A comment says why, not what.
+- Names say what the thing is today. When a design is replaced, its names, fields and comments go too.
 
 ## Rust
 
-- Logging only via `log` macros (`error!`, `warn!`, `info!`, `debug!`, `trace!`). No `println!`/`eprintln!`
-  outside tests and pre-logger bootstrap.
-- Application code: `AnyhowResult<T>` from the `errors` crate (never depend on `anyhow` directly).
-  Typed errors at boundaries: `AppError` for commands, `{Feature}Error` enums inside crates (`thiserror`).
-- DB queries: SQLx `query!` / `query_as!` macros, return `Result<T, sqlx::Error>`.
-- Tauri: one command per file, named after it (`generate_image_command.rs`); shared code in a support module.
-  All commands registered in one `generate_handler!` list.
-- No panics after bootstrap — see `architecture.md`.
+- Logging only via `log` macros (`error!`, `warn!`, `info!`, `debug!`, `trace!`), with the component
+  in brackets first: `info!("[MicStream] ...")`. No `println!` / `eprintln!` outside tests, examples
+  and pre-logger bootstrap.
+- Errors: see `architecture.md` (`Result<T, String>` for log-and-show, an enum where the caller
+  decides by kind).
+- A new dependency needs a reason the standard library and the existing dependencies cannot cover;
+  the reason goes into a comment in `Cargo.toml`, as the existing ones have.
+- No panics after bootstrap, `unsafe` only with a `// SAFETY:` comment: see `architecture.md`.
 
-### Lints (`[workspace.lints]` in root `Cargo.toml`)
+### Lints (`[workspace.lints]` in the root `Cargo.toml`)
 
 ```toml
 [workspace.lints.rust]
-unsafe_code = "deny"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]
@@ -38,19 +38,37 @@ needless_return = "deny"
 redundant_field_names = "deny"
 ```
 
-Bootstrap code and tests opt out locally with `#[allow(clippy::expect_used)]` + a reason comment.
+- Every crate inherits them (`[lints] workspace = true`); `crates/vendor/` is outside the workspace.
+- Tests may unwrap, expect, panic and index (`clippy.toml`).
+- Bootstrap code opts out locally with `#[allow(clippy::expect_used)]` and a reason comment.
 
-## TypeScript / Frontend
+## UI (egui)
 
-- React + Vite + Zustand; Three.js for 3D. Strict TS, no `any` at the command boundary.
-- Every `invoke()` goes through one typed wrapper that returns success | failure; no bare try/catch per call site.
-- A React error boundary around each major panel; one broken panel doesn't blank the app.
+- Every text the user sees goes through `tr("English text")`, `trf` (with arguments) or `tk` (in a
+  constant). The English text is the key; add the Czech entry to `i18n_cs.rs` in the same change. A
+  test fails on a missing one, but only in the files listed in `SOURCES` (`i18n.rs`): add a new file
+  with UI text there.
+- New features reuse the shared widgets: the EQ band editor (`ui/eq_editor.rs`, `ui/eq_graph.rs`) and
+  volumes in percent with a defined 100 %. No parallel widgets, no bare dB gains.
+- The window repaints many times a second: no file, registry or Windows audio calls in the paint path.
+  Read on a timer or on an event and keep the result in the state.
+- Say what happens and why, in place (label, tooltip, status line); state a limit honestly with the
+  next step.
+
+## PowerShell (`scripts/`)
+
+- `apo-install.ps1` / `apo-uninstall.ps1` run elevated under Windows PowerShell 5.1; their self-check
+  (`scripts/tests/apo-install.tests.ps1`) also runs under `pwsh` on macOS. Code must work in both.
+- Constants shared with Rust (CLSIDs, registry value names, device-state bits) must agree with
+  `win_audio/apo_install.rs`.
 
 ## File Layout
 
 Read top to bottom:
 
 1. Constants
-2. Types (structs/enums/interfaces), then API types: Request, Response, Error
-3. Constructors, then public functions/methods, then private helpers
+2. Types (structs / enums)
+3. Constructors, then public functions / methods, then private helpers
 4. Tests last
+
+A file holds one job. Split by job, never by line count.

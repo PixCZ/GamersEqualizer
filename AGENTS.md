@@ -5,29 +5,57 @@ Guide for coding agents (Claude Code, Codex, Copilot, ...) working in this repo.
 
 ## Project
 
-Desktop app for AI-assisted creative work (images, video, 3D), similar in shape to
-[ArtCraft](https://github.com/storytold/artcraft): Tauri 2 + Rust backend, React/TypeScript frontend,
-SQLite for local state. _TBD: product specifics from the brief._
+Audio control center for Windows, built for gamers: per-app mixer with ChatMix, headphone correction
+EQ, game profiles, sidetone and a low-latency microphone chain (echo cancellation, AI noise
+suppression, voice leveler). The processing runs as Windows audio effects (APOs) on the user's real
+devices: no virtual sound card, no kernel driver, no network code. Pure Rust with a native UI
+(`eframe` / `egui`), Windows 10 1803+ / Windows 11, x64.
 
-Core property: **the running app never crashes** — see `.claude/rules/architecture.md`.
-Out of scope: browser emulation / consumer-web-app clients for third-party services; official APIs only.
+What users see is in `README.md`; history, measurements and what was tried and dropped are in
+`DEVLOG.md`. `SPECIFICATION.md` is the original brief, kept as written: where it differs, the code wins.
+
+Three places our code runs (details in `.claude/rules/architecture.md`):
+
+| Where                              | What                                                                   |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| `audiodg.exe` (Windows audio)      | `gamersequalizer_apo.dll`: mic chain, output EQ, per-app stream EQ     |
+| `gamersequalizer.exe --daemon`     | Background service: devices, mixer, game detection, health, sidetone   |
+| `gamersequalizer.exe`              | The window (egui); closing it leaves the service running               |
+
+They talk through shared memory (`crates/gamersequalizer-common/src/shm.rs`) and JSON files in
+`%APPDATA%\GamersEqualizer`.
+
+Core properties: **the running app never crashes, and our DLL never takes Windows audio down**; the
+binary has **no network code**; latency of the microphone chain is measured and shown, never guessed.
 
 ## Structure
 
-Target layout (created as the work needs it, not up front):
+| Path                              | Purpose                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------- |
+| `crates/gamersequalizer-common/`  | Shared by all: shared-memory layout, biquads, limiter, profiles, sidetone |
+| `crates/gamersequalizer-mic-vst/` | Microphone DSP chain, a plain library (the name is historical: no VST)    |
+| `crates/gamersequalizer-apo/`     | The APO DLL: COM object, mic / output / stream processors; probe examples |
+| `crates/gamersequalizer-daemon/`  | `gamersequalizer.exe`: service loop and window (see below)                |
+| `crates/vendor/`                  | Third-party forks (DeepFilterNet, RNNoise, Silero VAD), outside our lints |
+| `crates/build-support/`           | Version info shared by the build scripts                                  |
+| `scripts/`                        | Dev rebuild, packaging, signing, APO install / uninstall and its tests    |
+| `test_data/`                      | Test fixtures; `test_data/private/` is git-ignored (own recordings)       |
+| `docs/`                           | Build guide, AEC3 tuning notes, screenshots                               |
+| `packaging/`                      | winget manifest drafts, release notes                                     |
+| `.claude/rules/`                  | Detailed agent rules: architecture, code style, testing                   |
+| `secrets/`                        | Never read, edit, or commit                                               |
 
-| Path                  | Purpose                                                  |
-| --------------------- | -------------------------------------------------------- |
-| `crates/desktop/`     | Tauri app: commands, background threads, state, events   |
-| `crates/api_clients/` | One crate per AI provider (official API)                 |
-| `crates/lib/`         | Small shared crates (`errors`, files, mimetypes, ...)    |
-| `crates/database/`    | SQLite task persistence (sqlx)                           |
-| `frontend/`           | React + Vite + Zustand (+ Three.js)                      |
-| `_database/`          | SQLite migrations; `.sqlx/` holds offline query metadata |
-| `test_data/`          | Test fixtures                                            |
-| `packaging/`          | winget manifest drafts                                   |
-| `.claude/rules/`      | Detailed agent rules: architecture, code style, testing  |
-| `secrets/`            | Never read, edit, or commit                              |
+Inside `crates/gamersequalizer-daemon/src/`:
+
+| Path              | Purpose                                                                         |
+| ----------------- | ------------------------------------------------------------------------------- |
+| `main.rs`         | Argument dispatch, the service loop, starting the window                        |
+| `win_audio/`      | Windows audio (WASAPI, COM), APO install and link, mixer, routing, sidetone     |
+| `output_eq/`      | Headphone / game / chat / media EQ layers, game and genre detection, AutoEQ     |
+| `sonar_importer/` | Import of SteelSeries Sonar profiles                                            |
+| `ui/`             | The egui window: one file per tab, shared widgets, theme                        |
+| `health.rs`       | Checks behind the warnings and the `[ApoCheck]` / `[ApoNote]` log lines         |
+| `i18n*.rs`        | UI texts: the English text is the key, `i18n_cs.rs` is the Czech table          |
 
 ## Working mode: Ponytail (write less code)
 
