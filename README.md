@@ -47,7 +47,8 @@ choice adds. It should be just as useful outside games.
   from files on your PC. None of these launchers is required.
 - Import your existing profiles from a SteelSeries Sonar install, even when Sonar itself never ran
   (SteelSeries GG kept for its hardware). Presets a later GG update brings are added on their own;
-  the ones you deleted or renamed stay that way.
+  the ones you deleted or renamed stay that way. Importing again keeps a profile you changed in the
+  deleted folder before Sonar's version replaces it.
 - Settings > "Back up or move settings" saves profiles and settings into one compressed JSON file
   (`.json.gz`), for a reinstalled Windows or a new PC. Export and import can be limited to some parts,
   e.g. only the game profiles for a friend, whose microphone settings stay as they are. Devices are

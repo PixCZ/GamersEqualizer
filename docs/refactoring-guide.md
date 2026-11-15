@@ -555,7 +555,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] A3 clippy na nulu
 - [x] A4 `check.ps1`, CI (zbývá: push, ověřit běh CI; pravidlo na GitHubu ruční)
 - [x] B1 instalátor, řádek 886
-- [ ] B2 import ze Sonaru
+- [x] B2 import ze Sonaru
 - [ ] B3 ID zařízení
 - [ ] B4 volba „(žádný)“
 - [ ] B5 varování se špatným jménem

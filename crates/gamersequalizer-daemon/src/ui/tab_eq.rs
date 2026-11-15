@@ -35,7 +35,11 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
     // Only offered when the Sonar database has profiles (counted once per run).
     if super::setup::sonar_profiles(state) > 0 {
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(DEFAULT_SONAR_DB_PATH).clicked() {
+        let hover = trf(
+    "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
+    &[&DEFAULT_SONAR_DB_PATH],
+  );
+  if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(hover).clicked() {
           reimport_sonar(state);
         }
       });

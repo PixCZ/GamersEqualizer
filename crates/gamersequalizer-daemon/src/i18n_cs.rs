@@ -221,6 +221,10 @@ pub static CS: &[(&str, &str)] = &[
   // --- game / chat / media ---
   ("Game EQ", "Herní EQ"),
   ("Import from Sonar DB", "Importovat z databáze Sonar"),
+  (
+    "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
+    "Zkopíruje profily ze Sonaru z {}. Profil stejného jména, který jste upravili, se nejdřív přesune do profiles\\_deleted, odkud ho jde vrátit.",
+  ),
   ("Import {} profiles from SteelSeries Sonar", "Importovat profily ze SteelSeries Sonar ({})"),
   ("SteelSeries GG is on this PC: its game profiles and microphone presets are copied here. SteelSeries GG stays as it is; later imports are on the Game tab.", "Na tomto počítači je SteelSeries GG: jeho herní profily a předvolby mikrofonu se zkopírují sem. SteelSeries GG zůstane beze změny; další import najdete na kartě Hra."),
   ("Genre: Shooter (footsteps)", "Žánr: Střílečka (kroky)"),

@@ -29,10 +29,22 @@ pub fn read_sonar_sources() -> Result<Vec<ParametricProfile>, String> {
   SonarDbReader::read_all_sources(Path::new(DEFAULT_SONAR_DB_PATH), &migrations::default_dir())
 }
 
-/// Copies every Sonar profile in (a profile of the same name is replaced) and remembers them.
+/// Copies every Sonar profile in and remembers them. A file of the same name with other content
+/// (the user's edits) is moved to the deleted folder first; when that fails it stays.
 pub fn import_sonar(profiles: &[ParametricProfile], storage: &ProfileStorage) -> ImportStats {
   let mut stats = ImportStats { total_imported: 0, game_presets: 0, custom_presets: 0 };
   for profile in profiles {
+    let file = format!("{}.json", ProfileStorage::sanitize_filename(&profile.name));
+    let path = storage.get_vad_directory(profile.vad_type).join(file);
+    if let Ok(old) = std::fs::read_to_string(&path) {
+      // The same text `save_profile` writes: an untouched import is not moved.
+      if serde_json::to_string_pretty(profile).ok().as_deref() != Some(old.as_str()) {
+        if let Err(e) = storage.move_to_deleted(&path) {
+          warn!("[Sonar] kept {} (not replaced): {e}", path.display());
+          continue;
+        }
+      }
+    }
     match storage.save_profile(profile) {
       Ok(_) => {
         stats.total_imported += 1;
@@ -170,6 +182,27 @@ mod tests {
     assert!(!game.join("Old gone.json").exists());
     assert_eq!(std::fs::read_to_string(game.join("Kept.json")).unwrap(), "{\"edited\": true}", "the user's copy stays");
     assert_eq!(sync_new(&after_update, &storage), 0, "nothing new the second time");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn import_moves_a_changed_profile_to_the_deleted_folder_first() {
+    let dir = std::env::temp_dir().join(format!("ge_sonar_import_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let storage = ProfileStorage::new(&dir);
+    let a = ParametricProfile::new("Apex", VadType::Game);
+    import_sonar(std::slice::from_ref(&a), &storage);
+    let file = storage.get_vad_directory(VadType::Game).join("Apex.json");
+    let sonar = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, "{\"edited\": true}").unwrap();
+
+    import_sonar(std::slice::from_ref(&a), &storage);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), sonar, "Sonar's version is in place");
+    let deleted = dir.join(DELETED_DIR).join("Apex.json");
+    assert_eq!(std::fs::read_to_string(&deleted).unwrap(), "{\"edited\": true}", "the user's copy is kept");
+
+    import_sonar(std::slice::from_ref(&a), &storage);
+    assert_eq!(std::fs::read_dir(dir.join(DELETED_DIR)).unwrap().count(), 1, "an unchanged profile is not moved");
     let _ = std::fs::remove_dir_all(&dir);
   }
 
