@@ -5,28 +5,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::{
   eCapture, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,
-  MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-  AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
-  WAVEFORMATEXTENSIBLE,
+  MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
-use windows::Win32::System::Threading::{
-  AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, WaitForSingleObject,
-};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use gamersequalizer_mic_vst::plugin::{GamersEqualizerPlugin, PluginMode};
 
-const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
-  windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+use super::loopback::{init_client_48k_float, StreamResources};
 
-/// The DSP chain (nnnoiseless, AEC) is tuned for 48 kHz; WASAPI resamples to/from it.
-const DSP_SAMPLE_RATE: u32 = 48_000;
 /// Bridge can't start without a virtual mic sink; expected when the APO path is used.
 const NO_VIRTUAL_MIC: &str = "No virtual microphone render endpoint found (SteelSeries Sonar Mic or VB-Cable Input)";
-const WAVE_FORMAT_IEEE_FLOAT_TAG: u16 = 3;
 const HNS_PER_MS: i64 = 10_000;
 const CAPTURE_BUFFER_MS: i64 = 10;
 /// Render ring is larger than the cushion so mic/sink clock drift doesn't overflow it at once.
@@ -55,27 +46,11 @@ pub struct MicStreamWorker {
   loopback_handle: Option<JoinHandle<()>>,
 }
 
-/// Format a client was actually initialized with.
-pub(crate) struct StreamFormat {
-  pub channels: usize,
-  pub sample_rate: u32,
-  pub bits: u16,
-  pub is_float: bool,
-}
-
 /// Device ids the UI currently wants; the stream reopens when they differ from the open ones.
 struct DeviceSelection<'a> {
   input: &'a Mutex<Option<String>>,
   output: &'a Mutex<Option<String>>,
   reference: Option<&'a Mutex<Option<String>>>,
-}
-
-/// Owns the raw handles/allocations of one stream session so every exit path frees them.
-pub(crate) struct StreamResources {
-  pub cap_event: HANDLE,
-  pub cap_fmt: *mut WAVEFORMATEX,
-  pub rnd_fmt: *mut WAVEFORMATEX,
-  mmcss: Option<HANDLE>,
 }
 
 impl Default for MicStreamWorker {
@@ -205,40 +180,6 @@ impl DeviceSelection<'_> {
   /// The echo-delay cache key depends on the reference device, so reopen on change.
   fn reference_changed(&self, open_ref: Option<&str>) -> bool {
     self.reference.is_some_and(|r| r.lock().ok().and_then(|g| g.clone()).as_deref() != open_ref)
-  }
-}
-
-impl StreamResources {
-  pub(crate) fn new() -> Self {
-    Self { cap_event: HANDLE::default(), cap_fmt: std::ptr::null_mut(), rnd_fmt: std::ptr::null_mut(), mmcss: None }
-  }
-
-  /// Raise this thread to an MMCSS task class; failure only costs glitch resistance.
-  pub(crate) fn register_mmcss(&mut self, task: PCWSTR) {
-    let mut task_index = 0u32;
-    match unsafe { AvSetMmThreadCharacteristicsW(task, &mut task_index) } {
-      Ok(h) => self.mmcss = Some(h),
-      Err(e) => warn!("[MicStream] MMCSS registration failed (continuing): {}", e),
-    }
-  }
-}
-
-impl Drop for StreamResources {
-  fn drop(&mut self) {
-    unsafe {
-      if let Some(h) = self.mmcss.take() {
-        let _ = AvRevertMmThreadCharacteristics(h);
-      }
-      if !self.cap_event.is_invalid() {
-        let _ = CloseHandle(self.cap_event);
-      }
-      if !self.cap_fmt.is_null() {
-        CoTaskMemFree(Some(self.cap_fmt as *const _));
-      }
-      if !self.rnd_fmt.is_null() {
-        CoTaskMemFree(Some(self.rnd_fmt as *const _));
-      }
-    }
   }
 }
 
@@ -549,45 +490,6 @@ unsafe fn device_id_of(dev: &IMMDevice) -> Option<String> {
   id
 }
 
-/// Initialize a shared-mode client at 48 kHz float32 (WASAPI converts and resamples);
-/// falls back to the device mix format if the driver refuses.
-pub(crate) unsafe fn init_client_48k_float(
-  client: &IAudioClient,
-  mix_fmt: *const WAVEFORMATEX,
-  flags: u32,
-  buffer_hns: i64,
-) -> Result<StreamFormat, String> {
-  let mix = *mix_fmt;
-  // Plain WAVEFORMATEX only describes mono/stereo unambiguously; we only need channel 0 anyway.
-  let channels = mix.nChannels.clamp(1, 2);
-  let block_align = channels * 4;
-  let wanted = WAVEFORMATEX {
-    wFormatTag: WAVE_FORMAT_IEEE_FLOAT_TAG,
-    nChannels: channels,
-    nSamplesPerSec: DSP_SAMPLE_RATE,
-    nAvgBytesPerSec: DSP_SAMPLE_RATE * block_align as u32,
-    nBlockAlign: block_align,
-    wBitsPerSample: 32,
-    cbSize: 0,
-  };
-  let convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-  match client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags | convert, buffer_hns, 0, &wanted, None) {
-    Ok(()) => Ok(StreamFormat { channels: channels as usize, sample_rate: DSP_SAMPLE_RATE, bits: 32, is_float: true }),
-    Err(e) => {
-      warn!("[MicStream] 48 kHz float stream refused ({}), using device mix format", e);
-      client
-        .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, buffer_hns, 0, mix_fmt, None)
-        .map_err(|e| format!("IAudioClient.Initialize failed: {}", e))?;
-      Ok(StreamFormat {
-        channels: (mix.nChannels as usize).max(1),
-        sample_rate: mix.nSamplesPerSec,
-        bits: mix.wBitsPerSample,
-        is_float: is_float_format(mix_fmt),
-      })
-    }
-  }
-}
-
 /// Queue `frames` of silence into the render sink.
 unsafe fn write_silence(render_client: &IAudioRenderClient, frames: u32) -> windows::core::Result<()> {
   if frames == 0 {
@@ -596,23 +498,6 @@ unsafe fn write_silence(render_client: &IAudioRenderClient, frames: u32) -> wind
   render_client.GetBuffer(frames)?;
   // AUDCLNT_BUFFERFLAGS_SILENT: WASAPI treats the buffer as zeros.
   render_client.ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)
-}
-
-unsafe fn is_float_format(p_fmt: *const WAVEFORMATEX) -> bool {
-  if p_fmt.is_null() {
-    return false;
-  }
-  let tag = (*p_fmt).wFormatTag as u32;
-  if tag == 3 {
-    return true; // WAVE_FORMAT_IEEE_FLOAT
-  }
-  if tag == 0xFFFE {
-    // WAVE_FORMAT_EXTENSIBLE
-    let ext = p_fmt as *const WAVEFORMATEXTENSIBLE;
-    let sub_format = std::ptr::read_unaligned(std::ptr::addr_of!((*ext).SubFormat));
-    return sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-  }
-  false
 }
 
 #[cfg(test)]
