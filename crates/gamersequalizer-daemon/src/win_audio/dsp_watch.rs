@@ -128,7 +128,6 @@ impl DspWatch {
     );
   }
 
-  /// Shortcut: call timing is measured in the APO only (not the in-process bridge).
   fn flush_timing(&mut self) {
     debug!(
       "[DSP] mic timing: call jitter peak {:.1} ms, {} stalled calls (>1.5 blocks late), DSP load peak {:.0} %, avg max {:.0} %",

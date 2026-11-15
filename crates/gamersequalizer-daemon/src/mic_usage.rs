@@ -98,7 +98,7 @@ fn recording() -> Vec<(u64, String)> {
 }
 
 fn scan_recording_apps() -> Vec<(u64, String)> {
-  // Our own mic bridge opens the mic too; it is not "another app recording".
+  // Our own mic probe (`--probe-mic`) opens the mic too; it is not "another app recording".
   let own = std::env::current_exe().ok().map(|p| p.to_string_lossy().replace('\\', "#").to_lowercase());
   let is_own = |name: &str| own.as_deref() == Some(name.to_lowercase().as_str());
 

@@ -9,7 +9,7 @@ use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
-  AecState, DenoiseModel, ShmHeader, ShmLayout, StereoFrame, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
+  AecState, DenoiseModel, ShmHeader, ShmLayout, AEC_IMPULSE_POINTS, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED,
   MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS, MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
   NOISE_GATE_AUTO_LOOKAHEAD,
 };
@@ -37,16 +37,10 @@ const PRE_HIGH_PASS_HZ: f32 = 70.0;
 /// Window of the published chain extremes (probability max, gate / limiter min): 250 ms at 48 kHz,
 /// one daemon log tick.
 const CHAIN_WINDOW_SAMPLES: usize = 12_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PluginMode {
-  Auto,
-  SpeakerTap,
-  MicProcessor,
-}
+/// The chain runs at 48 kHz only; the APO bridges other device rates (`RateBridge`).
+const SAMPLE_RATE: f32 = 48_000.0;
 
 pub struct GamersEqualizerPlugin {
-  pub mode: PluginMode,
   shm_client: Option<SharedMemoryClient>,
   delay_estimator: DelayEstimator,
   aec: EchoCanceller3,
@@ -72,12 +66,10 @@ pub struct GamersEqualizerPlugin {
   eq_version: Option<u32>,
   /// Last stage: volume, then this (smooth gain on peaks instead of clipping them).
   limiter: PeakLimiter,
-  pub sample_rate: f32,
   /// Speaker reference of the block as the AEC gets it: mono mix, and left / right.
   ref_buffer: Vec<f32>,
   ref_stereo: [Vec<f32>; 2],
   mic_mono_temp: Vec<f32>,
-  tap_frames: Vec<StereoFrame>,
   aec_state: AecState,
   /// Last `aec_cached_delay_samples` seen in shared memory (warm start when it changes).
   cached_delay_seen: u32,
@@ -162,15 +154,10 @@ struct ChainExtremes {
 }
 
 impl GamersEqualizerPlugin {
-  pub fn new(sample_rate: f32) -> Self {
-    Self::with_shm(sample_rate, SharedMemoryClient::open_or_create().ok())
-  }
-
   /// Uses the given mapping for settings, reference audio and telemetry (the APO passes
   /// its Global mapping here).
-  pub fn with_shm(sample_rate: f32, shm_client: Option<SharedMemoryClient>) -> Self {
+  pub fn with_shm(shm_client: Option<SharedMemoryClient>) -> Self {
     Self {
-      mode: PluginMode::Auto,
       shm_client,
       delay_estimator: DelayEstimator::new(),
       aec: EchoCanceller3::new(),
@@ -185,12 +172,10 @@ impl GamersEqualizerPlugin {
       leveler_inputs: None,
       eq: BiquadCascade::default(),
       eq_version: None,
-      limiter: PeakLimiter::new(48_000.0),
-      sample_rate,
+      limiter: PeakLimiter::new(SAMPLE_RATE),
       ref_buffer: vec![0.0; 2048],
       ref_stereo: [vec![0.0; 2048], vec![0.0; 2048]],
       mic_mono_temp: vec![0.0; 2048],
-      tap_frames: Vec::with_capacity(2048),
       aec_state: AecState::Disabled,
       cached_delay_seen: 0,
       cached_echo_seen: 0,
@@ -221,32 +206,12 @@ impl GamersEqualizerPlugin {
     self.capture = Some(CaptureWriter::new(map, device_rate));
   }
 
-  /// Warm-start the echo canceller with a delay measured in an earlier session.
-  pub fn set_cached_aec_delay(&mut self, delay_samples: usize) {
-    self.delay_estimator.set_cached_delay(delay_samples);
-  }
-
-  /// Confirmed echo delay (48 kHz samples), for persisting across restarts.
-  pub fn confirmed_aec_delay(&self) -> Option<usize> {
-    if self.delay_estimator.is_from_cache() {
-      None // nothing new learned
-    } else {
-      self.delay_estimator.current_delay()
-    }
-  }
-
   /// Apply the noise model chosen in the UI now (a heavy model loads here, 0.1-0.2 s).
   /// Call before audio starts so the first selection doesn't cause a gap.
   pub fn preload_selected_model(&mut self) {
     if let Some(model) = self.shm_header().map(|h| DenoiseModel::from_u32(h.denoise_model.load(Ordering::Relaxed))) {
       self.ai_denoiser.set_model(model);
     }
-  }
-
-  /// Process audio buffers without timestamps (VST host). AEC needs timestamps, so it
-  /// reports `NoReference` in this path.
-  pub fn process(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]]) {
-    self.process_timed(inputs, outputs, None);
   }
 
   /// `mic_qpc_hns`: QPC time (100 ns units) of the first input frame, from WASAPI.
@@ -258,39 +223,7 @@ impl GamersEqualizerPlugin {
     if frames == 0 || outputs.is_empty() {
       return;
     }
-
-    let effective_mode = match self.mode {
-      PluginMode::Auto if inputs.len() >= 2 => PluginMode::SpeakerTap,
-      PluginMode::Auto => PluginMode::MicProcessor,
-      m => m,
-    };
-
-    if effective_mode == PluginMode::SpeakerTap {
-      self.speaker_tap(inputs, outputs);
-    } else {
-      self.mic_process(first, outputs, mic_qpc_hns);
-    }
-  }
-
-  fn speaker_tap(&mut self, inputs: &[&[f32]], outputs: &mut [&mut [f32]]) {
-    // Pass-through audio to output untouched
-    for (ch, out) in outputs.iter_mut().enumerate() {
-      if let Some(src) = inputs.get(ch.min(inputs.len().saturating_sub(1))) {
-        let n = out.len().min(src.len());
-        if let (Some(o), Some(s)) = (out.get_mut(..n), src.get(..n)) {
-          o.copy_from_slice(s);
-        }
-      }
-    }
-
-    // Tap stereo mix into shared memory ring buffer
-    if let Some(shm) = self.shm_client.as_mut() {
-      let left = inputs.first().copied().unwrap_or(&[]);
-      let right = inputs.get(1).copied().unwrap_or(left);
-      self.tap_frames.clear();
-      self.tap_frames.extend(left.iter().zip(right).map(|(&l, &r)| StereoFrame { left: l, right: r }));
-      shm.ring_buffer().push_frames(&self.tap_frames);
-    }
+    self.mic_process(first, outputs, mic_qpc_hns);
   }
 
   /// With several mic chains in one process only one may publish telemetry: `publishes` says
@@ -436,7 +369,7 @@ impl GamersEqualizerPlugin {
     if eq_version.is_some() && eq_version != self.eq_version {
       self.eq_version = eq_version;
       let bands = self.shm_header().map(|h| h.read_mic_eq()).unwrap_or_default();
-      self.eq.set_bands(&bands, self.sample_rate);
+      self.eq.set_bands(&bands, SAMPLE_RATE);
     }
 
     self.mic_rms = smooth_rms(self.mic_rms, mic_in);
@@ -560,7 +493,7 @@ impl GamersEqualizerPlugin {
       }
     }
 
-    let block_secs = frames as f32 / self.sample_rate.max(1.0);
+    let block_secs = frames as f32 / SAMPLE_RATE;
     let load = started.elapsed().as_secs_f32() / block_secs;
     // The block a model takes over in sets up its scratch memory: not a sign of a slow CPU.
     if self.ai_denoiser.active_model() == model_before {
@@ -1033,6 +966,7 @@ fn aec_latency_samples(aec_idle: bool, aec_state: AecState, aec: &EchoCanceller3
 mod tests {
   use super::*;
   use gamersequalizer_common::limiter::soft_limit;
+  use gamersequalizer_common::shm::StereoFrame;
 
   #[test]
   fn test_digital_boost_saturation() {
@@ -1086,7 +1020,7 @@ mod tests {
     ];
     // (output, leveler gain at the end, share of blocks the heavy model slept, whisper section only)
     let run = |model: DenoiseModel, permille: u32, input: &[f32]| -> (Vec<f32>, f32, f32) {
-      let mut p = GamersEqualizerPlugin::with_shm(48_000.0, None);
+      let mut p = GamersEqualizerPlugin::with_shm(None);
       p.test_overrides = Some((model, permille));
       p.ai_denoiser.set_model(model);
       p.eq.set_bands(&bands, 48_000.0);
@@ -1094,7 +1028,7 @@ mod tests {
       let mut asleep = 0usize;
       let whisper_blocks = 40 * HALF_SEC / 480..48 * HALF_SEC / 480;
       for (n, (i, o)) in input.chunks(480).zip(out.chunks_mut(480)).enumerate() {
-        p.process(&[i], &mut [o]);
+        p.process_timed(&[i], &mut [o], None);
         asleep += usize::from(whisper_blocks.contains(&n) && p.ai_denoiser.asleep());
       }
       let lead = p.ai_denoiser.output_lead_samples();
@@ -1257,7 +1191,7 @@ mod tests {
     let frames: Vec<StereoFrame> = reference.iter().map(|&s| StereoFrame { left: s, right: s }).collect();
     shm.ring_buffer().push_frames_timed(&frames, T0_HNS);
     shm.layout().header.tap_active.store(true, Ordering::Relaxed); // the loopback writer's flag
-    let mut p = GamersEqualizerPlugin::with_shm(48_000.0, Some(shm));
+    let mut p = GamersEqualizerPlugin::with_shm(Some(shm));
     p.test_overrides = Some((DenoiseModel::RnNoise, 1000));
     p
   }

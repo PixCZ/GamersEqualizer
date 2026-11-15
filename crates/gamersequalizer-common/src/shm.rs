@@ -1122,17 +1122,6 @@ impl<'a> ShmRingBuffer<'a> {
     Self { layout }
   }
 
-  /// Write stereo samples from speaker output tap
-  pub fn push_frames(&mut self, frames: &[StereoFrame]) {
-    let mut write_pos = self.layout.header.write_frame_index.load(Ordering::Relaxed);
-    for &frame in frames {
-      self.write_slot(write_pos, frame);
-      write_pos = write_pos.wrapping_add(1);
-    }
-    self.layout.header.write_frame_index.store(write_pos, Ordering::Release);
-    self.layout.header.tap_active.store(true, Ordering::Relaxed);
-  }
-
   /// Write a timestamped loopback packet (48 kHz). `qpc_first_hns` is the QPC time of
   /// `frames[0]`. Gaps (WASAPI loopback delivers nothing while nothing plays) are filled
   /// with silence so ring index stays linear in time.
@@ -1268,7 +1257,7 @@ mod tests {
       StereoFrame { left: 0.6, right: 0.8 },
       StereoFrame { left: 1.0, right: 1.0 },
     ];
-    ring.push_frames(&frames);
+    ring.push_frames_timed(&frames, HNS_PER_SEC as u64);
 
     let mut out = [0.0; 3];
     ring.read_recent_frames(3, 0, &mut out);
@@ -1333,7 +1322,7 @@ mod tests {
       StereoFrame { left: 1e30, right: 1e30 },
       StereoFrame { left: 0.5, right: 0.25 },
     ];
-    ring.push_frames(&frames);
+    ring.push_frames_timed(&frames, HNS_PER_SEC as u64);
     let mut out = [1.0f32; 4];
     ring.read_frames_from(0, &mut out);
     assert_eq!(out, [0.0, 0.0, REF_SAMPLE_MAX, 0.375]);

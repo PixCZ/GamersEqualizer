@@ -36,37 +36,35 @@ const DEVICE_INVALIDATED: &str = "0x88890004";
 const IDLE_POLL: Duration = Duration::from_millis(50);
 const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
   windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
-/// The DSP chain (nnnoiseless, AEC) is tuned for 48 kHz; WASAPI resamples to/from it.
+/// The echo canceller's reference runs at 48 kHz; WASAPI resamples to it.
 const DSP_SAMPLE_RATE: u32 = 48_000;
 const WAVE_FORMAT_IEEE_FLOAT_TAG: u16 = 3;
 
 /// Format a client was actually initialized with.
-pub(crate) struct StreamFormat {
-  pub channels: usize,
-  pub sample_rate: u32,
-  pub bits: u16,
-  pub is_float: bool,
+struct StreamFormat {
+  channels: usize,
+  sample_rate: u32,
+  is_float: bool,
 }
 
 /// Owns the raw handles/allocations of one stream session so every exit path frees them.
-pub(crate) struct StreamResources {
-  pub cap_event: HANDLE,
-  pub cap_fmt: *mut WAVEFORMATEX,
-  pub rnd_fmt: *mut WAVEFORMATEX,
+struct StreamResources {
+  cap_event: HANDLE,
+  cap_fmt: *mut WAVEFORMATEX,
   mmcss: Option<HANDLE>,
 }
 
 impl StreamResources {
-  pub(crate) fn new() -> Self {
-    Self { cap_event: HANDLE::default(), cap_fmt: std::ptr::null_mut(), rnd_fmt: std::ptr::null_mut(), mmcss: None }
+  fn new() -> Self {
+    Self { cap_event: HANDLE::default(), cap_fmt: std::ptr::null_mut(), mmcss: None }
   }
 
   /// Raise this thread to an MMCSS task class; failure only costs glitch resistance.
-  pub(crate) fn register_mmcss(&mut self, task: PCWSTR) {
+  fn register_mmcss(&mut self, task: PCWSTR) {
     let mut task_index = 0u32;
     match unsafe { AvSetMmThreadCharacteristicsW(task, &mut task_index) } {
       Ok(h) => self.mmcss = Some(h),
-      Err(e) => warn!("[MicStream] MMCSS registration failed (continuing): {}", e),
+      Err(e) => warn!("[Loopback] MMCSS registration failed (continuing): {}", e),
     }
   }
 }
@@ -82,9 +80,6 @@ impl Drop for StreamResources {
       }
       if !self.cap_fmt.is_null() {
         CoTaskMemFree(Some(self.cap_fmt as *const _));
-      }
-      if !self.rnd_fmt.is_null() {
-        CoTaskMemFree(Some(self.rnd_fmt as *const _));
       }
     }
   }
@@ -281,7 +276,7 @@ fn run_loopback(
 
 /// Initialize a shared-mode client at 48 kHz float32 (WASAPI converts and resamples);
 /// falls back to the device mix format if the driver refuses.
-pub(crate) unsafe fn init_client_48k_float(
+unsafe fn init_client_48k_float(
   client: &IAudioClient,
   mix_fmt: *const WAVEFORMATEX,
   flags: u32,
@@ -302,16 +297,15 @@ pub(crate) unsafe fn init_client_48k_float(
   };
   let convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
   match client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags | convert, buffer_hns, 0, &wanted, None) {
-    Ok(()) => Ok(StreamFormat { channels: channels as usize, sample_rate: DSP_SAMPLE_RATE, bits: 32, is_float: true }),
+    Ok(()) => Ok(StreamFormat { channels: channels as usize, sample_rate: DSP_SAMPLE_RATE, is_float: true }),
     Err(e) => {
-      warn!("[MicStream] 48 kHz float stream refused ({}), using device mix format", e);
+      warn!("[Loopback] 48 kHz float stream refused ({}), using device mix format", e);
       client
         .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, buffer_hns, 0, mix_fmt, None)
         .map_err(|e| format!("IAudioClient.Initialize failed: {}", e))?;
       Ok(StreamFormat {
         channels: (mix.nChannels as usize).max(1),
         sample_rate: mix.nSamplesPerSec,
-        bits: mix.wBitsPerSample,
         is_float: is_float_format(mix_fmt),
       })
     }

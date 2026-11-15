@@ -203,8 +203,6 @@ pub fn selected_mic_is_default(state: &AppState) -> bool {
 
 /// One-line status for the Mic tab, also when everything is fine (the bar then hides).
 /// "Installed" comes from the registry; "running" only from the effect's own telemetry.
-/// shortcut: the telemetry is shared with the in-process bridge (Sonar / VB-Cable mic), so with
-/// a virtual mic "running" may be the bridge; a per-path counter in the mapping would tell them apart.
 pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
   let live = state.mic_dsp_live();
   let several =

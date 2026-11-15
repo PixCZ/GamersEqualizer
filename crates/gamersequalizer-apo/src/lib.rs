@@ -1224,7 +1224,7 @@ impl MicProcessor {
     let shm_tag = endpoint_tag.clone();
     let built = catch_unwind(AssertUnwindSafe(move || {
       let shm = shared_memory_tagged(ApoKind::Mic, shm_tag.as_deref(), instance_id);
-      let mut plugin = Box::new(GamersEqualizerPlugin::with_shm(REF_SAMPLE_RATE as f32, shm));
+      let mut plugin = Box::new(GamersEqualizerPlugin::with_shm(shm));
       plugin.preload_selected_model();
       #[cfg(feature = "debug-capture")]
       if let Ok(map) = gamersequalizer_mic_vst::debug_capture::DebugCaptureMap::create(APO_SHM_SDDL) {

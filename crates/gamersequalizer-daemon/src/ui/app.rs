@@ -124,18 +124,12 @@ impl eframe::App for GamersEqualizerApp {
       // Unchanged mic: no re-read, so the restored wish survives the first frame and replugs.
       self.win_audio.chatmix.use_mic(picked.clone());
       self.state.selected_mic_endpoint_id = picked;
-      if let Some(id) = self.win_audio.chatmix.mic_device_id.clone() {
-        self.win_audio.mic_stream.set_input_device(Some(id));
-      }
       self.state.spatial_checked_at = None;
       self.state.headphones_ui.recheck_apo();
       super::apo_banner::recheck(&mut self.state);
       super::setup::recheck(&mut self.state);
     }
     super::header::refresh_spatial(&mut self.state, &mut self.win_audio);
-
-    // Echo reference follows the Master output (the stream reopens only when it changes).
-    self.win_audio.mic_stream.set_reference_device(self.win_audio.chatmix.master_device_id.clone());
 
     // Windows 11 Settings layout: slim top bar, navigation on the left, page on the right.
     // Mica-like flat chrome: no separator lines, the panels share the window background.

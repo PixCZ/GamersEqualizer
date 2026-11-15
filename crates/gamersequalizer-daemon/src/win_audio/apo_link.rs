@@ -154,7 +154,7 @@ impl ApoLink {
       // Another user at the console: our settings must not reach the APO (it serves them).
       self.driving = false;
     }
-    // After mirroring: the local mapping now holds the APO's or the bridge's telemetry.
+    // After mirroring: the local mapping now holds the APO's telemetry.
     self.watch.check(&local.layout().header);
   }
 
@@ -194,7 +194,7 @@ impl ApoLink {
     // The output APO may run without the mic APO: its heartbeat is mirrored every tick.
     local_h.copy_output_telemetry_from(apo_h);
 
-    // Only while the APO is producing, so a stopped APO doesn't overwrite bridge telemetry.
+    // Only while the APO is producing: the bumped local sequence tells the watchers it runs.
     let seq = apo_h.aec_telemetry_seq.load(Ordering::Acquire);
     if seq != self.last_apo_seq {
       self.last_apo_seq = seq;
@@ -206,7 +206,7 @@ impl ApoLink {
   }
 
   /// Voice leveler: hand the level remembered for this mic to the APO, save what it learns, and
-  /// forget it on "Learn again". Shortcut: APO path only (the in-process bridge starts fresh).
+  /// forget it on "Learn again".
   fn sync_level_cache(&mut self, local: &SharedMemoryClient) {
     let reset_seq = local.layout().header.mic_leveler_reset_seq.load(Ordering::Relaxed);
     if self.level_reset_seen.is_some_and(|s| s != reset_seq) {
@@ -237,7 +237,6 @@ impl ApoLink {
   }
 
   /// Hand the remembered delay and echo strength to the APO; save what the APO measured itself.
-  /// Shortcut: APO path only (the in-process bridge measures the echo strength anew each time).
   fn sync_delay_cache(&mut self) {
     if self.last_key_check.is_none_or(|t| t.elapsed() >= KEY_CHECK_INTERVAL) {
       self.last_key_check = Some(Instant::now());

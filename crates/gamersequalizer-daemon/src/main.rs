@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use ui::{AppState, GamersEqualizerApp};
 use win_audio::WinAudioSystem;
@@ -188,13 +188,11 @@ fn run_background_daemon() {
   let mut app_state = AppState::init(storage);
   app_state.apply_output_eq();
 
-  // Start Native WASAPI Microphone Audio Bridge in background daemon
-  let initial_mic_id =
-    win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
-  win_audio.mic_stream.set_input_device(initial_mic_id);
-  // Echo reference = the physical output (Master), what actually reaches the speakers.
-  win_audio.mic_stream.set_reference_device(win_audio.chatmix.master_device_id.clone());
-  win_audio.mic_stream.start();
+  // Speaker reference for the echo canceller, plus the link to the microphone APO. The echo
+  // reference = the physical output (Master), what actually reaches the speakers.
+  let loopback_running = Arc::new(AtomicBool::new(true));
+  let echo_reference = Arc::new(Mutex::new(win_audio.chatmix.master_device_id.clone()));
+  let loopback = win_audio::loopback::spawn(loopback_running.clone(), echo_reference.clone());
 
   let mut last_volume_sync: Option<Instant> = None;
   let mut last_output_check: Option<Instant> = None;
@@ -290,7 +288,6 @@ fn run_background_daemon() {
             win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
           mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
           win_audio.chatmix.use_mic(wanted);
-          win_audio.mic_stream.set_input_device(win_audio.chatmix.mic_device_id.clone());
         }
       }
 
@@ -312,7 +309,9 @@ fn run_background_daemon() {
         }
       }
       // Follow output device changes for the echo reference (reopens only on change).
-      win_audio.mic_stream.set_reference_device(win_audio.chatmix.master_device_id.clone());
+      if let Ok(mut reference) = echo_reference.lock() {
+        reference.clone_from(&win_audio.chatmix.master_device_id);
+      }
 
       // 1. Sync live Windows master & channel volumes to daemon & SHM
       let sync_due = last_volume_sync.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL);
@@ -385,6 +384,10 @@ fn run_background_daemon() {
     std::thread::sleep(Duration::from_millis(50));
   }
 
+  loopback_running.store(false, Ordering::SeqCst);
+  if let Some(handle) = loopback {
+    let _ = handle.join();
+  }
   if let Some(ptr) = shm_ptr {
     unsafe {
       let _ =
@@ -468,10 +471,10 @@ fn run_gui_mode() {
   // Update SHM with live channel volumes
   state.sync_mixer_to_shm(&win_audio.chatmix);
 
-  // The mic bridge, the echo reference loopback and the APO link run only in the background
-  // service (started above, restarted by the window's watchdog). The window used to start its
-  // own when the service was not up within 150 ms of a cold start, and never stopped it: two
-  // bridges on one virtual mic, two APO owners mixing echo reference frames.
+  // The echo reference loopback and the APO link run only in the background service (started
+  // above, restarted by the window's watchdog). The window used to start its own when the
+  // service was not up within 150 ms of a cold start, and never stopped it: two APO owners
+  // mixing echo reference frames.
 
   // Last size/position/maximized state; the default fits a 1366x768 laptop and everything
   // scrolls / reflows when the window is made smaller.

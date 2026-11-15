@@ -14,7 +14,6 @@ pub mod leveler_log;
 pub mod loopback;
 pub mod mic_gain;
 pub mod mic_probe;
-pub mod mic_stream;
 pub mod policy_config;
 pub mod shell;
 pub mod sidetone;
@@ -24,7 +23,6 @@ pub use chatmix::{AudioBus, AudioSessionInfo, ChatMixController};
 pub use dolby_atmos::{DolbyAtmosGuard, SpatialAudioStatus, SpatialFormat};
 pub use endpoint_lock::{AudioEndpointInfo, EndpointLockManager, EndpointLockState};
 pub use game_detector::{GameDetector, GameForegroundEvent};
-pub use mic_stream::MicStreamWorker;
 
 use std::sync::Arc;
 
@@ -33,7 +31,6 @@ pub struct WinAudioSystem {
   pub dolby_guard: DolbyAtmosGuard,
   pub chatmix: ChatMixController,
   pub game_detector: Option<GameDetector>,
-  pub mic_stream: MicStreamWorker,
 }
 
 impl WinAudioSystem {
@@ -43,14 +40,13 @@ impl WinAudioSystem {
     let dolby_guard = DolbyAtmosGuard::default();
     let mut chatmix = ChatMixController::new();
     let game_detector = GameDetector::start().ok();
-    let mic_stream = MicStreamWorker::new();
 
     let devices = endpoint_lock.enumerate_playback_devices();
     let def_id = endpoint_lock.get_default_output_id();
     chatmix.bind_endpoints(&devices, def_id.as_deref());
     chatmix.use_mic(None);
 
-    Ok(Self { endpoint_lock, dolby_guard, chatmix, game_detector, mic_stream })
+    Ok(Self { endpoint_lock, dolby_guard, chatmix, game_detector })
   }
 }
 
