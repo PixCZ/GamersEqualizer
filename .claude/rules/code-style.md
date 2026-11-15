@@ -46,8 +46,8 @@ redundant_field_names = "deny"
 
 - Every text the user sees goes through `tr("English text")`, `trf` (with arguments) or `tk` (in a
   constant). The English text is the key; add the Czech entry to `i18n_cs.rs` in the same change. A
-  test fails on a missing one, but only in the files listed in `SOURCES` (`i18n.rs`): add a new file
-  with UI text there.
+  test (`i18n.rs`) reads every file under `src/` and fails on a missing one. It sees only literals
+  passed straight to `tr` / `trf` / `tk`, so a text in a constant goes through `tk`.
 - New features reuse the shared widgets: the EQ band editor (`ui/eq_editor.rs`, `ui/eq_graph.rs`) and
   volumes in percent with a defined 100 %. No parallel widgets, no bare dB gains.
 - The window repaints many times a second: no file, registry or Windows audio calls in the paint path.

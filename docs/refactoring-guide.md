@@ -559,7 +559,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] B3 ID zařízení (jinak než návod: kontrola srážky v souborech, viz commit)
 - [x] B4 volba „(žádný)“ (zbývá zkouška v okně)
 - [x] B5 varování se špatným jménem
-- [ ] B6 test překladů
+- [x] B6 test překladů
 - [ ] C1 most mikrofonu
 - [ ] C2 `dsp_apo`
 - [ ] C3 pokusy v řetězci mikrofonu

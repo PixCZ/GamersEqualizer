@@ -124,38 +124,12 @@ fn fill(template: &str, args: &[&dyn std::fmt::Display]) -> String {
 mod tests {
   use super::*;
 
-  /// Files whose `tr("...")` / `trf("...")` literals must all be translated.
-  const SOURCES: [(&str, &str); 22] = [
-    ("output_eq/game_presets.rs", include_str!("output_eq/game_presets.rs")),
-    ("tray.rs", include_str!("tray.rs")),
-    ("ui/setup.rs", include_str!("ui/setup.rs")),
-    ("health.rs", include_str!("health.rs")),
-    ("ui/apo_banner.rs", include_str!("ui/apo_banner.rs")),
-    ("ui/eq_editor.rs", include_str!("ui/eq_editor.rs")),
-    ("ui/eq_graph.rs", include_str!("ui/eq_graph.rs")),
-    ("ui/header.rs", include_str!("ui/header.rs")),
-    ("ui/mic_presets.rs", include_str!("ui/mic_presets.rs")),
-    ("ui/profile_bar.rs", include_str!("ui/profile_bar.rs")),
-    ("ui/tab_eq.rs", include_str!("ui/tab_eq.rs")),
-    ("ui/tab_headphones.rs", include_str!("ui/tab_headphones.rs")),
-    ("ui/tab_log.rs", include_str!("ui/tab_log.rs")),
-    ("ui/tab_mic.rs", include_str!("ui/tab_mic.rs")),
-    ("ui/tab_mixer.rs", include_str!("ui/tab_mixer.rs")),
-    ("ui/tab_settings.rs", include_str!("ui/tab_settings.rs")),
-    ("ui/tab_sidetone.rs", include_str!("ui/tab_sidetone.rs")),
-    ("ui/theme.rs", include_str!("ui/theme.rs")),
-    ("output_eq/autoeq.rs", include_str!("output_eq/autoeq.rs")),
-    ("output_eq/share_text.rs", include_str!("output_eq/share_text.rs")),
-    ("win_audio/dolby_atmos.rs", include_str!("win_audio/dolby_atmos.rs")),
-    ("win_audio/apo_install.rs", include_str!("win_audio/apo_install.rs")),
-  ];
-
   #[test]
   fn every_tr_call_has_a_czech_translation() {
     let cs: HashMap<&str, &str> = crate::i18n_cs::CS.iter().copied().collect();
     let mut missing = Vec::new();
-    for (file, src) in SOURCES {
-      for key in tr_literals(src) {
+    for (file, src) in sources() {
+      for key in tr_literals(&src) {
         if !cs.contains_key(key.as_str()) {
           missing.push(format!("{file}: {key:?}"));
         }
@@ -185,6 +159,27 @@ mod tests {
   fn unknown_language_preference_falls_back_to_system() {
     let pref: LanguagePref = serde_json::from_str("\"Klingon\"").unwrap();
     assert_eq!(pref, LanguagePref::System);
+  }
+
+  /// (path, text) of every `.rs` file under `src/`, so a new file with UI text is checked too.
+  /// The translation code itself is left out: its comments and tests quote `tr("...")`.
+  fn sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut dirs = vec![root.clone()];
+    let mut out = Vec::new();
+    while let Some(dir) = dirs.pop() {
+      for path in std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()) {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if path.is_dir() {
+          dirs.push(path);
+        } else if name.ends_with(".rs") && name != "i18n.rs" && name != "i18n_cs.rs" {
+          let text = std::fs::read_to_string(&path).unwrap();
+          out.push((path.strip_prefix(&root).unwrap().display().to_string(), text));
+        }
+      }
+    }
+    assert!(out.len() > 50, "src/ not found under {}", root.display());
+    out
   }
 
   /// Number of argument slots a template uses (`{}` and `{N}` count alike).
