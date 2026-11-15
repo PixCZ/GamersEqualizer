@@ -16,6 +16,7 @@
 //!
 //! Both then compute the same bands from the same inputs, so either may publish them.
 
+pub mod auto_preamp;
 pub mod autoeq;
 pub mod game_match;
 pub mod game_presets;
@@ -24,9 +25,9 @@ pub mod launchers;
 pub mod settings;
 pub mod share_text;
 
-use crate::dsp_apo::{compute_combined_engine, CombinedEngineResult};
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::game_detector::{is_process_running, GameForegroundEvent};
+use auto_preamp::{compute_combined_engine, CombinedEngineResult};
 use game_match::{GameFacts, GameMatch};
 use gamersequalizer_common::biquad::{MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
 use gamersequalizer_common::profile::{expand_slopes, invert_bands, BiquadBand, ParametricProfile, VadType};

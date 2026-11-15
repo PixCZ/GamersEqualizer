@@ -7,8 +7,8 @@ use gamersequalizer_common::profile::{slots_used, BiquadBand, FilterType, SLOPES
 
 use super::eq_editor::Curve;
 use super::theme;
-use crate::dsp_apo::{evaluate_bands_response, generate_log_frequencies};
 use crate::i18n::{tk, tr, trf};
+use crate::output_eq::auto_preamp::{evaluate_bands_response, generate_log_frequencies};
 
 const F_MIN: f32 = 20.0;
 const F_MAX: f32 = 20000.0;

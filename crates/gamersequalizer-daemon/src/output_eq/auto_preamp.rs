@@ -1,4 +1,4 @@
-use super::biquad::BiquadCoefficients;
+use gamersequalizer_common::biquad::BiquadCoefficients;
 use gamersequalizer_common::profile::{expand_slopes, BiquadBand};
 
 pub const FREQ_POINTS_COUNT: usize = 512;

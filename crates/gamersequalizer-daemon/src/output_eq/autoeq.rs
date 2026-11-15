@@ -2,7 +2,7 @@
 //! The app never downloads anything: the user pastes / imports a `ParametricEQ.txt`, or points
 //! the app at a downloaded copy of the AutoEq repository, which is then indexed and searched.
 
-use crate::dsp_apo::{evaluate_bands_response, generate_log_frequencies};
+use super::auto_preamp::{evaluate_bands_response, generate_log_frequencies};
 use crate::i18n::{tr, trf};
 use gamersequalizer_common::biquad::MAX_OUT_EQ_BANDS;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};

@@ -4,7 +4,6 @@ pub mod apo_notes;
 pub mod app_icon;
 pub mod app_log;
 pub mod autostart;
-pub mod dsp_apo;
 pub mod health;
 pub mod i18n;
 pub mod i18n_cs;

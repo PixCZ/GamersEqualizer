@@ -561,7 +561,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] B5 varování se špatným jménem
 - [x] B6 test překladů
 - [x] C1 most mikrofonu (zbývá ruční zkouška: log `[ApoLink]` a reference AEC; poznámka v `packaging/release-notes/next.md`)
-- [ ] C2 `dsp_apo`
+- [x] C2 `dsp_apo`
 - [ ] C3 pokusy v řetězci mikrofonu
 - [ ] C4 ostatní mrtvý kód
 - [ ] C5 jména z prototypu

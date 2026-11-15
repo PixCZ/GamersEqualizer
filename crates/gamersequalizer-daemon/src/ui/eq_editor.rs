@@ -1,8 +1,8 @@
 //! Parametric EQ widgets shared by the output EQ tabs and the microphone tab.
 
 use super::theme;
-use crate::dsp_apo::{evaluate_bands_response, generate_log_frequencies};
 use crate::i18n::{tr, trf};
+use crate::output_eq::auto_preamp::{evaluate_bands_response, generate_log_frequencies};
 use egui::{Color32, Stroke, Ui};
 use egui_plot::{HLine, HoverPosition, Line, Plot, PlotPoint, PlotPoints};
 use gamersequalizer_common::profile::BiquadBand;

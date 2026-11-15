@@ -4,8 +4,8 @@
 use super::eq_editor::{band_editor, curves_plot, on_off_button, profile_picker};
 use super::state::{ActiveTab, AppState, OutputLayer};
 use super::theme::{self, icons, Severity};
-use crate::dsp_apo::generate_log_frequencies;
 use crate::i18n::{tk, tr, trf};
+use crate::output_eq::auto_preamp::generate_log_frequencies;
 use crate::output_eq::game_match::MatchMethod;
 use crate::sonar_importer::{import_sonar, read_sonar_sources, DEFAULT_SONAR_DB_PATH};
 use egui::{Color32, RichText, Ui};
