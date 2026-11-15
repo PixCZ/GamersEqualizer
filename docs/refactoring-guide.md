@@ -569,7 +569,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] D1 edice 2024
 - [x] D2 lint SAFETY (nálezy opravené cestou: `capture_time_hns`, `IPolicyConfig` s holým `PCWSTR`, únik textu z `GetId` v `get_endpoint_info`)
 - [x] D3 `#[expect]` (30 zbytečných smazáno, z toho 28 na testových modulech, které pokrývá `clippy.toml`; `allow` zůstal jen u `unused_mut` v `aec3.rs`)
-- [ ] D4 dlouhé testy zvlášť
+- [x] D4 dlouhé testy zvlášť
 - [ ] E1 jedno číslo verze
 - [ ] E2 `Default`
 - [ ] E3 nepoužitá pole
