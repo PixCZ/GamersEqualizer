@@ -553,7 +553,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] A1 verze překladače 1.100.0 (zbývá ruční běh Release)
 - [x] A2 formát
 - [x] A3 clippy na nulu
-- [ ] A4 `check.ps1`, CI, pravidlo na GitHubu (ruční)
+- [x] A4 `check.ps1`, CI (zbývá: push, ověřit běh CI; pravidlo na GitHubu ruční)
 - [ ] B1 instalátor, řádek 886
 - [ ] B2 import ze Sonaru
 - [ ] B3 ID zařízení

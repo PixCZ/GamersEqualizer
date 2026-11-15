@@ -79,8 +79,11 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
 
 ## Dev loop
 
+- `scripts/check.ps1` is the gate: format, clippy at zero warnings (also with `debug-capture`), workspace
+  tests, the installer self-check and the vendor crates' tests. `dev-rebuild.ps1 -Test` runs it, and so
+  does CI (`.github/workflows/ci.yml`) on every push. Work is done only when it passes.
 - `scripts/dev-rebuild.ps1 [-Apo] [-Test] [-Package] [-Start]`: stops the running app, builds it (and with
-  `-Apo` also the microphone APO DLL), runs tests and clippy, makes a tester ZIP (`-Package`, see below)
+  `-Apo` also the microphone APO DLL), runs the gate (`-Test`), makes a tester ZIP (`-Package`, see below)
   and starts the app again.
 - Claude Code: delegate it to the `dev-rebuild` subagent (`.claude/agents/dev-rebuild.md`, Haiku), so build
   output stays out of the main context.

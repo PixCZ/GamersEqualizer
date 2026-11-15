@@ -8,8 +8,7 @@
   3. -Apo: cargo build --profile apo -p gamersequalizer-apo (the microphone APO DLL, unwinding profile).
      -DebugCapture (with -Apo): builds it with the `debug-capture` feature, so the mic chain records
      every stage on request (cargo run --release -p gamersequalizer-apo --example debug_capture).
-  4. -Test: cargo test --workspace, the installer self-check (scripts\tests), plus clippy on the
-     workspace (warnings are listed, not fatal).
+  4. -Test: the quality gate, scripts\check.ps1 (format, clippy at zero warnings, all tests).
   5. -Package: tester ZIP from this release build (scripts\package.ps1 -Fast, a few seconds).
      The final build for testers is scripts\package.ps1 without -Fast (fat LTO, minutes).
   6. Reports whether the installed APO (needs admin to install) is older than target\apo.
@@ -72,24 +71,7 @@ if ($Apo -and -not $failed) {
 }
 
 if ($Test -and -not $failed) {
-  Step 'cargo test --workspace' { cargo test --workspace }
-  Step 'installer self-check' { & (Join-Path $PSScriptRoot 'tests\apo-install.tests.ps1'); $global:LASTEXITCODE = 0 }
-  # rnnoise2 is excluded from the workspace (vendor fork): its AVX2-vs-scalar kernel test and the
-  # upstream reference test run only here on x86_64.
-  Step 'cargo test rnnoise2 (release)' { cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml }
-  # silero_vad is excluded too: the port against onnxruntime's output.
-  Step 'cargo test silero_vad (release)' { cargo test --release --manifest-path crates/vendor/silero_vad/Cargo.toml }
-  Step 'clippy --workspace' {
-    # Windows PowerShell turns redirected native stderr into error records; with 'Stop' the
-    # first clippy warning would abort the step.
-    $ErrorActionPreference = 'Continue'
-    $out = cargo clippy --workspace --all-targets 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { Write-Host $out; throw 'clippy failed' }
-    $out += cargo clippy --manifest-path crates/vendor/rnnoise2/Cargo.toml --all-targets 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { Write-Host $out; throw 'clippy failed (rnnoise2)' }
-    $warnings = ([regex]::Matches($out, '(?m)^warning: (?!`).*$')).Count
-    Write-Host "clippy warnings: $warnings"
-  }
+  Step 'check (scripts\check.ps1)' { & (Join-Path $PSScriptRoot 'check.ps1') }
 }
 
 if ($Package -and $DebugCapture) {

@@ -11,13 +11,13 @@ You run the project's dev loop and report the result. Do not edit any files.
    `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-rebuild.ps1 [-Apo] [-Test] [-Start]`
    - `-Apo`: also build the APO DLL (`target\apo`), needed when `crates/gamersequalizer-apo`,
      `gamersequalizer-mic-vst` or `gamersequalizer-common` changed.
-   - `-Test`: `cargo test --workspace` + clippy.
+   - `-Test`: the gate, `scripts\check.ps1` (format, clippy at zero warnings, all tests).
    - `-Start`: start the app again afterwards.
    Builds take several minutes: use a 600000 ms timeout.
 2. Report back:
    - the SUMMARY block verbatim;
    - for any FAIL, the first compiler error or failing test with its file:line, copied from the
      output (not paraphrased);
-   - new clippy warnings in files the caller named, if any.
+   - for a failing gate step, the CHECK SUMMARY lines and the first error of that step (file:line).
 3. Never install the APO yourself (needs admin and restarts Windows audio). If the summary says
    the installed APO is older, just say so.
