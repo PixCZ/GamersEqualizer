@@ -126,15 +126,17 @@ fn windows_note(xml: &str) -> ApoNote {
 /// # Safety
 /// `event` must be a live event handle from `EvtNext`.
 unsafe fn render_xml(event: EVT_HANDLE) -> Option<String> {
-  let mut used = 0u32;
-  let mut count = 0u32;
-  // First call only asks for the size (it fails with "insufficient buffer").
-  let _ = EvtRender(None, event, EvtRenderEventXml.0, 0, None, &mut used, &mut count);
-  let mut buf = vec![0u16; (used as usize).div_ceil(2)];
-  let bytes = u32::try_from(buf.len() * 2).ok()?;
-  EvtRender(None, event, EvtRenderEventXml.0, bytes, Some(buf.as_mut_ptr().cast()), &mut used, &mut count).ok()?;
-  let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-  Some(String::from_utf16_lossy(buf.get(..len)?))
+  unsafe {
+    let mut used = 0u32;
+    let mut count = 0u32;
+    // First call only asks for the size (it fails with "insufficient buffer").
+    let _ = EvtRender(None, event, EvtRenderEventXml.0, 0, None, &mut used, &mut count);
+    let mut buf = vec![0u16; (used as usize).div_ceil(2)];
+    let bytes = u32::try_from(buf.len() * 2).ok()?;
+    EvtRender(None, event, EvtRenderEventXml.0, bytes, Some(buf.as_mut_ptr().cast()), &mut used, &mut count).ok()?;
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(buf.get(..len)?))
+  }
 }
 
 /// `SystemTime='...'` and the first `<Data>` of a classic event's XML.

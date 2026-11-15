@@ -83,12 +83,14 @@ impl DebugCaptureMap {
 
   /// Takes ownership of `handle` (closed on failure).
   unsafe fn map(handle: HANDLE) -> Result<Self, String> {
-    let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, DebugCaptureLayout::total_size_bytes());
-    let Some(ptr) = NonNull::new(view.Value as *mut DebugCaptureLayout) else {
-      let _ = CloseHandle(handle);
-      return Err("MapViewOfFile returned null pointer".to_string());
-    };
-    Ok(Self { handle, ptr })
+    unsafe {
+      let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, DebugCaptureLayout::total_size_bytes());
+      let Some(ptr) = NonNull::new(view.Value as *mut DebugCaptureLayout) else {
+        let _ = CloseHandle(handle);
+        return Err("MapViewOfFile returned null pointer".to_string());
+      };
+      Ok(Self { handle, ptr })
+    }
   }
 
   #[cfg(feature = "debug-capture")]

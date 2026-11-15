@@ -154,10 +154,12 @@ pub fn resolve_default_capture_id() -> Option<String> {
 }
 
 unsafe fn device_id(dev: &IMMDevice) -> Option<String> {
-  let pw = dev.GetId().ok()?;
-  let id = pw.to_string().ok();
-  CoTaskMemFree(Some(pw.as_ptr() as *const _));
-  id
+  unsafe {
+    let pw = dev.GetId().ok()?;
+    let id = pw.to_string().ok();
+    CoTaskMemFree(Some(pw.as_ptr() as *const _));
+    id
+  }
 }
 
 fn run_loopback(
@@ -282,49 +284,53 @@ unsafe fn init_client_48k_float(
   flags: u32,
   buffer_hns: i64,
 ) -> Result<StreamFormat, String> {
-  let mix = *mix_fmt;
-  // Plain WAVEFORMATEX only describes mono/stereo unambiguously; we only need channel 0 anyway.
-  let channels = mix.nChannels.clamp(1, 2);
-  let block_align = channels * 4;
-  let wanted = WAVEFORMATEX {
-    wFormatTag: WAVE_FORMAT_IEEE_FLOAT_TAG,
-    nChannels: channels,
-    nSamplesPerSec: DSP_SAMPLE_RATE,
-    nAvgBytesPerSec: DSP_SAMPLE_RATE * block_align as u32,
-    nBlockAlign: block_align,
-    wBitsPerSample: 32,
-    cbSize: 0,
-  };
-  let convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-  match client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags | convert, buffer_hns, 0, &wanted, None) {
-    Ok(()) => Ok(StreamFormat { channels: channels as usize, sample_rate: DSP_SAMPLE_RATE, is_float: true }),
-    Err(e) => {
-      warn!("[Loopback] 48 kHz float stream refused ({}), using device mix format", e);
-      client
-        .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, buffer_hns, 0, mix_fmt, None)
-        .map_err(|e| format!("IAudioClient.Initialize failed: {}", e))?;
-      Ok(StreamFormat {
-        channels: (mix.nChannels as usize).max(1),
-        sample_rate: mix.nSamplesPerSec,
-        is_float: is_float_format(mix_fmt),
-      })
+  unsafe {
+    let mix = *mix_fmt;
+    // Plain WAVEFORMATEX only describes mono/stereo unambiguously; we only need channel 0 anyway.
+    let channels = mix.nChannels.clamp(1, 2);
+    let block_align = channels * 4;
+    let wanted = WAVEFORMATEX {
+      wFormatTag: WAVE_FORMAT_IEEE_FLOAT_TAG,
+      nChannels: channels,
+      nSamplesPerSec: DSP_SAMPLE_RATE,
+      nAvgBytesPerSec: DSP_SAMPLE_RATE * block_align as u32,
+      nBlockAlign: block_align,
+      wBitsPerSample: 32,
+      cbSize: 0,
+    };
+    let convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    match client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags | convert, buffer_hns, 0, &wanted, None) {
+      Ok(()) => Ok(StreamFormat { channels: channels as usize, sample_rate: DSP_SAMPLE_RATE, is_float: true }),
+      Err(e) => {
+        warn!("[Loopback] 48 kHz float stream refused ({}), using device mix format", e);
+        client
+          .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, buffer_hns, 0, mix_fmt, None)
+          .map_err(|e| format!("IAudioClient.Initialize failed: {}", e))?;
+        Ok(StreamFormat {
+          channels: (mix.nChannels as usize).max(1),
+          sample_rate: mix.nSamplesPerSec,
+          is_float: is_float_format(mix_fmt),
+        })
+      }
     }
   }
 }
 
 unsafe fn is_float_format(p_fmt: *const WAVEFORMATEX) -> bool {
-  if p_fmt.is_null() {
-    return false;
+  unsafe {
+    if p_fmt.is_null() {
+      return false;
+    }
+    let tag = (*p_fmt).wFormatTag as u32;
+    if tag == 3 {
+      return true; // WAVE_FORMAT_IEEE_FLOAT
+    }
+    if tag == 0xFFFE {
+      // WAVE_FORMAT_EXTENSIBLE
+      let ext = p_fmt as *const WAVEFORMATEXTENSIBLE;
+      let sub_format = std::ptr::read_unaligned(std::ptr::addr_of!((*ext).SubFormat));
+      return sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    }
+    false
   }
-  let tag = (*p_fmt).wFormatTag as u32;
-  if tag == 3 {
-    return true; // WAVE_FORMAT_IEEE_FLOAT
-  }
-  if tag == 0xFFFE {
-    // WAVE_FORMAT_EXTENSIBLE
-    let ext = p_fmt as *const WAVEFORMATEXTENSIBLE;
-    let sub_format = std::ptr::read_unaligned(std::ptr::addr_of!((*ext).SubFormat));
-    return sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
-  }
-  false
 }

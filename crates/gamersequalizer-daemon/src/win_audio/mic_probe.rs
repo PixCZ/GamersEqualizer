@@ -129,14 +129,16 @@ fn probe_render(id: &str) -> Result<u64, String> {
 /// # Safety
 /// `capture` belongs to a started shared-mode capture client.
 unsafe fn drain(capture: &IAudioCaptureClient) -> Result<u64, String> {
-  let mut total = 0u64;
-  while capture.GetNextPacketSize().map_err(|e| format!("GetNextPacketSize: {e}"))? > 0 {
-    let (mut data, mut frames, mut flags) = (null_mut(), 0u32, 0u32);
-    capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None).map_err(|e| format!("GetBuffer: {e}"))?;
-    total += u64::from(frames);
-    capture.ReleaseBuffer(frames).map_err(|e| format!("ReleaseBuffer: {e}"))?;
+  unsafe {
+    let mut total = 0u64;
+    while capture.GetNextPacketSize().map_err(|e| format!("GetNextPacketSize: {e}"))? > 0 {
+      let (mut data, mut frames, mut flags) = (null_mut(), 0u32, 0u32);
+      capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None).map_err(|e| format!("GetBuffer: {e}"))?;
+      total += u64::from(frames);
+      capture.ReleaseBuffer(frames).map_err(|e| format!("ReleaseBuffer: {e}"))?;
+    }
+    Ok(total)
   }
-  Ok(total)
 }
 
 /// Fills available render buffer frames with zero PCM samples (flags = 0 so the audio engine
@@ -150,16 +152,19 @@ unsafe fn write_zero_pcm(
   buf_size: u32,
   block_align: usize,
 ) -> Result<u64, String> {
-  let pad = client.GetCurrentPadding().map_err(|e| format!("GetCurrentPadding: {e}"))?;
-  let avail = buf_size.saturating_sub(pad);
-  if avail == 0 {
-    return Ok(0);
+  unsafe {
+    let pad = client.GetCurrentPadding().map_err(|e| format!("GetCurrentPadding: {e}"))?;
+    let avail = buf_size.saturating_sub(pad);
+    if avail == 0 {
+      return Ok(0);
+    }
+    let byte_len =
+      silence_byte_len(avail, block_align).ok_or_else(|| "render buffer byte count overflow".to_string())?;
+    let data = render.GetBuffer(avail).map_err(|e| format!("GetBuffer: {e}"))?;
+    write_bytes(data, 0, byte_len);
+    render.ReleaseBuffer(avail, 0).map_err(|e| format!("ReleaseBuffer: {e}"))?;
+    Ok(u64::from(avail))
   }
-  let byte_len = silence_byte_len(avail, block_align).ok_or_else(|| "render buffer byte count overflow".to_string())?;
-  let data = render.GetBuffer(avail).map_err(|e| format!("GetBuffer: {e}"))?;
-  write_bytes(data, 0, byte_len);
-  render.ReleaseBuffer(avail, 0).map_err(|e| format!("ReleaseBuffer: {e}"))?;
-  Ok(u64::from(avail))
 }
 
 fn silence_byte_len(frames: u32, block_align: usize) -> Option<usize> {

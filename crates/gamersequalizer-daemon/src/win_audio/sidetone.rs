@@ -253,9 +253,11 @@ impl OpenFailure {
 /// # Safety
 /// COM must be initialized on this thread.
 unsafe fn open_device(id: &str) -> windows::core::Result<IMMDevice> {
-  let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-  let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-  enumerator.GetDevice(PCWSTR(wide.as_ptr()))
+  unsafe {
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+    let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+    enumerator.GetDevice(PCWSTR(wide.as_ptr()))
+  }
 }
 
 /// Opens and starts a shared-mode stream on device `id`; `tag` ("capture" / "render") names it
@@ -265,20 +267,22 @@ unsafe fn open_device(id: &str) -> windows::core::Result<IMMDevice> {
 /// # Safety
 /// COM must be initialized on this thread.
 unsafe fn open_stream<S: Interface>(id: &str, low_latency: bool, tag: &str) -> windows::core::Result<Stream<S>> {
-  let device = open_device(id)?;
-  let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
-  let format = MixFormat(client.GetMixFormat()?);
-  let granted = low_latency && init_low_latency(&client, format.0, tag);
-  if low_latency && !granted {
-    log::info!("[Sidetone] {tag} on {id}: shortest period not available, using the default one");
+  unsafe {
+    let device = open_device(id)?;
+    let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+    let format = MixFormat(client.GetMixFormat()?);
+    let granted = low_latency && init_low_latency(&client, format.0, tag);
+    if low_latency && !granted {
+      log::info!("[Sidetone] {tag} on {id}: shortest period not available, using the default one");
+    }
+    if !granted {
+      client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1_000_000, 0, format.0, None)?;
+    }
+    let service: S = client.GetService()?;
+    let buffer_frames = client.GetBufferSize()?;
+    client.Start()?;
+    Ok(Stream { device_id: id.to_string(), low_latency, client, service, buffer_frames, _format: format })
   }
-  if !granted {
-    client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1_000_000, 0, format.0, None)?;
-  }
-  let service: S = client.GetService()?;
-  let buffer_frames = client.GetBufferSize()?;
-  client.Start()?;
-  Ok(Stream { device_id: id.to_string(), low_latency, client, service, buffer_frames, _format: format })
 }
 
 /// Initializes `client` at the engine's shortest period (or the current one when another
@@ -287,28 +291,30 @@ unsafe fn open_stream<S: Interface>(id: &str, low_latency: bool, tag: &str) -> w
 /// # Safety
 /// `format` is the client's mix format; COM must be initialized on this thread.
 unsafe fn init_low_latency(client: &IAudioClient, format: *mut WAVEFORMATEX, tag: &str) -> bool {
-  let Ok(client3) = client.cast::<IAudioClient3>() else {
-    return false;
-  };
-  let (mut default, mut fundamental, mut min, mut max) = (0u32, 0u32, 0u32, 0u32);
-  if client3.GetSharedModeEnginePeriod(format, &mut default, &mut fundamental, &mut min, &mut max).is_err() {
-    return false;
+  unsafe {
+    let Ok(client3) = client.cast::<IAudioClient3>() else {
+      return false;
+    };
+    let (mut default, mut fundamental, mut min, mut max) = (0u32, 0u32, 0u32, 0u32);
+    if client3.GetSharedModeEnginePeriod(format, &mut default, &mut fundamental, &mut min, &mut max).is_err() {
+      return false;
+    }
+    let Err(err) = client3.InitializeSharedAudioStream(0, min, format, None) else {
+      return true;
+    };
+    if err.code() != AUDCLNT_E_ENGINE_PERIODICITY_LOCKED {
+      log::warn!("[Sidetone] InitializeSharedAudioStream failed on {tag}: {err}");
+      return false;
+    }
+    let mut current_format: *mut WAVEFORMATEX = std::ptr::null_mut();
+    let mut current = 0u32;
+    if client3.GetCurrentSharedModeEnginePeriod(&mut current_format, &mut current).is_err() {
+      return false;
+    }
+    drop(MixFormat(current_format));
+    log::info!("[Sidetone] engine periodicity locked on {tag} ({current} frames, min {min})");
+    client3.InitializeSharedAudioStream(0, current, format, None).is_ok()
   }
-  let Err(err) = client3.InitializeSharedAudioStream(0, min, format, None) else {
-    return true;
-  };
-  if err.code() != AUDCLNT_E_ENGINE_PERIODICITY_LOCKED {
-    log::warn!("[Sidetone] InitializeSharedAudioStream failed on {tag}: {err}");
-    return false;
-  }
-  let mut current_format: *mut WAVEFORMATEX = std::ptr::null_mut();
-  let mut current = 0u32;
-  if client3.GetCurrentSharedModeEnginePeriod(&mut current_format, &mut current).is_err() {
-    return false;
-  }
-  drop(MixFormat(current_format));
-  log::info!("[Sidetone] engine periodicity locked on {tag} ({current} frames, min {min})");
-  client3.InitializeSharedAudioStream(0, current, format, None).is_ok()
 }
 
 /// Closes the stream in `slot` when it is not `wanted` any more (other device, other period

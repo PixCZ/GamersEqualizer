@@ -92,13 +92,15 @@ impl DolbyAtmosGuard {
   }
 
   unsafe fn query_active_endpoint(&self) -> SpatialAudioStatus {
-    let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      Ok(e) => e,
-      Err(_) => return SpatialAudioStatus::Unsupported,
-    };
-    match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-      Ok(device) => device_status(&device),
-      Err(_) => SpatialAudioStatus::Unsupported,
+    unsafe {
+      let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+        Ok(e) => e,
+        Err(_) => return SpatialAudioStatus::Unsupported,
+      };
+      match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+        Ok(device) => device_status(&device),
+        Err(_) => SpatialAudioStatus::Unsupported,
+      }
     }
   }
 }
@@ -121,16 +123,18 @@ pub fn spatial_status(device_id: &str) -> SpatialAudioStatus {
 
 /// SAFETY: COM must be initialized on the calling thread.
 unsafe fn device_status(device: &IMMDevice) -> SpatialAudioStatus {
-  let spatial_client: ISpatialAudioClient = match device.Activate(CLSCTX_ALL, None) {
-    Ok(c) => c,
-    Err(_) => return SpatialAudioStatus::Unsupported,
-  };
+  unsafe {
+    let spatial_client: ISpatialAudioClient = match device.Activate(CLSCTX_ALL, None) {
+      Ok(c) => c,
+      Err(_) => return SpatialAudioStatus::Unsupported,
+    };
 
-  // The first argument is the IID of the stream interface to open, not a format GUID
-  // (passing format GUIDs here always failed, so Atmos read as "off").
-  match spatial_client.IsSpatialAudioStreamAvailable(&ISpatialAudioObjectRenderStream::IID, None) {
-    Ok(()) => SpatialAudioStatus::Active,
-    Err(_) => SpatialAudioStatus::Disabled,
+    // The first argument is the IID of the stream interface to open, not a format GUID
+    // (passing format GUIDs here always failed, so Atmos read as "off").
+    match spatial_client.IsSpatialAudioStreamAvailable(&ISpatialAudioObjectRenderStream::IID, None) {
+      Ok(()) => SpatialAudioStatus::Active,
+      Err(_) => SpatialAudioStatus::Disabled,
+    }
   }
 }
 

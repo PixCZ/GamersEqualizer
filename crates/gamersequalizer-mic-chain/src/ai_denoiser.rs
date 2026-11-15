@@ -2366,7 +2366,7 @@ pub(crate) mod tests {
         }
       }
       let quiet: Vec<f32> =
-        out.as_chunks::<480>().0.iter().zip(&ref_db).filter(|(_, &r)| r < loud - 40.0).map(|(f, _)| rms(f)).collect();
+        out.as_chunks::<480>().0.iter().zip(&ref_db).filter(|&(_, &r)| r < loud - 40.0).map(|(f, _)| rms(f)).collect();
       eprintln!(
         "{name:<15} speech frames cut > 10 dB under RNNoise: {:4.1} % of {speech}; quiet frames {:5.1} dBFS",
         cut as f32 * 100.0 / speech.max(1) as f32,

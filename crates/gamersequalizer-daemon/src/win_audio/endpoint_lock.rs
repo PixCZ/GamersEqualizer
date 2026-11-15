@@ -356,23 +356,25 @@ pub(crate) unsafe fn get_endpoint_info(
   device: &IMMDevice,
   default_id: &str,
 ) -> windows_core::Result<AudioEndpointInfo> {
-  let pwstr = device.GetId()?;
-  let id = pwstr.to_string()?;
-  windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+  unsafe {
+    let pwstr = device.GetId()?;
+    let id = pwstr.to_string()?;
+    windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
 
-  let mut name = "Unknown Device".to_string();
-  if let Ok(props) = device.OpenPropertyStore(STGM_READ) {
-    if let Ok(val) = props.GetValue(&PKEY_DEVICE_FRIENDLY_NAME) {
-      if let Ok(pwstr_name) = windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&val) {
-        if let Ok(s) = pwstr_name.to_string() {
-          name = s;
+    let mut name = "Unknown Device".to_string();
+    if let Ok(props) = device.OpenPropertyStore(STGM_READ) {
+      if let Ok(val) = props.GetValue(&PKEY_DEVICE_FRIENDLY_NAME) {
+        if let Ok(pwstr_name) = windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&val) {
+          if let Ok(s) = pwstr_name.to_string() {
+            name = s;
+          }
+          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr_name.as_ptr() as *const _));
         }
-        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr_name.as_ptr() as *const _));
       }
     }
+
+    let is_default = id == default_id;
+
+    Ok(AudioEndpointInfo { id, name, is_default })
   }
-
-  let is_default = id == default_id;
-
-  Ok(AudioEndpointInfo { id, name, is_default })
 }

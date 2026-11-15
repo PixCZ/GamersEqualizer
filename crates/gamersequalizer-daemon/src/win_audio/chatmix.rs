@@ -725,23 +725,25 @@ impl ChatMixController {
 
   /// (session instance id, volume control, channel) of every app session on every device.
   unsafe fn enumerate_active_sessions_raw(&self) -> Vec<(String, ISimpleAudioVolume, AudioBus)> {
-    let mut list = Vec::new();
-    for manager in get_all_session_managers() {
-      if let Ok(enumerator) = manager.GetSessionEnumerator() {
-        let count = enumerator.GetCount().unwrap_or(0);
-        for i in 0..count {
-          if let Ok(control) = enumerator.GetSession(i) {
-            if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
-              if let Ok(pid) = control2.GetProcessId() {
-                if pid > 0 {
-                  let exe_name = get_exe_name_from_pid(pid).unwrap_or_default();
-                  if is_own_exe(&exe_name) {
-                    continue;
-                  }
-                  let bus = self.classify_exe(&exe_name);
-                  let key = session_instance_id(&control2).unwrap_or_else(|| format!("pid:{pid}:{i}"));
-                  if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
-                    list.push((key, vol_ctl, bus));
+    unsafe {
+      let mut list = Vec::new();
+      for manager in get_all_session_managers() {
+        if let Ok(enumerator) = manager.GetSessionEnumerator() {
+          let count = enumerator.GetCount().unwrap_or(0);
+          for i in 0..count {
+            if let Ok(control) = enumerator.GetSession(i) {
+              if let Ok(control2) = control.cast::<IAudioSessionControl2>() {
+                if let Ok(pid) = control2.GetProcessId() {
+                  if pid > 0 {
+                    let exe_name = get_exe_name_from_pid(pid).unwrap_or_default();
+                    if is_own_exe(&exe_name) {
+                      continue;
+                    }
+                    let bus = self.classify_exe(&exe_name);
+                    let key = session_instance_id(&control2).unwrap_or_else(|| format!("pid:{pid}:{i}"));
+                    if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
+                      list.push((key, vol_ctl, bus));
+                    }
                   }
                 }
               }
@@ -749,8 +751,8 @@ impl ChatMixController {
           }
         }
       }
+      list
     }
-    list
   }
 }
 
@@ -773,10 +775,12 @@ fn session_action(last: Option<f32>, target: f32) -> SessionAction {
 }
 
 unsafe fn session_instance_id(control: &IAudioSessionControl2) -> Option<String> {
-  let p = control.GetSessionInstanceIdentifier().ok()?;
-  let id = p.to_string().ok();
-  CoTaskMemFree(Some(p.0 as *const _));
-  id
+  unsafe {
+    let p = control.GetSessionInstanceIdentifier().ok()?;
+    let id = p.to_string().ok();
+    CoTaskMemFree(Some(p.0 as *const _));
+    id
+  }
 }
 
 thread_local! {
@@ -823,11 +827,13 @@ fn with_endpoint<I: Interface + Clone, T>(
 }
 
 unsafe fn activate_endpoint<I: Interface>(device_id: &str) -> Option<I> {
-  let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-  let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-  let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-  let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
-  device.Activate::<I>(CLSCTX_ALL, None).ok()
+  unsafe {
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+    let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
+    device.Activate::<I>(CLSCTX_ALL, None).ok()
+  }
 }
 
 /// Another process has a running stream on `device_id` (a microphone: an app records from this
@@ -960,22 +966,24 @@ fn is_own_exe(exe: &str) -> bool {
 }
 
 unsafe fn get_all_session_managers() -> Vec<IAudioSessionManager2> {
-  let mut managers = Vec::new();
-  let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-  if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-    if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
-      if let Ok(count) = collection.GetCount() {
-        for i in 0..count {
-          if let Ok(device) = collection.Item(i) {
-            if let Ok(mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-              managers.push(mgr);
+  unsafe {
+    let mut managers = Vec::new();
+    let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+      if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+        if let Ok(count) = collection.GetCount() {
+          for i in 0..count {
+            if let Ok(device) = collection.Item(i) {
+              if let Ok(mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                managers.push(mgr);
+              }
             }
           }
         }
       }
     }
+    managers
   }
-  managers
 }
 
 pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {

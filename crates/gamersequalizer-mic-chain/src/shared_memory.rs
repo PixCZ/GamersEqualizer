@@ -69,16 +69,18 @@ impl SharedMemoryClient {
 
   /// Takes ownership of `handle` (closed on failure).
   unsafe fn map(handle: HANDLE) -> Result<Self, String> {
-    if handle.is_invalid() {
-      return Err("file mapping handle is invalid".to_string());
+    unsafe {
+      if handle.is_invalid() {
+        return Err("file mapping handle is invalid".to_string());
+      }
+      let size = ShmLayout::total_size_bytes();
+      let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
+      let Some(mapped_ptr) = NonNull::new(view.Value as *mut ShmLayout) else {
+        let _ = CloseHandle(handle);
+        return Err("MapViewOfFile returned null pointer".to_string());
+      };
+      Ok(Self { handle, mapped_ptr })
     }
-    let size = ShmLayout::total_size_bytes();
-    let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, size);
-    let Some(mapped_ptr) = NonNull::new(view.Value as *mut ShmLayout) else {
-      let _ = CloseHandle(handle);
-      return Err("MapViewOfFile returned null pointer".to_string());
-    };
-    Ok(Self { handle, mapped_ptr })
   }
 }
 

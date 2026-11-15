@@ -379,32 +379,34 @@ static INNER_VTBL: IUnknown_Vtbl =
 
 /// # Safety
 /// Called by COM with pointers it owns; every pointer is null-checked before use.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllGetClassObject(
   rclsid: *const GUID,
   riid: *const GUID,
   ppv: *mut *mut c_void,
 ) -> HRESULT {
-  if ppv.is_null() {
-    return E_POINTER;
+  unsafe {
+    if ppv.is_null() {
+      return E_POINTER;
+    }
+    *ppv = null_mut();
+    if rclsid.is_null() || riid.is_null() {
+      return E_INVALIDARG;
+    }
+    let Some(kind) = ApoKind::from_clsid(&*rclsid) else {
+      return CLASS_E_CLASSNOTAVAILABLE;
+    };
+    // Each step Windows takes towards a running effect is noted once, so the last note shows
+    // where it stopped (class -> instance -> initialized -> formats -> stream).
+    note(Level::Info, format!("{}: class requested", kind.friendly_name()));
+    let factory: IClassFactory = ApoFactory { kind }.into();
+    factory.query(riid, ppv)
   }
-  *ppv = null_mut();
-  if rclsid.is_null() || riid.is_null() {
-    return E_INVALIDARG;
-  }
-  let Some(kind) = ApoKind::from_clsid(&*rclsid) else {
-    return CLASS_E_CLASSNOTAVAILABLE;
-  };
-  // Each step Windows takes towards a running effect is noted once, so the last note shows
-  // where it stopped (class -> instance -> initialized -> formats -> stream).
-  note(Level::Info, format!("{}: class requested", kind.friendly_name()));
-  let factory: IClassFactory = ApoFactory { kind }.into();
-  factory.query(riid, ppv)
 }
 
 /// Shortcut: never unload. audiodg keeps APOs alive anyway; tracking live objects for a
 /// correct answer is not worth it until the DLL has to be upgraded without an audio restart.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
   S_FALSE
 }
@@ -472,15 +474,15 @@ impl ApoObject {
 /// # Safety
 /// `this` must be an interface pointer of an `ApoObject` taken at field offset `OFF`.
 unsafe fn object<'a, const OFF: usize>(this: *mut c_void) -> &'a ApoObject {
-  &*((this as *mut u8).sub(OFF) as *const ApoObject)
+  unsafe { &*((this as *mut u8).sub(OFF) as *const ApoObject) }
 }
 
 unsafe fn state<'a, const OFF: usize>(this: *mut c_void) -> &'a ApoState {
-  &object::<OFF>(this).state
+  unsafe { &object::<OFF>(this).state }
 }
 
 unsafe fn unknown_vtbl(unknown: *mut c_void) -> &'static IUnknown_Vtbl {
-  &**(unknown as *const *const IUnknown_Vtbl)
+  unsafe { &**(unknown as *const *const IUnknown_Vtbl) }
 }
 
 const fn delegating_unknown<const OFF: usize>() -> IUnknown_Vtbl {
@@ -496,62 +498,72 @@ unsafe extern "system" fn delegating_qi<const OFF: usize>(
   iid: *const GUID,
   ppv: *mut *mut c_void,
 ) -> HRESULT {
-  let outer = object::<OFF>(this).outer;
-  (unknown_vtbl(outer).QueryInterface)(outer, iid, ppv)
+  unsafe {
+    let outer = object::<OFF>(this).outer;
+    (unknown_vtbl(outer).QueryInterface)(outer, iid, ppv)
+  }
 }
 
 unsafe extern "system" fn delegating_add_ref<const OFF: usize>(this: *mut c_void) -> u32 {
-  let outer = object::<OFF>(this).outer;
-  (unknown_vtbl(outer).AddRef)(outer)
+  unsafe {
+    let outer = object::<OFF>(this).outer;
+    (unknown_vtbl(outer).AddRef)(outer)
+  }
 }
 
 unsafe extern "system" fn delegating_release<const OFF: usize>(this: *mut c_void) -> u32 {
-  let outer = object::<OFF>(this).outer;
-  (unknown_vtbl(outer).Release)(outer)
+  unsafe {
+    let outer = object::<OFF>(this).outer;
+    (unknown_vtbl(outer).Release)(outer)
+  }
 }
 
 unsafe extern "system" fn inner_query_interface(this: *mut c_void, iid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
-  if ppv.is_null() {
-    return E_POINTER;
+  unsafe {
+    if ppv.is_null() {
+      return E_POINTER;
+    }
+    *ppv = null_mut();
+    if iid.is_null() {
+      return E_POINTER;
+    }
+    let obj = (this as *mut u8).sub(OFF_INNER) as *mut ApoObject;
+    let iid = *iid;
+    let found: *mut c_void = if iid == IUnknown::IID {
+      addr_of_mut!((*obj).inner) as *mut c_void
+    } else if iid == IAudioProcessingObject::IID {
+      addr_of_mut!((*obj).apo) as *mut c_void
+    } else if iid == IAudioProcessingObjectRT::IID {
+      addr_of_mut!((*obj).rt) as *mut c_void
+    } else if iid == IAudioProcessingObjectConfiguration::IID {
+      addr_of_mut!((*obj).cfg) as *mut c_void
+    } else if iid == IAudioSystemEffects::IID {
+      addr_of_mut!((*obj).sfx) as *mut c_void
+    } else {
+      return E_NOINTERFACE;
+    };
+    // AddRef through the returned interface: outer-delegating except for the inner IUnknown.
+    (unknown_vtbl(found).AddRef)(found);
+    *ppv = found;
+    S_OK
   }
-  *ppv = null_mut();
-  if iid.is_null() {
-    return E_POINTER;
-  }
-  let obj = (this as *mut u8).sub(OFF_INNER) as *mut ApoObject;
-  let iid = *iid;
-  let found: *mut c_void = if iid == IUnknown::IID {
-    addr_of_mut!((*obj).inner) as *mut c_void
-  } else if iid == IAudioProcessingObject::IID {
-    addr_of_mut!((*obj).apo) as *mut c_void
-  } else if iid == IAudioProcessingObjectRT::IID {
-    addr_of_mut!((*obj).rt) as *mut c_void
-  } else if iid == IAudioProcessingObjectConfiguration::IID {
-    addr_of_mut!((*obj).cfg) as *mut c_void
-  } else if iid == IAudioSystemEffects::IID {
-    addr_of_mut!((*obj).sfx) as *mut c_void
-  } else {
-    return E_NOINTERFACE;
-  };
-  // AddRef through the returned interface: outer-delegating except for the inner IUnknown.
-  (unknown_vtbl(found).AddRef)(found);
-  *ppv = found;
-  S_OK
 }
 
 unsafe extern "system" fn inner_add_ref(this: *mut c_void) -> u32 {
-  object::<OFF_INNER>(this).refs.fetch_add(1, Ordering::Relaxed) + 1
+  unsafe { object::<OFF_INNER>(this).refs.fetch_add(1, Ordering::Relaxed) + 1 }
 }
 
 unsafe extern "system" fn inner_release(this: *mut c_void) -> u32 {
-  let left = object::<OFF_INNER>(this).refs.fetch_sub(1, Ordering::AcqRel).wrapping_sub(1);
-  if left == 0 {
-    let obj = Box::from_raw((this as *mut u8).sub(OFF_INNER) as *mut ApoObject);
-    // Windows may release a still-locked APO (device removed): this drops the processor, and
-    // a panic in a DSP destructor must not unwind out of `extern "system"` (kills audiodg).
-    let _ = catch_unwind(AssertUnwindSafe(move || drop(obj)));
+  unsafe {
+    let left = object::<OFF_INNER>(this).refs.fetch_sub(1, Ordering::AcqRel).wrapping_sub(1);
+    if left == 0 {
+      let obj = Box::from_raw((this as *mut u8).sub(OFF_INNER) as *mut ApoObject);
+      // Windows may release a still-locked APO (device removed): this drops the processor, and
+      // a panic in a DSP destructor must not unwind out of `extern "system"` (kills audiodg).
+      let _ = catch_unwind(AssertUnwindSafe(move || drop(obj)));
+    }
+    left
   }
-  left
 }
 
 // ---------------------------------------------------------------------------------------
@@ -563,53 +575,59 @@ unsafe extern "system" fn apo_reset(_this: *mut c_void) -> HRESULT {
 }
 
 unsafe extern "system" fn apo_get_latency(_this: *mut c_void, latency: *mut i64) -> HRESULT {
-  if latency.is_null() {
-    return E_POINTER;
+  unsafe {
+    if latency.is_null() {
+      return E_POINTER;
+    }
+    *latency = 0;
+    S_OK
   }
-  *latency = 0;
-  S_OK
 }
 
 unsafe extern "system" fn apo_get_registration_properties(
   this: *mut c_void,
   out: *mut *mut APO_REG_PROPERTIES,
 ) -> HRESULT {
-  if out.is_null() {
-    return E_POINTER;
-  }
-  match registration_properties(state::<OFF_APO>(this).kind) {
-    Ok(props) => {
-      *out = props;
-      S_OK
+  unsafe {
+    if out.is_null() {
+      return E_POINTER;
     }
-    Err(err) => {
-      *out = null_mut();
-      err.code()
+    match registration_properties(state::<OFF_APO>(this).kind) {
+      Ok(props) => {
+        *out = props;
+        S_OK
+      }
+      Err(err) => {
+        *out = null_mut();
+        err.code()
+      }
     }
   }
 }
 
 unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *const u8) -> HRESULT {
-  let st = state::<OFF_APO>(this);
-  if st.locked.load(Ordering::Acquire) {
-    return APOERR_APO_LOCKED;
+  unsafe {
+    let st = state::<OFF_APO>(this);
+    if st.locked.load(Ordering::Acquire) {
+      return APOERR_APO_LOCKED;
+    }
+    let device_id = endpoint_device_id(size, data);
+    if let Some(guid) = endpoint_guid_from_init(size, data, device_id.as_deref()) {
+      let _ = st.endpoint_tag.set(guid);
+    }
+    let mode = processing_mode(size, data);
+    if let Some(mode) = mode {
+      st.mode.0.store((mode >> 64) as u64, Ordering::Relaxed);
+      st.mode.1.store(mode as u64, Ordering::Relaxed);
+    }
+    // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
+    let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
+    note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
+    if let Some(hash) = device_id.as_deref().map(device_hash) {
+      st.endpoint.store(hash, Ordering::Relaxed);
+    }
+    S_OK
   }
-  let device_id = endpoint_device_id(size, data);
-  if let Some(guid) = endpoint_guid_from_init(size, data, device_id.as_deref()) {
-    let _ = st.endpoint_tag.set(guid);
-  }
-  let mode = processing_mode(size, data);
-  if let Some(mode) = mode {
-    st.mode.0.store((mode >> 64) as u64, Ordering::Relaxed);
-    st.mode.1.store(mode as u64, Ordering::Relaxed);
-  }
-  // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
-  let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
-  note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
-  if let Some(hash) = device_id.as_deref().map(device_hash) {
-    st.endpoint.store(hash, Ordering::Relaxed);
-  }
-  S_OK
 }
 
 unsafe extern "system" fn apo_is_input_format_supported(
@@ -618,7 +636,7 @@ unsafe extern "system" fn apo_is_input_format_supported(
   requested: *mut c_void,
   supported: *mut *mut c_void,
 ) -> HRESULT {
-  is_format_supported(this, "input", opposite, requested, supported)
+  unsafe { is_format_supported(this, "input", opposite, requested, supported) }
 }
 
 unsafe extern "system" fn apo_is_output_format_supported(
@@ -627,7 +645,7 @@ unsafe extern "system" fn apo_is_output_format_supported(
   requested: *mut c_void,
   supported: *mut *mut c_void,
 ) -> HRESULT {
-  is_format_supported(this, "output", opposite, requested, supported)
+  unsafe { is_format_supported(this, "output", opposite, requested, supported) }
 }
 
 /// # Safety
@@ -639,39 +657,43 @@ unsafe fn is_format_supported(
   requested: *mut c_void,
   supported: *mut *mut c_void,
 ) -> HRESULT {
-  if supported.is_null() {
-    return E_POINTER;
-  }
-  *supported = null_mut();
-  let opposite = IAudioMediaType::from_raw_borrowed(&opposite);
-  let requested = IAudioMediaType::from_raw_borrowed(&requested);
-  let result = check_format(opposite, requested);
-  // A refused format drops the effect from the graph before it ever starts a stream.
-  let describe = |media: Option<&IAudioMediaType>| {
-    media.and_then(uncompressed_format).map_or_else(|| "none".to_string(), |f| describe_format(&f))
-  };
-  let (level, verdict) = match &result {
-    Ok(_) => (Level::Info, "accepted".to_string()),
-    Err(err) => (Level::Warning, format!("refused ({:?})", err.code())),
-  };
-  let st = state::<OFF_APO>(this);
-  let (requested_text, opposite_text) = (describe(requested), describe(opposite));
-  note_for(st, level, format!("{direction} format {requested_text} (other side {opposite_text}): {verdict}"));
-  match result {
-    Ok(format) => {
-      *supported = format.into_raw();
-      S_OK
+  unsafe {
+    if supported.is_null() {
+      return E_POINTER;
     }
-    Err(err) => err.code(),
+    *supported = null_mut();
+    let opposite = IAudioMediaType::from_raw_borrowed(&opposite);
+    let requested = IAudioMediaType::from_raw_borrowed(&requested);
+    let result = check_format(opposite, requested);
+    // A refused format drops the effect from the graph before it ever starts a stream.
+    let describe = |media: Option<&IAudioMediaType>| {
+      media.and_then(uncompressed_format).map_or_else(|| "none".to_string(), |f| describe_format(&f))
+    };
+    let (level, verdict) = match &result {
+      Ok(_) => (Level::Info, "accepted".to_string()),
+      Err(err) => (Level::Warning, format!("refused ({:?})", err.code())),
+    };
+    let st = state::<OFF_APO>(this);
+    let (requested_text, opposite_text) = (describe(requested), describe(opposite));
+    note_for(st, level, format!("{direction} format {requested_text} (other side {opposite_text}): {verdict}"));
+    match result {
+      Ok(format) => {
+        *supported = format.into_raw();
+        S_OK
+      }
+      Err(err) => err.code(),
+    }
   }
 }
 
 unsafe extern "system" fn apo_get_input_channel_count(this: *mut c_void, count: *mut u32) -> HRESULT {
-  if count.is_null() {
-    return E_POINTER;
+  unsafe {
+    if count.is_null() {
+      return E_POINTER;
+    }
+    *count = state::<OFF_APO>(this).channels.load(Ordering::Acquire);
+    S_OK
   }
-  *count = state::<OFF_APO>(this).channels.load(Ordering::Acquire);
-  S_OK
 }
 
 // ---------------------------------------------------------------------------------------
@@ -685,25 +707,27 @@ unsafe extern "system" fn rt_apo_process(
   num_outputs: u32,
   outputs: *mut *mut APO_CONNECTION_PROPERTY,
 ) {
-  if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
-    return;
-  }
-  let st = state::<OFF_RT>(this);
-  let channels = st.channels.load(Ordering::Relaxed) as usize;
-  let input = *inputs;
-  let output = *outputs;
-  if input.is_null() || output.is_null() {
-    return;
-  }
-  let qpc_hns = capture_time_hns(&*input, st.rate.load(Ordering::Relaxed));
-  process_connection(&*input, &mut *output, channels, |buf| {
-    // Never block the audio thread: if configuration holds the lock, pass this block through.
-    if let Ok(mut guard) = st.processor.try_lock() {
-      if let Some(processor) = guard.as_mut() {
-        processor.process(buf, channels, qpc_hns);
-      }
+  unsafe {
+    if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
+      return;
     }
-  });
+    let st = state::<OFF_RT>(this);
+    let channels = st.channels.load(Ordering::Relaxed) as usize;
+    let input = *inputs;
+    let output = *outputs;
+    if input.is_null() || output.is_null() {
+      return;
+    }
+    let qpc_hns = capture_time_hns(&*input, st.rate.load(Ordering::Relaxed));
+    process_connection(&*input, &mut *output, channels, |buf| {
+      // Never block the audio thread: if configuration holds the lock, pass this block through.
+      if let Ok(mut guard) = st.processor.try_lock() {
+        if let Some(processor) = guard.as_mut() {
+          processor.process(buf, channels, qpc_hns);
+        }
+      }
+    });
+  }
 }
 
 unsafe extern "system" fn rt_calc_frames(_this: *mut c_void, frames: u32) -> u32 {
@@ -721,75 +745,79 @@ unsafe extern "system" fn cfg_lock_for_process(
   num_outputs: u32,
   outputs: *const *const APO_CONNECTION_DESCRIPTOR,
 ) -> HRESULT {
-  let st = state::<OFF_CFG>(this);
-  if st.locked.load(Ordering::Acquire) {
-    return APOERR_APO_LOCKED;
-  }
-  if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
-    note_for(st, Level::Warning, format!("refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
-    return APOERR_NUM_CONNECTIONS_INVALID;
-  }
-  let input = *inputs;
-  if input.is_null() {
-    return E_POINTER;
-  }
-  let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
-  let Some(format) = offered.filter(is_supported_format) else {
-    let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
-    note_for(st, Level::Warning, format!("stream format not supported ({what}); Windows runs the stream without it"));
-    return APOERR_FORMAT_NOT_SUPPORTED;
-  };
+  unsafe {
+    let st = state::<OFF_CFG>(this);
+    if st.locked.load(Ordering::Acquire) {
+      return APOERR_APO_LOCKED;
+    }
+    if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
+      note_for(st, Level::Warning, format!("refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
+      return APOERR_NUM_CONNECTIONS_INVALID;
+    }
+    let input = *inputs;
+    if input.is_null() {
+      return E_POINTER;
+    }
+    let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
+    let Some(format) = offered.filter(is_supported_format) else {
+      let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
+      note_for(st, Level::Warning, format!("stream format not supported ({what}); Windows runs the stream without it"));
+      return APOERR_FORMAT_NOT_SUPPORTED;
+    };
 
-  st.channels.store(format.dwSamplesPerFrame, Ordering::Release);
-  let rate = format.fFramesPerSecond;
-  st.rate.store(rate as u32, Ordering::Release);
-  let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
-  let tag = st.endpoint_tag.get().cloned();
-  let endpoint = st.endpoint.load(Ordering::Relaxed);
-  let processor = match st.kind {
-    ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|mut p| {
-      p.sidetone.endpoint_hash = endpoint;
-      Processor::Mic(p)
-    }),
-    ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
-      p.sidetone_endpoint = endpoint;
-      Processor::Output(p)
-    }),
-    ApoKind::Stream => shared_memory(st)
-      .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
-      .map(Processor::Stream),
-  };
-  let level = if processor.is_some() { Level::Info } else { Level::Warning };
-  let outcome = match &processor {
-    Some(Processor::Mic(_)) => format!("started, mic chains running here: {}", MIC_CHAINS.load(Ordering::Relaxed)),
-    Some(_) => "started".to_string(),
-    None => "no chain, passes audio through".to_string(),
-  };
-  let msg = format!("stream {}, mode {:?}: {outcome}", describe_format(&format), GUID::from_u128(mode));
-  note_for(st, level, msg);
-  if let Ok(mut slot) = st.processor.lock() {
-    // Replacing drops a previous processor: keep a destructor panic inside this DLL.
-    let old = std::mem::replace(&mut *slot, processor);
-    let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
+    st.channels.store(format.dwSamplesPerFrame, Ordering::Release);
+    let rate = format.fFramesPerSecond;
+    st.rate.store(rate as u32, Ordering::Release);
+    let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
+    let tag = st.endpoint_tag.get().cloned();
+    let endpoint = st.endpoint.load(Ordering::Relaxed);
+    let processor = match st.kind {
+      ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|mut p| {
+        p.sidetone.endpoint_hash = endpoint;
+        Processor::Mic(p)
+      }),
+      ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
+        p.sidetone_endpoint = endpoint;
+        Processor::Output(p)
+      }),
+      ApoKind::Stream => shared_memory(st)
+        .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
+        .map(Processor::Stream),
+    };
+    let level = if processor.is_some() { Level::Info } else { Level::Warning };
+    let outcome = match &processor {
+      Some(Processor::Mic(_)) => format!("started, mic chains running here: {}", MIC_CHAINS.load(Ordering::Relaxed)),
+      Some(_) => "started".to_string(),
+      None => "no chain, passes audio through".to_string(),
+    };
+    let msg = format!("stream {}, mode {:?}: {outcome}", describe_format(&format), GUID::from_u128(mode));
+    note_for(st, level, msg);
+    if let Ok(mut slot) = st.processor.lock() {
+      // Replacing drops a previous processor: keep a destructor panic inside this DLL.
+      let old = std::mem::replace(&mut *slot, processor);
+      let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
+    }
+    st.locked.store(true, Ordering::Release);
+    S_OK
   }
-  st.locked.store(true, Ordering::Release);
-  S_OK
 }
 
 unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -> HRESULT {
-  let st = state::<OFF_CFG>(this);
-  if !st.locked.swap(false, Ordering::AcqRel) {
-    return APOERR_ALREADY_UNLOCKED;
-  }
-  if let Ok(mut slot) = st.processor.lock() {
-    if let Some(Processor::Mic(mic)) = slot.as_ref() {
-      mic.note_stop();
+  unsafe {
+    let st = state::<OFF_CFG>(this);
+    if !st.locked.swap(false, Ordering::AcqRel) {
+      return APOERR_ALREADY_UNLOCKED;
     }
-    // Dropping may run arbitrary DSP destructors: keep a panic inside this DLL.
-    let old = slot.take();
-    let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
+    if let Ok(mut slot) = st.processor.lock() {
+      if let Some(Processor::Mic(mic)) = slot.as_ref() {
+        mic.note_stop();
+      }
+      // Dropping may run arbitrary DSP destructors: keep a panic inside this DLL.
+      let old = slot.take();
+      let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
+    }
+    S_OK
   }
-  S_OK
 }
 
 /// The Global mapping, created or opened. Without it the effect passes audio through and the
@@ -1577,28 +1605,30 @@ fn frames_to_hns(frames: u64, rate: u32) -> i64 {
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn endpoint_guid_from_init(size: u32, data: *const u8, device_id: Option<&str>) -> Option<String> {
-  if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects>() {
-    return None;
-  }
-  let init = data as *const APOInitSystemEffects;
-  let declared = std::ptr::addr_of!((*init).APOInit.cbSize).read_unaligned();
-  if (declared as usize) < size_of::<APOInitSystemEffects>() {
-    return None;
-  }
-  // Field reads only: `ManuallyDrop` borrows COM pointers without taking ownership or calling Release.
-  let props = std::ptr::addr_of!((*init).pAPOEndpointProperties).read_unaligned();
-  if let Some(store) = props.as_ref() {
-    if let Ok(val) = store.GetValue(&PKEY_AUDIO_ENDPOINT_GUID) {
-      if let Ok(pwstr) = PropVariantToStringAlloc(&val) {
-        let text = pwstr.to_string().ok();
-        CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
-        if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
-          return Some(guid);
+  unsafe {
+    if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects>() {
+      return None;
+    }
+    let init = data as *const APOInitSystemEffects;
+    let declared = std::ptr::addr_of!((*init).APOInit.cbSize).read_unaligned();
+    if (declared as usize) < size_of::<APOInitSystemEffects>() {
+      return None;
+    }
+    // Field reads only: `ManuallyDrop` borrows COM pointers without taking ownership or calling Release.
+    let props = std::ptr::addr_of!((*init).pAPOEndpointProperties).read_unaligned();
+    if let Some(store) = props.as_ref() {
+      if let Ok(val) = store.GetValue(&PKEY_AUDIO_ENDPOINT_GUID) {
+        if let Ok(pwstr) = PropVariantToStringAlloc(&val) {
+          let text = pwstr.to_string().ok();
+          CoTaskMemFree(Some(pwstr.as_ptr() as *const c_void));
+          if let Some(guid) = text.and_then(|s| normalize_endpoint_guid(&s)) {
+            return Some(guid);
+          }
         }
       }
     }
+    device_id.and_then(normalize_endpoint_guid)
   }
-  device_id.and_then(normalize_endpoint_guid)
 }
 
 fn normalize_endpoint_guid(raw: &str) -> Option<String> {
@@ -1612,16 +1642,18 @@ fn normalize_endpoint_guid(raw: &str) -> Option<String> {
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
-  if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects2>() {
-    return None;
+  unsafe {
+    if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects2>() {
+      return None;
+    }
+    let init = data as *const APOInitSystemEffects2;
+    // Field reads only: the struct holds COM pointers we must not take ownership of.
+    let declared = std::ptr::addr_of!((*init).APOInit.cbSize).read_unaligned();
+    if (declared as usize) < size_of::<APOInitSystemEffects2>() {
+      return None;
+    }
+    Some(std::ptr::addr_of!((*init).AudioProcessingMode).read_unaligned().to_u128())
   }
-  let init = data as *const APOInitSystemEffects2;
-  // Field reads only: the struct holds COM pointers we must not take ownership of.
-  let declared = std::ptr::addr_of!((*init).APOInit.cbSize).read_unaligned();
-  if (declared as usize) < size_of::<APOInitSystemEffects2>() {
-    return None;
-  }
-  Some(std::ptr::addr_of!((*init).AudioProcessingMode).read_unaligned().to_u128())
 }
 
 /// Device id of the endpoint the engine creates this APO for: the last device in the init
@@ -1633,24 +1665,26 @@ unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn endpoint_device_id(size: u32, data: *const u8) -> Option<String> {
-  let (v1, v2) = (size_of::<APOInitSystemEffects>(), size_of::<APOInitSystemEffects2>());
-  if data.is_null() || (size as usize) < v1 {
-    return None;
+  unsafe {
+    let (v1, v2) = (size_of::<APOInitSystemEffects>(), size_of::<APOInitSystemEffects2>());
+    if data.is_null() || (size as usize) < v1 {
+      return None;
+    }
+    let init = data as *const APOInitSystemEffects;
+    let declared = addr_of!((*init).APOInit.cbSize).read_unaligned() as usize;
+    if declared != v1 && declared != v2 {
+      return None;
+    }
+    // Borrowed: the engine owns the collection; no AddRef, no Release.
+    let raw = addr_of!((*init).pDeviceCollection).cast::<*mut c_void>().read_unaligned();
+    let collection = IMMDeviceCollection::from_raw_borrowed(&raw)?;
+    let last = collection.GetCount().ok()?.checked_sub(1)?;
+    let device = collection.Item(last).ok()?;
+    let id = device.GetId().ok()?;
+    let text = id.to_string().ok();
+    CoTaskMemFree(Some(id.as_ptr() as *const c_void));
+    text
   }
-  let init = data as *const APOInitSystemEffects;
-  let declared = addr_of!((*init).APOInit.cbSize).read_unaligned() as usize;
-  if declared != v1 && declared != v2 {
-    return None;
-  }
-  // Borrowed: the engine owns the collection; no AddRef, no Release.
-  let raw = addr_of!((*init).pDeviceCollection).cast::<*mut c_void>().read_unaligned();
-  let collection = IMMDeviceCollection::from_raw_borrowed(&raw)?;
-  let last = collection.GetCount().ok()?.checked_sub(1)?;
-  let device = collection.Item(last).ok()?;
-  let id = device.GetId().ok()?;
-  let text = id.to_string().ok();
-  CoTaskMemFree(Some(id.as_ptr() as *const c_void));
-  text
 }
 
 fn interface_ids() -> [GUID; 4] {
@@ -1744,44 +1778,48 @@ unsafe fn process_connection(
   channels: usize,
   process: impl FnOnce(&mut [f32]),
 ) {
-  let samples = input.u32ValidFrameCount as usize * channels;
-  output.u32ValidFrameCount = input.u32ValidFrameCount;
-  output.u32BufferFlags = input.u32BufferFlags;
-  if input.pBuffer == 0 || output.pBuffer == 0 || samples == 0 {
-    return;
-  }
-
-  let same_buffer = input.pBuffer == output.pBuffer;
-  let out = std::slice::from_raw_parts_mut(output.pBuffer as *mut f32, samples);
-  if input.u32BufferFlags == BUFFER_SILENT {
-    if !same_buffer {
-      out.fill(0.0);
+  unsafe {
+    let samples = input.u32ValidFrameCount as usize * channels;
+    output.u32ValidFrameCount = input.u32ValidFrameCount;
+    output.u32BufferFlags = input.u32BufferFlags;
+    if input.pBuffer == 0 || output.pBuffer == 0 || samples == 0 {
+      return;
     }
-    return;
+
+    let same_buffer = input.pBuffer == output.pBuffer;
+    let out = std::slice::from_raw_parts_mut(output.pBuffer as *mut f32, samples);
+    if input.u32BufferFlags == BUFFER_SILENT {
+      if !same_buffer {
+        out.fill(0.0);
+      }
+      return;
+    }
+    if input.u32BufferFlags != BUFFER_VALID {
+      return;
+    }
+    if !same_buffer {
+      out.copy_from_slice(std::slice::from_raw_parts(input.pBuffer as *const f32, samples));
+    }
+    process(out);
   }
-  if input.u32BufferFlags != BUFFER_VALID {
-    return;
-  }
-  if !same_buffer {
-    out.copy_from_slice(std::slice::from_raw_parts(input.pBuffer as *const f32, samples));
-  }
-  process(out);
 }
 
 /// QPC time (100 ns units) of the first frame: the engine's V2 timestamp when present and
 /// plausible, else "now minus the buffer length" (the delay estimator absorbs the offset).
 unsafe fn capture_time_hns(input: &APO_CONNECTION_PROPERTY, rate: u32) -> Option<u64> {
-  let now = now_hns()?;
-  if input.u32Signature == CONNECTION_V2_SIGNATURE {
-    let t = (*(input as *const APO_CONNECTION_PROPERTY as *const APO_CONNECTION_PROPERTY_V2)).u64QPCTime;
-    if t.abs_diff(now) < MAX_TIMESTAMP_SKEW_HNS {
-      return Some(t);
+  unsafe {
+    let now = now_hns()?;
+    if input.u32Signature == CONNECTION_V2_SIGNATURE {
+      let t = (*(input as *const APO_CONNECTION_PROPERTY as *const APO_CONNECTION_PROPERTY_V2)).u64QPCTime;
+      if t.abs_diff(now) < MAX_TIMESTAMP_SKEW_HNS {
+        return Some(t);
+      }
     }
+    // 0 = not locked yet (the engine doesn't process then); assume the usual rate.
+    let rate = if rate == 0 { REF_SAMPLE_RATE } else { rate };
+    let duration = frames_to_hns(u64::from(input.u32ValidFrameCount), rate).max(0) as u64;
+    Some(now.saturating_sub(duration))
   }
-  // 0 = not locked yet (the engine doesn't process then); assume the usual rate.
-  let rate = if rate == 0 { REF_SAMPLE_RATE } else { rate };
-  let duration = frames_to_hns(u64::from(input.u32ValidFrameCount), rate).max(0) as u64;
-  Some(now.saturating_sub(duration))
 }
 
 fn now_hns() -> Option<u64> {
