@@ -1,5 +1,5 @@
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::STILL_ACTIVE;
@@ -21,9 +21,8 @@ pub struct GameForegroundEvent {
   pub full_path: String,
 }
 
-// Global hook dispatch
-static mut HOOK_SENDER: Option<Sender<isize>> = None;
-static HOOK_LOCK: Mutex<()> = Mutex::new(());
+/// Where the hook callback (a plain `extern "system" fn`, no context pointer) sends window handles.
+static HOOK_SENDER: Mutex<Option<Sender<isize>>> = Mutex::new(None);
 
 /// Foreground-window watcher. The hook is out-of-context, so Windows delivers its events
 /// through the message queue of the thread that installed it: that thread must pump
@@ -38,19 +37,12 @@ pub struct GameDetector {
 
 impl GameDetector {
   pub fn start() -> Result<Self, String> {
-    let _guard = match HOOK_LOCK.lock() {
-      Ok(g) => g,
-      Err(poisoned) => poisoned.into_inner(),
-    };
-
     let (raw_tx, raw_rx) = channel::<isize>();
     let (event_tx, event_rx) = channel::<GameForegroundEvent>();
     let (ready_tx, ready_rx) = channel::<Result<u32, String>>();
     let current_game = Arc::new(Mutex::new(None));
 
-    unsafe {
-      HOOK_SENDER = Some(raw_tx);
-    }
+    *HOOK_SENDER.lock().unwrap_or_else(PoisonError::into_inner) = Some(raw_tx);
     let hook_thread = std::thread::Builder::new()
       .name("GamersEqualizer_GameHook".into())
       .spawn(move || run_hook_thread(ready_tx))
@@ -119,12 +111,8 @@ impl Drop for GameDetector {
           let _ = t.join();
         }
       }
-      let _guard = match HOOK_LOCK.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-      };
-      HOOK_SENDER = None;
     }
+    *HOOK_SENDER.lock().unwrap_or_else(PoisonError::into_inner) = None;
   }
 }
 
@@ -167,7 +155,7 @@ unsafe extern "system" fn win_event_proc(
   _dwms_event_time: u32,
 ) {
   if event == EVENT_SYSTEM_FOREGROUND && !hwnd.is_invalid() {
-    if let Some(ref tx) = HOOK_SENDER {
+    if let Some(tx) = HOOK_SENDER.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
       let _ = tx.send(hwnd.0 as isize);
     }
   }
