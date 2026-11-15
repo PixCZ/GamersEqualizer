@@ -577,7 +577,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] E5 čtení pásem (bez nového čtení verze, viz Nepotvrzené nálezy)
 - [x] F1 `DeviceState`
 - [x] F2 návrat zpět
-- [ ] F3 `Add-Type`
+- [x] F3 `Add-Type` (potvrzeno: zapisuje `.cs`, `.cmdline` a `.dll` do `$env:TEMP`; TEMP se mění jen kolem `Add-Type`, ne v bootstrapu, protože odinstalace do TEMP přesouvá svůj zamčený exe)
 - [ ] F4 společný začátek skriptů
 - [ ] F5 dokumentace instalátoru
 - [ ] G1 AEC3 po pauze

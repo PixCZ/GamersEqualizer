@@ -225,8 +225,23 @@ namespace GamersEqualizer {
 }
 '@
 
+# Add-Type compiles through files in $env:TEMP, which non-admin processes can change between the
+# write and the compile: a folder only administrators can write to instead, beside the app folder
+# so it never blocks an uninstall.
 function Use-RestoreKey {
-  if (-not ('GamersEqualizer.RestoreKey' -as [type])) { Add-Type -TypeDefinition $RestoreKeySource }
+  if ('GamersEqualizer.RestoreKey' -as [type]) { return }
+  $temp = "$ProgramDir.tmp.$([guid]::NewGuid())"
+  $saved = $env:TEMP, $env:TMP
+  New-Item -ItemType Directory $temp | Out-Null
+  try {
+    $env:TEMP = $temp
+    $env:TMP = $temp
+    Add-Type -TypeDefinition $RestoreKeySource
+  }
+  finally {
+    $env:TEMP, $env:TMP = $saved
+    Remove-Item -Recurse -Force $temp -ErrorAction SilentlyContinue
+  }
 }
 
 # $subKey under HKLM. True when the key was new.
