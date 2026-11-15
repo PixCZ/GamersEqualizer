@@ -718,7 +718,8 @@ unsafe extern "system" fn rt_apo_process(
     if input.is_null() || output.is_null() {
       return;
     }
-    let qpc_hns = capture_time_hns(&*input, st.rate.load(Ordering::Relaxed));
+    // Only the mic chain lines its audio up with the reference by time.
+    let qpc_hns = (st.kind == ApoKind::Mic).then(|| capture_time_hns(input, st.rate.load(Ordering::Relaxed))).flatten();
     process_connection(&*input, &mut *output, channels, |buf| {
       // Never block the audio thread: if configuration holds the lock, pass this block through.
       if let Ok(mut guard) = st.processor.try_lock()
@@ -1805,20 +1806,28 @@ unsafe fn process_connection(
 
 /// QPC time (100 ns units) of the first frame: the engine's V2 timestamp when present and
 /// plausible, else "now minus the buffer length" (the delay estimator absorbs the offset).
-unsafe fn capture_time_hns(input: &APO_CONNECTION_PROPERTY, rate: u32) -> Option<u64> {
-  unsafe {
-    let now = now_hns()?;
-    if input.u32Signature == CONNECTION_V2_SIGNATURE {
-      let t = (*(input as *const APO_CONNECTION_PROPERTY as *const APO_CONNECTION_PROPERTY_V2)).u64QPCTime;
-      if t.abs_diff(now) < MAX_TIMESTAMP_SKEW_HNS {
-        return Some(t);
-      }
+///
+/// A raw pointer, not a reference: a `&APO_CONNECTION_PROPERTY` covers only the V1 fields, so the
+/// V2 timestamp behind them may not be read through it.
+///
+/// # Safety
+/// `input` points to a live connection property, a whole `APO_CONNECTION_PROPERTY_V2` when its
+/// signature says so (audio engine contract).
+unsafe fn capture_time_hns(input: *const APO_CONNECTION_PROPERTY, rate: u32) -> Option<u64> {
+  let now = now_hns()?;
+  // SAFETY: V1 fields of a live property (contract above).
+  let (signature, frames) = unsafe { ((*input).u32Signature, (*input).u32ValidFrameCount) };
+  if signature == CONNECTION_V2_SIGNATURE {
+    // SAFETY: the V2 signature means the engine passed a whole V2 property (contract above).
+    let t = unsafe { addr_of!((*input.cast::<APO_CONNECTION_PROPERTY_V2>()).u64QPCTime).read() };
+    if t.abs_diff(now) < MAX_TIMESTAMP_SKEW_HNS {
+      return Some(t);
     }
-    // 0 = not locked yet (the engine doesn't process then); assume the usual rate.
-    let rate = if rate == 0 { REF_SAMPLE_RATE } else { rate };
-    let duration = frames_to_hns(u64::from(input.u32ValidFrameCount), rate).max(0) as u64;
-    Some(now.saturating_sub(duration))
   }
+  // 0 = not locked yet (the engine doesn't process then); assume the usual rate.
+  let rate = if rate == 0 { REF_SAMPLE_RATE } else { rate };
+  let duration = frames_to_hns(u64::from(frames), rate).max(0) as u64;
+  Some(now.saturating_sub(duration))
 }
 
 fn now_hns() -> Option<u64> {
@@ -1897,6 +1906,22 @@ fn add_sidetone(buf: &mut [f32], channels: usize, mono: &[f32]) {
 mod tests {
   use super::*;
   use windows::Win32::System::Com::CoTaskMemFree;
+
+  #[test]
+  fn capture_time_reads_the_v2_timestamp_only_with_its_signature() {
+    let now = now_hns().unwrap();
+    let mut v2 = APO_CONNECTION_PROPERTY_V2::default();
+    v2.property.u32Signature = CONNECTION_V2_SIGNATURE;
+    v2.property.u32ValidFrameCount = 480;
+    v2.u64QPCTime = now - 1234;
+    // SAFETY: a whole V2 property that outlives the call.
+    let at = |v2: &APO_CONNECTION_PROPERTY_V2| unsafe { capture_time_hns(addr_of!(*v2).cast(), 48_000) };
+    assert_eq!(at(&v2), Some(now - 1234));
+    // A V1 signature: "now minus 10 ms", never the field behind the V1 struct.
+    v2.property.u32Signature = 0;
+    let t = at(&v2).unwrap();
+    assert!(t >= now - 100_000 && t != now - 1234, "{t} vs now {now}");
+  }
 
   #[test]
   fn chain_writes_processed_mono_to_every_channel() {
