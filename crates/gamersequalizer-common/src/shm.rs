@@ -2,6 +2,7 @@ use crate::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
 use crate::profile::{BiquadBand, FilterType, expand_slopes};
 use crate::sidetone::{NoiseMode, SidetoneRing, SidetoneSettings};
 use crate::streams::{STREAM_EQ_BUSES, StreamTable};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering, fence};
 use std::time::{Duration, Instant};
 
@@ -382,7 +383,13 @@ pub struct ShmHeader {
   pub sidetone_output_hash_seen: AtomicU32,
 }
 
-/// Watches `owner_beat` from the APO side, on its own clock (no time shared across sessions).
+/// Last `owner_beat` change any `OwnerWatch` in this process saw, in one value so the two halves
+/// never come from different watches: the beat in the high half, the low half tenths of a second
+/// after `beat_epoch()` plus one (0 = none seen yet; 13 years of range).
+static LAST_BEAT_CHANGE: AtomicU64 = AtomicU64::new(0);
+static BEAT_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// Watches `owner_beat` from the APO side, on this process's clock (no time shared across sessions).
 #[derive(Debug, Default)]
 pub struct OwnerWatch {
   /// Last beat value and when it last changed (None = not seen changing yet).
@@ -875,18 +882,41 @@ impl Default for ShmStreamEq {
 }
 
 impl OwnerWatch {
-  /// An owner is publishing settings right now. False until the beat is seen to change, so a
-  /// value left behind by an owner that is gone never counts.
+  /// An owner is publishing settings right now. False until this or an earlier watch in the
+  /// process saw the beat change, so a value left behind by an owner that is gone never counts.
+  /// A watch for a new stream starts from the earlier one: the stream's first blocks are
+  /// processed too, not passed through until the next beat.
   pub fn live(&mut self, h: &ShmHeader, now: Instant) -> bool {
     let beat = h.owner_beat.load(Ordering::Acquire);
     let changed_at = match self.seen {
-      None => None,
+      None => last_beat_change().filter(|&(b, _)| b == beat).map(|(_, at)| at),
       Some((last, at)) if last == beat => at,
-      Some(_) => Some(now),
+      Some(_) => {
+        note_beat_change(beat, now);
+        Some(now)
+      }
     };
     self.seen = Some((beat, changed_at));
-    changed_at.is_some_and(|t| now.duration_since(t) < OWNER_TIMEOUT)
+    changed_at.is_some_and(|t| now.saturating_duration_since(t) < OWNER_TIMEOUT)
   }
+}
+
+/// Zero point of `LAST_BEAT_CHANGE`; set once, by the first beat change seen.
+fn beat_epoch() -> Instant {
+  *BEAT_EPOCH.get_or_init(Instant::now)
+}
+
+fn note_beat_change(beat: u32, at: Instant) {
+  let tenths = at.saturating_duration_since(beat_epoch()).as_millis() / 100;
+  let tenths = u32::try_from(tenths).unwrap_or(u32::MAX - 1).min(u32::MAX - 1) + 1;
+  LAST_BEAT_CHANGE.store((u64::from(beat) << 32) | u64::from(tenths), Ordering::Relaxed);
+}
+
+/// The beat and when it changed, as the last watch in this process saw it.
+fn last_beat_change() -> Option<(u32, Instant)> {
+  let v = LAST_BEAT_CHANGE.load(Ordering::Relaxed);
+  let tenths = v as u32;
+  (tenths != 0).then(|| ((v >> 32) as u32, beat_epoch() + Duration::from_millis(u64::from(tenths - 1) * 100)))
 }
 
 impl ShmStreamEq {
@@ -1258,6 +1288,12 @@ mod tests {
     assert!(!watch.live(&h, t0 + Duration::from_millis(200) + OWNER_TIMEOUT), "owner gone");
     h.owner_beat.fetch_add(1, Ordering::Relaxed);
     assert!(watch.live(&h, t0 + OWNER_TIMEOUT * 2), "owner back");
+    // In this test, not another one: the last change seen is shared by the whole process.
+    let mut new_stream = OwnerWatch::default();
+    assert!(new_stream.live(&h, t0 + OWNER_TIMEOUT * 2), "a new watch after a live beat is live at once");
+    let mut late_stream = OwnerWatch::default();
+    let later = t0 + OWNER_TIMEOUT * 3 + Duration::from_millis(100);
+    assert!(!late_stream.live(&h, later), "a beat that stopped is no owner for a new watch either");
   }
 
   #[test]

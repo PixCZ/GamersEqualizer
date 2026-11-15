@@ -286,7 +286,6 @@ struct SidetoneTap {
   instance: u32,
   /// Owner value while this tap writes the ring.
   owner: Option<u64>,
-  watch: OwnerWatch,
   mono: Vec<f32>,
   peak: f32,
   blocks: u32,
@@ -1360,12 +1359,15 @@ impl MicProcessor {
     if channels == 0 {
       return;
     }
+    let now = Instant::now();
+    // One look per block, for the chain and its sidetone tap.
+    let owner_live = self.chain.shm_header().is_some_and(|h| self.owner.live(h, now));
     // Sidetone first, from the untouched input; it has its own failure flag.
     if let Some(layout) = self.chain.shm_layout() {
       // This chain's own leveler, not the shared memory: every mic APO instance publishes there.
       // A failed chain no longer levels, so the sidetone goes back to the raw microphone.
       let leveler_gain_db = if self.failed { 0.0 } else { self.chain.leveler_gain_db() };
-      self.sidetone.process(layout, buf, channels, qpc_hns, leveler_gain_db);
+      self.sidetone.process(layout, buf, channels, qpc_hns, leveler_gain_db, owner_live);
     }
     if self.failed {
       return;
@@ -1377,14 +1379,13 @@ impl MicProcessor {
       self.mono_out.resize(frames, 0.0);
     }
     let qpc_hns = self.clock.next(qpc_hns, frames as u64);
-    let now = Instant::now();
     // With several mic chains (MFX: one per processing mode in use) the app shows one of them.
     let publishes = self.count.publishes();
     self.chain.set_publishing(publishes, MIC_CHAINS.load(Ordering::Relaxed) > 1);
     self.timing.note(now, frames, self.clock.rate, self.chain.shm_header().filter(|_| publishes));
     // Nobody's settings to apply (app not running for the user at the console): the raw mic.
-    let Self { chain, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, processed, .. } = self;
-    if *follow_owner && !chain.shm_header().is_some_and(|h| owner.live(h, now)) {
+    let Self { chain, mono_in, mono_out, bridge, failed, follow_owner, was_live, processed, .. } = self;
+    if *follow_owner && !owner_live {
       if std::mem::replace(was_live, false) {
         chain.pause();
       }
@@ -1449,7 +1450,6 @@ impl SidetoneTap {
       endpoint_hash: 0,
       instance,
       owner: None,
-      watch: OwnerWatch::default(),
       // ~85 ms at 48 kHz; grows only if the engine sends longer blocks.
       mono: vec![0.0; 4096],
       peak: 0.0,
@@ -1459,11 +1459,20 @@ impl SidetoneTap {
   }
 
   /// `buf`: the interleaved raw input of this block. Never changed.
-  fn process(&mut self, layout: &ShmLayout, buf: &[f32], channels: usize, qpc_hns: Option<u64>, leveler_gain_db: f32) {
+  /// `owner_live`: the mic APO's `OwnerWatch` for this block.
+  fn process(
+    &mut self,
+    layout: &ShmLayout,
+    buf: &[f32],
+    channels: usize,
+    qpc_hns: Option<u64>,
+    leveler_gain_db: f32,
+    owner_live: bool,
+  ) {
     if self.failed || channels == 0 {
       return;
     }
-    let inner = || self.process_inner(layout, buf, channels, qpc_hns, leveler_gain_db);
+    let inner = || self.process_inner(layout, buf, channels, qpc_hns, leveler_gain_db, owner_live);
     if catch_unwind(AssertUnwindSafe(inner)).is_err() {
       self.failed = true;
       self.release(layout);
@@ -1477,6 +1486,7 @@ impl SidetoneTap {
     channels: usize,
     qpc_hns: Option<u64>,
     leveler_gain_db: f32,
+    owner_live: bool,
   ) {
     let h = &layout.header;
     let r = Ordering::Relaxed;
@@ -1490,7 +1500,7 @@ impl SidetoneTap {
     // microphone is only a wrong voice, and the ring takes one writer.
     let ours = pair_hash != 0 && (self.endpoint_hash == pair_hash || self.endpoint_hash == 0);
     let mut settings = h.read_sidetone();
-    settings.enabled &= ours && self.watch.live(h, Instant::now()) && !h.master_bypass.load(r);
+    settings.enabled &= ours && owner_live && !h.master_bypass.load(r);
     self.chain.configure(&settings, leveler_gain_db, h.mic_muted.load(r));
     let eq_version = h.sidetone_eq_version.load(Ordering::Acquire);
     if self.eq_version != Some(eq_version) {

@@ -403,7 +403,7 @@ fn sidetone_plays_on_the_pair_output_only() {
         .flat_map(|i| [((k * 480 + i) as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0).sin() * 0.25; 2])
         .collect();
       let before = mic.clone();
-      tap.process(layout, &mic, 2, None, 0.0);
+      tap.process(layout, &mic, 2, None, 0.0, true);
       assert_eq!(mic, before, "the tap only reads the microphone buffer");
       let mut out = vec![0.0f32; 960];
       output.process(&mut out, 2);
