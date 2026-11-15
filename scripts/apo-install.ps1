@@ -551,8 +551,9 @@ function Migrate-LegacySlots($job, [string[]]$slots) {
   }
 }
 
+# Only the low bits are DEVICE_STATE_*; higher ones are other flags (0x10000001 is active too).
 function Get-ActiveEndpoints([string]$flow) {
-  Get-ChildItem (Join-Path $AudioRoot $flow) | Where-Object { (Get-ItemProperty $_.PSPath).DeviceState -eq 1 } | ForEach-Object {
+  Get-ChildItem (Join-Path $AudioRoot $flow) | Where-Object { ((Get-ItemProperty $_.PSPath).DeviceState -band 0xF) -eq 1 } | ForEach-Object {
     $props = Get-ItemProperty "$($_.PSPath)\Properties" -ErrorAction SilentlyContinue
     [pscustomobject]@{ Id = $_.PSChildName; Name = "$($props.$NameProp) ($($props.$DeviceDescProp))" }
   }

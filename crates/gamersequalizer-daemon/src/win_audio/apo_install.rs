@@ -945,6 +945,30 @@ fn read_dword_value(key: &str, value: &str) -> Option<u32> {
 mod tests {
   use super::*;
 
+  /// The scripts spell these constants themselves: a mismatch installs where the app never looks.
+  #[test]
+  fn scripts_use_the_same_constants() {
+    let has = |script: &str, text: &str| script.to_lowercase().contains(&text.to_lowercase());
+    let fx_guid = FX_ASSOC_VALUE.split(',').next().unwrap();
+    let modes_guid = FX_MODE_VALUES[0].1.split(',').next().unwrap();
+    for script in [SCRIPT, UNINSTALL_SCRIPT] {
+      assert!(has(script, &format!("$FxGuid = '{fx_guid}'")));
+      assert!(has(script, &format!("$ModesGuid = '{modes_guid}'")));
+      for text in ALL_CLSIDS.iter().chain(&[NULL_GUID, DEFAULT_PROCESSING_MODE]) {
+        assert!(has(script, &format!("'{text}'")), "{text}");
+      }
+    }
+    let values = FX_LIST_VALUES.iter().chain(FX_LEGACY_VALUES.iter().chain(&FX_MODE_VALUES).map(|(_, v)| v));
+    for value in values {
+      let text = format!("\"{}\"", value.replace(fx_guid, "$FxGuid").replace(modes_guid, "$ModesGuid"));
+      assert!(has(SCRIPT, &text), "{text}");
+    }
+    for text in [ENDPOINT_NAME_VALUE, DEVICE_NAME_VALUE, DISABLE_SYSFX_VALUE] {
+      assert!(has(SCRIPT, &format!("'{text}'")), "{text}");
+    }
+    assert!(has(SCRIPT, &format!("DeviceState -band {DEVICE_STATE_MASK:#X}) -eq {DEVICE_STATE_ACTIVE}")));
+  }
+
   #[test]
   fn endpoint_guid_is_taken_from_the_device_id() {
     assert_eq!(

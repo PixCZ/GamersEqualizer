@@ -575,7 +575,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] E3 nepoužitá pole (tady verze 21 -> 22; `vars.tsv` bez `double_talk` a `aec_taps`, 55 sloupců, debug mapování v5: patří do milníku v K)
 - [x] E4 `OwnerWatch`
 - [x] E5 čtení pásem (bez nového čtení verze, viz Nepotvrzené nálezy)
-- [ ] F1 `DeviceState`
+- [x] F1 `DeviceState`
 - [ ] F2 návrat zpět
 - [ ] F3 `Add-Type`
 - [ ] F4 společný začátek skriptů
