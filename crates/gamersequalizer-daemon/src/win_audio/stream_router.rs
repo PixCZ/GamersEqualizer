@@ -32,7 +32,7 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 use windows::Win32::System::Threading::GetCurrentProcessId;
 
 use super::app_channels::{self, AppChannel};
-use super::chatmix::{get_exe_name_from_pid, CHAT_EXES, MEDIA_EXES};
+use super::chatmix::get_exe_name_from_pid;
 use super::console_owner::ConsoleOwner;
 
 // ---------------------------------------------------------------------------------------
@@ -114,22 +114,12 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
     .ok()
 }
 
-/// Channel of an app by its exe name (case-insensitive): the user's assignment (dragged in
-/// the mixer), else the built-in lists.
+/// Stream bus of an app by its exe name; Game = no stream EQ. See `app_channels::channel_for`.
 pub fn bus_for_exe(exe: &str) -> StreamBus {
-  match app_channels::get(exe) {
-    Some(AppChannel::Chat) => return StreamBus::Chat,
-    Some(AppChannel::Media) => return StreamBus::Media,
-    Some(AppChannel::Game) => return StreamBus::None,
-    Some(AppChannel::Unknown) | None => {}
-  }
-  let exe = exe.to_ascii_lowercase();
-  if CHAT_EXES.contains(&exe.as_str()) {
-    StreamBus::Chat
-  } else if MEDIA_EXES.contains(&exe.as_str()) {
-    StreamBus::Media
-  } else {
-    StreamBus::None
+  match app_channels::channel_for(exe) {
+    AppChannel::Chat => StreamBus::Chat,
+    AppChannel::Game => StreamBus::None,
+    AppChannel::Media | AppChannel::Unknown => StreamBus::Media,
   }
 }
 
@@ -354,8 +344,13 @@ mod tests {
   fn exe_lists_decide_the_channel() {
     assert_eq!(bus_for_exe("Discord.exe"), StreamBus::Chat);
     assert_eq!(bus_for_exe("brave.exe"), StreamBus::Media);
-    assert_eq!(bus_for_exe("TheDivision2.exe"), StreamBus::None);
-    assert_eq!(bus_for_exe(""), StreamBus::None);
+    assert_eq!(bus_for_exe("steamwebhelper.exe"), StreamBus::Media, "a launcher is no game");
+    assert_eq!(bus_for_exe("NoSuchGame.exe"), StreamBus::Media, "not recognized as a game: Media");
+    crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", true);
+    assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::None);
+    crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", false);
+    assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::Media);
+    assert_eq!(bus_for_exe(""), StreamBus::Media);
   }
 
   #[test]

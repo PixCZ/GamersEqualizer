@@ -25,6 +25,8 @@ pub struct OutputEqSettings {
   pub detect_launchers: bool,
   /// Match exe / product / launcher names against profile names.
   pub detect_names: bool,
+  /// No profile of its own: use the built-in profile of the game's genre (`genre`).
+  pub detect_genres: bool,
   /// Game profile used while no game is detected (None = no game EQ).
   pub fallback_game_profile: Option<String>,
   /// exe name (lowercase) -> game profile name. Empty name = "not a game, never switch".
@@ -43,9 +45,8 @@ pub struct OutputEqSettings {
   pub media_profile: Option<String>,
   /// Version of the built-in genre profiles already written to `profiles/game` (0 = none).
   pub builtin_game_presets: u32,
-  /// The SteelSeries Sonar database was imported (or checked) once. Without it the import ran
-  /// on every start whenever no game profile had launcher ids (old Sonar DB, or the user kept
-  /// only the genre presets), overwriting the user's edits of same-named profiles.
+  /// The SteelSeries Sonar profiles were imported (offered on the first-start setup card, or the
+  /// button on the Game tab). The offer is not shown again once they are in.
   pub imported_sonar: bool,
 }
 
@@ -59,6 +60,7 @@ impl Default for OutputEqSettings {
       auto_detect: true,
       detect_launchers: true,
       detect_names: true,
+      detect_genres: true,
       fallback_game_profile: None,
       bindings: BTreeMap::new(),
       autoeq_dir: None,
@@ -96,7 +98,7 @@ impl OutputEqSettings {
 /// - `sync_all` before `rename`: NTFS may keep the rename but not the data after a power cut.
 /// - The temp name carries the process id: the window and the service write some of the same
 ///   files (`health.json`, `output_eq.json`), and a shared temp name mixed their bytes.
-pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
   if let Some(dir) = path.parent() {
     std::fs::create_dir_all(dir)?;
   }
@@ -105,7 +107,7 @@ pub fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
   let tmp: PathBuf = path.with_file_name(tmp_name);
   let written = (|| {
     let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(content.as_bytes())?;
+    file.write_all(content.as_ref())?;
     file.sync_all()?;
     drop(file);
     std::fs::rename(&tmp, path)

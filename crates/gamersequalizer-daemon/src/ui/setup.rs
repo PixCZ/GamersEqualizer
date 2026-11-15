@@ -7,6 +7,9 @@
 //! Windows audio restart, however many devices. Steps without admin rights (start with
 //! Windows) are done right away.
 //!
+//! On the first start it also offers to copy the SteelSeries Sonar profiles in (ticked) when
+//! SteelSeries GG is on this PC.
+//!
 //! By default only the devices in use get the effects; other connected devices are offered
 //! unticked (each costs extra audio restarts if its check fails). A device the installer rolled
 //! back is not offered again until the user clicks "Try again".
@@ -43,6 +46,8 @@ pub struct SetupUi {
   /// Installer started: the card waits for it and closes when nothing is left.
   launched: bool,
   error: Option<String>,
+  /// Profiles in the SteelSeries Sonar database; read once (None = not yet).
+  sonar_profiles: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +55,7 @@ enum Kind {
   Mic,
   Output,
   Autostart,
+  SonarImport,
 }
 
 struct Item {
@@ -75,6 +81,25 @@ pub fn open_for_output(state: &mut AppState) {
   set_ticked(state, Kind::Output, true);
 }
 
+/// Profiles Sonar's database and GG's preset scripts hold (0 without SteelSeries GG). Read once
+/// per run.
+/// shortcut: GG installed while the app runs is seen after a restart; recount on the device
+/// recheck if that matters.
+pub fn sonar_profiles(state: &mut AppState) -> usize {
+  *state.setup.sonar_profiles.get_or_insert_with(|| {
+    match crate::sonar_importer::read_sonar_sources() {
+      Ok(p) => {
+        log::info!("[Setup] SteelSeries Sonar: {} profiles", p.len());
+        p.len()
+      }
+      Err(e) => {
+        log::warn!("[Setup] SteelSeries Sonar profiles not readable: {e}");
+        0
+      }
+    }
+  })
+}
+
 /// Check again on the next frame (active device or endpoint list changed).
 pub fn recheck(state: &mut AppState) {
   state.setup.checked_at = None;
@@ -87,6 +112,7 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
     return;
   }
   take_rollbacks(state);
+  sonar_profiles(state);
   let output_id = win_audio.chatmix.master_device_id.clone();
   let check = apo_install::check_flow(Flow::Render, output_id.as_deref());
   state.setup.output_name = state
@@ -285,6 +311,10 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
 
 fn run(state: &mut AppState, list: &[Item]) {
   let chosen: Vec<&Item> = list.iter().filter(|i| ticked(state, i)).collect();
+  // Before the installer: its copy of the app starts with the profiles already there.
+  if chosen.iter().any(|i| i.kind == Kind::SonarImport) {
+    super::tab_eq::reimport_sonar(state);
+  }
   if chosen.iter().any(|i| i.kind == Kind::Autostart) {
     match crate::autostart::set_autostart(true) {
       Ok(()) => state.autostart_enabled = true,
@@ -356,6 +386,18 @@ fn items(state: &AppState) -> Vec<Item> {
       kind: Kind::Autostart,
       title: tr("Start with Windows").to_string(),
       detail: tr("The background service starts when you sign in, so the effects get their settings.").to_string(),
+      admin_targets: Vec::new(),
+    });
+  }
+  let sonar = state.setup.sonar_profiles.unwrap_or(0);
+  if !state.prefs.setup_done && !state.output_eq.settings.imported_sonar && sonar > 0 {
+    list.push(Item {
+      kind: Kind::SonarImport,
+      title: trf("Import {} profiles from SteelSeries Sonar", &[&sonar]),
+      detail: tr(
+        "SteelSeries GG is on this PC: its game profiles and microphone presets are copied here. SteelSeries GG stays as it is; later imports are on the Game tab.",
+      )
+      .to_string(),
       admin_targets: Vec::new(),
     });
   }

@@ -3,8 +3,10 @@
 //! 1. the user's binding for this exe (or "not a game"),
 //! 2. a launcher id the Sonar profile lists (`1_<steam appid>`, `8_<ubisoft id>`, ...),
 //! 3. names (launcher title, exe product name, exe name) matched against profile names,
-//! 4. a launcher says it is a game, but no profile fits: detected without a profile.
+//! 4. the game's genre (`genre`) picks the built-in genre profile,
+//! 5. a launcher says it is a game, but no profile fits: detected without a profile.
 
+use super::genre::Genre;
 use super::settings::OutputEqSettings;
 use gamersequalizer_common::profile::ParametricProfile;
 use std::collections::BTreeSet;
@@ -52,6 +54,10 @@ pub struct GameFacts {
   pub names: Vec<String>,
   /// Installed through a game launcher: a game even if no profile matches.
   pub from_launcher: bool,
+  /// Genre and where it came from ("GOG Galaxy"), filled by `genre::GenreLookup`.
+  pub genre: Option<(Genre, String)>,
+  /// A launcher installed it but its store says it is no game ("Steam lists it as Application").
+  pub not_a_game: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +65,8 @@ pub enum MatchMethod {
   Binding,
   LauncherId,
   Name,
+  /// The built-in profile of the game's genre.
+  Genre,
   /// A launcher game without a profile.
   NoProfile,
 }
@@ -88,8 +96,8 @@ pub fn resolve(settings: &OutputEqSettings, profiles: &[ParametricProfile], fact
       return found(p, MatchMethod::Binding);
     }
   }
-  if !settings.auto_detect {
-    return None;
+  if !settings.auto_detect || facts.not_a_game.is_some() {
+    return None; // a tool (upscaler, compressor) over a game must not take its place
   }
   if settings.detect_launchers {
     for id in &facts.launcher_ids {
@@ -103,7 +111,15 @@ pub fn resolve(settings: &OutputEqSettings, profiles: &[ParametricProfile], fact
       return found(p, MatchMethod::Name);
     }
   }
-  facts.from_launcher.then_some(GameMatch { profile: None, label, method: MatchMethod::NoProfile })
+  if settings.detect_genres {
+    if let Some((genre, _)) = &facts.genre {
+      if let Some(p) = profiles.iter().find(|p| p.name == genre.preset_name()) {
+        return found(p, MatchMethod::Genre);
+      }
+    }
+  }
+  (facts.from_launcher || facts.genre.is_some())
+    .then_some(GameMatch { profile: None, label, method: MatchMethod::NoProfile })
 }
 
 /// Words of a name: camelCase and letter/digit boundaries split ("Division2" -> division 2),
@@ -142,19 +158,32 @@ pub fn tokenize(name: &str) -> Vec<String> {
 pub fn explain(settings: &OutputEqSettings, facts: &GameFacts, matched: Option<&GameMatch>) -> String {
   let ids = if facts.launcher_ids.is_empty() { "none".to_string() } else { facts.launcher_ids.join(", ") };
   let names = if facts.names.is_empty() { "none".to_string() } else { facts.names.join(" / ") };
-  let seen = format!("launcher ids: {ids}; names: {names}");
+  // The genre is always shown, also when a better match wins: it is the fallback.
+  let genre = match &facts.genre {
+    _ if !settings.detect_genres => "off".to_string(),
+    Some((g, source)) => format!("{g:?} from {source}"),
+    None => "none".to_string(),
+  };
+  let seen = format!("launcher ids: {ids}; names: {names}; genre: {genre}");
   let profile = |m: &GameMatch| m.profile.clone().unwrap_or_default();
   match matched {
     Some(m) => match m.method {
       MatchMethod::Binding => format!("game {}, assigned by you to profile {}", m.label, profile(m)),
       MatchMethod::LauncherId => format!("game {}, profile {} by launcher id ({seen})", m.label, profile(m)),
       MatchMethod::Name => format!("game {}, profile {} by name ({seen})", m.label, profile(m)),
+      MatchMethod::Genre => {
+        let source = facts.genre.as_ref().map_or("", |(_, s)| s.as_str());
+        format!("game {}, profile {} by genre from {source} ({seen})", m.label, profile(m))
+      }
       MatchMethod::NoProfile => format!("game {} (installed by a launcher), no profile matches ({seen})", m.label),
     },
     None if settings.bindings.get(&facts.exe_name).is_some_and(String::is_empty) => {
       "marked by you as not a game".to_string()
     }
     None if !settings.auto_detect => "automatic detection is off".to_string(),
+    None if facts.not_a_game.is_some() => {
+      format!("not a game: {} ({seen})", facts.not_a_game.as_deref().unwrap_or_default())
+    }
     None => format!("not a game ({seen})"),
   }
 }
@@ -277,11 +306,45 @@ mod tests {
       launcher_ids: ids.iter().map(|s| s.to_string()).collect(),
       names: names.iter().map(|s| s.to_string()).collect(),
       from_launcher: !ids.is_empty(),
+      genre: None,
+      not_a_game: None,
     }
   }
 
   fn matched(f: &GameFacts) -> Option<String> {
     resolve(&OutputEqSettings::default(), &profiles(), f).and_then(|m| m.profile)
+  }
+
+  #[test]
+  fn genre_profile_only_when_nothing_better_fits() {
+    let mut list = profiles();
+    list.push(profile(Genre::Shooter.preset_name(), &[]));
+    let mut f = facts("unknownshooter.exe", &["1_99"], &["Unknown Shooter X"]);
+    f.genre = Some((Genre::Shooter, "Steam tags".into()));
+    let m = resolve(&OutputEqSettings::default(), &list, &f).unwrap();
+    assert_eq!((m.profile.as_deref(), m.method), (Some(Genre::Shooter.preset_name()), MatchMethod::Genre));
+
+    // Its own Sonar profile wins over the genre.
+    let mut cs = facts("cs2.exe", &["1_730"], &["Counter-Strike 2"]);
+    cs.genre = f.genre.clone();
+    assert_eq!(resolve(&OutputEqSettings::default(), &list, &cs).unwrap().profile.as_deref(), Some("CS2 Pro Preset"));
+
+    // Switched off, or the genre profile deleted: a game without a profile.
+    let off = OutputEqSettings { detect_genres: false, ..Default::default() };
+    assert_eq!(resolve(&off, &list, &f).unwrap().method, MatchMethod::NoProfile);
+    assert_eq!(resolve(&OutputEqSettings::default(), &profiles(), &f).unwrap().method, MatchMethod::NoProfile);
+  }
+
+  #[test]
+  fn steam_tools_never_count_as_games() {
+    let settings = OutputEqSettings::default();
+    let mut tool = facts("losslessscaling.exe", &["1_993090"], &["Lossless Scaling"]);
+    tool.not_a_game = Some("Steam lists it as Application".into());
+    assert_eq!(resolve(&settings, &profiles(), &tool), None);
+    assert!(explain(&settings, &tool, None).starts_with("not a game: Steam lists it as Application"));
+    // The user can still assign it a profile by hand.
+    let bound = OutputEqSettings { bindings: [("losslessscaling.exe".to_string(), "The Division 2".to_string())].into(), ..Default::default() };
+    assert_eq!(resolve(&bound, &profiles(), &tool).unwrap().method, MatchMethod::Binding);
   }
 
   #[test]

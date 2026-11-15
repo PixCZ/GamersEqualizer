@@ -1,5 +1,8 @@
 # Master Technical Specification: GamersEqualizer (Pure Rust Edition)
 
+> The original brief, written under the project's first name OpenSonar (renamed to
+> GamersEqualizer, see DEVLOG Milestone 8). Kept as written; the code and DEVLOG are current.
+
 **Role:** Principal Rust Systems & Real-Time Audio DSP Architect  
 **Target Platform:** Windows 10 / Windows 11 (x64)  
 **Tech Stack:** 100% Pure Rust (`Cargo` workspace), Equalizer APO Bridge, Native GPU UI (`eframe`/`egui`)  

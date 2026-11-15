@@ -11,6 +11,7 @@ pub mod i18n_cs;
 pub mod mic_usage;
 pub mod notify;
 pub mod output_eq;
+pub mod settings_transfer;
 pub mod setup_cli;
 pub mod sonar_importer;
 pub mod takeover;
@@ -22,13 +23,16 @@ pub mod win_clipboard;
 
 use eframe::egui_wgpu::{self, wgpu};
 use log::{debug, error, info};
-use sonar_importer::{import_sonar_db, ProfileStorage, DEFAULT_SONAR_DB_PATH};
+use sonar_importer::ProfileStorage;
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ui::{AppState, GamersEqualizerApp};
+use gamersequalizer_common::shm::ShmLayout;
 use win_audio::WinAudioSystem;
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
@@ -47,6 +51,11 @@ const SERVICE_EXIT_WAIT: Duration = Duration::from_secs(5);
 static MOVE_TO_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Starting the installed copy failed in this process: it keeps running from here.
 static HANDOVER_FAILED: AtomicBool = AtomicBool::new(false);
+/// A settings file to import once the window has closed and the service has ended (nothing
+/// may write settings meanwhile); then the app starts again (`import_after_close`).
+static PENDING_IMPORT: Mutex<Option<(PathBuf, settings_transfer::Selection)>> = Mutex::new(None);
+/// Passed to the window started after an import: "ok" or the error, shown in Settings.
+const IMPORT_RESULT_ARG: &str = "--import-result";
 /// Reading Windows volumes and re-applying per-app session volumes walks devices and every
 /// audio session over COM (opening each app's process for its name). At the loop's 20 Hz
 /// that was most of the daemon's CPU. Volume changes are picked up within 250 ms; channel
@@ -86,6 +95,22 @@ fn main() {
 }
 
 /// Headless background audio service (runs on Windows boot or detached)
+/// `device_ids::heal` over all connected endpoints, then tells the running processes: the
+/// picked mic moves to its new id in shared memory, the output EQ reloads its settings.
+fn heal_device_ids(win_audio: &WinAudioSystem, profiles_dir: &Path, shm_ptr: Option<NonNull<ShmLayout>>) {
+  let mut connected = win_audio.endpoint_lock.enumerate_playback_devices();
+  connected.extend(win_audio.endpoint_lock.enumerate_capture_devices());
+  let moves = win_audio::device_ids::heal(profiles_dir, &connected);
+  let Some(ptr) = shm_ptr.filter(|_| !moves.is_empty()) else { return };
+  // SAFETY: the mapping lives until the service exits; no other reference to the header is
+  // held while this runs (callers take theirs afterwards), the same as at startup.
+  let header = unsafe { &mut (*ptr.as_ptr()).header };
+  if let Some((_, new)) = header.get_selected_mic_id().and_then(|cur| moves.iter().find(|(old, _)| *old == cur)) {
+    header.set_selected_mic_id(new);
+  }
+  header.out_settings_version.fetch_add(1, Ordering::AcqRel);
+}
+
 fn run_background_daemon() {
   info!(
     "[GamersEqualizer] Initializing headless background service, version {}...",
@@ -132,6 +157,8 @@ fn run_background_daemon() {
   let mut last_mic_version = 0;
   let mut last_default_mic: Option<String> = None;
   let mut last_default_out: Option<String> = None;
+  // Before anything reads a device id: settings follow devices that got a new id meanwhile.
+  heal_device_ids(&win_audio, storage.base_dir(), shm_ptr);
   if let Some(ptr) = shm_ptr {
     let header = unsafe { &mut (*ptr.as_ptr()).header };
     header.daemon_active.store(true, Ordering::SeqCst);
@@ -202,6 +229,12 @@ fn run_background_daemon() {
       Some(tray::TrayAction::Fix(fix)) => health.apply(&fix, &win_audio),
       None => {}
     }
+    // A device came or went: the picked mic may have been unplugged (the default does not
+    // change when it was not the default) or plugged back in, maybe on another USB port.
+    let devices_changed = win_audio.endpoint_lock.poll_device_changed();
+    if devices_changed {
+      heal_device_ids(&win_audio, app_state.storage.base_dir(), shm_ptr);
+    }
     // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop);
     // the header is only read through atomics.
     let header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
@@ -227,9 +260,6 @@ fn run_background_daemon() {
       } else {
         last_default_mic.clone()
       };
-      // A device came or went: the picked mic may have been unplugged (the default does not
-      // change when it was not the default) or plugged back in.
-      let devices_changed = win_audio.endpoint_lock.poll_device_changed();
       // Sonar / VB-Cable installed or started after the service: their channel outputs take
       // over from per-app volumes (and give them back when they go).
       if devices_changed {
@@ -347,7 +377,6 @@ fn run_background_daemon() {
     // Game detection: the daemon is the owner (decides and publishes the active game).
     if let Some(ref detector) = win_audio.game_detector {
       while let Some(event) = detector.poll_event() {
-        win_audio.chatmix.set_current_game(Some(event.exe_name.clone()));
         app_state.output_eq_do(|eq, shm| eq.on_foreground(&event, true, shm));
       }
     }
@@ -400,25 +429,7 @@ fn run_gui_mode() {
   win_audio::app_channels::init(storage.base_dir());
   win_audio::sidetone::init(storage.base_dir());
 
-  // Import once: also when the profiles predate launcher ids (needed for game detection),
-  // which is the one time it overwrites same-named profiles. Then never again.
-  let default_db = Path::new(DEFAULT_SONAR_DB_PATH);
-  let eq_settings_path = storage.base_dir().join(output_eq::settings::SETTINGS_FILE);
-  let mut eq_settings = output_eq::settings::OutputEqSettings::load_or_default(&eq_settings_path);
-  if !eq_settings.imported_sonar && default_db.exists() {
-    let games = storage.load_profiles_for_vad(gamersequalizer_common::profile::VadType::Game);
-    let done = if games.iter().all(|p| p.game_ids.is_empty()) {
-      import_sonar_db(default_db, &storage).map_err(|e| log::warn!("[Sonar] import failed: {e}")).is_ok()
-    } else {
-      true // imported by an older version already
-    };
-    if done {
-      eq_settings.imported_sonar = true;
-      if let Err(e) = eq_settings.save(&eq_settings_path) {
-        log::warn!("[Sonar] could not save {}: {e}", eq_settings_path.display());
-      }
-    }
-  }
+  // The Sonar profiles are offered on the first-start setup card (`ui::setup`), not imported here.
 
   let mut win_audio = match WinAudioSystem::new() {
     Ok(w) => w,
@@ -429,6 +440,10 @@ fn run_gui_mode() {
   };
 
   let mut state = AppState::init(storage);
+  let args: Vec<String> = std::env::args().collect();
+  if let Some(result) = args.iter().position(|a| a == IMPORT_RESULT_ARG).and_then(|i| args.get(i + 1)) {
+    state.transfer_ui.show_import_result(result);
+  }
   state.apply_output_eq();
 
   // Bind channel endpoints and synchronize live volumes
@@ -498,6 +513,32 @@ fn run_gui_mode() {
     }),
   );
 
+  let pending_import = PENDING_IMPORT.lock().unwrap_or_else(|e| e.into_inner()).take();
+  if let Some((path, only)) = pending_import {
+    let asked = Instant::now();
+    while daemon_running() && asked.elapsed() < SERVICE_EXIT_WAIT {
+      std::thread::sleep(Duration::from_millis(100));
+    }
+    if daemon_running() {
+      log::warn!("[Transfer] the service has not exited yet; importing anyway");
+    }
+    let result = match settings_transfer::import(ProfileStorage::default_storage().base_dir(), &path, Some(&only)) {
+      Ok(_) => "ok".to_string(),
+      Err(e) => {
+        error!("[Transfer] import of {} failed: {e}", path.display());
+        e
+      }
+    };
+    match std::env::current_exe() {
+      Ok(exe) => {
+        if let Err(e) = Command::new(exe).args([IMPORT_RESULT_ARG, &result]).spawn() {
+          error!("[Transfer] could not start the app again: {e}");
+        }
+      }
+      Err(e) => error!("[Transfer] could not locate the executable: {e}"),
+    }
+    return;
+  }
   if MOVE_TO_INSTALLED.load(Ordering::Relaxed) {
     // Only now, with this window gone (the installed app would find it and just focus it). Its
     // service was asked to stop and holds the single-instance mutex until it has exited.
@@ -537,6 +578,18 @@ pub(crate) fn hand_over_to_installed(args: &[String]) -> bool {
       false
     }
   }
+}
+
+/// Imports the `only` parts of `path` after this window has closed (the caller closes it) and
+/// the service has stopped, then starts the app again with the result.
+pub(crate) fn import_after_close(state: &AppState, path: PathBuf, only: settings_transfer::Selection) {
+  *PENDING_IMPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, only));
+  state.signal_daemon_shutdown();
+}
+
+/// An import waits for the window to close: the service must stay stopped.
+pub(crate) fn import_pending() -> bool {
+  PENDING_IMPORT.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 /// The window's part of an install: true once the installer has put this app into Program

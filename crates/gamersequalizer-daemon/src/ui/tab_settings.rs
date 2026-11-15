@@ -5,6 +5,8 @@ use super::prefs::ThemePref;
 use super::state::AppState;
 use super::theme::{self, icons, Severity};
 use crate::i18n::{self, tr, trf, LanguagePref, LANGUAGES};
+use crate::settings_transfer::{self, Part, Selection, Summary};
+use crate::win_audio::shell;
 use egui::{Color32, RichText, Ui};
 
 const COLOR: Color32 = Color32::from_rgb(150, 150, 150);
@@ -15,6 +17,31 @@ pub struct UninstallUi {
   confirming: bool,
   remove_user_data: bool,
   error: Option<String>,
+}
+
+/// Export / import card. Each list holds the parts with their checkbox.
+#[derive(Default)]
+pub struct TransferUi {
+  /// Export started: which parts go into the file.
+  export: Option<Vec<(Part, bool)>>,
+  /// File picked for import, waiting for confirmation.
+  pending: Option<(Summary, Vec<(Part, bool)>)>,
+  message: Option<(Severity, String)>,
+}
+
+impl TransferUi {
+  /// The app was started again after an import: "ok" or the error text.
+  pub fn show_import_result(&mut self, result: &str) {
+    self.message = Some(if result == "ok" {
+      (
+        Severity::Success,
+        tr("Settings imported. Devices are matched by their names; check the headphone profile and the microphone.")
+          .to_string(),
+      )
+    } else {
+      (Severity::Error, trf("Import failed: {}", &[&result]))
+    });
+  }
 }
 
 pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
@@ -112,6 +139,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
     });
   });
 
+  transfer_card(ui, state);
   uninstall_card(ui, state);
 
   theme::card(ui, |ui| {
@@ -119,6 +147,136 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
     ui.label(concat!("GamersEqualizer ", env!("GAMERSEQUALIZER_VERSION")));
     ui.label(format!("{}: {}", tr("Author"), env!("CARGO_PKG_AUTHORS")));
   });
+}
+
+fn transfer_card(ui: &mut Ui, state: &mut AppState) {
+  theme::card(ui, |ui| {
+    theme::card_title(ui, Some((icons::SAVE, COLOR)), tr("Back up or move settings"));
+    ui.label(theme::caption(tr(
+      "Saves profiles and settings into one file, e.g. before reinstalling Windows or for a new PC. Devices are found again by their names, also on another USB port. The audio effects are installed on each PC separately.",
+    )));
+    let base_dir = state.storage.base_dir().to_path_buf();
+    let t = &mut state.transfer_ui;
+    ui.horizontal(|ui| {
+      if ui.button(theme::with_icon(icons::SAVE, tr("Export settings..."))).clicked() {
+        t.export = Some(settings_transfer::parts_here(&base_dir).into_iter().map(|p| (p, true)).collect());
+        t.pending = None;
+        t.message = None;
+      }
+      if ui.button(theme::with_icon(icons::OPEN, tr("Import settings..."))).clicked() {
+        if let Some(path) = shell::pick_settings_file(tr("Import settings")) {
+          match settings_transfer::inspect(&path) {
+            Ok(s) => {
+              let parts = s.parts.iter().map(|p| (p.clone(), true)).collect();
+              t.pending = Some((s, parts));
+              t.export = None;
+              t.message = None;
+            }
+            Err(e) => t.message = Some((Severity::Error, trf("Import failed: {}", &[&e]))),
+          }
+        }
+      }
+    });
+
+    if let Some(parts) = &mut t.export {
+      ui.add_space(4.0);
+      ui.label(RichText::new(tr("What goes into the file:")).strong());
+      part_checkboxes(ui, parts);
+      ui.label(theme::caption(tr(
+        "Sharing profiles with a friend? Keep only the profiles: their devices and microphone settings stay as they are.",
+      )));
+      let only = selection(parts);
+      let mut close = false;
+      ui.horizontal(|ui| {
+        if ui.add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::SAVE, tr("Save...")))).clicked() {
+          if let Some(path) = shell::pick_settings_save_path(tr("Export settings"), &settings_transfer::default_file_name()) {
+            t.message = Some(match settings_transfer::export(&base_dir, &path, Some(&only)) {
+              Ok(s) => (Severity::Success, trf("Saved {} profiles to {}", &[&s.profiles, &path.display()])),
+              Err(e) => (Severity::Error, trf("Export failed: {}", &[&e])),
+            });
+            close = true;
+          }
+        }
+        close |= ui.button(tr("Cancel")).clicked();
+      });
+      if close {
+        t.export = None;
+      }
+    }
+
+    let mut import = None;
+    if let Some((s, parts)) = &mut t.pending {
+      ui.add_space(4.0);
+      ui.label(RichText::new(trf("{}: {} profiles, exported {}", &[&s.path.display(), &s.profiles, &s.exported_at])).strong());
+      if !s.devices.is_empty() {
+        ui.label(theme::caption(trf("Devices in the file: {}", &[&s.devices.join(", ")])));
+      }
+      ui.label(RichText::new(tr("What to import:")).strong());
+      part_checkboxes(ui, parts);
+      theme::status_line(
+        ui,
+        Severity::Warning,
+        tr("Your current settings are backed up first. Checked settings are replaced, profiles with the same name too; everything else stays. The app closes and starts again."),
+      );
+      let only = selection(parts);
+      ui.horizontal(|ui| {
+        if ui.add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::OPEN, tr("Import and restart")))).clicked() {
+          import = Some(Some((s.path.clone(), only)));
+        }
+        if ui.button(tr("Cancel")).clicked() {
+          import = Some(None);
+        }
+      });
+    }
+    // Some(None): cancelled.
+    let import = match import {
+      Some(None) => {
+        t.pending = None;
+        None
+      }
+      other => other.flatten(),
+    };
+    if let Some((path, only)) = import {
+      crate::import_after_close(state, path, only);
+      ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+    if let Some((severity, text)) = &state.transfer_ui.message {
+      theme::status_line(ui, *severity, text);
+    }
+  });
+}
+
+fn part_checkboxes(ui: &mut Ui, parts: &mut [(Part, bool)]) {
+  for (part, on) in parts {
+    ui.checkbox(on, part_label(part));
+  }
+}
+
+fn selection(parts: &[(Part, bool)]) -> Selection {
+  parts.iter().filter(|(_, on)| *on).map(|(p, _)| p.key.clone()).collect()
+}
+
+fn part_label(part: &Part) -> String {
+  let name = match part.key.as_str() {
+    "profiles/game" => tr("Game profiles"),
+    "profiles/headphones" => tr("Headphone profiles"),
+    "profiles/mic" => tr("Microphone profiles"),
+    "profiles/chat" => tr("Chat profiles"),
+    "profiles/media" => tr("Media profiles"),
+    "profiles/aux" => tr("Aux profiles"),
+    "settings/output_eq" => tr("Headphone and game EQ settings (devices, game assignments)"),
+    "settings/audio_settings" => tr("Microphone and volume settings"),
+    "settings/mic_active" => tr("Current microphone EQ"),
+    "settings/sidetone" => tr("Sidetone"),
+    "settings/app_channels" => tr("Apps assigned to mixer channels"),
+    "settings/ui_prefs" => tr("Language and theme"),
+    other => other,
+  };
+  if part.key.starts_with("profiles/") {
+    format!("{name} ({})", part.profiles)
+  } else {
+    name.to_string()
+  }
 }
 
 fn uninstall_card(ui: &mut Ui, state: &mut AppState) {

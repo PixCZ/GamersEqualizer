@@ -120,8 +120,8 @@ mod tests {
 
   #[test]
   fn test_atomic_file_write() {
-    let dir = std::env::temp_dir().join("opensonar_test_apo");
-    let target = dir.join("opensonar_live.txt");
+    let dir = std::env::temp_dir().join("ge_test_apo");
+    let target = dir.join("gamersequalizer_live.txt");
     let writer = ApoWriter::new(&target);
 
     let band = BiquadBand::default();

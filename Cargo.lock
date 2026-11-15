@@ -1117,6 +1117,7 @@ dependencies = [
  "egui_plot",
  "embed-resource",
  "env_logger",
+ "flate2",
  "gamersequalizer-common",
  "gamersequalizer-mic-vst",
  "jiff",

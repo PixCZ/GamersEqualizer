@@ -140,7 +140,7 @@ mod tests {
 
   #[test]
   fn test_save_and_load_profile() {
-    let tmp = std::env::temp_dir().join("opensonar_test_storage");
+    let tmp = std::env::temp_dir().join("ge_test_storage");
     let storage = ProfileStorage::new(&tmp);
 
     let profile = ParametricProfile::new("CS:GO / CS2 Pro", VadType::Game);

@@ -10,7 +10,6 @@ use super::theme::{self, Severity};
 use crate::i18n::{tr, trf};
 use crate::output_eq::same_profile_slot;
 use crate::output_eq::share_text::{self, SHARE_HEADER, SHARE_NAME_PREFIX};
-use crate::sonar_importer::SonarDbReader;
 use gamersequalizer_common::biquad::{MAX_EQ_BANDS, MAX_LAYER_EQ_BANDS};
 use gamersequalizer_common::profile::{BiquadBand, ParametricProfile, VadType};
 
@@ -207,7 +206,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
   {
     if let Some(name) = active_profile(state, target).map(|p| p.name.clone()) {
       let sonar_hint =
-        matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && SonarDbReader::default_db_exists();
+        matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && super::setup::sonar_profiles(state) > 0;
       state.profile_bar.dialog = Some((target, Dialog::Delete { name, sonar_hint }));
       state.profile_bar.notice = None;
     }

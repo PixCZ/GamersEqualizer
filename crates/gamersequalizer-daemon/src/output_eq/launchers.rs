@@ -8,7 +8,8 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Registry::{
-  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ,
+  RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
+  RRF_RT_REG_SZ,
 };
 
 const EPIC_MANIFESTS: &str = r"C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests";
@@ -172,13 +173,22 @@ fn registry_subkeys(key: &str) -> Vec<String> {
 }
 
 fn reg_string(key: &str, value: &str) -> Option<String> {
+  reg_string_in(HKEY_LOCAL_MACHINE, key, value)
+}
+
+/// A string value under HKCU (Steam's install path).
+pub fn hkcu_string(key: &str, value: &str) -> Option<String> {
+  reg_string_in(HKEY_CURRENT_USER, key, value)
+}
+
+fn reg_string_in(root: HKEY, key: &str, value: &str) -> Option<String> {
   let (key_w, value_w) = (wide(key), wide(value));
   let mut buf = [0u16; 1024];
   let mut size = (buf.len() * 2) as u32;
   // SAFETY: buffer and size describe a local array.
   unsafe {
     RegGetValueW(
-      HKEY_LOCAL_MACHINE,
+      root,
       PCWSTR(key_w.as_ptr()),
       PCWSTR(value_w.as_ptr()),
       RRF_RT_REG_SZ,
@@ -197,6 +207,9 @@ fn reg_string(key: &str, value: &str) -> Option<String> {
 
 /// `...\WindowsApps\<Name>_<Version>_<Arch>_<Resource>_<PublisherId>\...` -> family
 /// `NAME_PUBLISHERID` (Sonar stores it uppercase). `...\XboxGames\<Title>\Content\...` -> title.
+/// Only XboxGames marks a game: WindowsApps also holds Windows Terminal, Calculator and the like.
+/// shortcut: an older Store game run from WindowsApps counts only through a profile with its id
+/// or `KNOWN_EXES`; add a better game signal if testers miss one.
 fn microsoft_store(path: &Path, facts: &mut GameFacts) {
   let components: Vec<String> = path.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
   for (i, c) in components.iter().enumerate() {
@@ -208,7 +221,6 @@ fn microsoft_store(path: &Path, facts: &mut GameFacts) {
       if let (Some(name), Some(publisher)) = (parts.first(), parts.last()) {
         if parts.len() >= 5 {
           facts.launcher_ids.push(format!("10_{name}_{publisher}").to_uppercase());
-          facts.from_launcher = true;
         }
       }
       return;
@@ -304,6 +316,11 @@ mod tests {
       &mut facts,
     );
     assert_eq!(facts.launcher_ids, vec!["10_MICROSOFT.624F8B84B80_8WEKYB3D8BBWE"]);
+    assert!(!facts.from_launcher, "WindowsApps alone is no game: Windows Terminal lives there too");
+
+    let mut facts = GameFacts::default();
+    microsoft_store(Path::new(r"D:\XboxGames\Forza Horizon 5\Content\ForzaHorizon5.exe"), &mut facts);
+    assert_eq!((facts.names.first().map(String::as_str), facts.from_launcher), (Some("Forza Horizon 5"), true));
   }
 
   #[test]

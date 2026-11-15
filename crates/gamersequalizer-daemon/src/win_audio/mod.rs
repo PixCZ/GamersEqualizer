@@ -6,6 +6,7 @@ pub mod chain_log;
 pub mod chatmix;
 pub mod console_owner;
 pub mod dolby_atmos;
+pub mod device_ids;
 pub mod dsp_watch;
 pub mod endpoint_lock;
 pub mod game_detector;

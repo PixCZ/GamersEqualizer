@@ -45,7 +45,7 @@ impl eframe::App for GamersEqualizerApp {
       self.daemon_checked_at = Instant::now();
       // The installer just copied this app next to its effects: close, the installed one
       // starts once this window is gone.
-      if crate::installed_copy_ready(&self.state) {
+      if crate::import_pending() || crate::installed_copy_ready(&self.state) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
       } else {
         crate::ensure_daemon_running();
@@ -71,7 +71,6 @@ impl eframe::App for GamersEqualizerApp {
     let owner = !self.state.is_daemon_active();
     if let Some(ref detector) = self.win_audio.game_detector {
       while let Some(event) = detector.poll_event() {
-        self.win_audio.chatmix.set_current_game(Some(event.exe_name.clone()));
         self.state.output_eq_do(|eq, shm| eq.on_foreground(&event, owner, shm));
       }
     }

@@ -42,51 +42,9 @@ pub struct AudioSessionInfo {
   pub bus: AudioBus,
 }
 
-/// Apps on the Chat channel (ChatMix volume, chat stream EQ). Lowercase exe file names.
-/// Hand-kept: app lists (e.g. Wikipedia's VoIP comparison) don't give exe names. Anything
-/// missing the user drags in the mixer (`app_channels`). Calls in a browser land on Media:
-/// streams are classified by process, not by website.
-pub const CHAT_EXES: &[&str] = &[
-  // Voice chat for gamers
-  "discord.exe",
-  "discordptb.exe",
-  "discordcanary.exe",
-  "vesktop.exe",
-  "ts3client_win64.exe",
-  "ts3client_win32.exe",
-  "teamspeak.exe",
-  "mumble.exe",
-  "guilded.exe",
-  "ventrilo.exe",
-  // Messengers
-  "signal.exe",
-  "telegram.exe",
-  "whatsapp.exe",
-  "whatsapp.root.exe",
-  "viber.exe",
-  "messenger.exe",
-  "skype.exe",
-  "element.exe",
-  "wire.exe",
-  "line.exe",
-  "wechat.exe",
-  "weixin.exe",
-  // Work / meetings
-  "teams.exe",
-  "ms-teams.exe",
-  "slack.exe",
-  "zoom.exe",
-  "webex.exe",
-  "ciscocollabhost.exe",
-  "atmgr.exe",
-  "mattermost.exe",
-  "rocket.chat.exe",
-  "ringcentral.exe",
-  "zulip.exe",
-];
-/// Apps on the Media channel: browsers, music and video players. Same rules as `CHAT_EXES`.
-pub const MEDIA_EXES: &[&str] = &[
-  // Browsers
+/// Browsers stay on Media (`app_channels::channel_for`), even if game detection or a name match
+/// says otherwise: YouTube plays in full quality. Lowercase exe file names.
+pub const BROWSER_EXES: &[&str] = &[
   "chrome.exe",
   "chromium.exe",
   "msedge.exe",
@@ -100,44 +58,105 @@ pub const MEDIA_EXES: &[&str] = &[
   "vivaldi.exe",
   "arc.exe",
   "thorium.exe",
-  // Music
-  "spotify.exe",
-  "tidal.exe",
-  "deezer.exe",
-  "qobuz.exe",
-  "applemusic.exe",
-  "itunes.exe",
-  "amazon music.exe",
-  "cider.exe",
-  "foobar2000.exe",
-  "musicbee.exe",
-  "aimp.exe",
-  "winamp.exe",
-  "mediamonkey.exe",
-  "dopamine.exe",
-  "strawberry.exe",
-  "clementine.exe",
-  "audacious.exe",
-  "roon.exe",
-  "plexamp.exe",
-  // Video
-  "vlc.exe",
-  "mpv.exe",
-  "mpc-hc.exe",
-  "mpc-hc64.exe",
-  "mpc-be.exe",
-  "mpc-be64.exe",
-  "potplayer.exe",
-  "potplayer64.exe",
-  "potplayermini.exe",
-  "potplayermini64.exe",
-  "smplayer.exe",
-  "kodi.exe",
-  "plex.exe",
-  "jellyfinmediaplayer.exe",
-  "stremio.exe",
-  "wmplayer.exe",
-  "microsoft.media.player.exe",
+  "iexplore.exe",
+  // Privacy / Firefox forks (Tor Browser runs as firefox.exe)
+  "mullvadbrowser.exe",
+  "palemoon.exe",
+  "basilisk.exe",
+  "seamonkey.exe",
+  "falkon.exe",
+  "midori.exe",
+  "k-meleon.exe",
+  "icedragon.exe",
+  "dooble.exe",
+  "otter-browser.exe",
+  // Chromium forks and bundled browsers (Opera GX / Air run as opera.exe)
+  "whale.exe",
+  "dragon.exe",
+  "iron.exe",
+  "slimjet.exe",
+  "maxthon.exe",
+  "avastbrowser.exe",
+  "avgbrowser.exe",
+  "ccleanerbrowser.exe",
+  "nortonbrowser.exe",
+  "sidekick.exe",
+  "wavebox.exe",
+  "360se.exe",
+  "360chrome.exe",
+  "qqbrowser.exe",
+  "sogouexplorer.exe",
+  "ucbrowser.exe",
+  "aloha.exe",
+  // Yandex Browser and Coc Coc: a generic name, but a wrong hit only keeps an app on Media (the default)
+  "browser.exe",
+  // AI browsers
+  "comet.exe",
+];
+
+/// Apps on the Chat channel (ChatMix volume, chat stream EQ). Lowercase exe file names; active
+/// desktop clients only. Anything missing stays on Media until the user drags it in the mixer
+/// (`app_channels`).
+pub const CHAT_EXES: &[&str] = &[
+  // Voice chat for gamers
+  "discord.exe",
+  "discordptb.exe",
+  "discordcanary.exe",
+  "vesktop.exe",
+  "ts3client_win64.exe",
+  "ts3client_win32.exe",
+  "teamspeak.exe",
+  "mumble.exe",
+  "guilded.exe",
+  "ventrilo.exe",
+  "teamtalk5.exe",
+  "revolt.exe",
+  // Messengers
+  "signal.exe",
+  "telegram.exe",
+  "whatsapp.exe",
+  "whatsapp.root.exe",
+  "viber.exe",
+  "element.exe",
+  "wire.exe",
+  "line.exe",
+  "wechat.exe",
+  "weixin.exe",
+  "threema.exe",
+  "qq.exe",
+  "kakaotalk.exe",
+  "pidgin.exe",
+  "trillian.exe",
+  "paltalk.exe",
+  "jami.exe",
+  "linphone.exe",
+  "whatsappdesktop.exe",
+  "zalo.exe",
+  "camfrog video chat.exe",
+  // Work / meetings
+  "teams.exe",
+  "ms-teams.exe",
+  "slack.exe",
+  "zoom.exe",
+  "webex.exe",
+  "ciscocollabhost.exe",
+  "atmgr.exe",
+  "mattermost.exe",
+  "rocket.chat.exe",
+  "ringcentral.exe",
+  "zulip.exe",
+  "lync.exe",
+  "ciscojabber.exe",
+  "webexhost.exe",
+  "g2mvideoconference.exe",
+  "ringcentralvideo.exe",
+  "jitsi meet.exe",
+  "g2mcomm.exe",
+  "goto.exe",
+  "bluejeans.exe",
+  "dingtalk.exe",
+  "vsee.exe",
+  "alfaview.exe",
 ];
 
 pub struct ChatMixController {
@@ -180,10 +199,6 @@ pub struct ChatMixController {
   pub(crate) last_applied_mic_vol: f32,
   last_applied_mic_muted: bool,
 
-  chat_executables: HashSet<String>,
-  media_executables: HashSet<String>,
-  assigned_game_executables: HashSet<String>,
-  current_game_exe: Option<String>,
 
   /// Off in the window while the background service runs: one process owns session volumes.
   pub sessions_enabled: bool,
@@ -197,8 +212,6 @@ pub struct ChatMixController {
 
 impl ChatMixController {
   pub fn new() -> Self {
-    let chat_executables: HashSet<String> = CHAT_EXES.iter().map(|e| e.to_string()).collect();
-    let media_executables: HashSet<String> = MEDIA_EXES.iter().map(|e| e.to_string()).collect();
 
     // Read real current master output volume & mute from Windows
     let (initial_master_vol, initial_master_muted) = get_system_master_volume().unwrap_or((1.0, false));
@@ -236,10 +249,6 @@ impl ChatMixController {
       last_applied_media_muted: false,
       last_applied_mic_vol: initial_mic_vol,
       last_applied_mic_muted: initial_mic_muted,
-      chat_executables,
-      media_executables,
-      assigned_game_executables: HashSet::new(),
-      current_game_exe: None,
       sessions_enabled: true,
       session_set: HashMap::new(),
       last_session_targets: None,
@@ -513,42 +522,18 @@ impl ChatMixController {
     }
   }
 
-  pub fn set_current_game(&mut self, exe_name: Option<String>) {
-    self.current_game_exe = exe_name.map(|s| s.to_ascii_lowercase());
-  }
-
-  pub fn add_game_executable(&mut self, exe_name: String) {
-    self.assigned_game_executables.insert(exe_name.to_ascii_lowercase());
-  }
-
   pub fn set_balance(&mut self, balance: f32) {
     self.balance = balance.clamp(-1.0, 1.0);
     self.apply_mix();
   }
 
+  /// See `app_channels::channel_for`.
   pub fn classify_exe(&self, exe: &str) -> AudioBus {
-    match app_channels::get(exe) {
-      Some(AppChannel::Chat) => return AudioBus::Chat,
-      Some(AppChannel::Media) => return AudioBus::Media,
-      Some(AppChannel::Game) => return AudioBus::Game,
-      Some(AppChannel::Unknown) | None => {}
+    match app_channels::channel_for(exe) {
+      AppChannel::Chat => AudioBus::Chat,
+      AppChannel::Game => AudioBus::Game,
+      AppChannel::Media | AppChannel::Unknown => AudioBus::Media,
     }
-    let lower = exe.to_ascii_lowercase();
-    if self.chat_executables.contains(&lower) {
-      return AudioBus::Chat;
-    }
-    if self.media_executables.contains(&lower) {
-      return AudioBus::Media;
-    }
-    if let Some(ref current) = self.current_game_exe {
-      if &lower == current {
-        return AudioBus::Game;
-      }
-    }
-    if self.assigned_game_executables.contains(&lower) {
-      return AudioBus::Game;
-    }
-    AudioBus::Game
   }
 
   /// Calculate effective multipliers for Game and Chat
@@ -1096,7 +1081,7 @@ mod tests {
   #[test]
   fn app_lists_are_lowercase_exes_without_duplicates_or_overlap() {
     let mut seen = HashSet::new();
-    for exe in CHAT_EXES.iter().chain(MEDIA_EXES) {
+    for exe in CHAT_EXES.iter().chain(BROWSER_EXES) {
       assert!(exe.ends_with(".exe") && *exe == exe.to_ascii_lowercase(), "{exe}: lookups are lowercase");
       assert!(seen.insert(*exe), "{exe} is listed twice (or on both channels)");
     }

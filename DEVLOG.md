@@ -1,4 +1,7 @@
-# OpenSonar Developer Log (DEVLOG)
+# GamersEqualizer Developer Log (DEVLOG)
+
+The first entries use the project's first name, OpenSonar (renamed to GamersEqualizer in
+Milestone 8); they are kept as written.
 
 ## [2026-11-04] - Project Initialization & Architecture Setup
 
@@ -2814,3 +2817,66 @@ noise) and without steady hiss in pauses. It plays only while an app records the
 - Not decided: AEC off for pairs with sidetone, an echo calibration burst on request, an echo cache keyed by
   the chosen microphone.
 
+
+---
+
+## Milestone 61: Profile edition: genre fallbacks, settings transfer, Sonar presets, app channels (2026-11-13 .. 2026-11-15)
+
+Branch `genre-presets`. Planned as release 0.2.0 "profile edition".
+
+**Built**
+
+- Genre fallback (`output_eq/genre.rs`): a launcher game without its own profile gets the genre preset
+  (Shooter, Competitive, MOBA / strategy, Open world, Story, ...). Labels come from GOG Galaxy's database
+  (`winsqlite3`, 500 ms busy timeout; it was seen locked) and Steam's `appinfo.vdf` (binary KV v28/v29,
+  `common/store_tags`, `common/type`). Specific labels (fps, moba, rts, visual novel...) win over broad
+  ones (strategy, rpg, survival...); among broad ones the game's own label order decides. Cached per exe
+  in `genre_cache.json` (cleared when Galaxy / Steam data or `RULES_VERSION` change; not cached while
+  Galaxy is unreadable). One log line per game: verdict, Galaxy labels, Steam tags.
+- Not a game: Steam apps whose type is not Game / Demo (Lossless Scaling, Game Compressor) never become
+  the active game, even with launcher facts; a binding still wins. Store apps count as launcher games only
+  under `XboxGames` (WindowsApps also holds Windows Terminal, Snipping Tool).
+- Settings export / import (`settings_transfer.rs`): one JSON file, gzip by default (`.json.gz`, flate2
+  was already in the tree; 64 MB limit also after unpacking). Parts can be chosen on export and import
+  (e.g. only game profiles for a friend whose mic settings must stay). Import backs up first and runs
+  after the window closes. Device ids travel with their names.
+- Device id healing (`win_audio/device_ids.rs`): every endpoint seen is remembered (`devices.json`); a
+  vanished id whose name matches exactly one connected device is rewritten in `output_eq.json`,
+  `audio_settings.json`, `sidetone.json` (other USB port, reinstalled Windows, imported settings).
+- Sonar import offered on the first-run setup card (ticked, runs with the APO install) and the button
+  only when there is something to import.
+- Sonar presets without Sonar (`sonar_importer/migrations.rs`): GG ships its presets as goose SQL
+  migrations (`Program Files\SteelSeries\GG\apps\sonar\db-migrations\sonar-X.Y.Z\*.sql`); Sonar copies
+  them into `database.db` only when it runs. For people who keep GG for SteelSeries hardware but never
+  start Sonar (Dolby Atmos), the scripts are replayed in an in-memory database (folders by version, only
+  the `Up` part). 53 rows hold JavaScript object literals (bare keys, trailing commas), converted before
+  parsing. Database rows win on equal names (user edits). Result here: 407 from scripts, 409 in the DB,
+  410 merged (`chat/Custom` exists only in the scripts).
+- New presets after a GG update are added at start (window and service, `AppState::init`) for whoever
+  imported once. `profiles/sonar_known.json` remembers every name seen, so deleted (`_deleted`, also with
+  `.<time>` suffix) or renamed profiles never come back and user copies are never overwritten.
+- App channels (`app_channels::channel_for`, one rule for the mixer and the stream router): the user's
+  drag, then browsers on Media, then the chat list, then games game detection recognized, else Media.
+  Recognized games are remembered in `detected_apps.json` (on Game after a restart while in the
+  background). Steam / launchers / tools are no longer on Game.
+
+**Why**
+
+- Media as the default: a wrong Media costs nothing (full quality, user drags once); a wrong Chat runs
+  the app through the chat EQ. Game only for what has a game match, so the game EQ follows real games.
+- Tried and dropped: a media list (launchers etc., grows forever); "an app holding the microphone is
+  Chat" (games have voice chat, apps open the mic late, browsers would move YouTube to Chat during a
+  Meet call, recorders / voice changers would learn Chat for good).
+- Browsers pinned by exe because they are universal apps; the chat list (from Wikipedia's IM and
+  video-telecommunication lists plus research) has only active desktop clients, no exe from a guess.
+- The Voyager misclassification came from broad labels ("tactical", "strategy") losing to the first
+  label seen; fixed in the label order, not with an exe exception.
+
+**Open**
+
+- GG's script format is SteelSeries-internal; a change falls back to the database with a warning.
+  `winsqlite3` on Windows 10 not tried with the scripts.
+- New game ids GG adds to a preset the user already has are not taken over (the button refreshes all).
+- Apps that play sound in a shared helper (`msedgewebview2.exe` in new Teams) and unknown AI browsers
+  (Atlas, Neon, Genspark, Norton Neo, DuckDuckGo: exe not found) need a drag in the mixer.
+- A game is on Media until it first comes to the foreground.

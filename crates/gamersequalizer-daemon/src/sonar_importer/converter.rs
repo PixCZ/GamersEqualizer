@@ -32,7 +32,10 @@ pub fn convert_sonar_config(
   raw_data_json: &str,
 ) -> Result<ParametricProfile, String> {
   let vad_type = map_sonar_vad(vad);
-  let v: Value = serde_json::from_str(raw_data_json).map_err(|e| format!("Invalid JSON in Sonar DB: {}", e))?;
+  // GG's preset scripts write JavaScript object literals; Sonar's database holds JSON.
+  let v: Value = serde_json::from_str(raw_data_json)
+    .or_else(|_| serde_json::from_str(&js_object_to_json(raw_data_json)))
+    .map_err(|e| format!("Invalid JSON in Sonar DB: {}", e))?;
 
   let mut profile = ParametricProfile::new(name, vad_type);
   profile.is_custom = !is_preset;
@@ -81,6 +84,55 @@ pub fn convert_sonar_config(
   Ok(profile)
 }
 
+/// `{ key: 1, list: [2,], }` -> `{ "key": 1, "list": [2] }`: quotes bare keys and drops trailing
+/// commas outside strings. Only what GG's scripts use (no comments, no single quotes).
+fn js_object_to_json(js: &str) -> String {
+  let chars: Vec<char> = js.chars().collect();
+  let mut out = String::with_capacity(js.len() + js.len() / 4);
+  let mut i = 0;
+  while let Some(&c) = chars.get(i) {
+    if c == '"' {
+      // Copy the string as is, escapes included.
+      out.push(c);
+      i += 1;
+      while let Some(&s) = chars.get(i) {
+        out.push(s);
+        i += 1;
+        if s == '\\' {
+          if let Some(&next) = chars.get(i) {
+            out.push(next);
+            i += 1;
+          }
+        } else if s == '"' {
+          break;
+        }
+      }
+      continue;
+    }
+    let next_solid = |from: usize| chars.iter().skip(from).copied().find(|c| !c.is_whitespace());
+    if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+      let start = i;
+      while chars.get(i).is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$') {
+        i += 1;
+      }
+      let word: String = chars.get(start..i).unwrap_or_default().iter().collect();
+      if next_solid(i) == Some(':') {
+        out.push('"');
+        out.push_str(&word);
+        out.push('"');
+      } else {
+        out.push_str(&word); // true, false, null
+      }
+      continue;
+    }
+    if !(c == ',' && matches!(next_solid(i + 1), Some('}' | ']'))) {
+      out.push(c);
+    }
+    i += 1;
+  }
+  out
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -116,6 +168,22 @@ mod tests {
     assert_eq!(profile.bands[0].frequency, 80.0);
     assert_eq!(profile.bands[1].filter_type, FilterType::Peaking);
     assert_eq!(profile.bands[1].frequency, 3500.0);
+  }
+
+  #[test]
+  fn gg_script_object_literals_convert() {
+    let js = r#"{
+  generalGain: -1.5,
+  note: "a: b, }\" x",
+  parametricEQ: {
+    enabled: true,
+    filter1: { enabled: true, qFactor: 0.707, frequency: 80, gain: 0, type: "highPass", },
+  },
+}"#;
+    let profile = convert_sonar_config("PUBG", 1, true, js).unwrap();
+    assert_eq!((profile.preamp_db, profile.bands.len()), (-1.5, 1));
+    assert_eq!(profile.bands[0].filter_type, FilterType::HighPass);
+    assert!(js_object_to_json(js).contains(r#""note": "a: b, }\" x""#), "strings stay untouched");
   }
 
   #[test]

@@ -41,7 +41,18 @@ choice adds. It should be just as useful outside games.
 - Import headphone profiles from [AutoEQ](https://github.com/jaakkopasanen/AutoEq), or share your own
   as text.
 - Game profiles switch on their own when a known game starts.
-- Import your existing profiles from a SteelSeries Sonar install.
+- A game without its own profile gets a genre profile (shooter, competitive, MOBA / strategy, open
+  world, story). The genre comes from a built-in list of big games, the GOG Galaxy library (which
+  also covers Steam, Ubisoft, Epic and EA games connected there) and Steam's own store tags, all read
+  from files on your PC. None of these launchers is required.
+- Import your existing profiles from a SteelSeries Sonar install, even when Sonar itself never ran
+  (SteelSeries GG kept for its hardware). Presets a later GG update brings are added on their own;
+  the ones you deleted or renamed stay that way.
+- Settings > "Back up or move settings" saves profiles and settings into one compressed JSON file
+  (`.json.gz`), for a reinstalled Windows or a new PC. Export and import can be limited to some parts,
+  e.g. only the game profiles for a friend, whose microphone settings stay as they are. Devices are
+  found again by name, so a headset on another USB port (or the same model on the new PC) keeps its
+  EQ and microphone settings.
 - Loudness matching between profiles, plus a limiter so EQ boosts don't clip.
 - Shows the Dolby Atmos for Headphones / spatial sound status, and can lock the output device so a GPU
   driver update can't take it over.

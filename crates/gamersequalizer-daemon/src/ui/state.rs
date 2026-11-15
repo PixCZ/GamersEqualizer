@@ -179,6 +179,7 @@ pub struct AppState {
   pub mic_eq_unsaved: bool,
   pub apo_banner: super::apo_banner::ApoBanner,
   pub uninstall_ui: super::tab_settings::UninstallUi,
+  pub transfer_ui: super::tab_settings::TransferUi,
   pub setup: super::setup::SetupUi,
   pub log_view: super::tab_log::LogView,
   aec_last_seq: u32,
@@ -210,6 +211,8 @@ impl AppState {
 
     let mic_profile = load_mic_profile(&storage).unwrap_or(mic_profile);
     crate::output_eq::game_presets::seed_builtin_game_presets(&storage);
+    // Before the game EQ loads its profiles (window and service): presets a GG update added.
+    crate::sonar_importer::sync_new_sonar_profiles(&storage);
     let output_eq = OutputEq::new(storage.clone());
     let autostart_enabled = crate::autostart::is_autostart_enabled();
     let prefs = super::prefs::UiPrefs::load_or_default(storage.base_dir());
@@ -247,6 +250,7 @@ impl AppState {
       mic_eq_unsaved: false,
       apo_banner: Default::default(),
       uninstall_ui: Default::default(),
+      transfer_ui: Default::default(),
       setup: Default::default(),
       log_view: Default::default(),
       aec_last_seq: 0,

@@ -7,11 +7,10 @@ use super::theme::{self, icons, Severity};
 use crate::dsp_apo::generate_log_frequencies;
 use crate::i18n::{tk, tr, trf};
 use crate::output_eq::game_match::MatchMethod;
-use crate::sonar_importer::{import_sonar_db, SonarDbReader, DEFAULT_SONAR_DB_PATH};
+use crate::sonar_importer::{import_sonar, read_sonar_sources, DEFAULT_SONAR_DB_PATH};
 use egui::{Color32, RichText, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::streams::StreamBus;
-use std::path::Path;
 
 const GAME_COLOR: Color32 = Color32::from_rgb(82, 183, 136);
 const CHAT_COLOR: Color32 = Color32::from_rgb(72, 202, 228);
@@ -33,9 +32,8 @@ pub fn render_tab_eq(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
 fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
   ui.horizontal(|ui| {
     theme::page_header(ui, icons::GAME, GAME_COLOR, tr("Game EQ"), None);
-    // Only offered when Sonar is installed (its DB exists). One file stat per frame, only on
-    // this tab; cache it if the tab ever repaints continuously.
-    if SonarDbReader::default_db_exists() {
+    // Only offered when the Sonar database has profiles (counted once per run).
+    if super::setup::sonar_profiles(state) > 0 {
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(DEFAULT_SONAR_DB_PATH).clicked() {
           reimport_sonar(state);
@@ -65,6 +63,8 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
           .on_hover_text(tr("Steam, Epic, GOG, Ubisoft Connect and Microsoft Store data on this PC (e.g. division2.exe = Steam app 2221490 = The Division 2)"));
         ui.checkbox(&mut next.detect_names, tr("Names"))
           .on_hover_text(tr("Match the exe name / product name with profile names (e.g. \"Tom Clancy's The Division 2\")"));
+        ui.checkbox(&mut next.detect_genres, tr("Genres"))
+          .on_hover_text(tr("A game without its own profile gets the genre profile (shooter, MOBA, ...). The genre comes from a built-in list of big games, GOG Galaxy and Steam on this PC; nothing is sent anywhere."));
       });
       if next != s {
         state.output_eq.settings = next;
@@ -222,6 +222,7 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
         Some((MatchMethod::Binding, Some(p))) => trf("assigned: {}", &[&tr(p)]),
         Some((MatchMethod::LauncherId, Some(p))) => trf("launcher id: {}", &[&tr(p)]),
         Some((MatchMethod::Name, Some(p))) => trf("by name: {}", &[&tr(p)]),
+        Some((MatchMethod::Genre, Some(p))) => trf("by genre: {}", &[&tr(p)]),
         Some((_, _)) => tr("game, no profile").to_string(),
         None => tr("not a game").to_string(),
       };
@@ -302,22 +303,20 @@ pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer) {
   ui.label(theme::caption(summary));
 }
 
-fn reimport_sonar(state: &mut AppState) {
-  let db_path = Path::new(DEFAULT_SONAR_DB_PATH);
-  if !db_path.exists() {
-    log::warn!("Sonar DB not found at {}", db_path.display());
-    return;
-  }
-  match import_sonar_db(db_path, &state.storage) {
-    Ok(stats) => {
+/// Copies the SteelSeries Sonar profiles in (the button here, the offer on the setup card).
+pub(super) fn reimport_sonar(state: &mut AppState) {
+  match read_sonar_sources() {
+    Ok(profiles) => {
+      let stats = import_sonar(&profiles, &state.storage);
       log::info!("Sonar import: {} profiles", stats.total_imported);
       state.available_mic_profiles = super::mic_presets::all_mic_presets(&state.storage);
       state.output_eq_do(|eq, shm| {
         eq.reload();
+        eq.settings.imported_sonar = true;
         eq.save_settings(shm);
       });
     }
-    Err(e) => log::error!("Sonar DB import failed: {e}"),
+    Err(e) => log::error!("Sonar import failed: {e}"),
   }
 }
 

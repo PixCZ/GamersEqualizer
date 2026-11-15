@@ -19,6 +19,7 @@
 pub mod autoeq;
 pub mod game_match;
 pub mod game_presets;
+pub mod genre;
 pub mod launchers;
 pub mod settings;
 pub mod share_text;
@@ -116,6 +117,7 @@ pub struct OutputEq {
   is_owner: bool,
   last_alive_check: Instant,
   facts_cache: HashMap<String, GameFacts>,
+  genres: genre::GenreLookup,
   seen_settings_version: Option<u32>,
 }
 
@@ -123,6 +125,7 @@ impl OutputEq {
   pub fn new(storage: ProfileStorage) -> Self {
     let settings_path = storage.base_dir().join(settings::SETTINGS_FILE);
     let settings = OutputEqSettings::load_or_default(&settings_path);
+    let genres = genre::GenreLookup::new(storage.base_dir());
     let mut engine = Self {
       headphone_profiles: storage.load_headphone_profiles(),
       game_profiles: storage.load_profiles_for_vad(VadType::Game),
@@ -141,6 +144,7 @@ impl OutputEq {
       is_owner: false,
       last_alive_check: Instant::now(),
       facts_cache: HashMap::new(),
+      genres,
       seen_settings_version: None,
     };
     engine.recompute();
@@ -524,12 +528,10 @@ impl OutputEq {
       }
       return;
     }
-    let facts = self
-      .facts_cache
-      .entry(event.full_path.clone())
-      .or_insert_with(|| launchers::gather_facts(&event.full_path))
-      .clone();
+    let facts = self.facts_for(&event.full_path);
     let matched = game_match::resolve(&self.settings, &self.game_profiles, &facts);
+    // Its sound goes to Game only when it is a game; anything else is Media (`bus_for_exe`).
+    crate::win_audio::app_channels::set_detected_game(&exe, matched.is_some());
     let label = matched.as_ref().map(|m| m.label.clone()).unwrap_or_else(|| exe.clone());
     self.recent_apps.retain(|a| a.exe_name != exe);
     if self.recent_apps.len() >= RECENT_APPS {
@@ -615,12 +617,28 @@ impl OutputEq {
 
   // --- private helpers -------------------------------------------------------------------
 
+  /// Launcher facts and genre of an exe, gathered once per path (cleared by `reload`).
+  fn facts_for(&mut self, full_path: &str) -> GameFacts {
+    if let Some(f) = self.facts_cache.get(full_path) {
+      return f.clone();
+    }
+    let mut facts = launchers::gather_facts(full_path);
+    // Always looked up: it also tells Steam tools from games, whatever the genre switch says.
+    let found = self.genres.lookup(full_path, &facts);
+    facts.not_a_game = found.not_a_game;
+    if self.settings.detect_genres {
+      facts.genre = found.genre;
+    }
+    self.facts_cache.insert(full_path.to_string(), facts.clone());
+    facts
+  }
+
   /// Owner only: classify the tracked game again after bindings / switches changed.
   fn re_resolve(&mut self, shm: Option<&ShmHeader>) {
     let Some((_, path)) = self.tracked.clone().filter(|_| self.is_owner) else {
       return;
     };
-    let facts = self.facts_cache.entry(path.clone()).or_insert_with(|| launchers::gather_facts(&path)).clone();
+    let facts = self.facts_for(&path);
     match game_match::resolve(&self.settings, &self.game_profiles, &facts) {
       Some(m) => {
         let game = ActiveGame { profile: m.profile.unwrap_or_default(), label: m.label };

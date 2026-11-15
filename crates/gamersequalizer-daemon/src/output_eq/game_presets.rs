@@ -3,7 +3,7 @@
 //! Names are English translation keys; the UI shows them translated.
 
 use super::settings::{OutputEqSettings, SETTINGS_FILE};
-use crate::i18n::tk;
+use super::genre::Genre;
 use crate::sonar_importer::ProfileStorage;
 use gamersequalizer_common::profile::{BiquadBand, FilterType, ParametricProfile, VadType};
 use log::{info, warn};
@@ -16,7 +16,7 @@ pub fn builtin_game_presets() -> Vec<ParametricProfile> {
   vec![
     // Footsteps, reloads and directional cues live at 2-5 kHz; explosions are tamed.
     preset(
-      tk("Genre: Shooter (footsteps)"),
+      Genre::Shooter.preset_name(),
       vec![
         band(FilterType::LowShelf, 120.0, -3.0, 0.707),
         pk(250.0, -1.5, 1.0),
@@ -27,7 +27,7 @@ pub fn builtin_game_presets() -> Vec<ParametricProfile> {
     ),
     // Everything for information, nothing for atmosphere.
     preset(
-      tk("Genre: Competitive (max. clarity)"),
+      Genre::Competitive.preset_name(),
       vec![
         band(FilterType::LowShelf, 150.0, -6.0, 0.707),
         pk(1000.0, -1.0, 1.0),
@@ -38,7 +38,7 @@ pub fn builtin_game_presets() -> Vec<ParametricProfile> {
     ),
     // Mild V: more weight and air, voices untouched.
     preset(
-      tk("Genre: Open world (immersion)"),
+      Genre::OpenWorld.preset_name(),
       vec![
         band(FilterType::LowShelf, 80.0, 3.0, 0.707),
         pk(3000.0, 1.0, 1.0),
@@ -46,10 +46,10 @@ pub fn builtin_game_presets() -> Vec<ParametricProfile> {
       ],
     ),
     // Voices forward, less boom and hiss.
-    preset(tk("Genre: Story and dialogue"), vec![pk(200.0, -2.0, 1.0), pk(2000.0, 3.0, 1.0), pk(7000.0, -1.0, 2.0)]),
+    preset(Genre::Story.preset_name(), vec![pk(200.0, -2.0, 1.0), pk(2000.0, 3.0, 1.0), pk(7000.0, -1.0, 2.0)]),
     // Top-down games: ability and UI cues sit around 4 kHz; less mud, bass kept.
     preset(
-      tk("Genre: MOBA / strategy"),
+      Genre::Moba.preset_name(),
       vec![
         band(FilterType::LowShelf, 100.0, -2.0, 0.707),
         pk(250.0, -2.0, 1.0),
@@ -156,6 +156,8 @@ mod tests {
         launcher_ids: vec![],
         names: names.into_iter().map(String::from).collect(),
         from_launcher: false,
+        genre: None,
+        not_a_game: None,
       };
       assert_eq!(resolve(&OutputEqSettings::default(), &profiles, &facts), None, "{exe}");
     }

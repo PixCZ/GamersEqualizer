@@ -60,6 +60,8 @@ pub mod icons {
   pub const COLOR: Icon = Icon { glyph: '\u{E790}', emoji: "🎨" };
   pub const EQUALIZER: Icon = Icon { glyph: '\u{E9E9}', emoji: "🎚" };
   pub const DELETE: Icon = Icon { glyph: '\u{E74D}', emoji: "🗑" };
+  pub const SAVE: Icon = Icon { glyph: '\u{E74E}', emoji: "💾" };
+  pub const OPEN: Icon = Icon { glyph: '\u{E838}', emoji: "📂" };
 }
 
 /// Message severity of an info bar / status text.
