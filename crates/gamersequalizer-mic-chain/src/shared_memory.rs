@@ -56,7 +56,7 @@ impl SharedMemoryClient {
   }
 
   pub fn ring_buffer(&mut self) -> ShmRingBuffer<'_> {
-    unsafe { ShmRingBuffer::from_raw(self.mapped_ptr.as_mut()) }
+    unsafe { ShmRingBuffer::new(self.mapped_ptr.as_mut()) }
   }
 
   pub fn layout(&self) -> &ShmLayout {

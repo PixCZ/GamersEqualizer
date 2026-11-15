@@ -1112,9 +1112,7 @@ impl ShmLayout {
 }
 
 impl<'a> ShmRingBuffer<'a> {
-  /// # Safety
-  /// Caller must guarantee `layout` points to valid initialized ShmLayout memory.
-  pub unsafe fn from_raw(layout: &'a mut ShmLayout) -> Self {
+  pub fn new(layout: &'a mut ShmLayout) -> Self {
     Self { layout }
   }
 
@@ -1242,7 +1240,7 @@ mod tests {
   #[test]
   fn test_ring_buffer_push_read() {
     let mut mem = new_layout();
-    let mut ring = unsafe { ShmRingBuffer::from_raw(&mut mem) };
+    let mut ring = ShmRingBuffer::new(&mut mem);
 
     let frames = vec![
       StereoFrame { left: 0.2, right: 0.4 },
@@ -1263,7 +1261,7 @@ mod tests {
   #[test]
   fn test_timed_push_maps_time_to_index_and_fills_gaps() {
     let mut mem = new_layout();
-    let mut ring = unsafe { ShmRingBuffer::from_raw(&mut mem) };
+    let mut ring = ShmRingBuffer::new(&mut mem);
     let one = [StereoFrame { left: 1.0, right: 1.0 }; 480];
 
     // Packet at t = 1 s, 10 ms long.
@@ -1307,7 +1305,7 @@ mod tests {
   #[test]
   fn test_ring_read_sanitizes_garbage() {
     let mut mem = new_layout();
-    let mut ring = unsafe { ShmRingBuffer::from_raw(&mut mem) };
+    let mut ring = ShmRingBuffer::new(&mut mem);
     let frames = [
       StereoFrame { left: f32::INFINITY, right: 0.0 },
       StereoFrame { left: f32::NAN, right: 0.5 },
