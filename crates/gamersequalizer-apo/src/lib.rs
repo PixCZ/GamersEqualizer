@@ -33,7 +33,6 @@
 //! - Stream: same allocation on a new band set. A channel change is crossfaded (20 ms); an edit
 //!   of the same channel's EQ is applied directly (filter state kept, like the output EQ).
 #![deny(
-  clippy::undocumented_unsafe_blocks,
   clippy::unwrap_used,
   clippy::expect_used,
   clippy::panic,

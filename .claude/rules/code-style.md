@@ -36,6 +36,7 @@ let_underscore_future = "deny"
 clone_on_copy = "deny"
 needless_return = "deny"
 redundant_field_names = "deny"
+undocumented_unsafe_blocks = "deny"
 ```
 
 - Every crate inherits them (`[lints] workspace = true`); `crates/vendor/` is outside the workspace.

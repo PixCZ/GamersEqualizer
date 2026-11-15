@@ -92,7 +92,9 @@ service (loopback, sidetone).
 ## Unsafe and COM
 
 - Win32, COM and APO FFI are everywhere, so `unsafe` is allowed. Every `unsafe` block carries a
-  `// SAFETY:` comment that says why it holds.
+  `// SAFETY:` comment that says why it holds (where the pointer comes from, how long it lives,
+  which check makes the access valid), enforced by the `undocumented_unsafe_blocks` lint. An
+  `unsafe fn` states its contract under `# Safety`. A run of COM calls on one object is one block.
 - A thread that uses COM initializes it itself. Strings Windows allocates (`GetId`,
   `PropVariantToStringAlloc`) are freed with `CoTaskMemFree` on every path.
 

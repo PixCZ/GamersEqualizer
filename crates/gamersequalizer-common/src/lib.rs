@@ -1,5 +1,3 @@
-#![deny(clippy::undocumented_unsafe_blocks)]
-
 pub mod biquad;
 pub mod debug_capture;
 pub mod limiter;
