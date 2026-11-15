@@ -56,19 +56,30 @@ impl SharedMemoryClient {
   }
 
   pub fn ring_buffer(&mut self) -> ShmRingBuffer<'_> {
+    // SAFETY: `mapped_ptr` is a live view of a whole `ShmLayout` until `Drop`, and `&mut self` keeps
+    // this client's references exclusive. Other processes share the memory: the header is atomics,
+    // the frames have one writer per mapping (the service's loopback thread) and the reader
+    // sanitizes torn frames (`read_frames_from`).
     unsafe { ShmRingBuffer::new(self.mapped_ptr.as_mut()) }
   }
 
   pub fn layout(&self) -> &ShmLayout {
+    // SAFETY: as `ring_buffer`; a shared reference, so this process does not write through it.
     unsafe { self.mapped_ptr.as_ref() }
   }
 
-  pub fn layout_mut(&mut self) -> &mut ShmLayout {
+  fn layout_mut(&mut self) -> &mut ShmLayout {
+    // SAFETY: as `ring_buffer`; used only to set defaults in a mapping this call just created.
     unsafe { self.mapped_ptr.as_mut() }
   }
 
   /// Takes ownership of `handle` (closed on failure).
+  ///
+  /// # Safety
+  /// `handle` is a file mapping handle the caller owns and does not close itself.
   unsafe fn map(handle: HANDLE) -> Result<Self, String> {
+    // SAFETY: the caller hands the handle over (contract above). The view is the layout's size or
+    // the call fails; it and the handle are released once, in `Drop`, or the handle here on failure.
     unsafe {
       if handle.is_invalid() {
         return Err("file mapping handle is invalid".to_string());
@@ -86,6 +97,7 @@ impl SharedMemoryClient {
 
 impl Drop for SharedMemoryClient {
   fn drop(&mut self) {
+    // SAFETY: the view and the handle come from `map` and are released only here.
     unsafe {
       let _ = UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
         Value: self.mapped_ptr.as_ptr() as *mut _,

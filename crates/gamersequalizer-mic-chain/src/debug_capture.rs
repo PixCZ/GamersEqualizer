@@ -82,7 +82,12 @@ impl DebugCaptureMap {
   }
 
   /// Takes ownership of `handle` (closed on failure).
+  ///
+  /// # Safety
+  /// `handle` is a file mapping handle the caller owns and does not close itself.
   unsafe fn map(handle: HANDLE) -> Result<Self, String> {
+    // SAFETY: the caller hands the handle over (contract above). The view is the layout's size or
+    // the call fails; it and the handle are released once, in `Drop`, or the handle here on failure.
     unsafe {
       let view = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, DebugCaptureLayout::total_size_bytes());
       let Some(ptr) = NonNull::new(view.Value as *mut DebugCaptureLayout) else {

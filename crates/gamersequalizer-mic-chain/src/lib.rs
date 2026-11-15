@@ -1,3 +1,5 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod aec3;
 pub mod ai_denoiser;
 pub mod chain;
