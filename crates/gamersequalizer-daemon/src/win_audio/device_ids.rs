@@ -4,7 +4,8 @@
 //!
 //! Every endpoint seen is remembered in `devices.json` (id -> name). When a remembered id is
 //! gone and exactly one connected device has the same name, the old id is replaced by the new
-//! one in the settings files that store device ids.
+//! one in the settings files that store device ids, unless they already use the new id (then it
+//! is a second identical device, not a new id).
 
 use super::endpoint_lock::AudioEndpointInfo;
 use crate::output_eq::settings::write_atomic;
@@ -39,10 +40,20 @@ pub fn save_known(profiles_dir: &Path, known: &KnownDevices) {
 }
 
 /// Remembers the connected devices and moves settings from vanished ids to the same device's
-/// new id. Returns the (old, new) pairs that were applied.
+/// new id, unless the settings already use that id. Returns the (old, new) pairs that were applied.
 pub fn heal(profiles_dir: &Path, connected: &[AudioEndpointInfo]) -> Vec<(String, String)> {
   let mut known = load_known(profiles_dir);
-  let moves = remap(&known, connected);
+  let texts: Vec<(&str, String)> =
+    FILES_WITH_IDS.iter().filter_map(|f| std::fs::read_to_string(profiles_dir.join(f)).ok().map(|t| (*f, t))).collect();
+  // A new id the settings already use is a device of its own (two identical devices, one
+  // unplugged): moving onto it would merge two devices' settings and drop one of them.
+  let (moves, collisions): (Vec<_>, Vec<_>) = remap(&known, connected).into_iter().partition(|(_, new)| {
+    let quoted = format!("\"{new}\"").to_lowercase();
+    !texts.iter().any(|(_, t)| t.to_lowercase().contains(&quoted))
+  });
+  for (old, new) in &collisions {
+    info!("[Devices] {old} not moved to {new}: that device has settings of its own");
+  }
   let mut changed = false;
   for d in connected {
     if known.get(&d.id) != Some(&d.name) {
@@ -56,11 +67,10 @@ pub fn heal(profiles_dir: &Path, connected: &[AudioEndpointInfo]) -> Vec<(String
   if moves.is_empty() {
     return moves;
   }
-  for file in FILES_WITH_IDS {
+  for (file, text) in &texts {
     let path = profiles_dir.join(file);
-    let Ok(text) = std::fs::read_to_string(&path) else { continue };
-    let new_text = replace_ids(&text, &moves);
-    if new_text != text {
+    let new_text = replace_ids(text, &moves);
+    if new_text != *text {
       match write_atomic(&path, &new_text) {
         Ok(()) => info!("[Devices] {file}: device ids updated"),
         Err(e) => warn!("[Devices] could not update {}: {e}", path.display()),
@@ -173,6 +183,21 @@ mod tests {
     // Back on the first port: moves back.
     heal(&dir, &[dev("{old}", "Mic (USB)")]);
     assert_eq!(std::fs::read_to_string(dir.join("audio_settings.json")).unwrap(), r#"{"mic_device_id": "{old}"}"#);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn two_identical_devices_never_merge_their_settings() {
+    let dir = std::env::temp_dir().join(format!("ge_device_ids_twins_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let settings = r#"{"headphone_by_device":{"{a}":"HD 600","{b}":"NTH-100"}}"#;
+    std::fs::write(dir.join("output_eq.json"), settings).unwrap();
+    heal(&dir, &[dev("{a}", "Speakers (USB Audio Device)"), dev("{b}", "Speakers (2- USB Audio Device)")]);
+
+    // {b} unplugged: {a} is the other device, not {b}'s new id.
+    assert!(heal(&dir, &[dev("{a}", "Speakers (USB Audio Device)")]).is_empty());
+    assert_eq!(std::fs::read_to_string(dir.join("output_eq.json")).unwrap(), settings);
     let _ = std::fs::remove_dir_all(&dir);
   }
 }
