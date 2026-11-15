@@ -48,8 +48,7 @@ pub fn convert_sonar_config(
   // Find all keys starting with "filter"
   let mut filter_entries: Vec<(usize, &Value)> = Vec::new();
   for (k, val) in peq.iter() {
-    if k.starts_with("filter") {
-      let idx_str = &k["filter".len()..];
+    if let Some(idx_str) = k.strip_prefix("filter") {
       if let Ok(idx) = idx_str.parse::<usize>() {
         filter_entries.push((idx, val));
       }

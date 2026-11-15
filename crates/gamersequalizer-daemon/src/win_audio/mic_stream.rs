@@ -459,6 +459,7 @@ fn run_bridge_stream(
         }
 
         // Convert raw capture bytes into normalized [-1.0, 1.0] float mono (first channel)
+        #[expect(clippy::indexing_slicing, reason = "both buffers were grown to `frames` above")]
         let mono = &mut in_mono_buf[..frames];
         let ch = cap.channels;
         if (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
@@ -484,8 +485,8 @@ fn run_bridge_stream(
         }
 
         // Process through Pure Rust DSP (AEC, nnnoiseless AI, Linear Boost 100%..300%, Limiter)
-        let in_slice: &[f32] = &in_mono_buf[..frames];
-        let mut out_slice: &mut [f32] = &mut out_mono_buf[..frames];
+        #[expect(clippy::indexing_slicing, reason = "both buffers were grown to `frames` above")]
+        let (in_slice, mut out_slice): (&[f32], &mut [f32]) = (&in_mono_buf[..frames], &mut out_mono_buf[..frames]);
         let mic_time = (qpc != 0).then_some(qpc);
         plugin.process_timed(&[in_slice], &mut [&mut out_slice], mic_time);
 
@@ -510,6 +511,7 @@ fn run_bridge_stream(
           {
             let p_rnd_dst = render_client.GetBuffer(frames_to_write).map_err(render_err)?;
             let write_frames = frames_to_write as usize;
+            #[expect(clippy::indexing_slicing, reason = "write_frames <= frames <= out_mono_buf.len()")]
             let src = &out_mono_buf[..write_frames];
             let rch = rnd.channels;
             if rnd.is_float {

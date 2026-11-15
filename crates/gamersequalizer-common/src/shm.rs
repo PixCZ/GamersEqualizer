@@ -1116,7 +1116,8 @@ impl ShmLayout {
 }
 
 impl<'a> ShmRingBuffer<'a> {
-  /// Safety: caller must guarantee `layout` points to valid initialized ShmLayout memory.
+  /// # Safety
+  /// Caller must guarantee `layout` points to valid initialized ShmLayout memory.
   pub unsafe fn from_raw(layout: &'a mut ShmLayout) -> Self {
     Self { layout }
   }

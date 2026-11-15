@@ -202,7 +202,7 @@ fn resolve_process_name(pid: u32) -> Option<(String, String)> {
 
     if ok && len > 0 {
       let full_path = String::from_utf16_lossy(buf.get(..len as usize).unwrap_or_default());
-      let exe_name = full_path.split('\\').last().unwrap_or(&full_path).to_string();
+      let exe_name = full_path.rsplit('\\').next().unwrap_or(&full_path).to_string();
       return Some((exe_name, full_path));
     }
     None

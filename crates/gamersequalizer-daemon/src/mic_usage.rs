@@ -84,7 +84,8 @@ pub fn longest_recording_app() -> Option<String> {
 fn recording() -> Vec<(u64, String)> {
   use std::sync::Mutex;
   use std::time::Instant;
-  static LAST: Mutex<Option<(Instant, Vec<(u64, String)>)>> = Mutex::new(None);
+  type Scan = (Instant, Vec<(u64, String)>);
+  static LAST: Mutex<Option<Scan>> = Mutex::new(None);
   let Ok(mut last) = LAST.lock() else { return scan_recording_apps() };
   if let Some((at, apps)) = last.as_ref() {
     if at.elapsed() < SCAN_MAX_AGE {

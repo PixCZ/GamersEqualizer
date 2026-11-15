@@ -208,7 +208,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   let peak = state
     .shm_header()
     .map_or(0.0, |h| (h.sidetone_peak_permille.load(Ordering::Relaxed) as f32 / 1000.0).clamp(0.0, 1.0));
-  let low_lat = state.shm_header().map_or(false, |h| h.sidetone_low_latency.load(Ordering::Relaxed));
+  let low_lat = state.shm_header().is_some_and(|h| h.sidetone_low_latency.load(Ordering::Relaxed));
   let leveler_on = state.shm_header().is_none_or(|h| h.mic_leveler_enabled.load(Ordering::Relaxed));
 
   theme::card(ui, |ui| {
@@ -402,7 +402,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       let key = (p.mic_id.clone(), p.output_id.clone());
       let asking = confirm.as_ref() == Some(&key);
       ui.horizontal(|ui| {
-        ui.label(theme::strong(&trf("{} → {}", &[&p.mic_name, &p.output_name]), 14.0));
+        ui.label(theme::strong(trf("{} → {}", &[&p.mic_name, &p.output_name]), 14.0));
         let state_str = if p.enabled { tr("On") } else { tr("Off") };
         ui.label(RichText::new(state_str).color(theme::palette(ui).text_secondary));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

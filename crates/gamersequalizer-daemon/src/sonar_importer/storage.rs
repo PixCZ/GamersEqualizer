@@ -102,7 +102,7 @@ impl ProfileStorage {
         }
       }
     }
-    result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result.sort_by_key(|p| p.name.to_lowercase());
     result
   }
 }

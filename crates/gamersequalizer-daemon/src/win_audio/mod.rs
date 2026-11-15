@@ -38,9 +38,9 @@ pub struct WinAudioSystem {
 
 impl WinAudioSystem {
   pub fn new() -> Result<Self, String> {
-    let state = Arc::new(EndpointLockState::new());
+    let state = Arc::new(EndpointLockState::default());
     let endpoint_lock = EndpointLockManager::new(state).map_err(|e| e.to_string())?;
-    let dolby_guard = DolbyAtmosGuard::new();
+    let dolby_guard = DolbyAtmosGuard::default();
     let mut chatmix = ChatMixController::new();
     let game_detector = GameDetector::start().ok();
     let mic_stream = MicStreamWorker::new();

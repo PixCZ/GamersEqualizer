@@ -28,6 +28,7 @@ pub struct AudioEndpointInfo {
   pub is_default: bool,
 }
 
+#[derive(Default)]
 pub struct EndpointLockState {
   pub locked_device_id: Mutex<Option<String>>,
   pub lock_enabled: AtomicBool,
@@ -36,19 +37,6 @@ pub struct EndpointLockState {
   pub device_changed_flag: AtomicBool,
   /// The console default left the locked output; `EndpointLockManager::enforce_lock` reverts it.
   pub revert_pending: AtomicBool,
-}
-
-impl EndpointLockState {
-  pub fn new() -> Self {
-    Self {
-      locked_device_id: Mutex::new(None),
-      lock_enabled: AtomicBool::new(false),
-      hijack_counter: AtomicU32::new(0),
-      current_default_device_id: Mutex::new(None),
-      device_changed_flag: AtomicBool::new(false),
-      revert_pending: AtomicBool::new(false),
-    }
-  }
 }
 
 #[implement(IMMNotificationClient)]
@@ -270,7 +258,7 @@ impl EndpointLockManager {
       if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) {
         if let Ok(pwstr) = device.GetId() {
           let s = pwstr.to_string().ok();
-          let _ = windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
           return s;
         }
       }
@@ -303,7 +291,7 @@ impl EndpointLockManager {
       if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
         if let Ok(pwstr) = device.GetId() {
           let s = pwstr.to_string().ok();
-          let _ = windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
           return s;
         }
       }
@@ -317,7 +305,7 @@ impl EndpointLockManager {
       if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eCommunications) {
         if let Ok(pwstr) = device.GetId() {
           let s = pwstr.to_string().ok();
-          let _ = windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+          windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
           return s;
         }
       }
@@ -395,7 +383,7 @@ mod tests {
 
   #[test]
   fn test_enumerate_devices() {
-    let state = Arc::new(EndpointLockState::new());
+    let state = Arc::new(EndpointLockState::default());
     if let Ok(manager) = EndpointLockManager::new(state) {
       let devices = manager.enumerate_playback_devices();
       println!("Found {} playback devices:", devices.len());

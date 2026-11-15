@@ -210,6 +210,7 @@ pub struct ChatMixController {
 }
 
 impl ChatMixController {
+  #[expect(clippy::new_without_default, reason = "new() reads the system volumes, not a plain default")]
   pub fn new() -> Self {
     // Read real current master output volume & mute from Windows
     let (initial_master_vol, initial_master_muted) = get_system_master_volume().unwrap_or((1.0, false));
@@ -989,8 +990,8 @@ pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
     let _ = CloseHandle(handle);
 
     if len > 0 {
-      let path = String::from_utf16_lossy(&buf[..len as usize]);
-      let filename = path.split('\\').last().unwrap_or(&path).to_string();
+      let path = String::from_utf16_lossy(buf.get(..len as usize).unwrap_or_default());
+      let filename = path.rsplit('\\').next().unwrap_or(&path).to_string();
       return Some(filename);
     }
     None

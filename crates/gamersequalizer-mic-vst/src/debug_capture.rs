@@ -66,6 +66,7 @@ impl DebugCaptureMap {
     }
     // SAFETY: in bounds (checked above, frames clamped); no writer after `STATE_DONE`.
     unsafe {
+      #[expect(clippy::indexing_slicing, reason = "stage < DEBUG_STAGES.len(), checked above")]
       let base = addr_of!((*self.ptr.as_ptr()).audio[stage]) as *const f32;
       std::slice::from_raw_parts(base, frames.min(DEBUG_CAPTURE_MAX_FRAMES))
     }
@@ -98,6 +99,7 @@ impl DebugCaptureMap {
     }
     // SAFETY: `at + n <= MAX_FRAMES` and `stage` in bounds; only the owning stream writes.
     unsafe {
+      #[expect(clippy::indexing_slicing, reason = "stage < DEBUG_STAGES.len(), checked above")]
       let base = std::ptr::addr_of_mut!((*self.ptr.as_ptr()).audio[stage]) as *mut f32;
       std::ptr::copy_nonoverlapping(samples.as_ptr(), base.add(at), n);
     }
@@ -111,6 +113,7 @@ impl DebugCaptureMap {
     }
     // SAFETY: as `write_audio`.
     unsafe {
+      #[expect(clippy::indexing_slicing, reason = "stage < DEBUG_STAGES.len(), checked above")]
       let base = std::ptr::addr_of_mut!((*self.ptr.as_ptr()).audio[stage]) as *mut f32;
       std::ptr::write_bytes(base.add(at), 0, n);
     }

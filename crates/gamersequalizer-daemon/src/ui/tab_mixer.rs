@@ -119,6 +119,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
     for col in cols.iter_mut() {
       col.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
     }
+    let [master_col, game_col, chat_col, media_col, mic_col] = cols else { return };
     // Footers name the device each channel really plays on.
     let output_of = |id: Option<&String>, fallback: &str| {
       let name = id.and_then(|id| state.endpoints.iter().find(|e| &e.id == id)).map(|e| e.name.clone());
@@ -141,7 +142,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       meter: None,
     };
     render_strip(
-      &mut cols[0],
+      master_col,
       &strip,
       &mut win_audio.chatmix.master_volume,
       &mut win_audio.chatmix.master_muted,
@@ -171,7 +172,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       meter: None,
     };
     render_strip(
-      &mut cols[1],
+      game_col,
       &strip,
       &mut win_audio.chatmix.game_volume,
       &mut win_audio.chatmix.game_muted,
@@ -200,7 +201,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       meter: None,
     };
     render_strip(
-      &mut cols[2],
+      chat_col,
       &strip,
       &mut win_audio.chatmix.chat_volume,
       &mut win_audio.chatmix.chat_muted,
@@ -257,7 +258,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       meter: None,
     };
     render_strip(
-      &mut cols[3],
+      media_col,
       &strip,
       &mut win_audio.chatmix.media_volume,
       &mut win_audio.chatmix.media_muted,
@@ -283,7 +284,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       meter: Some(win_audio.chatmix.mic_peak_level),
     };
     render_strip(
-      &mut cols[4],
+      mic_col,
       &strip,
       &mut win_audio.chatmix.mic_volume,
       &mut win_audio.chatmix.mic_muted,

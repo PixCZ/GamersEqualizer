@@ -70,7 +70,7 @@ fn uninstall(silent: bool) -> Result<u32, String> {
 /// The physical microphone and output in use (a virtual default such as a Sonar or VB-Cable
 /// device is skipped for the first real one), as (flow, endpoint GUID).
 fn devices_in_use() -> Vec<(Flow, String)> {
-  let manager = match EndpointLockManager::new(Arc::new(EndpointLockState::new())) {
+  let manager = match EndpointLockManager::new(Arc::new(EndpointLockState::default())) {
     Ok(manager) => manager,
     Err(e) => {
       warn!("[SetupCli] cannot list audio devices: {e}");

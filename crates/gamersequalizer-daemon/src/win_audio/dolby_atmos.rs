@@ -29,11 +29,12 @@ const OFFERED_ID_AT: usize = 0x308;
 const MAX_OFFERED: u32 = 32;
 
 /// Spatial sound on the default output, as Windows reports it (which format: `active_format`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpatialAudioStatus {
   /// A spatial renderer is on: apps can render spatial objects, which bypass per-stream (SFX)
   /// effects and their session meter (measured with Dolby Atmos, Milestone 19).
   Active,
+  #[default]
   Disabled,
   Unsupported,
 }
@@ -74,15 +75,12 @@ impl SpatialFormat {
   }
 }
 
+#[derive(Default)]
 pub struct DolbyAtmosGuard {
   last_status: SpatialAudioStatus,
 }
 
 impl DolbyAtmosGuard {
-  pub fn new() -> Self {
-    Self { last_status: SpatialAudioStatus::Disabled }
-  }
-
   /// Check active spatial audio status on default render endpoint
   pub fn check_spatial_status(&mut self) -> SpatialAudioStatus {
     let status = unsafe { self.query_active_endpoint() };

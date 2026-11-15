@@ -52,8 +52,8 @@ pub fn compute_combined_engine(
   let mut combined_gains = Vec::with_capacity(FREQ_POINTS_COUNT);
   let mut max_boost = 0.0f32;
 
-  for i in 0..FREQ_POINTS_COUNT {
-    let combined = layer_a_gains[i] + layer_b_gains[i];
+  for (a, b) in layer_a_gains.iter().zip(&layer_b_gains) {
+    let combined = a + b;
     if combined > max_boost {
       max_boost = combined;
     }
