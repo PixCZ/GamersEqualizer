@@ -10,7 +10,7 @@ use log::{info, warn};
 
 /// Bump when presets are added; existing files (user edits) are never overwritten and
 /// deleted ones only come back when this changes.
-pub const BUILTIN_GAME_PRESETS_VERSION: u32 = 1;
+pub const BUILTIN_GAME_PRESETS_VERSION: u32 = 2;
 
 pub fn builtin_game_presets() -> Vec<ParametricProfile> {
   vec![
@@ -47,6 +47,17 @@ pub fn builtin_game_presets() -> Vec<ParametricProfile> {
     ),
     // Voices forward, less boom and hiss.
     preset(tk("Genre: Story and dialogue"), vec![pk(200.0, -2.0, 1.0), pk(2000.0, 3.0, 1.0), pk(7000.0, -1.0, 2.0)]),
+    // Top-down games: ability and UI cues sit around 4 kHz; less mud, bass kept.
+    preset(
+      tk("Genre: MOBA / strategy"),
+      vec![
+        band(FilterType::LowShelf, 100.0, -2.0, 0.707),
+        pk(250.0, -2.0, 1.0),
+        pk(1000.0, 1.5, 1.0),
+        pk(4000.0, 5.0, 1.2),
+        band(FilterType::HighShelf, 10000.0, -1.0, 0.707),
+      ],
+    ),
   ]
 }
 

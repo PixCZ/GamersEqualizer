@@ -225,6 +225,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Genre: Competitive (max. clarity)", "Žánr: Kompetitivní (max. čitelnost)"),
   ("Genre: Open world (immersion)", "Žánr: Otevřený svět (atmosféra)"),
   ("Genre: Story and dialogue", "Žánr: Příběh a dialogy"),
+  ("Genre: MOBA / strategy", "Žánr: MOBA a strategie"),
   ("Game profiles on top of the headphone correction, switched by the game in the foreground.", "Herní profily nad korekcí sluchátek, přepínané podle hry v popředí."),
   ("Auto-detect game", "Automaticky rozpoznat hru"),
   ("Switch the profile when a game comes to the foreground; it stays until the game exits.", "Přepne profil, když se hra dostane do popředí; zůstane, dokud hra neskončí."),
