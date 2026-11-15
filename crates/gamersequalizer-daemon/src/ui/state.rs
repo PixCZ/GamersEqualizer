@@ -606,8 +606,8 @@ fn save_mic_profile(storage: &ProfileStorage, profile: &ParametricProfile) {
 /// Windows volumes and then the user's saved choices from `settings_dir`.
 pub(crate) fn open_or_create_shm(settings_dir: &Path) -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
   // SAFETY: the name is NUL-terminated and outlives the calls; the view is the layout's size or null (checked, the
-  // handle is then closed). Defaults are written only into a mapping no one set up yet (magic not set), before the
-  // pointer is handed out.
+  // handle is then closed, as for a mapping of another layout). Defaults are written only into a mapping no one set up
+  // yet (magic not set), before the pointer is handed out.
   unsafe {
     let wide_name: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
     let size_bytes = ShmLayout::total_size_bytes() as u32;
@@ -627,6 +627,14 @@ pub(crate) fn open_or_create_shm(settings_dir: &Path) -> (Option<HANDLE>, Option
     let ptr = NonNull::new(map_ptr.Value as *mut ShmLayout);
     if let Some(p) = ptr {
       let header = &mut (*p.as_ptr()).header;
+      if header.magic == gamersequalizer_common::shm::SHM_MAGIC
+        && let Some(e) = header.layout_mismatch()
+      {
+        log::warn!("[MicEQ] {SHM_NAME} has {e}: running without it");
+        let _ = UnmapViewOfFile(map_ptr);
+        let _ = CloseHandle(handle);
+        return (None, None);
+      }
       if header.magic != gamersequalizer_common::shm::SHM_MAGIC {
         header.init_defaults();
         if let Some((vol, mute)) = crate::win_audio::chatmix::get_system_master_volume() {

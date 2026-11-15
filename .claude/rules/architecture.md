@@ -85,7 +85,8 @@ service (loopback, sidetone).
 ## Shared-memory layout
 
 - Two processes that may be different builds read it (an old DLL meets a new exe after an update).
-  Every layout change bumps `SHM_VERSION` and both mapping names (`SHM_NAME`, `APO_SHM_NAME`) together.
+  Every layout change bumps `shm_version!` in `shm.rs`; `SHM_VERSION` and both mapping names follow it,
+  and a size check fails the build until it is bumped. A mapping of another version counts as missing.
 - Fields are atomics. A value made of several fields is published with a version counter that the
   reader checks after reading.
 - A new field goes into the struct, `init_defaults` and the right `copy_*` mirror list.

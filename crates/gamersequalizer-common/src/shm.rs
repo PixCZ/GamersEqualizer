@@ -5,16 +5,24 @@ use crate::streams::{STREAM_EQ_BUSES, StreamTable};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, AtomicU64, Ordering, fence};
 use std::time::{Duration, Instant};
 
-/// Name carries the layout version: a process still running an older build keeps its own
-/// (smaller) mapping instead of both reading each other's memory with different layouts.
-/// Bump both names together with `SHM_VERSION` on every layout change.
-pub const SHM_NAME: &str = "Local\\GamersEqualizer_SpeakerRef_Buffer_v21";
+/// The layout version: the one number to bump on every layout change (`SHM_LAYOUT_SIZE` fails the
+/// build until it is bumped). Both mapping names carry it, so a process still running an older
+/// build keeps its own mapping instead of both reading each other's memory with different layouts.
+macro_rules! shm_version {
+  () => {
+    21
+  };
+}
+pub const SHM_VERSION: u32 = shm_version!();
+/// Size of `ShmLayout` at `SHM_VERSION`.
+const SHM_LAYOUT_SIZE: usize = 1_255_080;
+const _: () = assert!(size_of::<ShmLayout>() == SHM_LAYOUT_SIZE, "layout changed: bump shm_version! and the size");
+pub const SHM_NAME: &str = concat!("Local\\GamersEqualizer_SpeakerRef_Buffer_v", shm_version!());
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
 /// a service may create Global objects). The daemon opens it when it exists and mirrors
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
-pub const APO_SHM_NAME: &str = "Global\\GamersEqualizer_Apo_v21";
+pub const APO_SHM_NAME: &str = concat!("Global\\GamersEqualizer_Apo_v", shm_version!());
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
-pub const SHM_VERSION: u32 = 21;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.
@@ -674,9 +682,19 @@ impl ShmHeader {
     if len == 0 { None } else { self.selected_mic_id.get(..len).and_then(|s| String::from_utf16(s).ok()) }
   }
 
+  /// None when this build's layout set the mapping up (checked after `magic`), else why it cannot
+  /// be used, with both versions.
+  pub fn layout_mismatch(&self) -> Option<String> {
+    fence(Ordering::Acquire);
+    (self.version != SHM_VERSION).then(|| format!("layout version {} (this build: {SHM_VERSION})", self.version))
+  }
+
   pub fn init_defaults(&mut self) {
-    self.magic = SHM_MAGIC;
+    // `version` before `magic`: a process that sees the magic of a mapping another one (several APO
+    // instances at once) is still setting up must not read a zero version as another layout.
     self.version = SHM_VERSION;
+    fence(Ordering::Release);
+    self.magic = SHM_MAGIC;
     self.sample_rate = REF_SAMPLE_RATE;
     self.channels = 2;
     self.capacity_frames = RING_BUFFER_CAPACITY as u32;
@@ -1320,6 +1338,17 @@ mod tests {
     ring.read_stereo_frames_from(0, &mut left, &mut right);
     assert_eq!(left, [0.0, 0.0, REF_SAMPLE_MAX, 0.5, 0.0]);
     assert_eq!(right, [0.0, 0.0, REF_SAMPLE_MAX, 0.25, 0.0], "channels apart; not written yet = silence");
+  }
+
+  #[test]
+  fn another_layout_version_is_refused_and_named() {
+    assert!(SHM_NAME.ends_with(&format!("_v{SHM_VERSION}")));
+    assert!(APO_SHM_NAME.ends_with(&format!("_v{SHM_VERSION}")));
+    let mut header = ShmHeader::default();
+    assert_eq!(header.layout_mismatch(), None);
+    header.version = SHM_VERSION - 1;
+    let e = header.layout_mismatch().unwrap_or_default();
+    assert!(e.contains(&(SHM_VERSION - 1).to_string()) && e.contains(&SHM_VERSION.to_string()), "{e}");
   }
 
   #[test]

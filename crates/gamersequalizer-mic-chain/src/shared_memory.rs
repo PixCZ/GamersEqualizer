@@ -35,6 +35,8 @@ impl SharedMemoryClient {
       let header = &mut client.layout_mut().header;
       if header.magic != SHM_MAGIC {
         header.init_defaults();
+      } else if let Some(e) = header.layout_mismatch() {
+        return Err(format!("{name} has {e}"));
       }
       Ok(client)
     }
@@ -48,8 +50,12 @@ impl SharedMemoryClient {
       let handle = OpenFileMappingW((FILE_MAP_READ | FILE_MAP_WRITE).0, false, PCWSTR(wide_name.as_ptr()))
         .map_err(|e| format!("OpenFileMappingW({name}) failed: {e}"))?;
       let client = Self::map(handle)?;
-      if client.layout().header.magic != SHM_MAGIC {
+      let header = &client.layout().header;
+      if header.magic != SHM_MAGIC {
         return Err(format!("{name} is not initialized"));
+      }
+      if let Some(e) = header.layout_mismatch() {
+        return Err(format!("{name} has {e}"));
       }
       Ok(client)
     }

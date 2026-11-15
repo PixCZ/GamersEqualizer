@@ -570,7 +570,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] D2 lint SAFETY (nálezy opravené cestou: `capture_time_hns`, `IPolicyConfig` s holým `PCWSTR`, únik textu z `GetId` v `get_endpoint_info`)
 - [x] D3 `#[expect]` (30 zbytečných smazáno, z toho 28 na testových modulech, které pokrývá `clippy.toml`; `allow` zůstal jen u `unused_mut` v `aec3.rs`)
 - [x] D4 dlouhé testy zvlášť
-- [ ] E1 jedno číslo verze
+- [x] E1 jedno číslo verze (`init_defaults` píše `version` před `magic`, jinak by souběžně startující APO viděla verzi 0)
 - [ ] E2 `Default`
 - [ ] E3 nepoužitá pole
 - [ ] E4 `OwnerWatch`
