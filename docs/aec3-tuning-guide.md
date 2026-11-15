@@ -7,14 +7,14 @@ Příkazy jsou pro PowerShell, spouštěj je z kořene repa.
 
 ## 1. Stav: co je hotové a co není ověřené
 
-| Část                                                      | Stav                                             |
-| --------------------------------------------------------- | ------------------------------------------------ |
-| `aec3.rs`: zesílení mikrofonu do AEC3 (`set_mic_gain_db`) | přeloženo a otestováno na Macu, jen na syntetice |
-| `aec3.rs`: testy a `capture_tuning_report`                | běží na Macu na dvou umělých „captures"          |
-| `chain.rs`: předání zesílení z leveleru do AEC (2 řádky)  | **psáno bez překladače**                         |
-| `voice_leveler.rs`: `gain_to_default_db`                  | přeloženo na Macu                                |
-| `ai_denoiser.rs`: `AEC_WAV` v `capture_replay_report`     | **psáno bez překladače**                         |
-| Cokoli na skutečných nahrávkách nebo naživo               | **neověřeno**                                    |
+| Část                                                        | Stav                                             |
+| ----------------------------------------------------------- | ------------------------------------------------ |
+| `aec3.rs`: zesílení mikrofonu do AEC3 (`set_mic_gain_db`)   | přeloženo a otestováno na Macu, jen na syntetice |
+| `aec3.rs`: testy a `capture_tuning_report`                  | běží na Macu na dvou umělých „captures"          |
+| `chain.rs`: předání zesílení z leveleru do AEC (2 řádky)    | **psáno bez překladače**                         |
+| `voice_leveler.rs`: `gain_to_default_db`                    | přeloženo na Macu                                |
+| `ai_denoiser/tests.rs`: `AEC_WAV` v `capture_replay_report` | **psáno bez překladače**                         |
+| Cokoli na skutečných nahrávkách nebo naživo                 | **neověřeno**                                    |
 
 Co změna dělá: AEC3 má absolutní prahy úrovně a tichý mikrofon ho drží mimo lineární filtr. Pak
 tlumí hlas podle hlasitosti reference. Mikrofon se proto před AEC3 zesílí a za ním stejně

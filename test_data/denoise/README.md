@@ -1,6 +1,6 @@
 # Denoiser test fixtures
 
-Used by the tests in `crates/gamersequalizer-mic-chain/src/ai_denoiser.rs`. Test-only, never shipped.
+Used by the tests in `crates/gamersequalizer-mic-chain/src/ai_denoiser/tests.rs`. Test-only, never shipped.
 
 | File                 | Content                    | Source                                                                        |
 | -------------------- | -------------------------- | ----------------------------------------------------------------------------- |

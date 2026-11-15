@@ -32,6 +32,8 @@
 ## Layout
 
 - `#[cfg(test)] mod tests` at the bottom of the file; imports, constants, tests, helpers.
+- Tests longer than 300 lines go into the neighbouring `tests.rs` (`foo.rs` -> `foo/tests.rs`, `lib.rs` ->
+  `tests.rs`); the file keeps `#[cfg(test)] mod tests;`.
 - Fixtures live in `test_data/`, not copy-pasted. Reports over the developer's recordings read
   `test_data/private/` (git-ignored) and are `#[ignore]`d, so the suite passes without them.
 - Tests use temp dirs, never the real `%APPDATA%\GamersEqualizer`.
