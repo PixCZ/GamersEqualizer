@@ -32,8 +32,8 @@
 //!   version changes; switching EQ on/off is not crossfaded (may click once).
 //! - Stream: same allocation on a new band set. A channel change is crossfaded (20 ms); an edit
 //!   of the same channel's EQ is applied directly (filter state kept, like the output EQ).
-
 #![deny(
+  clippy::undocumented_unsafe_blocks,
   clippy::unwrap_used,
   clippy::expect_used,
   clippy::panic,
@@ -385,6 +385,8 @@ pub unsafe extern "system" fn DllGetClassObject(
   riid: *const GUID,
   ppv: *mut *mut c_void,
 ) -> HRESULT {
+  // SAFETY: COM passes its own pointers or null; each is null-checked before it is read or written, and `query`
+  // writes the interface to the checked `ppv`.
   unsafe {
     if ppv.is_null() {
       return E_POINTER;
@@ -474,14 +476,22 @@ impl ApoObject {
 /// # Safety
 /// `this` must be an interface pointer of an `ApoObject` taken at field offset `OFF`.
 unsafe fn object<'a, const OFF: usize>(this: *mut c_void) -> &'a ApoObject {
+  // SAFETY: by the contract above, `this - OFF` is the start of a live `ApoObject`.
   unsafe { &*((this as *mut u8).sub(OFF) as *const ApoObject) }
 }
 
+/// # Safety
+/// As `object`.
 unsafe fn state<'a, const OFF: usize>(this: *mut c_void) -> &'a ApoState {
+  // SAFETY: the contract of `object`, passed on.
   unsafe { &object::<OFF>(this).state }
 }
 
+/// # Safety
+/// `unknown` is a live COM interface pointer.
 unsafe fn unknown_vtbl(unknown: *mut c_void) -> &'static IUnknown_Vtbl {
+  // SAFETY: the contract above: a COM interface pointer points to its vtable pointer, and callers use
+  // the vtable only while they hold the interface.
   unsafe { &**(unknown as *const *const IUnknown_Vtbl) }
 }
 
@@ -498,6 +508,9 @@ unsafe extern "system" fn delegating_qi<const OFF: usize>(
   iid: *const GUID,
   ppv: *mut *mut c_void,
 ) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF` of a live `ApoObject` and holds a
+  // reference for the call (`object`); `outer` is the controlling IUnknown, alive while this object is (aggregation),
+  // or our own inner one.
   unsafe {
     let outer = object::<OFF>(this).outer;
     (unknown_vtbl(outer).QueryInterface)(outer, iid, ppv)
@@ -505,6 +518,7 @@ unsafe extern "system" fn delegating_qi<const OFF: usize>(
 }
 
 unsafe extern "system" fn delegating_add_ref<const OFF: usize>(this: *mut c_void) -> u32 {
+  // SAFETY: as `delegating_qi`.
   unsafe {
     let outer = object::<OFF>(this).outer;
     (unknown_vtbl(outer).AddRef)(outer)
@@ -512,6 +526,7 @@ unsafe extern "system" fn delegating_add_ref<const OFF: usize>(this: *mut c_void
 }
 
 unsafe extern "system" fn delegating_release<const OFF: usize>(this: *mut c_void) -> u32 {
+  // SAFETY: as `delegating_qi`.
   unsafe {
     let outer = object::<OFF>(this).outer;
     (unknown_vtbl(outer).Release)(outer)
@@ -519,6 +534,9 @@ unsafe extern "system" fn delegating_release<const OFF: usize>(this: *mut c_void
 }
 
 unsafe extern "system" fn inner_query_interface(this: *mut c_void, iid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_INNER` of a live `ApoObject` and holds a
+  // reference for the call (`object`); `ppv` and `iid` are null-checked, and `found` is one of this object's
+  // interface fields.
   unsafe {
     if ppv.is_null() {
       return E_POINTER;
@@ -550,10 +568,15 @@ unsafe extern "system" fn inner_query_interface(this: *mut c_void, iid: *const G
 }
 
 unsafe extern "system" fn inner_add_ref(this: *mut c_void) -> u32 {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_INNER` of a live `ApoObject` and holds a
+  // reference for the call (`object`).
   unsafe { object::<OFF_INNER>(this).refs.fetch_add(1, Ordering::Relaxed) + 1 }
 }
 
 unsafe extern "system" fn inner_release(this: *mut c_void) -> u32 {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_INNER` of a live `ApoObject` and holds a
+  // reference for the call (`object`). The last reference frees the `Box` from `ApoObject::create`, once: no caller
+  // may use the pointer after its final Release.
   unsafe {
     let left = object::<OFF_INNER>(this).refs.fetch_sub(1, Ordering::AcqRel).wrapping_sub(1);
     if left == 0 {
@@ -575,6 +598,7 @@ unsafe extern "system" fn apo_reset(_this: *mut c_void) -> HRESULT {
 }
 
 unsafe extern "system" fn apo_get_latency(_this: *mut c_void, latency: *mut i64) -> HRESULT {
+  // SAFETY: `latency` is null-checked; the engine owns it for the call.
   unsafe {
     if latency.is_null() {
       return E_POINTER;
@@ -588,6 +612,8 @@ unsafe extern "system" fn apo_get_registration_properties(
   this: *mut c_void,
   out: *mut *mut APO_REG_PROPERTIES,
 ) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_APO` of a live `ApoObject` and holds a
+  // reference for the call (`object`); `out` is null-checked.
   unsafe {
     if out.is_null() {
       return E_POINTER;
@@ -606,6 +632,9 @@ unsafe extern "system" fn apo_get_registration_properties(
 }
 
 unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *const u8) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_APO` of a live `ApoObject` and holds a
+  // reference for the call (`object`); `data` is the engine's init block of `size` bytes (or null), which each helper
+  // checks before reading a version's fields.
   unsafe {
     let st = state::<OFF_APO>(this);
     if st.locked.load(Ordering::Acquire) {
@@ -636,6 +665,8 @@ unsafe extern "system" fn apo_is_input_format_supported(
   requested: *mut c_void,
   supported: *mut *mut c_void,
 ) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_APO` of a live `ApoObject` and holds a
+  // reference for the call (`object`); the media types are the engine's (contract of `is_format_supported`).
   unsafe { is_format_supported(this, "input", opposite, requested, supported) }
 }
 
@@ -645,6 +676,7 @@ unsafe extern "system" fn apo_is_output_format_supported(
   requested: *mut c_void,
   supported: *mut *mut c_void,
 ) -> HRESULT {
+  // SAFETY: as `apo_is_input_format_supported`.
   unsafe { is_format_supported(this, "output", opposite, requested, supported) }
 }
 
@@ -657,6 +689,8 @@ unsafe fn is_format_supported(
   requested: *mut c_void,
   supported: *mut *mut c_void,
 ) -> HRESULT {
+  // SAFETY: the contract above; `supported` is null-checked, the media types are borrowed for the call and the
+  // accepted one is handed out with its own reference (`into_raw`).
   unsafe {
     if supported.is_null() {
       return E_POINTER;
@@ -687,6 +721,8 @@ unsafe fn is_format_supported(
 }
 
 unsafe extern "system" fn apo_get_input_channel_count(this: *mut c_void, count: *mut u32) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_APO` of a live `ApoObject` and holds a
+  // reference for the call (`object`); `count` is null-checked.
   unsafe {
     if count.is_null() {
       return E_POINTER;
@@ -707,6 +743,9 @@ unsafe extern "system" fn rt_apo_process(
   num_outputs: u32,
   outputs: *mut *mut APO_CONNECTION_PROPERTY,
 ) {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_RT` of a live `ApoObject` and holds a
+  // reference for the call (`object`). The engine passes one input and one output connection (checked, as are the
+  // pointers) that stay valid for this call, with buffers as `process_connection` needs.
   unsafe {
     if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
       return;
@@ -746,6 +785,9 @@ unsafe extern "system" fn cfg_lock_for_process(
   num_outputs: u32,
   outputs: *const *const APO_CONNECTION_DESCRIPTOR,
 ) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_CFG` of a live `ApoObject` and holds a
+  // reference for the call (`object`); the one input descriptor is null-checked, its `pFormat` is the engine's media
+  // type or null.
   unsafe {
     let st = state::<OFF_CFG>(this);
     if st.locked.load(Ordering::Acquire) {
@@ -804,6 +846,8 @@ unsafe extern "system" fn cfg_lock_for_process(
 }
 
 unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -> HRESULT {
+  // SAFETY: COM calls this slot only through our interface pointer at `OFF_CFG` of a live `ApoObject` and holds a
+  // reference for the call (`object`).
   unsafe {
     let st = state::<OFF_CFG>(this);
     if !st.locked.swap(false, Ordering::AcqRel) {
@@ -1606,6 +1650,8 @@ fn frames_to_hns(frames: u64, rate: u32) -> i64 {
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn endpoint_guid_from_init(size: u32, data: *const u8, device_id: Option<&str>) -> Option<String> {
+  // SAFETY: the contract above; both sizes are checked before a field is read, reads are unaligned, and the property
+  // store is borrowed (no Release); the string from `PropVariantToStringAlloc` is freed here.
   unsafe {
     if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects>() {
       return None;
@@ -1642,6 +1688,7 @@ fn normalize_endpoint_guid(raw: &str) -> Option<String> {
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
+  // SAFETY: the contract above; both sizes are checked before the field is read, unaligned.
   unsafe {
     if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects2>() {
       return None;
@@ -1665,6 +1712,8 @@ unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
 unsafe fn endpoint_device_id(size: u32, data: *const u8) -> Option<String> {
+  // SAFETY: the contract above; the declared size must be exactly v1 or v2, where `pDeviceCollection` has this
+  // offset; the collection is borrowed (no Release) and the id string freed here.
   unsafe {
     let (v1, v2) = (size_of::<APOInitSystemEffects>(), size_of::<APOInitSystemEffects2>());
     if data.is_null() || (size as usize) < v1 {
@@ -1778,6 +1827,8 @@ unsafe fn process_connection(
   channels: usize,
   process: impl FnOnce(&mut [f32]),
 ) {
+  // SAFETY: the contract above; both buffers are non-zero and hold `samples` floats. Input and output may be the same
+  // buffer: then only `out` exists, else they do not overlap (in-place APO or separate buffers).
   unsafe {
     let samples = input.u32ValidFrameCount as usize * channels;
     output.u32ValidFrameCount = input.u32ValidFrameCount;
@@ -2112,6 +2163,7 @@ mod tests {
     let mut dst = vec![9.0f32; 4];
     let input = connection(&mut src, 2, BUFFER_VALID.0);
     let mut output = connection(&mut dst, 0, BUFFER_VALID.0);
+    // SAFETY: the connections describe the vectors above with their frame counts; both outlive the call.
     unsafe { process_connection(&input, &mut output, 2, double) };
     assert_eq!(output.u32ValidFrameCount, 2);
     assert_eq!(dst, vec![0.2, -0.4, 0.6, -0.8]);
@@ -2119,6 +2171,7 @@ mod tests {
     let mut buf = vec![0.25f32, -0.25];
     let input = connection(&mut buf, 1, BUFFER_VALID.0);
     let mut output = input;
+    // SAFETY: the connections describe the vectors above with their frame counts; both outlive the call.
     unsafe { process_connection(&input, &mut output, 2, double) };
     assert_eq!(buf, vec![0.5, -0.5]);
   }
@@ -2129,6 +2182,7 @@ mod tests {
     let mut dst = vec![0.7f32; 4];
     let input = connection(&mut src, 2, BUFFER_SILENT.0);
     let mut output = connection(&mut dst, 0, BUFFER_VALID.0);
+    // SAFETY: the connections describe the vectors above with their frame counts; both outlive the call.
     unsafe { process_connection(&input, &mut output, 2, double) };
     assert_eq!(output.u32BufferFlags, BUFFER_SILENT);
     assert_eq!(dst, vec![0.0; 4]);
@@ -2138,12 +2192,13 @@ mod tests {
   fn output_and_stream_classes_register_their_own_clsid() {
     for clsid in [CLSID_OUTPUT_EQ_APO, CLSID_STREAM_APO] {
       let mut raw = null_mut();
-      let hr = unsafe { DllGetClassObject(&clsid, &IClassFactory::IID, &mut raw) };
-      assert!(hr.is_ok());
-      let factory = unsafe { IClassFactory::from_raw(raw) };
-      let apo: IAudioProcessingObject = unsafe { factory.CreateInstance(None) }.unwrap();
-      let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
+      // SAFETY: valid in/out pointers; on success `raw` holds a factory reference that `from_raw`
+      // takes over; the properties block is ours to read and free.
       unsafe {
+        assert!(DllGetClassObject(&clsid, &IClassFactory::IID, &mut raw).is_ok());
+        let factory = IClassFactory::from_raw(raw);
+        let apo: IAudioProcessingObject = factory.CreateInstance(None).unwrap();
+        let props = apo.GetRegistrationProperties().unwrap();
         assert_eq!((*props).clsid, clsid);
         CoTaskMemFree(Some(props as *const c_void));
       }
@@ -2170,16 +2225,20 @@ mod tests {
   #[test]
   fn processing_mode_is_read_from_init_block_and_short_blocks_are_ignored() {
     let mode = GUID::from_u128(0x98951333_b9cd_48b1_a0a3_ff40682d73f7);
+    // SAFETY: all zero is a valid block: integers, GUIDs and null (None) COM pointers.
     let mut init: APOInitSystemEffects2 = unsafe { std::mem::zeroed() };
     init.APOInit.cbSize = size_of::<APOInitSystemEffects2>() as u32;
     init.AudioProcessingMode = mode;
     let data = &init as *const APOInitSystemEffects2 as *const u8;
     let size = size_of::<APOInitSystemEffects2>() as u32;
-    assert_eq!(unsafe { processing_mode(size, data) }, Some(mode.to_u128()));
-    assert_eq!(unsafe { endpoint_guid_from_init(size, data, None) }, None);
-    assert_eq!(unsafe { processing_mode(20, data) }, None);
-    assert_eq!(unsafe { endpoint_guid_from_init(20, data, None) }, None);
-    assert_eq!(unsafe { processing_mode(size, std::ptr::null()) }, None);
+    // SAFETY: `data` points to `size` readable bytes of `init` (20 claims fewer), or is null.
+    unsafe {
+      assert_eq!(processing_mode(size, data), Some(mode.to_u128()));
+      assert_eq!(endpoint_guid_from_init(size, data, None), None);
+      assert_eq!(processing_mode(20, data), None);
+      assert_eq!(endpoint_guid_from_init(20, data, None), None);
+      assert_eq!(processing_mode(size, std::ptr::null()), None);
+    }
     assert_eq!(
       normalize_endpoint_guid("{0.0.0.00000000}.{42B05AAC-7B95-4CC8-8481-B940A20FE8BD}").as_deref(),
       Some("{42b05aac-7b95-4cc8-8481-b940a20fe8bd}")
@@ -2193,14 +2252,16 @@ mod tests {
 
   #[test]
   fn class_factory_exposes_all_apo_interfaces() {
+    // SAFETY: COM calls on live interfaces we hold.
     let apo: IAudioProcessingObject = unsafe { factory().CreateInstance(None) }.unwrap();
     apo.cast::<IAudioProcessingObjectRT>().unwrap();
     apo.cast::<IAudioProcessingObjectConfiguration>().unwrap();
     apo.cast::<IAudioSystemEffects>().unwrap();
     assert!(apo.cast::<IClassFactory>().is_err());
 
-    let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
+    // SAFETY: a live interface; the properties block holds the 4 IIDs it declares and is ours to free.
     unsafe {
+      let props = apo.GetRegistrationProperties().unwrap();
       assert_eq!((*props).clsid, CLSID_MIC_APO);
       assert_eq!((*props).u32NumAPOInterfaces, 4);
       let list = addr_of_mut!((*props).iidAPOInterfaceList) as *const GUID;
@@ -2214,6 +2275,7 @@ mod tests {
   fn aggregation_delegates_to_outer() {
     // Any COM object works as the outer; a class factory is the one we have at hand.
     let outer: IUnknown = factory().cast().unwrap();
+    // SAFETY: a COM call on live interfaces we hold.
     let inner: IUnknown = unsafe { factory().CreateInstance(&outer) }.unwrap();
     assert_ne!(inner.as_raw(), outer.as_raw());
 
@@ -2221,10 +2283,12 @@ mod tests {
     // QI through an APO interface goes to the outer object: it finds the outer's interface...
     assert!(apo.cast::<IClassFactory>().is_ok());
     // ...and asking aggregated for anything but IUnknown is refused.
+    // SAFETY: as above.
     let refused: Result<IAudioProcessingObject> = unsafe { factory().CreateInstance(&outer) };
     assert_eq!(refused.unwrap_err().code(), CLASS_E_NOAGGREGATION);
 
     let rt: IAudioProcessingObjectRT = inner.cast().unwrap();
+    // SAFETY: as above.
     assert_eq!(unsafe { rt.CalcOutputFrames(480) }, 480);
   }
 
@@ -2232,15 +2296,19 @@ mod tests {
   fn wrong_clsid_and_bad_calls_fail_without_crashing() {
     let mut raw = null_mut();
     let other = GUID::from_u128(1);
-    assert_eq!(unsafe { DllGetClassObject(&other, &IClassFactory::IID, &mut raw) }, CLASS_E_CLASSNOTAVAILABLE);
-    assert!(raw.is_null());
+    // SAFETY: valid in/out pointers, then COM calls on live interfaces we hold. The null connection
+    // arrays are the bad call under test: APOProcess must check them, not read them.
+    unsafe {
+      assert_eq!(DllGetClassObject(&other, &IClassFactory::IID, &mut raw), CLASS_E_CLASSNOTAVAILABLE);
+      assert!(raw.is_null());
 
-    let apo: IAudioProcessingObject = unsafe { factory().CreateInstance(None) }.unwrap();
-    let config = apo.cast::<IAudioProcessingObjectConfiguration>().unwrap();
-    assert_eq!(unsafe { config.UnlockForProcess() }.unwrap_err().code(), APOERR_ALREADY_UNLOCKED);
-    let rt = apo.cast::<IAudioProcessingObjectRT>().unwrap();
-    unsafe { rt.APOProcess(1, std::ptr::null(), 1, null_mut()) };
-    assert_eq!(unsafe { apo.GetInputChannelCount() }.unwrap(), 1);
+      let apo: IAudioProcessingObject = factory().CreateInstance(None).unwrap();
+      let config = apo.cast::<IAudioProcessingObjectConfiguration>().unwrap();
+      assert_eq!(config.UnlockForProcess().unwrap_err().code(), APOERR_ALREADY_UNLOCKED);
+      let rt = apo.cast::<IAudioProcessingObjectRT>().unwrap();
+      rt.APOProcess(1, std::ptr::null(), 1, null_mut());
+      assert_eq!(apo.GetInputChannelCount().unwrap(), 1);
+    }
   }
 
   fn double(buf: &mut [f32]) {
@@ -2249,9 +2317,11 @@ mod tests {
 
   fn factory() -> IClassFactory {
     let mut raw = null_mut();
-    let hr = unsafe { DllGetClassObject(&CLSID_MIC_APO, &IClassFactory::IID, &mut raw) };
-    assert!(hr.is_ok());
-    unsafe { IClassFactory::from_raw(raw) }
+    // SAFETY: valid in/out pointers; on success `raw` holds a factory reference that `from_raw` takes over.
+    unsafe {
+      assert!(DllGetClassObject(&CLSID_MIC_APO, &IClassFactory::IID, &mut raw).is_ok());
+      IClassFactory::from_raw(raw)
+    }
   }
 
   fn connection(buf: &mut [f32], frames: u32, flags: i32) -> APO_CONNECTION_PROPERTY {
