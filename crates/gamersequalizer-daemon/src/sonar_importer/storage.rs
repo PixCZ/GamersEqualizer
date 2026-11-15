@@ -3,6 +3,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Deleted and replaced profiles are moved here (recoverable), flat: "<name>[.<unix time>].json".
+pub const DELETED_DIR: &str = "_deleted";
+
 #[derive(Debug, Clone)]
 pub struct ProfileStorage {
   base_dir: PathBuf,
@@ -54,6 +57,22 @@ impl ProfileStorage {
       clean = "unnamed_profile".to_string();
     }
     clean
+  }
+
+  /// Moves a profile file to `DELETED_DIR` (recoverable). Returns where the file went.
+  pub fn move_to_deleted(&self, path: &Path) -> Result<PathBuf, String> {
+    let file_name = path.file_name().ok_or("bad profile path")?;
+    let dir = self.base_dir.join(DELETED_DIR);
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let mut target = dir.join(file_name);
+    if target.exists() {
+      // Keep older deleted copies: "<name>.json" -> "<name>.<unix time>.json".
+      let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+      target = dir.join(format!("{}.{stamp}.json", path.file_stem().unwrap_or_default().to_string_lossy()));
+    }
+    fs::rename(path, &target).map_err(|e| format!("could not move {}: {e}", path.display()))?;
+    log::info!("[Profiles] profile moved to {}", target.display());
+    Ok(target)
   }
 
   /// Save profile as JSON

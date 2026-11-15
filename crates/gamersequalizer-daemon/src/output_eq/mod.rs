@@ -51,8 +51,6 @@ const LOUDNESS_BAND_HZ: (f32, f32) = (200.0, 6000.0);
 /// handles them); a stronger boost is still partly compensated.
 const MATCH_MAX_PEAK_DB: f32 = 3.0;
 const PREAMP_RANGE_DB: (f32, f32) = (-30.0, 12.0);
-/// Deleted profiles are moved here (recoverable), not removed.
-const DELETED_DIR: &str = "_deleted";
 
 /// Which layer of the output EQ a profile / edit belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,7 +442,7 @@ impl OutputEq {
   pub fn delete_headphone_profile(&mut self, name: &str, shm: Option<&ShmHeader>) -> Result<PathBuf, String> {
     let path =
       self.storage.get_headphones_directory().join(format!("{}.json", ProfileStorage::sanitize_filename(name)));
-    let moved = self.move_to_deleted(&path)?;
+    let moved = self.storage.move_to_deleted(&path)?;
     self.headphone_profiles.retain(|p| p.name != name);
     self.settings.headphone_by_device.retain(|_, p| p != name);
     self.save_settings(shm);
@@ -454,7 +452,7 @@ impl OutputEq {
   /// Same for a game profile; also drops bindings and the fallback that point to it.
   pub fn delete_game_profile(&mut self, name: &str, shm: Option<&ShmHeader>) -> Result<PathBuf, String> {
     let dir = self.storage.get_vad_directory(VadType::Game);
-    let moved = self.move_to_deleted(&dir.join(format!("{}.json", ProfileStorage::sanitize_filename(name))))?;
+    let moved = self.storage.move_to_deleted(&dir.join(format!("{}.json", ProfileStorage::sanitize_filename(name))))?;
     self.game_profiles.retain(|p| p.name != name);
     self.settings.bindings.retain(|_, p| p != name);
     if self.settings.fallback_game_profile.as_deref() == Some(name) {
@@ -472,7 +470,7 @@ impl OutputEq {
       _ => return Err(format!("{bus:?} has no profiles")),
     };
     let dir = self.storage.get_vad_directory(vad);
-    let moved = self.move_to_deleted(&dir.join(format!("{}.json", ProfileStorage::sanitize_filename(name))))?;
+    let moved = self.storage.move_to_deleted(&dir.join(format!("{}.json", ProfileStorage::sanitize_filename(name))))?;
     let (list, selected) = match bus {
       StreamBus::Chat => (&mut self.chat_profiles, &mut self.settings.chat_profile),
       _ => (&mut self.media_profiles, &mut self.settings.media_profile),
@@ -704,21 +702,6 @@ impl OutputEq {
     })
   }
 
-  fn move_to_deleted(&self, path: &std::path::Path) -> Result<PathBuf, String> {
-    let file_name = path.file_name().ok_or("bad profile path")?;
-    let dir = self.storage.base_dir().join(DELETED_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    let mut target = dir.join(file_name);
-    if target.exists() {
-      // Keep older deleted copies: "<name>.json" -> "<name>.<unix time>.json".
-      let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-      target = dir.join(format!("{}.{stamp}.json", path.file_stem().unwrap_or_default().to_string_lossy()));
-    }
-    std::fs::rename(path, &target).map_err(|e| format!("could not move {}: {e}", path.display()))?;
-    info!("[OutputEq] profile moved to {}", target.display());
-    Ok(target)
-  }
-
   /// Curves + the volume change of headphone + game.
   fn recompute(&mut self) {
     let s = &self.settings;
@@ -802,6 +785,7 @@ fn average_gain(result: &CombinedEngineResult) -> f32 {
 #[allow(clippy::unwrap_used)]
 mod tests {
   use super::*;
+  use crate::sonar_importer::DELETED_DIR;
   use gamersequalizer_common::profile::FilterType;
 
   fn header() -> Box<ShmHeader> {

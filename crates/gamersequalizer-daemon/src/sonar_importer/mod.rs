@@ -6,7 +6,7 @@ pub mod winsqlite;
 
 pub use converter::convert_sonar_config;
 pub use reader::{SonarDbReader, DEFAULT_SONAR_DB_PATH};
-pub use storage::ProfileStorage;
+pub use storage::{ProfileStorage, DELETED_DIR};
 
 use crate::output_eq::settings::{write_atomic, OutputEqSettings, SETTINGS_FILE};
 use gamersequalizer_common::profile::ParametricProfile;
@@ -17,8 +17,6 @@ use std::path::Path;
 /// Sonar profiles this app has seen ("game/name"), so a later sync adds only new ones and
 /// never brings back one the user deleted or renamed.
 pub const KNOWN_FILE: &str = "sonar_known.json";
-/// Where `ProfileStorage::move_to_deleted` puts deleted profiles (flat, "<name>[.<time>].json").
-const DELETED_DIR: &str = "_deleted";
 
 pub struct ImportStats {
   pub total_imported: usize,
