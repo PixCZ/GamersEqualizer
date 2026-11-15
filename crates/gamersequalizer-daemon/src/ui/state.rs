@@ -3,7 +3,6 @@ use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::{collapse_slopes, slots_used, ParametricProfile, VadType};
-use gamersequalizer_common::shm::ShmHeader as ShmHeaderT;
 use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout, APO_SHM_NAME, SHM_NAME};
 use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
@@ -265,7 +264,7 @@ impl AppState {
   }
 
   /// Run `f` on the output EQ engine with the shared-memory header (both borrowed at once).
-  pub fn output_eq_do<R>(&mut self, f: impl FnOnce(&mut OutputEq, Option<&ShmHeaderT>) -> R) -> R {
+  pub fn output_eq_do<R>(&mut self, f: impl FnOnce(&mut OutputEq, Option<&ShmHeader>) -> R) -> R {
     // SAFETY: the mapping lives as long as self (unmapped in Drop); the header is only
     // accessed through atomics, so sharing it with the engine borrow is sound.
     let shm = self.shm_ptr.map(|p| unsafe { &(*p.as_ptr()).header });
@@ -538,14 +537,6 @@ impl AppState {
       });
     }
     t
-  }
-
-  pub fn get_erle_db(&self) -> f32 {
-    if let Some(header) = self.shm_header() {
-      (header.erle_db_times_10.load(Ordering::Relaxed) as f32) / 10.0
-    } else {
-      0.0
-    }
   }
 }
 

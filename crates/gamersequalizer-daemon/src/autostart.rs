@@ -84,13 +84,3 @@ pub fn repoint() {
     }
   }
 }
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn test_autostart_query() {
-    let _ = is_autostart_enabled();
-  }
-}

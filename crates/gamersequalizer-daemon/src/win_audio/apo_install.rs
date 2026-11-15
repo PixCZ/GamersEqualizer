@@ -138,14 +138,13 @@ pub fn check(capture_id: Option<&str>) -> ApoCheck {
 
 /// `endpoint_id`: full endpoint id of the microphone (Capture) or output (Render) in use.
 pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
-  let capture_id = endpoint_id;
   let installed = installed_dll();
   let bundled = bundled_dll();
   let installed_stamp = installed.as_deref().and_then(file_stamp);
   let bundled_stamp = bundled.as_deref().and_then(file_stamp);
-  let endpoint_guid = capture_id.and_then(endpoint_guid_of);
+  let endpoint_guid = endpoint_id.and_then(endpoint_guid_of);
 
-  let dll_outdated = installed_stamp.zip(bundled_stamp).is_some_and(|((_, installed_at), (_, b))| b > installed_at);
+  let dll_outdated = installed_stamp.zip(bundled_stamp).is_some_and(|(installed_at, b)| b > installed_at);
   // The app itself is installed with its effects: a copy run from elsewhere (the unzipped
   // folder) that is newer than the installed one, or the first with this feature, updates too.
   let app = app_to_install();
@@ -163,7 +162,7 @@ pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
   // What the "outdated" message shows: the DLL builds, or the app's when only that differs.
   let (installed_at, bundled_at) = match app.filter(|_| !dll_outdated) {
     Some((installed_app, this_app)) => (installed_app, Some(this_app)),
-    None => (installed_stamp.map(|(_, t)| t), bundled_stamp.map(|(_, t)| t)),
+    None => (installed_stamp, bundled_stamp),
   };
 
   ApoCheck {
@@ -186,8 +185,8 @@ pub fn handover_target() -> Option<PathBuf> {
   if same_path(&this, &installed) || in_dev_tree(this.parent()?) {
     return None;
   }
-  let (_, installed_at) = file_stamp(&installed)?;
-  let (_, this_at) = file_stamp(&this)?;
+  let installed_at = file_stamp(&installed)?;
+  let this_at = file_stamp(&this)?;
   (installed_at >= this_at).then_some(installed)
 }
 
@@ -206,8 +205,8 @@ fn app_to_install() -> Option<(Option<SystemTime>, SystemTime)> {
   if same_path(&this, &target) || in_dev_tree(this.parent()?) {
     return None;
   }
-  let (_, this_at) = file_stamp(&this)?;
-  let installed_at = file_stamp(&target).map(|(_, t)| t);
+  let this_at = file_stamp(&this)?;
+  let installed_at = file_stamp(&target);
   installed_at.is_none_or(|t| this_at > t).then_some((installed_at, this_at))
 }
 
@@ -371,7 +370,7 @@ pub fn describe_system() -> String {
   let protected =
     read_dword_value(AUDIO_KEY, "DisableProtectedAudioDG").map_or_else(|| "-".to_string(), |v| v.to_string());
   let installed = installed_dll();
-  let dll = installed.as_deref().and_then(file_stamp).map_or_else(|| "missing".to_string(), |(_, t)| format_time(t));
+  let dll = installed.as_deref().and_then(file_stamp).map_or_else(|| "missing".to_string(), format_time);
   // Still marked as downloaded: Smart App Control / SmartScreen may refuse it.
   let zone = installed.as_deref().map_or("-", |p| if zone_marked(p) { "yes" } else { "no" });
   format!(
@@ -835,9 +834,8 @@ fn exe_dir() -> Option<PathBuf> {
   std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
 }
 
-fn file_stamp(path: &Path) -> Option<(u64, SystemTime)> {
-  let meta = std::fs::metadata(path).ok()?;
-  Some((meta.len(), meta.modified().ok()?))
+fn file_stamp(path: &Path) -> Option<SystemTime> {
+  std::fs::metadata(path).ok()?.modified().ok()
 }
 
 fn format_time(t: SystemTime) -> String {

@@ -53,8 +53,6 @@ const LEVEL_RAMP_SECONDS: f32 = 0.010;
 /// Band edges of the expander: below 500 Hz, 500 Hz - 2 kHz, 2 - 5 kHz, above 5 kHz.
 const BAND_EDGES_HZ: [f32; 3] = [500.0, 2_000.0, 5_000.0];
 const BANDS: usize = BAND_EDGES_HZ.len() + 1;
-/// Low cut of the one-band detector: rumble must not hold the gate open.
-const WIDE_DETECTOR_LOW_CUT_HZ: f32 = 100.0;
 /// The level, the noise floor and the gain target are updated once per this many samples.
 const CONTROL_SAMPLES: u32 = 16;
 /// The expander filters run on chunks of this many samples (scratch buffer size).
@@ -223,7 +221,7 @@ enum ReaderState {
   Running,
 }
 
-/// Downward expander in `BANDS` bands, or in one. Each band measures its own noise floor in
+/// Downward expander in `BANDS` bands. Each band measures its own noise floor in
 /// the pauses and is turned down whenever nothing louder is in it.
 ///
 /// The bands are differences of low-passes (band k = LP k - LP k-1, the last one input - LP),
@@ -233,10 +231,7 @@ enum ReaderState {
 pub struct BandExpander {
   split: [BiquadCascade; BANDS - 1],
   detect: [BiquadCascade; BANDS],
-  wide: BiquadCascade,
   bands: [BandState; BANDS],
-  /// One gain for all bands, from the wide detector (a plain expander).
-  single_band: bool,
   phase: u32,
   rates: ControlRates,
   attack: f32,
@@ -246,7 +241,6 @@ pub struct BandExpander {
   range_db: f32,
   split_buf: [[f32; CHUNK]; BANDS - 1],
   detect_buf: [[f32; CHUNK]; BANDS],
-  wide_buf: [f32; CHUNK],
 }
 
 /// What `BandState::control` needs, per control tick.
@@ -712,9 +706,7 @@ impl BandExpander {
         let high = edge(k).map(|f| cut(FilterType::LowPass, f, 12));
         cascade(&low.into_iter().chain(high).collect::<Vec<_>>())
       }),
-      wide: cascade(&[cut(FilterType::HighPass, WIDE_DETECTOR_LOW_CUT_HZ, 12)]),
       bands: [BandState::new(); BANDS],
-      single_band: false,
       phase: 0,
       rates: ControlRates {
         env_release: (-tick / ENV_RELEASE_SECONDS).exp(),
@@ -729,7 +721,6 @@ impl BandExpander {
       range_db: 18.0,
       split_buf: [[0.0; CHUNK]; BANDS - 1],
       detect_buf: [[0.0; CHUNK]; BANDS],
-      wide_buf: [0.0; CHUNK],
     }
   }
 
@@ -737,11 +728,6 @@ impl BandExpander {
   pub fn set(&mut self, margin_db: f32, range_db: f32) {
     self.margin = margin_db.clamp(GATE_MARGIN_DB_MIN, GATE_MARGIN_DB_MAX);
     self.range_db = range_db.clamp(0.0, GATE_RANGE_DB_MAX);
-  }
-
-  /// One gain for the whole signal instead of one per band (for comparing the two).
-  pub fn set_single_band(&mut self, single_band: bool) {
-    self.single_band = single_band;
   }
 
   /// Gain of the most closed band right now, dB (0 = all open).
@@ -754,7 +740,6 @@ impl BandExpander {
   /// memory and closes the bands. The noise floors stay: it is still the same microphone.
   pub fn reset(&mut self) {
     self.split.iter_mut().chain(self.detect.iter_mut()).for_each(BiquadCascade::reset_state);
-    self.wide.reset_state();
     for band in self.bands.iter_mut() {
       (band.peak, band.env, band.target, band.gain, band.hold) = (0.0, 0.0, 0.0, 0.0, 0);
     }
@@ -776,11 +761,7 @@ impl BandExpander {
       }
     };
     self.split.iter_mut().zip(self.split_buf.iter_mut()).for_each(|(c, b)| filter(c, b));
-    if self.single_band {
-      filter(&mut self.wide, &mut self.wide_buf);
-    } else {
-      self.detect.iter_mut().zip(self.detect_buf.iter_mut()).for_each(|(c, b)| filter(c, b));
-    }
+    self.detect.iter_mut().zip(self.detect_buf.iter_mut()).for_each(|(c, b)| filter(c, b));
 
     let at = |buf: &[f32; CHUNK], i: usize| buf.get(i).copied().unwrap_or(0.0);
     for (i, sample) in chunk.iter_mut().enumerate() {
@@ -797,8 +778,7 @@ impl BandExpander {
         let upper = self.split_buf.get(k).map_or(x, |b| at(b, i));
         let signal = upper - below;
         below = upper;
-        let level =
-          if self.single_band { at(&self.wide_buf, i) } else { self.detect_buf.get(k).map_or(0.0, |b| at(b, i)) };
+        let level = self.detect_buf.get(k).map_or(0.0, |b| at(b, i));
         band.peak = band.peak.max(level.abs());
         if tick {
           band.control(&self.rates, self.margin, self.range_db);
@@ -900,15 +880,6 @@ impl SidetoneChain {
   /// Switched off or muted, and the level has reached zero: nothing to write to the ring.
   pub fn is_silent(&self) -> bool {
     self.level <= 0.0 && self.level_goal <= 0.0
-  }
-
-  /// Gain of the most closed expander band, dB (0 while the expander is not the mode).
-  pub fn gate_gain_db(&self) -> f32 {
-    if self.noise_mode == NoiseMode::Expander {
-      self.expander.gain_db()
-    } else {
-      0.0
-    }
   }
 
   pub fn expander_mut(&mut self) -> &mut BandExpander {
@@ -1171,16 +1142,13 @@ mod tests {
 
   #[test]
   fn expander_turns_steady_noise_down_by_its_depth() {
-    for single in [false, true] {
-      let mut expander = BandExpander::new(RATE as f32);
-      expander.set(10.0, 18.0);
-      expander.set_single_band(single);
-      let input = noise(6 * RATE as usize, 0.001, 3);
-      let mut out = input.clone();
-      process_in_blocks(&mut out, |b| expander.process(b));
-      let cut = db(rms(&out[4 * RATE as usize..]) / rms(&input[4 * RATE as usize..]));
-      assert!((-19.0..=-16.0).contains(&cut), "single={single}: noise changed by {cut:.1} dB");
-    }
+    let mut expander = BandExpander::new(RATE as f32);
+    expander.set(10.0, 18.0);
+    let input = noise(6 * RATE as usize, 0.001, 3);
+    let mut out = input.clone();
+    process_in_blocks(&mut out, |b| expander.process(b));
+    let cut = db(rms(&out[4 * RATE as usize..]) / rms(&input[4 * RATE as usize..]));
+    assert!((-19.0..=-16.0).contains(&cut), "noise changed by {cut:.1} dB");
   }
 
   #[test]
@@ -1222,7 +1190,7 @@ mod tests {
   }
 
   #[test]
-  fn expander_takes_hiss_from_under_a_low_tone_only_in_bands() {
+  fn expander_takes_hiss_from_under_a_low_tone() {
     // Hiss above 6 kHz at -60 dBFS under a 200 Hz tone at -20 dBFS.
     let len = 6 * RATE as usize;
     let mut hiss = noise(len, 0.004, 9);
@@ -1230,22 +1198,17 @@ mod tests {
     let tone: Vec<f32> = (0..len).map(|i| 0.1 * (2.0 * PI * 200.0 * i as f32 / RATE as f32).sin()).collect();
     let input: Vec<f32> = hiss.iter().zip(&tone).map(|(h, t)| h + t).collect();
     let tail = 4 * RATE as usize;
-    let hiss_left = |single: bool| {
-      let mut expander = BandExpander::new(RATE as f32);
-      expander.set_single_band(single);
-      let mut out = input.clone();
-      process_in_blocks(&mut out, |b| expander.process(b));
-      let tone_change = db(rms(&out[tail..]) / rms(&input[tail..]));
-      // The bands overlap gently: a closed neighbour takes a little of the tone with it.
-      assert!(tone_change.abs() < 1.0, "single={single}: tone changed by {tone_change:.2} dB");
-      let (mut a, mut b) = (out, input.clone());
-      high_pass(&mut a, 4_000.0);
-      high_pass(&mut b, 4_000.0);
-      db(rms(&a[tail..]) / rms(&b[tail..]))
-    };
-    let (bands, single) = (hiss_left(false), hiss_left(true));
-    assert!(bands < -12.0, "bands: hiss under the tone changed by {bands:.1} dB");
-    assert!(single > -1.0, "one band: the tone holds it open ({single:.1} dB)");
+    let mut expander = BandExpander::new(RATE as f32);
+    let mut out = input.clone();
+    process_in_blocks(&mut out, |b| expander.process(b));
+    let tone_change = db(rms(&out[tail..]) / rms(&input[tail..]));
+    // The bands overlap gently: a closed neighbour takes a little of the tone with it.
+    assert!(tone_change.abs() < 1.0, "tone changed by {tone_change:.2} dB");
+    let (mut a, mut b) = (out, input.clone());
+    high_pass(&mut a, 4_000.0);
+    high_pass(&mut b, 4_000.0);
+    let hiss = db(rms(&a[tail..]) / rms(&b[tail..]));
+    assert!(hiss < -12.0, "hiss under the tone changed by {hiss:.1} dB");
   }
 
   #[test]

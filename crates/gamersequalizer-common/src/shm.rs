@@ -1201,10 +1201,6 @@ impl<'a> ShmRingBuffer<'a> {
     &self.layout.header
   }
 
-  pub fn header_mut(&mut self) -> &mut ShmHeader {
-    &mut self.layout.header
-  }
-
   fn write_slot(&mut self, pos: u32, frame: StereoFrame) {
     let idx = pos as usize % RING_BUFFER_CAPACITY;
     if let Some(slot) = self.layout.buffer.get_mut(idx) {

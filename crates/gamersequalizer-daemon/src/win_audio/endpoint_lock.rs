@@ -376,36 +376,3 @@ pub(crate) unsafe fn get_endpoint_info(
 
   Ok(AudioEndpointInfo { id, name, is_default })
 }
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn test_enumerate_devices() {
-    let state = Arc::new(EndpointLockState::default());
-    if let Ok(manager) = EndpointLockManager::new(state) {
-      let devices = manager.enumerate_playback_devices();
-      println!("Found {} playback devices:", devices.len());
-      for d in devices {
-        println!("  - [{}] {} (default: {})", d.id, d.name, d.is_default);
-        // Query endpoint volume
-        unsafe {
-          let wide: Vec<u16> = d.id.encode_utf16().chain(std::iter::once(0)).collect();
-          if let Ok(dev) = manager.enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())) {
-            if let Ok(vol) = dev.Activate::<windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume>(
-              windows::Win32::System::Com::CLSCTX_ALL,
-              None,
-            ) {
-              let level = vol.GetMasterVolumeLevelScalar().unwrap_or(0.0);
-              let muted = vol.GetMute().map(|m| m.as_bool()).unwrap_or(false);
-              println!("      -> Volume: {:.1}%, Muted: {}", level * 100.0, muted);
-            }
-          }
-        }
-      }
-      let def_id = manager.get_default_output_id();
-      println!("Default output ID from get_default_output_id: {:?}", def_id);
-    }
-  }
-}

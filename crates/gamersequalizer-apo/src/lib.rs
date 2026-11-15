@@ -94,8 +94,6 @@ pub const CLSID_STREAM_APO: GUID = GUID::from_u128(0x3c9a5e21_7d4f_4b8e_a1c6_5f2
 
 /// Sidetone telemetry (peak, gate, mode) is published every this many blocks.
 const SIDETONE_TELEMETRY_BLOCKS: u32 = 10;
-/// Numbers the sidetone taps of this process (ring owner = process id + this).
-static SIDETONE_INSTANCE: AtomicU32 = AtomicU32::new(0);
 
 /// Global mapping DACL: full access for SYSTEM, LOCAL SERVICE (audiodg) and Administrators;
 /// interactively logged-on users (the daemon) only map read/write (`0x6` =
@@ -596,7 +594,8 @@ unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *co
   if st.locked.load(Ordering::Acquire) {
     return APOERR_APO_LOCKED;
   }
-  if let Some(guid) = endpoint_guid_from_init(size, data) {
+  let device_id = endpoint_device_id(size, data);
+  if let Some(guid) = endpoint_guid_from_init(size, data, device_id.as_deref()) {
     let _ = st.endpoint_tag.set(guid);
   }
   let mode = processing_mode(size, data);
@@ -607,7 +606,7 @@ unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *co
   // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
   let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
   note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
-  if let Some(hash) = endpoint_hash(size, data) {
+  if let Some(hash) = device_id.as_deref().map(device_hash) {
     st.endpoint.store(hash, Ordering::Relaxed);
   }
   S_OK
@@ -1232,7 +1231,7 @@ impl MicProcessor {
       }
       Box::new(MicProcessor {
         plugin,
-        sidetone: Box::new(SidetoneTap::new(rate)),
+        sidetone: Box::new(SidetoneTap::new(rate, instance_id)),
         mono_in: vec![0.0; 4096],
         mono_out: vec![0.0; 4096],
         bridge,
@@ -1368,14 +1367,15 @@ impl Drop for MicProcessor {
 }
 
 impl SidetoneTap {
-  fn new(rate: u32) -> Self {
+  /// `instance`: the APO's `instance_id`, unique in this process (ring owner = process id + it).
+  fn new(rate: u32, instance: u32) -> Self {
     Self {
       chain: Box::new(SidetoneChain::new(rate as f32)),
       eq_version: None,
       denoiser: (rate == sidetone_denoise::SAMPLE_RATE).then(|| Box::new(SidetoneDenoiser::new())),
       rate,
       endpoint_hash: 0,
-      instance: SIDETONE_INSTANCE.fetch_add(1, Ordering::Relaxed).wrapping_add(1),
+      instance,
       owner: None,
       watch: OwnerWatch::default(),
       // ~85 ms at 48 kHz; grows only if the engine sends longer blocks.
@@ -1572,11 +1572,11 @@ fn frames_to_hns(frames: u64, rate: u32) -> i64 {
 
 /// Endpoint `{guid}` (lowercased) from the init block. Reads `pAPOEndpointProperties`
 /// (`PKEY_AudioEndpoint_GUID`; same offset in every APOInitSystemEffects version), falling back
-/// to the device collection (`endpoint_device_id`).
+/// to `device_id`, the block's device collection entry (`endpoint_device_id`).
 ///
 /// # Safety
 /// `data` must point to `size` readable bytes or be null (audio engine contract).
-unsafe fn endpoint_guid_from_init(size: u32, data: *const u8) -> Option<String> {
+unsafe fn endpoint_guid_from_init(size: u32, data: *const u8, device_id: Option<&str>) -> Option<String> {
   if data.is_null() || (size as usize) < size_of::<APOInitSystemEffects>() {
     return None;
   }
@@ -1598,7 +1598,7 @@ unsafe fn endpoint_guid_from_init(size: u32, data: *const u8) -> Option<String> 
       }
     }
   }
-  endpoint_device_id(size, data).and_then(|id| normalize_endpoint_guid(&id))
+  device_id.and_then(normalize_endpoint_guid)
 }
 
 fn normalize_endpoint_guid(raw: &str) -> Option<String> {
@@ -1622,14 +1622,6 @@ unsafe fn processing_mode(size: u32, data: *const u8) -> Option<u128> {
     return None;
   }
   Some(std::ptr::addr_of!((*init).AudioProcessingMode).read_unaligned().to_u128())
-}
-
-/// `device_hash` of the endpoint the engine creates this APO for (`endpoint_device_id`).
-///
-/// # Safety
-/// `data` must point to `size` readable bytes or be null (audio engine contract).
-unsafe fn endpoint_hash(size: u32, data: *const u8) -> Option<u32> {
-  endpoint_device_id(size, data).map(|id| device_hash(&id))
 }
 
 /// Device id of the endpoint the engine creates this APO for: the last device in the init
@@ -2081,30 +2073,18 @@ mod tests {
   }
 
   #[test]
-  fn output_class_registers_its_own_clsid() {
-    let mut raw = null_mut();
-    let hr = unsafe { DllGetClassObject(&CLSID_OUTPUT_EQ_APO, &IClassFactory::IID, &mut raw) };
-    assert!(hr.is_ok());
-    let factory = unsafe { IClassFactory::from_raw(raw) };
-    let apo: IAudioProcessingObject = unsafe { factory.CreateInstance(None) }.unwrap();
-    let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
-    unsafe {
-      assert_eq!((*props).clsid, CLSID_OUTPUT_EQ_APO);
-      CoTaskMemFree(Some(props as *const c_void));
-    }
-  }
-
-  #[test]
-  fn stream_class_registers_its_own_clsid() {
-    let mut raw = null_mut();
-    let hr = unsafe { DllGetClassObject(&CLSID_STREAM_APO, &IClassFactory::IID, &mut raw) };
-    assert!(hr.is_ok());
-    let factory = unsafe { IClassFactory::from_raw(raw) };
-    let apo: IAudioProcessingObject = unsafe { factory.CreateInstance(None) }.unwrap();
-    let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
-    unsafe {
-      assert_eq!((*props).clsid, CLSID_STREAM_APO);
-      CoTaskMemFree(Some(props as *const c_void));
+  fn output_and_stream_classes_register_their_own_clsid() {
+    for clsid in [CLSID_OUTPUT_EQ_APO, CLSID_STREAM_APO] {
+      let mut raw = null_mut();
+      let hr = unsafe { DllGetClassObject(&clsid, &IClassFactory::IID, &mut raw) };
+      assert!(hr.is_ok());
+      let factory = unsafe { IClassFactory::from_raw(raw) };
+      let apo: IAudioProcessingObject = unsafe { factory.CreateInstance(None) }.unwrap();
+      let props = unsafe { apo.GetRegistrationProperties() }.unwrap();
+      unsafe {
+        assert_eq!((*props).clsid, clsid);
+        CoTaskMemFree(Some(props as *const c_void));
+      }
     }
   }
 
@@ -2134,9 +2114,9 @@ mod tests {
     let data = &init as *const APOInitSystemEffects2 as *const u8;
     let size = size_of::<APOInitSystemEffects2>() as u32;
     assert_eq!(unsafe { processing_mode(size, data) }, Some(mode.to_u128()));
-    assert_eq!(unsafe { endpoint_guid_from_init(size, data) }, None);
+    assert_eq!(unsafe { endpoint_guid_from_init(size, data, None) }, None);
     assert_eq!(unsafe { processing_mode(20, data) }, None);
-    assert_eq!(unsafe { endpoint_guid_from_init(20, data) }, None);
+    assert_eq!(unsafe { endpoint_guid_from_init(20, data, None) }, None);
     assert_eq!(unsafe { processing_mode(size, std::ptr::null()) }, None);
     assert_eq!(
       normalize_endpoint_guid("{0.0.0.00000000}.{42B05AAC-7B95-4CC8-8481-B940A20FE8BD}").as_deref(),
@@ -2235,7 +2215,7 @@ mod tests {
     h.sidetone_mic_hash.store(MIC, Ordering::Relaxed);
     h.sidetone_output_hash.store(OUT, Ordering::Relaxed);
 
-    let mut tap = SidetoneTap::new(48_000);
+    let mut tap = SidetoneTap::new(48_000, 1);
     tap.endpoint_hash = MIC;
     let mut output = OutputProcessor::create(Some(shm), 48_000.0, 2).unwrap();
     output.sidetone_endpoint = OUT;
@@ -2285,12 +2265,12 @@ mod tests {
   }
 
   #[test]
-  fn endpoint_hash_rejects_blocks_it_does_not_know() {
+  fn endpoint_device_id_rejects_blocks_it_does_not_know() {
     // SAFETY: null, and a buffer of the stated size.
     unsafe {
-      assert_eq!(endpoint_hash(0, std::ptr::null()), None);
+      assert_eq!(endpoint_device_id(0, std::ptr::null()), None);
       let short = [0u8; 8];
-      assert_eq!(endpoint_hash(short.len() as u32, short.as_ptr()), None);
+      assert_eq!(endpoint_device_id(short.len() as u32, short.as_ptr()), None);
       // Right size, but cbSize says another layout (e.g. APOInitSystemEffects3). The collection
       // slot holds a pointer that must never be called: the guard has to stop before it.
       let mut init: APOInitSystemEffects2 = std::mem::zeroed();
@@ -2299,12 +2279,12 @@ mod tests {
       addr_of_mut!(init.pDeviceCollection).cast::<*mut c_void>().write_unaligned(poison);
       let data = &init as *const _ as *const u8;
       let size = size_of::<APOInitSystemEffects2>() as u32;
-      assert_eq!(endpoint_hash(size, data), None);
-      assert_eq!(endpoint_guid_from_init(size, data), None, "no endpoint properties, collection refused");
+      assert_eq!(endpoint_device_id(size, data), None);
+      assert_eq!(endpoint_guid_from_init(size, data, None), None, "no endpoint properties, no device id");
       addr_of_mut!(init.pDeviceCollection).cast::<*mut c_void>().write_unaligned(std::ptr::null_mut());
       // Known layout, no device collection.
       init.APOInit.cbSize = size_of::<APOInitSystemEffects2>() as u32;
-      assert_eq!(endpoint_hash(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);
+      assert_eq!(endpoint_device_id(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);
     }
   }
 }

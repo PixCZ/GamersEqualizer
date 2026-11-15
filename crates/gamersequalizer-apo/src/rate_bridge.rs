@@ -9,6 +9,7 @@
 //! Real-time safe in steady state: all buffers are preallocated for blocks up to
 //! `PREALLOC_FRAMES`; a larger engine block grows them once (allocation in the audio thread).
 
+use gamersequalizer_common::shm::REF_SAMPLE_RATE;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
   Async, FixedAsync, ResampleError, Resampler, ResamplerConstructionError, SincInterpolationParameters,
@@ -19,8 +20,6 @@ use rubato::{
 // Constants
 // ---------------------------------------------------------------------------------------
 
-/// Rate the chain runs at (the reference ring's rate).
-pub const CHAIN_RATE: u32 = 48_000;
 /// Chunk length fed to each resampler. Shorter = less latency, more per-call overhead.
 const CHUNK_MS: u32 = 2;
 const SINC_LEN: usize = 64;
@@ -37,7 +36,7 @@ const HNS_PER_SEC: u64 = 10_000_000;
 // Types
 // ---------------------------------------------------------------------------------------
 
-/// Mono resampling sandwich around a chain that only runs at `CHAIN_RATE`.
+/// Mono resampling sandwich around a chain that only runs at `REF_SAMPLE_RATE`.
 pub struct RateBridge {
   device_rate: u32,
   up: Stage,
@@ -72,18 +71,18 @@ struct Stage {
 // ---------------------------------------------------------------------------------------
 
 impl RateBridge {
-  /// None at `CHAIN_RATE` (no bridge needed) or outside the supported range.
+  /// None at `REF_SAMPLE_RATE` (no bridge needed) or outside the supported range.
   pub fn for_rate(device_rate: u32) -> Option<Result<Self, ResamplerConstructionError>> {
-    (device_rate != CHAIN_RATE && (MIN_RATE..=MAX_RATE).contains(&device_rate)).then(|| Self::new(device_rate))
+    (device_rate != REF_SAMPLE_RATE && (MIN_RATE..=MAX_RATE).contains(&device_rate)).then(|| Self::new(device_rate))
   }
 
   pub fn new(device_rate: u32) -> Result<Self, ResamplerConstructionError> {
-    let up = Stage::new(device_rate, CHAIN_RATE)?;
-    let down = Stage::new(CHAIN_RATE, device_rate)?;
+    let up = Stage::new(device_rate, REF_SAMPLE_RATE)?;
+    let down = Stage::new(REF_SAMPLE_RATE, device_rate)?;
     // Worst case short of output: a device chunk stuck in `up`, a 48 kHz chunk stuck in
     // `down`, the frames each sinc filter withholds at start-up (its delay), plus rounding of
     // the fractional resampler positions. 48 kHz counts are converted to device frames.
-    let to_device = |frames: usize| (frames as u64 * device_rate as u64).div_ceil(CHAIN_RATE as u64) as usize;
+    let to_device = |frames: usize| (frames as u64 * device_rate as u64).div_ceil(REF_SAMPLE_RATE as u64) as usize;
     let prime = up.chunk + to_device(down.chunk + up.resampler.output_delay()) + down.resampler.output_delay() + 2;
     let mut out_fifo = Vec::with_capacity(2 * prime + PREALLOC_FRAMES);
     out_fifo.resize(prime, 0.0);

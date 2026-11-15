@@ -4,7 +4,7 @@
 //! the app without the app going online: it says where to click, finds the downloaded file
 //! and checks it before saving.
 
-use super::eq_editor::{band_editor, on_off_button, response_plot};
+use super::eq_editor::{band_editor, response_plot};
 use super::state::{AppState, OutputLayer};
 use super::theme::{self, icons, Severity};
 use crate::i18n::{tr, trf};
@@ -160,7 +160,7 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
 fn my_headphones_row(ui: &mut Ui, state: &mut AppState) {
   ui.horizontal_wrapped(|ui| {
     let on = state.output_eq.settings.headphone_enabled;
-    if on_off_button(ui, on, tr("Headphone EQ")) {
+    if theme::toggle_labeled(ui, on, tr("Headphone EQ")) {
       state.output_eq.settings.headphone_enabled = !on;
       state.output_eq_do(|eq, shm| eq.save_settings(shm));
     }

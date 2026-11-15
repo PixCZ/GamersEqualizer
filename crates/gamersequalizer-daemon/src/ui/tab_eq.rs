@@ -1,7 +1,7 @@
 //! Game tab (game profile with auto-detection, on top of the headphone correction) and the
 //! Chat / Media tabs.
 
-use super::eq_editor::{band_editor, curves_plot, on_off_button, profile_picker};
+use super::eq_editor::{band_editor, curves_plot, profile_picker};
 use super::state::{ActiveTab, AppState, OutputLayer};
 use super::theme::{self, icons, Severity};
 use crate::i18n::{tk, tr, trf};
@@ -56,7 +56,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal_wrapped(|ui| {
       let s = state.output_eq.settings.clone();
       let mut next = s.clone();
-      if on_off_button(ui, s.game_enabled, tr("Game EQ")) {
+      if theme::toggle_labeled(ui, s.game_enabled, tr("Game EQ")) {
         next.game_enabled = !s.game_enabled;
       }
       ui.add_space(16.0);
@@ -352,7 +352,7 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
   theme::card(ui, |ui| {
     ui.horizontal_wrapped(|ui| {
       let on = state.output_eq.bus_enabled(bus);
-      if on_off_button(ui, on, title) {
+      if theme::toggle_labeled(ui, on, title) {
         match bus {
           StreamBus::Chat => state.output_eq.settings.chat_enabled = !on,
           _ => state.output_eq.settings.media_enabled = !on,

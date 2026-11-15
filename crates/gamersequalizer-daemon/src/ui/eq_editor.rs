@@ -106,8 +106,3 @@ pub fn profile_picker(
     });
   picked
 }
-
-/// Layer switch: "<label>  [toggle]  On/Off". Returns true when clicked.
-pub fn on_off_button(ui: &mut Ui, on: bool, label: &str) -> bool {
-  theme::toggle_labeled(ui, on, label)
-}

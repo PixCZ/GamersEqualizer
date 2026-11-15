@@ -20,7 +20,6 @@ const MINIMIZED_FRAME_INTERVAL: Duration = Duration::from_secs(1);
 pub struct GamersEqualizerApp {
   pub state: AppState,
   pub win_audio: WinAudioSystem,
-  applied_mica: bool,
   window: super::window_state::WindowTracker,
   daemon_checked_at: Instant,
   synced_at: Option<Instant>,
@@ -28,17 +27,13 @@ pub struct GamersEqualizerApp {
 
 impl GamersEqualizerApp {
   pub fn new(state: AppState, win_audio: WinAudioSystem, window: super::window_state::WindowTracker) -> Self {
-    Self { state, win_audio, applied_mica: false, window, daemon_checked_at: Instant::now(), synced_at: None }
+    Self { state, win_audio, window, daemon_checked_at: Instant::now(), synced_at: None }
   }
 }
 
 impl eframe::App for GamersEqualizerApp {
   fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
     let ctx = &ui.ctx().clone();
-    if !self.applied_mica {
-      self.applied_mica = true;
-    }
-
     // 0. The background service carries the echo reference and the mic telemetry. Restart it
     // if it died (or was still exiting when this window started, so the startup check missed it).
     if self.daemon_checked_at.elapsed() >= DAEMON_CHECK_INTERVAL {
