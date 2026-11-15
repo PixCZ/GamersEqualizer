@@ -572,7 +572,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] D4 dlouhé testy zvlášť
 - [x] E1 jedno číslo verze (`init_defaults` píše `version` před `magic`, jinak by souběžně startující APO viděla verzi 0)
 - [x] E2 `Default`
-- [ ] E3 nepoužitá pole
+- [x] E3 nepoužitá pole (tady verze 21 -> 22; `vars.tsv` bez `double_talk` a `aec_taps`, 55 sloupců, debug mapování v5: patří do milníku v K)
 - [ ] E4 `OwnerWatch`
 - [ ] E5 čtení pásem
 - [ ] F1 `DeviceState`

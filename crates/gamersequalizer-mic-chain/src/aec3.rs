@@ -39,8 +39,6 @@ pub const FRAME: usize = 480;
 pub const PRE_DELAY_SAMPLES: usize = 144;
 /// Measured delay of the mic through AEC3 (test `test_latency_zero_for_whole_frames_...`).
 pub const AEC3_LATENCY_SAMPLES: usize = 430;
-/// Linear filter length reported to the UI: 13 refined blocks x 64 samples at 16 kHz (52 ms).
-const FILTER_TAPS: usize = 13 * 64 * 3;
 /// Highest mic gain into AEC3 (the leveler's highest boost).
 pub const MAX_MIC_GAIN_DB: f32 = 24.0;
 /// The mic gain moves in these steps, and only when the request is this far past half a step:
@@ -203,10 +201,6 @@ impl EchoCanceller3 {
     }
   }
 
-  pub fn taps(&self) -> usize {
-    FILTER_TAPS
-  }
-
   /// Gain that brings the user's speech to a normal level (the leveler's boost, dB): the mic
   /// goes into AEC3 this much louder and comes out this much quieter again. Cheap to call every
   /// block; AEC3 follows in 6 dB steps, at once in its first 0.5 s and after 2 s otherwise.
@@ -314,16 +308,6 @@ impl EchoCanceller3 {
 
   pub fn erle_db(&self) -> f32 {
     self.erle_db
-  }
-
-  /// AEC3 exposes no double-talk flag through the public API.
-  pub fn is_double_talk(&self) -> bool {
-    false
-  }
-
-  /// AEC3 keeps its filter internal: the UI impulse view stays flat.
-  pub fn impulse_bins(&self, out: &mut [f32]) {
-    out.fill(0.0);
   }
 
   fn process_frame(&mut self) {

@@ -36,14 +36,11 @@ pub struct AecTelemetry {
   pub confidence: f32,
   pub estimate_count: u32,
   pub erle_db: f32,
-  pub double_talk: bool,
   pub ref_db: f32,
   pub mic_db: f32,
   pub out_db: f32,
-  pub filter_taps: u32,
   pub pre_delay_ms: f32,
   pub corr_max_delay_ms: f32,
-  pub impulse: Vec<f32>,
   pub corr: Vec<f32>,
   pub seq: u32,
   /// A mic stream published telemetry recently. False = no app uses the mic, so the values
@@ -124,9 +121,6 @@ pub struct SidetoneUi {
   pub last_writer_beat_time: Option<std::time::Instant>,
 }
 
-/// How long the double-talk indicator stays visible after the last detection.
-const DOUBLE_TALK_HOLD: std::time::Duration = std::time::Duration::from_millis(1500);
-
 pub struct AppState {
   pub active_tab: ActiveTab,
   pub endpoints: Vec<AudioEndpointInfo>,
@@ -188,8 +182,6 @@ pub struct AppState {
   denoise_switched_at: Option<std::time::Instant>,
   /// Mic chain + mixer choices as last written to disk (see `save_audio_settings_if_changed`).
   audio_settings_saved: super::audio_settings::AudioSettings,
-  /// Double-talk lasts ~30 ms: keep the indicator lit long enough to read.
-  double_talk_until: Option<std::time::Instant>,
   started_at: std::time::Instant,
 }
 
@@ -256,7 +248,6 @@ impl AppState {
       mic_dsp_seen: (None, None),
       denoise_switched_at: None,
       audio_settings_saved,
-      double_talk_until: None,
       started_at: std::time::Instant::now(),
     };
     state.sync_mic_eq_to_shm();
@@ -510,24 +501,16 @@ impl AppState {
       confidence: h.aec_confidence_permille.load(Ordering::Relaxed) as f32 / 1000.0,
       estimate_count: h.aec_estimate_count.load(Ordering::Relaxed),
       erle_db: h.erle_db_times_10.load(Ordering::Relaxed) as f32 / 10.0,
-      double_talk: h.aec_double_talk.load(Ordering::Relaxed),
       ref_db: h.aec_ref_level_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
       mic_db: h.aec_mic_level_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
       out_db: h.aec_out_level_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-      filter_taps: h.aec_filter_taps.load(Ordering::Relaxed),
       pre_delay_ms: us_to_ms(h.aec_pre_delay_us.load(Ordering::Relaxed)),
       corr_max_delay_ms: us_to_ms(h.aec_corr_max_delay_us.load(Ordering::Relaxed)),
-      impulse: h.read_aec_impulse(),
       corr: h.read_aec_corr(),
       seq: h.aec_telemetry_seq.load(Ordering::Acquire),
       live: false,
     };
     t.live = self.mic_dsp_live();
-    let now = std::time::Instant::now();
-    if t.double_talk {
-      self.double_talk_until = Some(now + DOUBLE_TALK_HOLD);
-    }
-    t.double_talk = self.double_talk_until.is_some_and(|until| until > now);
     if t.seq != self.aec_last_seq {
       self.aec_last_seq = t.seq;
       if self.aec_history.len() >= AEC_HISTORY_LEN {

@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 /// build keeps its own mapping instead of both reading each other's memory with different layouts.
 macro_rules! shm_version {
   () => {
-    21
+    22
   };
 }
 pub const SHM_VERSION: u32 = shm_version!();
 /// Size of `ShmLayout` at `SHM_VERSION`.
-const SHM_LAYOUT_SIZE: usize = 1_255_080;
+const SHM_LAYOUT_SIZE: usize = 1_254_808;
 const _: () = assert!(size_of::<ShmLayout>() == SHM_LAYOUT_SIZE, "layout changed: bump shm_version! and the size");
 pub const SHM_NAME: &str = concat!("Local\\GamersEqualizer_SpeakerRef_Buffer_v", shm_version!());
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
@@ -32,7 +32,6 @@ pub const RING_BUFFER_CAPACITY: usize = 131072;
 /// turn the AEC output into NaN and pin the speaker level meter at +inf forever.
 const REF_SAMPLE_MAX: f32 = 8.0;
 pub const REF_SAMPLE_RATE: u32 = 48_000;
-pub const AEC_IMPULSE_POINTS: usize = 64;
 pub const AEC_CORR_POINTS: usize = 128;
 const HNS_PER_SEC: i64 = 10_000_000;
 /// UTF-16 slots of the active-game strings (profile name, label).
@@ -130,13 +129,9 @@ pub enum DenoiseLimit {
 pub struct ShmHeader {
   pub magic: u32,
   pub version: u32,
-  pub sample_rate: u32,
-  pub channels: u32,
-  pub capacity_frames: u32,
 
   // Single-producer single-consumer ring buffer head/tail
   pub write_frame_index: AtomicU32,
-  pub read_frame_index: AtomicU32,
 
   // Runtime control flags updated by GUI / Daemon
   pub aec_enabled: AtomicBool,
@@ -189,15 +184,11 @@ pub struct ShmHeader {
   pub aec_confidence_permille: AtomicU32,
   pub aec_estimate_count: AtomicU32,
   pub aec_delay_from_cache: AtomicBool,
-  pub aec_double_talk: AtomicBool,
   pub aec_ref_level_db_x10: AtomicI32,
   pub aec_mic_level_db_x10: AtomicI32,
   pub aec_out_level_db_x10: AtomicI32,
-  pub aec_filter_taps: AtomicU32,
   pub aec_pre_delay_us: AtomicU32,
   pub aec_telemetry_seq: AtomicU32,
-  /// Adaptive filter impulse response magnitude (f32 bits), tap groups oldest..newest.
-  pub aec_impulse: [AtomicU32; AEC_IMPULSE_POINTS],
   /// Cross-correlation magnitude over 0..max delay (f32 bits).
   pub aec_corr: [AtomicU32; AEC_CORR_POINTS],
   pub aec_corr_max_delay_us: AtomicU32,
@@ -561,9 +552,6 @@ impl ShmHeader {
     self.version = SHM_VERSION;
     fence(Ordering::Release);
     self.magic = SHM_MAGIC;
-    self.sample_rate = REF_SAMPLE_RATE;
-    self.channels = 2;
-    self.capacity_frames = RING_BUFFER_CAPACITY as u32;
     self.aec_enabled.store(true, Ordering::Relaxed);
     self.ai_voice_strength_permille.store(750, Ordering::Relaxed);
     self.noise_gate_threshold_db.store(NOISE_GATE_AUTO_LOOKAHEAD, Ordering::Relaxed);
@@ -767,16 +755,11 @@ impl ShmHeader {
     self.aec_confidence_permille.store(src.aec_confidence_permille.load(r), r);
     self.aec_estimate_count.store(src.aec_estimate_count.load(r), r);
     self.aec_delay_from_cache.store(src.aec_delay_from_cache.load(r), r);
-    self.aec_double_talk.store(src.aec_double_talk.load(r), r);
     self.aec_ref_level_db_x10.store(src.aec_ref_level_db_x10.load(r), r);
     self.aec_mic_level_db_x10.store(src.aec_mic_level_db_x10.load(r), r);
     self.aec_out_level_db_x10.store(src.aec_out_level_db_x10.load(r), r);
-    self.aec_filter_taps.store(src.aec_filter_taps.load(r), r);
     self.aec_pre_delay_us.store(src.aec_pre_delay_us.load(r), r);
     self.aec_corr_max_delay_us.store(src.aec_corr_max_delay_us.load(r), r);
-    for (d, s) in self.aec_impulse.iter().zip(&src.aec_impulse) {
-      d.store(s.load(r), r);
-    }
     for (d, s) in self.aec_corr.iter().zip(&src.aec_corr) {
       d.store(s.load(r), r);
     }
@@ -873,10 +856,6 @@ impl ShmHeader {
   pub fn ref_age_hns(&self, now_hns: u64) -> Option<u64> {
     let t = self.ref_snap_qpc_hns.load(Ordering::Acquire);
     (t != 0).then(|| now_hns.saturating_sub(t))
-  }
-
-  pub fn read_aec_impulse(&self) -> Vec<f32> {
-    self.aec_impulse.iter().map(|a| f32::from_bits(a.load(Ordering::Relaxed))).collect()
   }
 
   pub fn read_aec_corr(&self) -> Vec<f32> {

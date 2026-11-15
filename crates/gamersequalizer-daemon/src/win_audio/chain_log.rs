@@ -54,7 +54,6 @@ pub struct DspSnapshot {
   pub aec_state: u32,
   pub aec_delay_us: u32,
   pub aec_from_cache: bool,
-  pub double_talk: bool,
   /// Echo strength (`aec_echo_db_x10`: negative measured, 0 none, positive a bound), AEC3's
   /// fallback echo estimate and the mic gain into AEC3 (dB x 10).
   pub echo_x10: i32,
@@ -131,7 +130,6 @@ impl DspSnapshot {
       aec_state: h.aec_state.load(r),
       aec_delay_us: h.aec_delay_us.load(r),
       aec_from_cache: h.aec_delay_from_cache.load(r),
-      double_talk: h.aec_double_talk.load(r),
       echo_x10: h.aec_echo_db_x10.load(r),
       fallback_echo_x10: h.aec_fallback_echo_db_x10.load(r),
       aec_mic_gain_x10: h.aec_mic_gain_db_x10.load(r),
@@ -342,7 +340,7 @@ fn state(s: &ChainSnapshot) -> String {
   format!(
     "mic in use {}, Windows default mic {}, Windows mic volume {} (default device {}), mute {}, automatic level {}, \
      mic wish {} %, model {} (running {}, limit {}), strength {}, gate {}, voice EQ v{}, AEC {} delay {} \
-     (from cache {}, double talk {}), echo {} (AEC fallback echo {} dB, AEC mic gain {} dB), {}, clips {}, \
+     (from cache {}), echo {} (AEC fallback echo {} dB, AEC mic gain {} dB), {}, clips {}, \
      late blocks {}",
     device(&c.mic_name, &c.mic_id),
     device(&c.default_name, &c.default_id),
@@ -360,7 +358,6 @@ fn state(s: &ChainSnapshot) -> String {
     aec(d),
     ms(d.aec_delay_us),
     on_off(d.aec_from_cache),
-    on_off(d.double_talk),
     echo_with_fit(d),
     db(d.fallback_echo_x10),
     db(d.aec_mic_gain_x10),

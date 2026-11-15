@@ -183,7 +183,7 @@ loss" má klesnout. Stejné srovnání udělej pro `_v0.wav`. WAV soubory si tak
    cfg.erle.max_l = 30.0;
    cfg.erle.max_h = 10.0;
    cfg.suppressor.high_frequency_suppression.bands_in_limiting_gain = 0;
-   cfg.filter.refined.length_blocks = 32; // pak i cfg.filter.coarse.length_blocks a FILTER_TAPS
+   cfg.filter.refined.length_blocks = 32; // pak i cfg.filter.coarse.length_blocks
    ```
 
 2. Do komentáře nad `tuning()` čísla z nahrávek (která nahrávka, před / po), ve stylu, jakým tam

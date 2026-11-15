@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 /// Bump the version in the name on every layout change.
-pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v4";
+pub const DEBUG_CAPTURE_NAME: &str = "Global\\GamersEqualizer_DebugCapture_v5";
 pub const DEBUG_CAPTURE_MAGIC: u32 = 0x4744_4247; // 'GDBG'
 pub const DEBUG_CAPTURE_RATE: u32 = 48_000;
 pub const DEBUG_CAPTURE_MAX_SECONDS: u32 = 60;
@@ -48,7 +48,7 @@ pub const STAGE_REF_AEC_LEFT: usize = 8;
 pub const STAGE_REF_AEC_RIGHT: usize = 9;
 
 /// (column, meaning) of the per-block variable table (`vars.tsv`), all stored as f32.
-pub const DEBUG_VARS: [(&str, &str); 57] = [
+pub const DEBUG_VARS: [(&str, &str); 55] = [
   ("frame", "first frame of the block in the capture"),
   ("frames", "block length"),
   ("t_ms", "block time (mic QPC) since capture start; -1 without a timestamp"),
@@ -65,8 +65,6 @@ pub const DEBUG_VARS: [(&str, &str); 57] = [
   ("mic_rms_db", "raw mic, smoothed, dBFS"),
   ("out_rms_db", "chain output, smoothed, dBFS"),
   ("erle_db", "echo return loss enhancement (smoothed, only while far end plays)"),
-  ("double_talk", "1 = double-talk detector froze adaptation"),
-  ("aec_taps", "adaptive filter length (samples)"),
   ("denoise_selected", "0 RNNoise, 1 DeepFilterNet, 2 DPDFNet"),
   ("denoise_active", "model actually running (fallbacks count)"),
   ("denoise_limit", "0 none, 1 load failed, 2 overloaded"),

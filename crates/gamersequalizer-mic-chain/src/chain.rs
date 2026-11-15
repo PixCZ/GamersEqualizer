@@ -9,9 +9,9 @@ use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::PeakLimiter;
 use gamersequalizer_common::profile::{BiquadBand, FilterType};
 use gamersequalizer_common::shm::{
-  AEC_IMPULSE_POINTS, AecState, DenoiseModel, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED, MIC_CHAIN_LOOKAHEAD,
-  MIC_CHAIN_OTHERS, MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10,
-  NOISE_GATE_AUTO_LOOKAHEAD, ShmHeader, ShmLayout,
+  AecState, DenoiseModel, MIC_CHAIN_ASLEEP, MIC_CHAIN_BYPASSED, MIC_CHAIN_LOOKAHEAD, MIC_CHAIN_OTHERS,
+  MIC_CHAIN_STEREO_REF, MIC_CHAIN_TAKEOVER, MIC_LEVELER_DEFAULT_TARGET_DB_X10, NOISE_GATE_AUTO_LOOKAHEAD, ShmHeader,
+  ShmLayout,
 };
 use std::sync::atomic::Ordering;
 
@@ -680,19 +680,12 @@ impl MicChain {
     let signed_permille = |x: f32| (x * 1000.0).round().clamp(-10_000.0, 10_000.0) as i32;
     h.aec_echo_fit_permille.store(signed_permille(fit), Ordering::Relaxed);
     h.aec_echo_slope_permille.store(signed_permille(slope), Ordering::Relaxed);
-    h.aec_double_talk.store(self.aec.is_double_talk(), Ordering::Relaxed);
     h.aec_ref_level_db_x10.store(db_x10(self.ref_rms), Ordering::Relaxed);
     h.aec_mic_level_db_x10.store(db_x10(self.mic_rms), Ordering::Relaxed);
     h.aec_out_level_db_x10.store(db_x10(self.out_rms), Ordering::Relaxed);
-    h.aec_filter_taps.store(self.aec.taps() as u32, Ordering::Relaxed);
     h.aec_pre_delay_us.store(to_us(PRE_DELAY_SAMPLES as f32), Ordering::Relaxed);
     h.aec_corr_max_delay_us.store(to_us(DelayEstimator::max_delay_samples() as f32), Ordering::Relaxed);
 
-    let mut ir = [0.0f32; AEC_IMPULSE_POINTS];
-    self.aec.impulse_bins(&mut ir);
-    for (slot, v) in h.aec_impulse.iter().zip(ir) {
-      slot.store(v.to_bits(), Ordering::Relaxed);
-    }
     for (slot, v) in h.aec_corr.iter().zip(est.corr_curve()) {
       slot.store(v.to_bits(), Ordering::Relaxed);
     }
@@ -783,8 +776,6 @@ impl MicChain {
       db(self.mic_rms),
       db(self.out_rms),
       self.aec.erle_db(),
-      b(self.aec.is_double_talk()),
-      self.aec.taps() as f32,
       self.ai_denoiser.selected_model().to_u32() as f32,
       self.ai_denoiser.active_model().to_u32() as f32,
       self.ai_denoiser.limit().to_u32() as f32,
