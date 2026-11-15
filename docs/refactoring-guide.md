@@ -566,7 +566,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] C4 ostatní mrtvý kód (bez složky `aux`, viz Nepotvrzené nálezy)
 - [x] C5 jména z prototypu (`CLSID_MIC_APO`, `ApoFactory`; GUID beze změny)
 - [x] C6 přejmenování crate (`gamersequalizer-mic-chain`, `MicChain`, `chain.rs`; pole `plugin` v APO je teď `chain`)
-- [ ] D1 edice 2024
+- [x] D1 edice 2024 (zbývá ruční zkouška APO: mikrofon, výstup, odposlech)
 - [ ] D2 lint SAFETY
 - [ ] D3 `#[expect]`
 - [ ] D4 dlouhé testy zvlášť

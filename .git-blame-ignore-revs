@@ -1,2 +1,4 @@
 # Format with rustfmt, no code change
 d541cbf6afc97e861ac4ce48de608c7ce541d2cf
+# Switch the workspace to edition 2024 (rustfmt 2024 style, collapsible_if let chains)
+f521bd1d39b89190b484fcf3e1a938bbe3153050
