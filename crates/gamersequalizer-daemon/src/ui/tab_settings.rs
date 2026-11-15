@@ -189,7 +189,9 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
       let mut close = false;
       ui.horizontal(|ui| {
         if ui.add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::SAVE, tr("Save...")))).clicked() {
-          if let Some(path) = shell::pick_settings_save_path(tr("Export settings"), &settings_transfer::default_file_name()) {
+          if let Some(path) =
+            shell::pick_settings_save_path(tr("Export settings"), &settings_transfer::default_file_name())
+          {
             t.message = Some(match settings_transfer::export(&base_dir, &path, Some(&only)) {
               Ok(s) => (Severity::Success, trf("Saved {} profiles to {}", &[&s.profiles, &path.display()])),
               Err(e) => (Severity::Error, trf("Export failed: {}", &[&e])),
@@ -207,7 +209,9 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
     let mut import = None;
     if let Some((s, parts)) = &mut t.pending {
       ui.add_space(4.0);
-      ui.label(RichText::new(trf("{}: {} profiles, exported {}", &[&s.path.display(), &s.profiles, &s.exported_at])).strong());
+      ui.label(
+        RichText::new(trf("{}: {} profiles, exported {}", &[&s.path.display(), &s.profiles, &s.exported_at])).strong(),
+      );
       if !s.devices.is_empty() {
         ui.label(theme::caption(trf("Devices in the file: {}", &[&s.devices.join(", ")])));
       }
@@ -220,7 +224,10 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
       );
       let only = selection(parts);
       ui.horizontal(|ui| {
-        if ui.add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::OPEN, tr("Import and restart")))).clicked() {
+        if ui
+          .add_enabled(!only.is_empty(), egui::Button::new(theme::with_icon(icons::OPEN, tr("Import and restart"))))
+          .clicked()
+        {
           import = Some(Some((s.path.clone(), only)));
         }
         if ui.button(tr("Cancel")).clicked() {

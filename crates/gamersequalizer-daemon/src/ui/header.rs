@@ -158,7 +158,8 @@ pub fn refresh_spatial(state: &mut AppState, win_audio: &mut WinAudioSystem) {
   let active = state.spatial_status.is_active();
   state.spatial_format = output.as_deref().filter(|_| active).and_then(active_format);
   // Learned by the background service (`health`); the window only reads it.
-  state.spatial_expected = output.as_deref().and_then(|id| crate::health::expected_spatial(state.storage.base_dir(), id));
+  state.spatial_expected =
+    output.as_deref().and_then(|id| crate::health::expected_spatial(state.storage.base_dir(), id));
   state.spatial_output_id = output;
 }
 

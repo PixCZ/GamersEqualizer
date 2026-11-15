@@ -117,17 +117,49 @@ pub struct Snapshot {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Issue {
-  OutputChanged { expected_id: String, expected_name: String, current_id: String, current_name: String },
+  OutputChanged {
+    expected_id: String,
+    expected_name: String,
+    current_id: String,
+    current_name: String,
+  },
   /// `format`: name of the format that was on, if known.
-  SpatialOff { device_id: String, device_name: String, format: Option<String> },
-  SpatialChanged { device_id: String, device_name: String, expected: SpatialFormat, current: SpatialFormat },
-  MicProcessing { status: ApoStatus, key: String },
-  NotDefaultMic { mic_id: String, mic_name: String },
-  OutputProcessing { device_name: String, key: String },
+  SpatialOff {
+    device_id: String,
+    device_name: String,
+    format: Option<String>,
+  },
+  SpatialChanged {
+    device_id: String,
+    device_name: String,
+    expected: SpatialFormat,
+    current: SpatialFormat,
+  },
+  MicProcessing {
+    status: ApoStatus,
+    key: String,
+  },
+  NotDefaultMic {
+    mic_id: String,
+    mic_name: String,
+  },
+  OutputProcessing {
+    device_name: String,
+    key: String,
+  },
   /// `apps` already joined for display.
-  MicSilenced { why: Silenced, apps: String, mic_id: Option<String> },
+  MicSilenced {
+    why: Silenced,
+    apps: String,
+    mic_id: Option<String>,
+  },
   /// Our effect is listed on the device but did not run while it was in use. `key` ignores it.
-  NotRunning { flow: Flow, device_id: String, device_name: String, key: String },
+  NotRunning {
+    flow: Flow,
+    device_id: String,
+    device_name: String,
+    key: String,
+  },
 }
 
 /// What a menu item under an issue does.

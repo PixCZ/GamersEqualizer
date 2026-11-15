@@ -2,8 +2,8 @@
 //! Written once into `profiles/game` as ordinary profiles: editable, deletable, assignable.
 //! Names are English translation keys; the UI shows them translated.
 
-use super::settings::{OutputEqSettings, SETTINGS_FILE};
 use super::genre::Genre;
+use super::settings::{OutputEqSettings, SETTINGS_FILE};
 use crate::sonar_importer::ProfileStorage;
 use gamersequalizer_common::profile::{BiquadBand, FilterType, ParametricProfile, VadType};
 use log::{info, warn};

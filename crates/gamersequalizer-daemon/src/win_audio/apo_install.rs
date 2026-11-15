@@ -19,7 +19,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Shell::{
-  SHGetKnownFolderPath, ShellExecuteExW, FOLDERID_ProgramFiles, FOLDERID_System, KF_FLAG_DEFAULT,
+  FOLDERID_ProgramFiles, FOLDERID_System, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DEFAULT,
   SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
@@ -224,7 +224,8 @@ pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
 /// the app alone (`-AppOnly`, a PC without audio devices). Returns the installer's exit code.
 pub fn install_and_wait(targets: &[(Flow, &str)], silent: bool) -> Result<u32, String> {
   let endpoints = if targets.is_empty() { None } else { Some(endpoint_args(targets)?) };
-  launch_installer(endpoints.as_deref(), ScriptRun::Wait { silent })?.ok_or_else(|| "the installer gave no exit code".to_string())
+  launch_installer(endpoints.as_deref(), ScriptRun::Wait { silent })?
+    .ok_or_else(|| "the installer gave no exit code".to_string())
 }
 
 /// Connected endpoints that carry our effects: an update installs on them again, so the effects
@@ -566,7 +567,13 @@ pub(crate) fn powershell_exe() -> Result<PathBuf, String> {
 /// itself travels in the command line. Module autoload is pinned to the system folder (the
 /// user's Documents module folder would otherwise come first and could shadow cmdlets).
 /// `ScriptRun::Wait` blocks until the script ends and returns its exit code.
-fn run_script_elevated(name: &str, content: &str, args: &str, what: &str, run: ScriptRun) -> Result<Option<u32>, String> {
+fn run_script_elevated(
+  name: &str,
+  content: &str,
+  args: &str,
+  what: &str,
+  run: ScriptRun,
+) -> Result<Option<u32>, String> {
   let path = write_script(name, content)?;
   let hash = sha256_hex(content.as_bytes())?;
   let bootstrap = elevated_bootstrap(&path.to_string_lossy(), &hash, args);
@@ -801,9 +808,7 @@ fn hklm_subkeys(key: &str) -> Vec<String> {
     for index in 0..MAX_SUBKEYS {
       let mut name = [0u16; 256];
       let mut len = name.len() as u32;
-      if RegEnumKeyExW(hkey, index, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None)
-        != ERROR_SUCCESS
-      {
+      if RegEnumKeyExW(hkey, index, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None) != ERROR_SUCCESS {
         break;
       }
       out.push(String::from_utf16_lossy(name.get(..len as usize).unwrap_or_default()));
@@ -874,9 +879,9 @@ fn endpoint_fx_configured(
   legacy: &[Option<String>; 4],
 ) -> bool {
   let in_use = |raw: &Option<String>| {
-    raw.as_deref().is_some_and(|raw| {
-      raw.split('\n').map(str::trim).any(|s| !s.is_empty() && !s.eq_ignore_ascii_case(NULL_GUID))
-    })
+    raw
+      .as_deref()
+      .is_some_and(|raw| raw.split('\n').map(str::trim).any(|s| !s.is_empty() && !s.eq_ignore_ascii_case(NULL_GUID)))
   };
   // FX_LEGACY_VALUES order: LFX, SFX, MFX, EFX; slots: SFX, MFX, EFX.
   let [lfx, sfx, mfx, efx] = legacy;
@@ -1134,7 +1139,8 @@ mod tests {
 
   #[test]
   fn uninstall_args_quotes_script_dir_and_fits_command_line() {
-    let args = uninstall_args(Some(Path::new(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts")), ScriptRun::FromApp);
+    let args =
+      uninstall_args(Some(Path::new(r"C:\Users\O'Neil\AppData\Local\GamersEqualizer\scripts")), ScriptRun::FromApp);
     assert_eq!(args, r"-RemoveBackups -FromApp -ScriptDir 'C:\Users\O''Neil\AppData\Local\GamersEqualizer\scripts'");
     assert_eq!(uninstall_args(None, ScriptRun::Wait { silent: true }), "-RemoveBackups");
     assert_eq!(uninstall_args(None, ScriptRun::Wait { silent: false }), "-RemoveBackups -FromApp");

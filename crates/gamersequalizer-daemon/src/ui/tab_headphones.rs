@@ -565,8 +565,7 @@ fn refresh_downloads(ui: &mut Ui, state: &mut AppState) {
   if ui_state.downloads_checked.is_none_or(|t| t.elapsed() >= DOWNLOADS_RECHECK) {
     ui_state.downloads_checked = Some(Instant::now());
     ui_state.downloads = autoeq::downloads_dir().map(|d| autoeq::scan_downloads(&d)).unwrap_or_default();
-    ui_state.autoeq_found =
-      autoeq::candidate_dirs(state.output_eq.settings.autoeq_dir.as_deref()).into_iter().next();
+    ui_state.autoeq_found = autoeq::candidate_dirs(state.output_eq.settings.autoeq_dir.as_deref()).into_iter().next();
   }
   ui.ctx().request_repaint_after(DOWNLOADS_RECHECK);
 }

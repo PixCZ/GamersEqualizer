@@ -118,8 +118,11 @@ pub fn resolve(settings: &OutputEqSettings, profiles: &[ParametricProfile], fact
       }
     }
   }
-  (facts.from_launcher || facts.genre.is_some())
-    .then_some(GameMatch { profile: None, label, method: MatchMethod::NoProfile })
+  (facts.from_launcher || facts.genre.is_some()).then_some(GameMatch {
+    profile: None,
+    label,
+    method: MatchMethod::NoProfile,
+  })
 }
 
 /// Words of a name: camelCase and letter/digit boundaries split ("Division2" -> division 2),
@@ -343,7 +346,10 @@ mod tests {
     assert_eq!(resolve(&settings, &profiles(), &tool), None);
     assert!(explain(&settings, &tool, None).starts_with("not a game: Steam lists it as Application"));
     // The user can still assign it a profile by hand.
-    let bound = OutputEqSettings { bindings: [("losslessscaling.exe".to_string(), "The Division 2".to_string())].into(), ..Default::default() };
+    let bound = OutputEqSettings {
+      bindings: [("losslessscaling.exe".to_string(), "The Division 2".to_string())].into(),
+      ..Default::default()
+    };
     assert_eq!(resolve(&bound, &profiles(), &tool).unwrap().method, MatchMethod::Binding);
   }
 

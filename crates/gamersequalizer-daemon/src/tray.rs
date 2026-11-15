@@ -14,8 +14,8 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, PeekMessageW, PostMessageW, SetForegroundWindow, ShowWindow,
-  TranslateMessage, MSG, PM_REMOVE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE,
+  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, PeekMessageW, PostMessageW, SetForegroundWindow,
+  ShowWindow, TranslateMessage, MSG, PM_REMOVE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_CLOSE,
 };
 
 /// Title of the main window; also how the service finds it (focus, close on exit).
@@ -132,7 +132,14 @@ impl TrayManager {
   /// Principle 1: Air-gapped update check via OS default browser
   pub fn open_updates_browser() {
     unsafe {
-      ShellExecuteW(None, w!("open"), w!("https://github.com/PixCZ/GamersEqualizer/releases"), None, None, SW_SHOWNORMAL);
+      ShellExecuteW(
+        None,
+        w!("open"),
+        w!("https://github.com/PixCZ/GamersEqualizer/releases"),
+        None,
+        None,
+        SW_SHOWNORMAL,
+      );
     }
   }
 }

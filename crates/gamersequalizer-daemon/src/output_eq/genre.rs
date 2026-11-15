@@ -430,7 +430,11 @@ fn steam_app(appinfo: &Path, app_id: u32) -> Option<SteamApp> {
   match parse_appinfo(&data, app_id) {
     Ok(app) => app.map(|(kind, tags)| SteamApp {
       kind,
-      labels: tags.iter().filter_map(|id| STEAM_TAGS.iter().find(|(t, _)| t == id)).map(|(_, l)| l.to_string()).collect(),
+      labels: tags
+        .iter()
+        .filter_map(|id| STEAM_TAGS.iter().find(|(t, _)| t == id))
+        .map(|(_, l)| l.to_string())
+        .collect(),
     }),
     Err(e) => {
       warn!("[Genre] {} not readable: {e}", appinfo.display());

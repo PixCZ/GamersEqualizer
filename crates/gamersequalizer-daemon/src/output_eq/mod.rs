@@ -699,9 +699,9 @@ impl OutputEq {
   fn save_headphone_to_disk(&self, profile: &ParametricProfile) -> Result<(), String> {
     let dir = self.storage.get_headphones_directory();
     let path = dir.join(format!("{}.json", ProfileStorage::sanitize_filename(&profile.name)));
-    serde_json::to_string_pretty(profile)
-      .map_err(|e| e.to_string())
-      .and_then(|json| settings::write_atomic(&path, &json).map_err(|e| format!("could not save {}: {e}", path.display())))
+    serde_json::to_string_pretty(profile).map_err(|e| e.to_string()).and_then(|json| {
+      settings::write_atomic(&path, &json).map_err(|e| format!("could not save {}: {e}", path.display()))
+    })
   }
 
   fn move_to_deleted(&self, path: &std::path::Path) -> Result<PathBuf, String> {

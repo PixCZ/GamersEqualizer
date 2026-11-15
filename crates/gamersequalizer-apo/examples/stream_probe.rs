@@ -179,7 +179,8 @@ fn write_csv(path: std::path::PathBuf, owned: &[(usize, &StreamSlot, u64)], sess
     })
     .collect();
   columns.extend(sessions.iter().map(|s| (format!("{}_{}", s.exe, s.pid), s.peaks.clone())));
-  let mut text = std::iter::once("block".to_string()).chain(columns.iter().map(|c| c.0.clone())).collect::<Vec<_>>().join(",");
+  let mut text =
+    std::iter::once("block".to_string()).chain(columns.iter().map(|c| c.0.clone())).collect::<Vec<_>>().join(",");
   for row in 0..ROUND_BLOCKS {
     text.push('\n');
     text.push_str(&row.to_string());
@@ -227,7 +228,10 @@ fn mode_name(mode: u128) -> String {
   if mode == 0 {
     return "?".into();
   }
-  KNOWN_MODES.iter().find(|(m, _)| *m == mode).map_or_else(|| format!("{:?}", GUID::from_u128(mode)), |(_, n)| n.to_string())
+  KNOWN_MODES
+    .iter()
+    .find(|(m, _)| *m == mode)
+    .map_or_else(|| format!("{:?}", GUID::from_u128(mode)), |(_, n)| n.to_string())
 }
 
 fn now_hns() -> Option<u64> {

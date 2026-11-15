@@ -84,8 +84,7 @@ impl RateBridge {
     // `down`, the frames each sinc filter withholds at start-up (its delay), plus rounding of
     // the fractional resampler positions. 48 kHz counts are converted to device frames.
     let to_device = |frames: usize| (frames as u64 * device_rate as u64).div_ceil(CHAIN_RATE as u64) as usize;
-    let prime =
-      up.chunk + to_device(down.chunk + up.resampler.output_delay()) + down.resampler.output_delay() + 2;
+    let prime = up.chunk + to_device(down.chunk + up.resampler.output_delay()) + down.resampler.output_delay() + 2;
     let mut out_fifo = Vec::with_capacity(2 * prime + PREALLOC_FRAMES);
     out_fifo.resize(prime, 0.0);
     Ok(Self {
@@ -283,7 +282,9 @@ mod tests {
   }
 
   fn tone(rate: u32, offset: usize, frames: usize) -> Vec<f32> {
-    (offset..offset + frames).map(|n| (n as f32 * 2.0 * std::f32::consts::PI * 440.0 / rate as f32).sin() * AMP).collect()
+    (offset..offset + frames)
+      .map(|n| (n as f32 * 2.0 * std::f32::consts::PI * 440.0 / rate as f32).sin() * AMP)
+      .collect()
   }
 
   /// Least-squares fit of a `freq` sine (any phase) to `x`: (amplitude, fit-to-residual dB).

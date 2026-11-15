@@ -3,7 +3,7 @@ use super::theme::{self, icons, Icon};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::app_channels::{self, AppChannel};
 use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
-use egui::{Color32, RichText, CornerRadius, Sense, Ui, Vec2};
+use egui::{Color32, CornerRadius, RichText, Sense, Ui, Vec2};
 use gamersequalizer_common::streams::StreamBus;
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
@@ -633,7 +633,8 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
       ui.set_width(ui.available_width());
       ui.add(egui::Label::new(RichText::new(text).small()).wrap_mode(egui::TextWrapMode::Extend).selectable(false))
     });
-  let response = ui.interact(chip.response.rect, ui.scope_id().with(("mixer_app_chip", &app.exe)), Sense::click_and_drag());
+  let response =
+    ui.interact(chip.response.rect, ui.scope_id().with(("mixer_app_chip", &app.exe)), Sense::click_and_drag());
   response.dnd_set_drag_payload(app.exe.clone());
   if response.dragged() {
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);

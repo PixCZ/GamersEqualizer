@@ -8,8 +8,8 @@
 //! systems.
 
 use egui::{
-  Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Frame, Margin, Response, RichText, CornerRadius, Sense,
-  Shadow, Stroke, TextStyle, TextWrapMode, Theme, Ui, Vec2, Visuals, Widget, WidgetText,
+  Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Frame, Margin, Response, RichText,
+  Sense, Shadow, Stroke, TextStyle, TextWrapMode, Theme, Ui, Vec2, Visuals, Widget, WidgetText,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -431,7 +431,8 @@ pub fn nav_item(ui: &mut Ui, selected: bool, ic: Icon, label: &str) -> Response 
       painter.rect_filled(pill, 1.5, p.accent);
     }
     let label_font = FontId::proportional(14.0);
-    let icon_pos = egui::pos2(rect.left() + 16.0, rect.center().y + icon_drop(ui.ctx().fonts_mut(|f| f.row_height(&label_font))));
+    let icon_pos =
+      egui::pos2(rect.left() + 16.0, rect.center().y + icon_drop(ui.ctx().fonts_mut(|f| f.row_height(&label_font))));
     if ICON_FONT.load(Ordering::Relaxed) {
       painter.text(
         icon_pos,
@@ -617,10 +618,8 @@ fn visuals(p: &Palette) -> Visuals {
   v.window_corner_radius = CornerRadius::same(CARD_RADIUS);
   v.menu_corner_radius = CornerRadius::same(CARD_RADIUS);
   let shadow_alpha = if p.dark { 110 } else { 40 };
-  v.window_shadow =
-    Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
-  v.popup_shadow =
-    Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
+  v.window_shadow = Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
+  v.popup_shadow = Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(shadow_alpha) };
   v.extreme_bg_color = if p.dark { Color32::from_rgb(29, 29, 29) } else { Color32::WHITE };
   v.faint_bg_color = if p.dark { Color32::from_rgb(38, 38, 38) } else { Color32::from_rgb(246, 246, 246) };
   v.code_bg_color = v.faint_bg_color;

@@ -148,7 +148,11 @@ impl<'a> WinSqliteConn<'a> {
             (0..columns)
               .map(|i| {
                 let p = (self.lib.fn_column_text)(stmt, i);
-                if p.is_null() { String::new() } else { CStr::from_ptr(p).to_string_lossy().into_owned() }
+                if p.is_null() {
+                  String::new()
+                } else {
+                  CStr::from_ptr(p).to_string_lossy().into_owned()
+                }
               })
               .collect(),
           ),

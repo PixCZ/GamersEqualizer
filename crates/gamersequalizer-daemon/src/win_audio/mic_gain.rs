@@ -291,7 +291,11 @@ mod tests {
     // Clips at 0.88 for the first 10 s, then the leveler reads "weak" for 5 minutes.
     let steps = drive(1200, 0.88, |n| {
       let s = talking(n);
-      if n < 40 { (if s > 0 { 30 } else { 0 }, s, 24.0) } else { (0, s, 24.0) }
+      if n < 40 {
+        (if s > 0 { 30 } else { 0 }, s, 24.0)
+      } else {
+        (0, s, 24.0)
+      }
     });
     let (_, ceiling) = steps[0];
     assert!((ceiling - 0.73).abs() < 1e-6, "{steps:?}");

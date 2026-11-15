@@ -63,7 +63,8 @@ fn uninstall(silent: bool) -> Result<u32, String> {
     warn!("[SetupCli] {e}");
   }
   info!("[SetupCli] uninstalling (silent: {silent})");
-  apo_install::launch_uninstall(ScriptRun::Wait { silent })?.ok_or_else(|| "the uninstaller gave no exit code".to_string())
+  apo_install::launch_uninstall(ScriptRun::Wait { silent })?
+    .ok_or_else(|| "the uninstaller gave no exit code".to_string())
 }
 
 /// The physical microphone and output in use (a virtual default such as a Sonar or VB-Cable

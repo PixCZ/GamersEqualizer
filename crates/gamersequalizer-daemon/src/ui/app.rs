@@ -192,7 +192,9 @@ impl eframe::App for GamersEqualizerApp {
           // Own scroll state per page: with egui's default id all pages shared one, and the
           // Log page's "follow" offset (f32::MAX) left the other pages scrolled past their content.
           egui::ScrollArea::vertical().id_salt(("page", tab)).auto_shrink([false, false]).show(ui, |ui| match tab {
-            ActiveTab::Headphones => super::tab_headphones::render_tab_headphones(ui, &mut self.state, &mut self.win_audio),
+            ActiveTab::Headphones => {
+              super::tab_headphones::render_tab_headphones(ui, &mut self.state, &mut self.win_audio)
+            }
             ActiveTab::Sidetone => super::tab_sidetone::render_tab_sidetone(ui, &mut self.state, &mut self.win_audio),
             ActiveTab::Settings => super::tab_settings::render_tab_settings(ui, &mut self.state),
             other => render_tab_eq(ui, &mut self.state, other),

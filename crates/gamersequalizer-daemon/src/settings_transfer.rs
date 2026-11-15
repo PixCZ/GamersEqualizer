@@ -20,10 +20,10 @@
 
 use crate::output_eq::settings::write_atomic;
 use crate::win_audio::device_ids::{self, KnownDevices};
-use gamersequalizer_common::profile::ParametricProfile;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use gamersequalizer_common::profile::ParametricProfile;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,7 +93,12 @@ pub fn export(profiles_dir: &Path, out: &Path, only: Option<&Selection>) -> Resu
   let text = serde_json::to_string_pretty(&file).map_err(|e| e.to_string())?;
   let bytes = if is_gz(out) { gzip(&text).map_err(|e| e.to_string())? } else { text.into_bytes() };
   write_atomic(out, bytes).map_err(|e| format!("{}: {e}", out.display()))?;
-  info!("[Transfer] exported {} profiles and {} settings files to {}", count(&file), file.settings.len(), out.display());
+  info!(
+    "[Transfer] exported {} profiles and {} settings files to {}",
+    count(&file),
+    file.settings.len(),
+    out.display()
+  );
   Ok(summary(out, &file))
 }
 
@@ -150,7 +155,12 @@ pub fn import(profiles_dir: &Path, path: &Path, only: Option<&Selection>) -> Res
     info!("[Transfer] imported {} (backup of the previous state: {})", path.display(), backup.display());
     Ok(backup)
   } else {
-    Err(format!("{} of the files could not be written ({}); backup: {}", errors.len(), errors.join("; "), backup.display()))
+    Err(format!(
+      "{} of the files could not be written ({}); backup: {}",
+      errors.len(),
+      errors.join("; "),
+      backup.display()
+    ))
   }
 }
 
@@ -393,8 +403,13 @@ mod tests {
     assert!(new_pc.join("game").join("Apex Legends.json").exists());
     assert!(new_pc.join("game").join("My own.json").exists(), "own profiles stay");
     assert!(new_pc.join("output_eq.json").exists());
-    let prefs: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(new_pc.join("ui_prefs.json")).unwrap()).unwrap();
-    assert_eq!(prefs, serde_json::json!({"language":"Czech","theme":"Dark","setup_done":false}), "setup state of this PC kept");
+    let prefs: serde_json::Value =
+      serde_json::from_str(&std::fs::read_to_string(new_pc.join("ui_prefs.json")).unwrap()).unwrap();
+    assert_eq!(
+      prefs,
+      serde_json::json!({"language":"Czech","theme":"Dark","setup_done":false}),
+      "setup state of this PC kept"
+    );
     assert_eq!(device_ids::load_known(&new_pc).get("{old-epos}").map(String::as_str), Some("Headphones (EPOS GSA 70)"));
     let _ = std::fs::remove_dir_all(old_pc.parent().unwrap());
     let _ = std::fs::remove_dir_all(new_pc.parent().unwrap());
@@ -422,7 +437,10 @@ mod tests {
     import(&friend, &full, Some(&only)).unwrap();
     assert!(friend.join("game").join("Apex Legends.json").exists());
     assert!(friend.join("mic").join("My voice.json").exists());
-    assert_eq!(std::fs::read_to_string(friend.join("audio_settings.json")).unwrap(), r#"{"mic_device_id":"{friend-mic}"}"#);
+    assert_eq!(
+      std::fs::read_to_string(friend.join("audio_settings.json")).unwrap(),
+      r#"{"mic_device_id":"{friend-mic}"}"#
+    );
     let _ = std::fs::remove_dir_all(mine.parent().unwrap());
     let _ = std::fs::remove_dir_all(friend.parent().unwrap());
   }

@@ -194,9 +194,7 @@ impl SidetoneDenoiser {
       _ => 0,
     };
     let ran = match mode {
-      NoiseMode::WebRtcNs => {
-        self.ns.process_capture_f32(&[&self.scratch_in], &mut [&mut self.scratch_out]).is_ok()
-      }
+      NoiseMode::WebRtcNs => self.ns.process_capture_f32(&[&self.scratch_in], &mut [&mut self.scratch_out]).is_ok(),
       NoiseMode::RnNoise | NoiseMode::RnNoise2 => {
         self.scratch_in.iter_mut().for_each(|s| *s *= I16_SCALE);
         match (mode, self.rnnoise2.as_mut()) {

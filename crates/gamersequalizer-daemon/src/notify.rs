@@ -49,8 +49,17 @@ fn register() -> Result<(), String> {
   let name: Vec<u16> = DISPLAY_NAME.encode_utf16().chain(std::iter::once(0)).collect();
   // SAFETY: the key is closed below; `name` outlives the call and is passed with its byte length.
   unsafe {
-    let rc =
-      RegCreateKeyExW(HKEY_CURRENT_USER, AUMID_KEY, Some(0), None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None);
+    let rc = RegCreateKeyExW(
+      HKEY_CURRENT_USER,
+      AUMID_KEY,
+      Some(0),
+      None,
+      REG_OPTION_NON_VOLATILE,
+      KEY_WRITE,
+      None,
+      &mut key,
+      None,
+    );
     if rc != ERROR_SUCCESS {
       return Err(format!("could not register for notifications: {rc:?}"));
     }
@@ -69,7 +78,8 @@ fn post(title: &str, body: &str) -> Result<(), String> {
   let doc = XmlDocument::new().map_err(|e| e.to_string())?;
   doc.LoadXml(&HSTRING::from(xml)).map_err(|e| e.to_string())?;
   let toast = ToastNotification::CreateToastNotification(&doc).map_err(|e| e.to_string())?;
-  let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID)).map_err(|e| e.to_string())?;
+  let notifier =
+    ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID)).map_err(|e| e.to_string())?;
   notifier.Show(&toast).map_err(|e| e.to_string())
 }
 

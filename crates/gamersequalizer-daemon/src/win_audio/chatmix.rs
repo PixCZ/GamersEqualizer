@@ -199,7 +199,6 @@ pub struct ChatMixController {
   pub(crate) last_applied_mic_vol: f32,
   last_applied_mic_muted: bool,
 
-
   /// Off in the window while the background service runs: one process owns session volumes.
   pub sessions_enabled: bool,
   /// Per session (instance id): the volume this process last set. A session is only touched
@@ -212,7 +211,6 @@ pub struct ChatMixController {
 
 impl ChatMixController {
   pub fn new() -> Self {
-
     // Read real current master output volume & mute from Windows
     let (initial_master_vol, initial_master_muted) = get_system_master_volume().unwrap_or((1.0, false));
 
@@ -882,9 +880,7 @@ pub fn set_endpoint_volume(device_id: &str, level: f32) {
 
 pub fn set_endpoint_mute(device_id: &str, muted: bool) {
   // SAFETY: COM call on a live interface.
-  with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe {
-    v.SetMute(muted, std::ptr::null())
-  });
+  with_endpoint(&ENDPOINT_VOLUMES, device_id, |v: &IAudioEndpointVolume| unsafe { v.SetMute(muted, std::ptr::null()) });
 }
 
 pub fn get_system_master_volume() -> Option<(f32, bool)> {
@@ -1128,7 +1124,10 @@ mod tests {
     assert!(mix.bind_channel_endpoints(&sonar));
     assert_eq!(mix.game_device_id.as_deref(), Some("game"));
     assert!(!mix.bind_channel_endpoints(&sonar), "unchanged devices: nothing to report");
-    assert_eq!((mix.master_device_id.clone(), mix.mic_device_id.as_deref(), mix.mic_volume), (master, Some("mic"), mic_volume));
+    assert_eq!(
+      (mix.master_device_id.clone(), mix.mic_device_id.as_deref(), mix.mic_volume),
+      (master, Some("mic"), mic_volume)
+    );
     // The guard returns before any session pass (which would stamp `last_session_pass`).
     mix.apply_session_mix();
     assert!(mix.last_session_pass.is_none());

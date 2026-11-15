@@ -322,7 +322,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     }
 
     if settings.noise_mode == NoiseMode::Expander {
-      ui.label(theme::caption(tr("Turns down steady noise in the pauses between words. Loud short sounds (keys) pass.")));
+      ui.label(theme::caption(tr(
+        "Turns down steady noise in the pauses between words. Loud short sounds (keys) pass.",
+      )));
     }
 
     egui::Grid::new("sidetone_noise_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {

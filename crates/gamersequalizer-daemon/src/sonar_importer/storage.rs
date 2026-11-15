@@ -89,9 +89,10 @@ impl ProfileStorage {
       for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) == Some("json") {
-          match fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|c| {
-            serde_json::from_str::<ParametricProfile>(&c).map_err(|e| e.to_string())
-          }) {
+          match fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|c| serde_json::from_str::<ParametricProfile>(&c).map_err(|e| e.to_string()))
+          {
             Ok(mut profile) => {
               sanitize_profile(&mut profile);
               result.push(profile);

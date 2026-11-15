@@ -151,7 +151,10 @@ mod tests {
   fn ids_are_replaced_only_as_whole_strings() {
     let text = r#"{"headphone_by_device":{"{0.0.0}.{abc}":"NTH-100"},"mic":"{0.0.0}.{abcd}"}"#;
     let moves = [("{0.0.0}.{abc}".to_string(), "{0.0.0}.{xyz}".to_string())];
-    assert_eq!(replace_ids(text, &moves), r#"{"headphone_by_device":{"{0.0.0}.{xyz}":"NTH-100"},"mic":"{0.0.0}.{abcd}"}"#);
+    assert_eq!(
+      replace_ids(text, &moves),
+      r#"{"headphone_by_device":{"{0.0.0}.{xyz}":"NTH-100"},"mic":"{0.0.0}.{abcd}"}"#
+    );
   }
 
   #[test]

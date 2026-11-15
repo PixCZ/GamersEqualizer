@@ -188,7 +188,14 @@ mod tests {
   use super::*;
 
   fn snap() -> LevelerSnapshot {
-    LevelerSnapshot { enabled: true, gain_x10: 60, level_x10: -300, speech_ms: 1000, target_x10: -240, ..Default::default() }
+    LevelerSnapshot {
+      enabled: true,
+      gain_x10: 60,
+      level_x10: -300,
+      speech_ms: 1000,
+      target_x10: -240,
+      ..Default::default()
+    }
   }
 
   fn started() -> LevelerLog {

@@ -155,15 +155,8 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
         Err(e) => trf("The copy could not be saved: {}", &[&e]),
       });
     }
-    let copy_label = if view.selection.is_some() {
-      tr("Copy selection")
-    } else {
-      tr("Copy all")
-    };
-    if ui
-      .button(format!("📋  {}", copy_label))
-      .on_hover_text(tr("Copies to the Windows clipboard (Ctrl+C)."))
-      .clicked()
+    let copy_label = if view.selection.is_some() { tr("Copy selection") } else { tr("Copy all") };
+    if ui.button(format!("📋  {}", copy_label)).on_hover_text(tr("Copies to the Windows clipboard (Ctrl+C).")).clicked()
     {
       let text = view.selection.map_or(view.buffer.as_str(), |r| r.slice_str(&view.buffer));
       view.saved = Some(match crate::win_clipboard::set_clipboard_text(text) {
@@ -238,10 +231,8 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
   // egui keeps following the end by itself once the offset sits there (stick_to_bottom), and
   // stops/resumes when the user scrolls away/back. We only jump to the end once on request.
-  let mut area = egui::ScrollArea::both()
-    .id_salt("log_lines")
-    .auto_shrink([false, false])
-    .stick_to_bottom(!view.selecting);
+  let mut area =
+    egui::ScrollArea::both().id_salt("log_lines").auto_shrink([false, false]).stick_to_bottom(!view.selecting);
   if view.jump_to_end {
     view.jump_to_end = false;
     // Past the end on purpose; egui clamps it to the end after this frame and sticks there.

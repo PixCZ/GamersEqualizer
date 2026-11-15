@@ -86,16 +86,14 @@ pub fn open_for_output(state: &mut AppState) {
 /// shortcut: GG installed while the app runs is seen after a restart; recount on the device
 /// recheck if that matters.
 pub fn sonar_profiles(state: &mut AppState) -> usize {
-  *state.setup.sonar_profiles.get_or_insert_with(|| {
-    match crate::sonar_importer::read_sonar_sources() {
-      Ok(p) => {
-        log::info!("[Setup] SteelSeries Sonar: {} profiles", p.len());
-        p.len()
-      }
-      Err(e) => {
-        log::warn!("[Setup] SteelSeries Sonar profiles not readable: {e}");
-        0
-      }
+  *state.setup.sonar_profiles.get_or_insert_with(|| match crate::sonar_importer::read_sonar_sources() {
+    Ok(p) => {
+      log::info!("[Setup] SteelSeries Sonar: {} profiles", p.len());
+      p.len()
+    }
+    Err(e) => {
+      log::warn!("[Setup] SteelSeries Sonar profiles not readable: {e}");
+      0
     }
   })
 }

@@ -8,8 +8,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Media::Audio::{
-  eCapture, eConsole, eRender, AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-  AUDCLNT_SHAREMODE_SHARED,
+  eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+  AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED};
 
@@ -33,7 +33,14 @@ fn main() -> windows::core::Result<()> {
       println!("mix format is not 32-bit float; unsupported");
       return Ok(());
     }
-    client.Initialize(AUDCLNT_SHAREMODE_SHARED, if render { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 }, 1_000_000, 0, format, None)?;
+    client.Initialize(
+      AUDCLNT_SHAREMODE_SHARED,
+      if render { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 },
+      1_000_000,
+      0,
+      format,
+      None,
+    )?;
     let capture: IAudioCaptureClient = client.GetService()?;
     client.Start()?;
 

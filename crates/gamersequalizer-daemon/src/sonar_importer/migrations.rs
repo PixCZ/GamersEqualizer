@@ -19,7 +19,8 @@ const GOOSE_DOWN: &str = "-- +goose Down";
 
 /// `%ProgramFiles%\SteelSeries\GG\apps\sonar\db-migrations`.
 pub fn default_dir() -> PathBuf {
-  let program_files = std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
+  let program_files =
+    std::env::var_os("ProgramFiles").map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from);
   program_files.join(r"SteelSeries\GG\apps\sonar\db-migrations")
 }
 
@@ -99,10 +100,18 @@ mod tests {
     let _ = std::fs::remove_dir_all(&dir);
     let write = |folder: &str, file: &str, sql: &str| {
       std::fs::create_dir_all(dir.join(folder)).unwrap();
-      std::fs::write(dir.join(folder).join(file), format!("-- +goose Up\n{sql}\n-- +goose Down\nDROP TABLE configs;\n")).unwrap();
+      std::fs::write(
+        dir.join(folder).join(file),
+        format!("-- +goose Up\n{sql}\n-- +goose Down\nDROP TABLE configs;\n"),
+      )
+      .unwrap();
     };
     // 0.10.0 must run after 0.9.0 (string order would put it first and fail on the missing table).
-    write("sonar-0.9.0", "1_schema.sql", "CREATE TABLE configs (name TEXT, vad INTEGER, data TEXT, is_preset INTEGER, game_ids TEXT NOT NULL DEFAULT '');");
+    write(
+      "sonar-0.9.0",
+      "1_schema.sql",
+      "CREATE TABLE configs (name TEXT, vad INTEGER, data TEXT, is_preset INTEGER, game_ids TEXT NOT NULL DEFAULT '');",
+    );
     write(
       "sonar-0.10.0",
       "2_presets.sql",
@@ -113,7 +122,10 @@ mod tests {
 
     let presets = read_presets(&dir).unwrap();
     assert_eq!(presets.len(), 1);
-    assert_eq!((presets[0].name.as_str(), presets[0].game_ids.as_slice()), ("Script Shooter", ["1_730".to_string()].as_slice()));
+    assert_eq!(
+      (presets[0].name.as_str(), presets[0].game_ids.as_slice()),
+      ("Script Shooter", ["1_730".to_string()].as_slice())
+    );
     assert!(read_presets(&dir.join("missing")).is_err());
     let _ = std::fs::remove_dir_all(&dir);
   }

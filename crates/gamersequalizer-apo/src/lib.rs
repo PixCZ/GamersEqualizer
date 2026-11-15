@@ -67,7 +67,6 @@ use windows::Win32::Foundation::{
   CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, PROPERTYKEY,
   S_FALSE, S_OK,
 };
-use windows::Win32::Media::Audio::IMMDeviceCollection;
 use windows::Win32::Media::Audio::Apo::{
   APOInitSystemEffects, APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject,
   IAudioProcessingObjectConfiguration, IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT,
@@ -76,6 +75,7 @@ use windows::Win32::Media::Audio::Apo::{
   APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_CONNECTION_PROPERTY_V2, APO_FLAG, APO_FLAG_DEFAULT,
   APO_FLAG_INPLACE, APO_REG_PROPERTIES, BUFFER_SILENT, BUFFER_VALID, UNCOMPRESSEDAUDIOFORMAT,
 };
+use windows::Win32::Media::Audio::IMMDeviceCollection;
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{CoTaskMemAlloc, CoTaskMemFree, IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -737,11 +737,7 @@ unsafe extern "system" fn cfg_lock_for_process(
   let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
   let Some(format) = offered.filter(is_supported_format) else {
     let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
-    note_for(
-      st,
-      Level::Warning,
-      format!("stream format not supported ({what}); Windows runs the stream without it"),
-    );
+    note_for(st, Level::Warning, format!("stream format not supported ({what}); Windows runs the stream without it"));
     return APOERR_FORMAT_NOT_SUPPORTED;
   };
 
@@ -756,12 +752,10 @@ unsafe extern "system" fn cfg_lock_for_process(
       p.sidetone.endpoint_hash = endpoint;
       Processor::Mic(p)
     }),
-    ApoKind::Output => {
-      OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
-        p.sidetone_endpoint = endpoint;
-        Processor::Output(p)
-      })
-    }
+    ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
+      p.sidetone_endpoint = endpoint;
+      Processor::Output(p)
+    }),
     ApoKind::Stream => shared_memory(st)
       .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
       .map(Processor::Stream),
@@ -809,7 +803,13 @@ fn shared_memory_tagged(kind: ApoKind, endpoint_tag: Option<&str>, instance_id: 
   match SharedMemoryClient::create_named(APO_SHM_NAME, Some(APO_SHM_SDDL)) {
     Ok(shm) => Some(shm),
     Err(e) => {
-      note_tagged(kind, endpoint_tag, instance_id, Level::Warning, format!("shared memory {APO_SHM_NAME} unavailable ({e})"));
+      note_tagged(
+        kind,
+        endpoint_tag,
+        instance_id,
+        Level::Warning,
+        format!("shared memory {APO_SHM_NAME} unavailable ({e})"),
+      );
       None
     }
   }
@@ -1201,7 +1201,13 @@ impl MicProcessor {
   /// to 48 kHz unless it already is). None (pass-through) on an unsupported rate or failure.
   fn create(rate: u32, endpoint_tag: Option<String>, instance_id: u32) -> Option<Box<Self>> {
     let refuse = |why: String| {
-      note_tagged(ApoKind::Mic, endpoint_tag.as_deref(), instance_id, Level::Warning, format!("{why}; passes audio through"));
+      note_tagged(
+        ApoKind::Mic,
+        endpoint_tag.as_deref(),
+        instance_id,
+        Level::Warning,
+        format!("{why}; passes audio through"),
+      );
     };
     let bridge = match RateBridge::for_rate(rate) {
       Some(Ok(bridge)) => Some(bridge),
@@ -1839,8 +1845,9 @@ fn read_sidetone(
   h.sidetone_reader_beat.fetch_add(1, r);
   h.sidetone_queued_us.store((u64::from(info.queued) * 1_000_000 / u64::from(info.ring_rate.max(1))) as u32, r);
   // Capture to mix; the units are 100 ns.
-  let age_us =
-    now_hns().zip(layout.sidetone.capture_qpc_hns(info.queued)).map_or(0, |(now, captured)| now.saturating_sub(captured) / 10);
+  let age_us = now_hns()
+    .zip(layout.sidetone.capture_qpc_hns(info.queued))
+    .map_or(0, |(now, captured)| now.saturating_sub(captured) / 10);
   h.sidetone_age_us.store(u32::try_from(age_us).unwrap_or(u32::MAX), r);
   true
 }
@@ -2131,8 +2138,14 @@ mod tests {
     assert_eq!(unsafe { processing_mode(20, data) }, None);
     assert_eq!(unsafe { endpoint_guid_from_init(20, data) }, None);
     assert_eq!(unsafe { processing_mode(size, std::ptr::null()) }, None);
-    assert_eq!(normalize_endpoint_guid("{0.0.0.00000000}.{42B05AAC-7B95-4CC8-8481-B940A20FE8BD}").as_deref(), Some("{42b05aac-7b95-4cc8-8481-b940a20fe8bd}"));
-    assert_eq!(normalize_endpoint_guid(" {CF0A2270-1885-4DD6-82A5-F636E9EFADD5} ").as_deref(), Some("{cf0a2270-1885-4dd6-82a5-f636e9efadd5}"));
+    assert_eq!(
+      normalize_endpoint_guid("{0.0.0.00000000}.{42B05AAC-7B95-4CC8-8481-B940A20FE8BD}").as_deref(),
+      Some("{42b05aac-7b95-4cc8-8481-b940a20fe8bd}")
+    );
+    assert_eq!(
+      normalize_endpoint_guid(" {CF0A2270-1885-4DD6-82A5-F636E9EFADD5} ").as_deref(),
+      Some("{cf0a2270-1885-4dd6-82a5-f636e9efadd5}")
+    );
     assert_eq!(normalize_endpoint_guid("garbage"), None);
   }
 
@@ -2231,8 +2244,9 @@ mod tests {
       let mut peak = 0.0f32;
       for k in 0..blocks {
         h.owner_beat.fetch_add(1, Ordering::Release);
-        let mic: Vec<f32> =
-          (0..480).flat_map(|i| [((k * 480 + i) as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0).sin() * 0.25; 2]).collect();
+        let mic: Vec<f32> = (0..480)
+          .flat_map(|i| [((k * 480 + i) as f32 * 2.0 * std::f32::consts::PI * 1000.0 / 48_000.0).sin() * 0.25; 2])
+          .collect();
         let before = mic.clone();
         tap.process(layout, &mic, 2, None, 0.0);
         assert_eq!(mic, before, "the tap only reads the microphone buffer");

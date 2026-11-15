@@ -20,7 +20,8 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn main() {
   let mut args = std::env::args().skip(1);
-  let seconds: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(DEBUG_CAPTURE_MAX_SECONDS).clamp(1, DEBUG_CAPTURE_MAX_SECONDS);
+  let seconds: u32 =
+    args.next().and_then(|s| s.parse().ok()).unwrap_or(DEBUG_CAPTURE_MAX_SECONDS).clamp(1, DEBUG_CAPTURE_MAX_SECONDS);
   let out_dir = args.next().map(PathBuf::from).unwrap_or_else(|| {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_data/private/captures").join(utc_stamp())
   });

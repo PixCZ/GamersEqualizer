@@ -26,9 +26,14 @@ impl ConsoleOwner {
       self.checked_at = Some(Instant::now());
       let owner = at_console();
       if first || owner != self.owner {
-        info!("[ConsoleOwner] {}", if owner { "this session is at the console: driving the APO" } else {
-          "another session is at the console: leaving the APO alone"
-        });
+        info!(
+          "[ConsoleOwner] {}",
+          if owner {
+            "this session is at the console: driving the APO"
+          } else {
+            "another session is at the console: leaving the APO alone"
+          }
+        );
         self.owner = owner;
       }
     }
@@ -40,7 +45,8 @@ impl ConsoleOwner {
 pub fn at_console() -> bool {
   let mut mine = 0u32;
   // SAFETY: plain Win32 queries with a valid out pointer.
-  let (active, ok) = unsafe { (WTSGetActiveConsoleSessionId(), ProcessIdToSessionId(GetCurrentProcessId(), &mut mine)) };
+  let (active, ok) =
+    unsafe { (WTSGetActiveConsoleSessionId(), ProcessIdToSessionId(GetCurrentProcessId(), &mut mine)) };
   // Unknown session: behave as before (drive the APO) rather than switch it off for everyone.
   ok.is_err() || mine == active
 }

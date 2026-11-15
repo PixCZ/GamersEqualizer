@@ -22,17 +22,17 @@ pub mod win_audio;
 pub mod win_clipboard;
 
 use eframe::egui_wgpu::{self, wgpu};
+use gamersequalizer_common::shm::ShmLayout;
 use log::{debug, error, info};
 use sonar_importer::ProfileStorage;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::ptr::NonNull;
 use std::process::Command;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ui::{AppState, GamersEqualizerApp};
-use gamersequalizer_common::shm::ShmLayout;
 use win_audio::WinAudioSystem;
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
@@ -112,10 +112,7 @@ fn heal_device_ids(win_audio: &WinAudioSystem, profiles_dir: &Path, shm_ptr: Opt
 }
 
 fn run_background_daemon() {
-  info!(
-    "[GamersEqualizer] Initializing headless background service, version {}...",
-    env!("GAMERSEQUALIZER_VERSION")
-  );
+  info!("[GamersEqualizer] Initializing headless background service, version {}...", env!("GAMERSEQUALIZER_VERSION"));
 
   // Single-instance daemon guard via named Win32 mutex
   let mutex_name = w!(r"Local\GamersEqualizer_Daemon_Mutex");
@@ -289,7 +286,8 @@ fn run_background_daemon() {
         if wanted.is_some() && wanted != win_audio.chatmix.mic_device_id {
           info!("[GamersEqualizer] microphone now {:?}", wanted);
           // The old mic gets its own wish back before `use_mic` loads the new one's volume.
-          let old = win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
+          let old =
+            win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
           mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
           win_audio.chatmix.use_mic(wanted);
           win_audio.mic_stream.set_input_device(win_audio.chatmix.mic_device_id.clone());
@@ -338,7 +336,8 @@ fn run_background_daemon() {
         header.mic_muted.store(win_audio.chatmix.mic_muted, Ordering::Relaxed);
       }
       if sync_due {
-        let mic_id = win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
+        let mic_id =
+          win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
         if mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref()) {
           app_state.save_audio_settings_if_changed(false);
         }
@@ -648,10 +647,11 @@ fn wgpu_backends() -> wgpu::Backends {
   // Native enumeration finishes inside the first poll (the future exists for WebGPU), so one
   // poll with a no-op waker is enough; a pending result counts as "no DX12 GPU".
   let mut adapters = std::pin::pin!(probe.enumerate_adapters(wgpu::Backends::DX12));
-  let adapters = match std::future::Future::poll(adapters.as_mut(), &mut std::task::Context::from_waker(std::task::Waker::noop())) {
-    std::task::Poll::Ready(list) => list,
-    std::task::Poll::Pending => Vec::new(),
-  };
+  let adapters =
+    match std::future::Future::poll(adapters.as_mut(), &mut std::task::Context::from_waker(std::task::Waker::noop())) {
+      std::task::Poll::Ready(list) => list,
+      std::task::Poll::Pending => Vec::new(),
+    };
   let has_dx12_gpu = adapters.iter().any(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
   if has_dx12_gpu {
     // No adapter name: wgpu picks the adapter later (low-power preference), not this probe.

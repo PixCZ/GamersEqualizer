@@ -1916,7 +1916,10 @@ pub(crate) mod tests {
     let with = measure(&clean, &mixed, &run(DenoiseModel::RnNoise, GATE_AUTO, &mixed), latency);
     let without = measure(&clean, &mixed, &without_soft(&mixed), latency);
     eprintln!("RNNoise quiet voice: with the soft key {with:?}, without {without:?}");
-    assert!(with.soft_dropouts <= without.soft_dropouts && with.dropouts <= without.dropouts, "{with:?} vs {without:?}");
+    assert!(
+      with.soft_dropouts <= without.soft_dropouts && with.dropouts <= without.dropouts,
+      "{with:?} vs {without:?}"
+    );
     let keys = keyboard_only(-20.0);
     let ungated = run(DenoiseModel::RnNoise, GATE_OFF_DB - 1.0, &keys);
     let (open, open_without) =
@@ -2604,7 +2607,16 @@ pub(crate) mod tests {
     let col = lines.next().unwrap().split('\t').position(|h| h == "leveler_gain_db").unwrap();
     let gains: Vec<f32> = lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect();
     let mut hp = BiquadCascade::default();
-    hp.set_bands(&[BiquadBand { filter_type: FilterType::HighPass, frequency: 70.0, q: 0.707, slope_db: 12, ..BiquadBand::default() }], 48_000.0);
+    hp.set_bands(
+      &[BiquadBand {
+        filter_type: FilterType::HighPass,
+        frequency: 70.0,
+        q: 0.707,
+        slope_db: 12,
+        ..BiquadBand::default()
+      }],
+      48_000.0,
+    );
     let mut iso = AiVoiceIsolator::new();
     iso.set_model(DenoiseModel::DeepFilterNet);
     iso.set_gate_threshold_db(GATE_AUTO);
@@ -2618,10 +2630,20 @@ pub(crate) mod tests {
     let lat = latency_samples(DenoiseModel::DeepFilterNet);
     let (out, live) = (&out[lat..], &live[lat..]);
     // Fidelity: 100 ms windows, replay against the live output.
-    let pairs: Vec<(f32, f32, f32)> = x.as_chunks::<4800>().0.iter().zip(out.as_chunks::<4800>().0).zip(live.as_chunks::<4800>().0).map(|((m, o), l)| (db(rms(m)), db(rms(o)), db(rms(l)))).collect();
+    let pairs: Vec<(f32, f32, f32)> = x
+      .as_chunks::<4800>()
+      .0
+      .iter()
+      .zip(out.as_chunks::<4800>().0)
+      .zip(live.as_chunks::<4800>().0)
+      .map(|((m, o), l)| (db(rms(m)), db(rms(o)), db(rms(l))))
+      .collect();
     let loud: Vec<&(f32, f32, f32)> = pairs.iter().skip(30).filter(|p| p.2 > -70.0 || p.1 > -70.0).collect();
     let off = loud.iter().filter(|p| (p.1 - p.2).abs() > 6.0).count();
-    eprintln!("FIDELITY {} windows with output over -70 dBFS (live or replay): {off} differ by more than 6 dB", loud.len());
+    eprintln!(
+      "FIDELITY {} windows with output over -70 dBFS (live or replay): {off} differ by more than 6 dB",
+      loud.len()
+    );
     for (t, p) in pairs.iter().enumerate().skip(30) {
       if (p.2 > -70.0 || p.1 > -70.0) && (p.1 - p.2).abs() > 6.0 {
         eprintln!("DIFF {:.1} s mic {:6.1} replay {:6.1} live {:6.1}", t as f32 / 10.0, p.0, p.1, p.2);
@@ -2630,8 +2652,11 @@ pub(crate) mod tests {
     // Clicks: loud windows the live chain's Silero would not call voice (standalone pass here).
     let (mut vad, mut probs) = (Vad48k::new().unwrap(), Vec::new());
     x.chunks(480).for_each(|b| vad.process(b, |p| probs.push(p)));
-    let silero = |t: usize| (0..4).map(|k| probs.get((t * 4800) / silero_vad::CHUNK_48K + k).copied().unwrap_or(0.0)).fold(0.0f32, f32::max);
-    let (mut n, mut e_in, mut e_out, mut leaks, mut sp, mut sp_loss, mut sp_cut) = (0usize, 0.0f32, 0.0f32, 0usize, 0usize, 0.0f32, 0usize);
+    let silero = |t: usize| {
+      (0..4).map(|k| probs.get((t * 4800) / silero_vad::CHUNK_48K + k).copied().unwrap_or(0.0)).fold(0.0f32, f32::max)
+    };
+    let (mut n, mut e_in, mut e_out, mut leaks, mut sp, mut sp_loss, mut sp_cut) =
+      (0usize, 0.0f32, 0.0f32, 0usize, 0usize, 0.0f32, 0usize);
     for (t, p) in pairs.iter().enumerate().skip(30) {
       if p.0 > -50.0 && silero(t) < 0.15 {
         n += 1;
@@ -2650,20 +2675,13 @@ pub(crate) mod tests {
       sp_loss / sp.max(1) as f32,
       sp_cut as f32 * 100.0 / sp.max(1) as f32
     );
-    let mut pauses: Vec<f32> = pairs
-      .iter()
-      .enumerate()
-      .skip(30)
-      .filter(|(t, _)| silero(*t) < 0.15)
-      .map(|(_, p)| p.1)
-      .collect();
+    let mut pauses: Vec<f32> =
+      pairs.iter().enumerate().skip(30).filter(|(t, _)| silero(*t) < 0.15).map(|(_, p)| p.1).collect();
     pauses.sort_by(f32::total_cmp);
     let p_len = pauses.len();
     let p_median = pauses.get(p_len / 2).copied().unwrap_or(0.0);
     let p_90 = pauses.get(p_len * 9 / 10).copied().unwrap_or(0.0);
-    eprintln!(
-      "PAUSES without voice {p_len}: median {p_median:.1} dBFS, 90th percentile {p_90:.1} dBFS"
-    );
+    eprintln!("PAUSES without voice {p_len}: median {p_median:.1} dBFS, 90th percentile {p_90:.1} dBFS");
   }
 
   #[derive(Debug)]

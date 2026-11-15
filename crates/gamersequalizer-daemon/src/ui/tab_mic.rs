@@ -96,7 +96,11 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         let mut target = h.mic_leveler_target_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
         ui.spacing_mut().slider_width = BAR_WIDTH;
         let slider = egui::Slider::new(&mut target, MIN_TARGET_DB..=MAX_TARGET_DB).step_by(1.0).show_value(false);
-        if ui.add(slider).on_hover_text(tr("How loud others hear you. The leveler gets your voice there by itself.")).changed() {
+        if ui
+          .add(slider)
+          .on_hover_text(tr("How loud others hear you. The leveler gets your voice there by itself."))
+          .changed()
+        {
           h.mic_leveler_target_db_x10.store((target * 10.0).round() as i32, Ordering::Relaxed);
         }
         let word = if target <= DEFAULT_TARGET_DB - 4.0 {
@@ -123,7 +127,9 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         ui.label(text);
         if ui
           .button(tr("Learn again"))
-          .on_hover_text(tr("Forget the learned level of this microphone and learn it from your next words (new mic, mic moved)."))
+          .on_hover_text(tr(
+            "Forget the learned level of this microphone and learn it from your next words (new mic, mic moved).",
+          ))
           .clicked()
         {
           h.mic_leveler_reset_seq.fetch_add(1, Ordering::Relaxed);
@@ -246,7 +252,10 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
     };
     ui.label(theme::caption(caption));
     if let Some((true, auto)) = leveler.filter(|&(_, auto)| auto > 0) {
-      ui.label(theme::caption(trf("Windows input level set automatically: {} %", &[&format!("{:.0}", auto as f32 / 10.0)])));
+      ui.label(theme::caption(trf(
+        "Windows input level set automatically: {} %",
+        &[&format!("{:.0}", auto as f32 / 10.0)],
+      )));
     }
   });
 }
@@ -262,13 +271,14 @@ fn clipping_status(ui: &mut Ui, clips: u32) {
   ui.ctx().data_mut(|d| d.insert_temp(id, (clips, last_at)));
   match last_at.map(|t| now - t).filter(|&ago| ago < CLIP_RECENT_SECS) {
     Some(ago) => {
-      theme::status_line(ui, Severity::Warning, &trf("Mic clipped {} s ago", &[&format!("{:.0}", ago)]))
-        .on_hover_text(tr(
+      theme::status_line(ui, Severity::Warning, &trf("Mic clipped {} s ago", &[&format!("{:.0}", ago)])).on_hover_text(
+        tr(
           "The sound card's input distorts: the wave is cut at its top. Lower the Windows input level, and check \
            \"Microphone Boost\" in the Windows sound control panel (device properties, Levels): it amplifies before \
            the input level, so lowering the level alone doesn't help. With the voice leveler on the app lowers the \
            input level by itself.",
-        ));
+        ),
+      );
     }
     None => {
       theme::status_line(ui, Severity::Success, tr("No clipping"));
@@ -343,7 +353,8 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
           });
           let last = t.raw_delay_ms.map_or_else(|| tr("no clear peak").to_string(), |d| format!("{d:.2} ms"));
           aec_row(ui, tr("Last measurement"), |ui| {
-            ui.label(RichText::new(last).color(p.text)).on_hover_text(trf("{} measurements total", &[&t.estimate_count]));
+            ui.label(RichText::new(last).color(p.text))
+              .on_hover_text(trf("{} measurements total", &[&t.estimate_count]));
           });
         });
       });
