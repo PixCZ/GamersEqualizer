@@ -965,22 +965,7 @@ fn aec_latency_samples(aec_idle: bool, aec_state: AecState, aec: &EchoCanceller3
 #[cfg(test)]
 mod tests {
   use super::*;
-  use gamersequalizer_common::limiter::soft_limit;
   use gamersequalizer_common::shm::StereoFrame;
-
-  #[test]
-  fn test_digital_boost_saturation() {
-    let boost = 3.0; // 300% (+9.5 dB)
-    let out: Vec<f32> = [0.1f32, 0.4, 0.8, 1.0].iter().map(|s| soft_limit(s * boost)).collect();
-
-    // 0.1 * 3.0 = 0.3 (linear, unclipped)
-    assert!((out[0] - 0.3).abs() < 1e-4);
-    // 0.4 * 3.0 = 1.2 -> saturated smoothly <= 1.0
-    assert!(out[1] > 0.95 && out[1] <= 1.0);
-    // 1.0 * 3.0 = 3.0 -> smoothly saturated without wrapping
-    assert!(out[3] > 0.95 && out[3] <= 1.0);
-    assert!(soft_limit(-3.0) < -0.95 && soft_limit(-3.0) >= -1.0);
-  }
 
   /// The whole mic chain (no AEC reference, default mic EQ) on the private recordings, for
   /// before/after comparisons of the stages after the denoiser. Per model and input level:

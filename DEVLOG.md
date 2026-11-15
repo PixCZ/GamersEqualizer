@@ -563,9 +563,9 @@ First live run (Brave playing music, The Division 2 in the background):
 ## Milestone 22: Whisper analysis, learning voice leveler (2026-11-06)
 
 Whisper analysis on own recordings (in git-ignored `test_data/private/`; one contains licensed music and never
-leaves the machine). Reports: `docs/mic-processing-report.md`, `docs/whisper-step1-results.md`. Tests
-(`#[ignore]`, need the private files): `scenario_report`, `whisper_probe`, `whisper_sweep`, `vad_timeline`,
-`leveler_report`.
+leaves the machine). The reports written then were removed later; what they found is below. Tests
+(`#[ignore]`, need the private files): `scenario_report`, `vad_timeline`, `leveler_report`; the probes
+`whisper_probe` and `whisper_sweep` went with the reports.
 
 - The RNNoise voice detector (both gate keys) never hears whisper: probability ~0, gain or lower thresholds
   don't help. A closed gate takes 12 dB off it.

@@ -2,8 +2,7 @@
 //! soft speech under keyboard noise than DeepFilterNet 3, at ~3x its CPU (~11 % of a core).
 //! Port of upstream's `dpdfnet.StreamEnhancer`: the ONNX graph takes one spectrum frame plus a
 //! flat state vector (feature normalisation + RNN states); the Vorbis STFT (960 / 480) and the
-//! overlap-add run here. Runs on tract 0.23, which is ~3x faster than the 0.21 DeepFilterNet 3
-//! is pinned to; both versions are linked side by side.
+//! overlap-add run here. Runs on tract 0.23, the same build as the DeepFilterNet 3 fork.
 
 use std::collections::VecDeque;
 use std::f32::consts::PI;
@@ -31,8 +30,8 @@ const LOOKAHEAD_HOPS: usize = 4;
 pub const LATENCY_SAMPLES: usize = HOP + (WIN - HOP) + LOOKAHEAD_HOPS * HOP;
 
 pub struct DpdfEngine {
-  /// One run state for the engine's lifetime: `plan.run()` would build a fresh one (and
-  /// allocate every intermediate buffer) per 10 ms frame.
+  /// One run state for the engine's lifetime: `plan.run()` would build a fresh one per 10 ms
+  /// frame. Each run still allocates inside tract (a known exception, see `architecture.md`).
   runner: TypedSimpleState,
   init_state: Vec<f32>,
   state: Tensor,

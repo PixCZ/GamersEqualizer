@@ -562,7 +562,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] B6 test překladů
 - [x] C1 most mikrofonu (ručně ověřeno 15. 11.: `[ApoLink]` spojeno, AEC Locked; poznámka v `packaging/release-notes/next.md`)
 - [x] C2 `dsp_apo`
-- [ ] C3 pokusy v řetězci mikrofonu
+- [x] C3 pokusy v řetězci mikrofonu (komentář „VST host“ zmizel už s `process()` v C1)
 - [ ] C4 ostatní mrtvý kód
 - [ ] C5 jména z prototypu
 - [ ] C6 přejmenování crate
