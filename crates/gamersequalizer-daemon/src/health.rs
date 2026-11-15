@@ -529,7 +529,7 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
 
   // Only where the user evidently wants it: on some output already (a new device), not "never
   // installed" (someone using the mic chain only). Outdated is the mic issue's job (one DLL).
-  if let (Some((ApoStatus::NotOnThisMic, true)), Some(output)) = (&snap.out_apo, snap.default_output.as_deref()) {
+  if let (Some((ApoStatus::NotOnThisMic, true)), Some(output)) = (&snap.out_apo, snap.output.as_deref()) {
     let key = format!("out_apo:{output}");
     if !memory.ignored.contains(&key) {
       issues.push(Issue::OutputProcessing { device_name: name_of(&snap.outputs, output), key });
@@ -1052,6 +1052,7 @@ mod tests {
   fn output_eq_missing_on_a_new_device_is_flagged_only_if_used_elsewhere() {
     let mut memory = HealthMemory::default();
     let mut s = snap("hp", &["hp"]);
+    s.output = Some("hp".into());
     s.out_apo = Some((ApoStatus::NotOnThisMic, false));
     assert!(evaluate(&mut memory, &s).0.is_empty(), "never set up on any output: user's choice");
     s.out_apo = Some((ApoStatus::NotOnThisMic, true));
@@ -1060,6 +1061,18 @@ mod tests {
     let Some(Fix::Ignore(key)) = issues[0].fixes().pop().map(|(_, f)| f) else { panic!("no ignore action") };
     memory.ignored.insert(key);
     assert!(evaluate(&mut memory, &s).0.is_empty());
+  }
+
+  #[test]
+  fn output_eq_warning_names_the_output_it_checked() {
+    let mut memory = HealthMemory::default();
+    // Master is the headphones; Windows' default is a virtual device (Sonar).
+    let mut s = snap("sonar", &["hp", "sonar"]);
+    s.output = Some("hp".into());
+    s.out_apo = Some((ApoStatus::NotOnThisMic, true));
+    let (issues, _) = evaluate(&mut memory, &s);
+    let [Issue::OutputProcessing { device_name, key }] = issues.as_slice() else { panic!("got {issues:?}") };
+    assert_eq!((device_name.as_str(), key.as_str()), ("HP", "out_apo:hp"));
   }
 
   #[test]
