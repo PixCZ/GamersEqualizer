@@ -10,7 +10,7 @@ Příkazy jsou pro PowerShell, spouštěj je z kořene repa.
 | Část                                                        | Stav                                             |
 | ----------------------------------------------------------- | ------------------------------------------------ |
 | `aec3.rs`: zesílení mikrofonu do AEC3 (`set_mic_gain_db`)   | přeloženo a otestováno na Macu, jen na syntetice |
-| `aec3.rs`: testy a `capture_tuning_report`                  | běží na Macu na dvou umělých „captures"          |
+| `aec3/tests.rs`: testy a `capture_tuning_report`            | běží na Macu na dvou umělých „captures"          |
 | `chain.rs`: předání zesílení z leveleru do AEC (2 řádky)    | **psáno bez překladače**                         |
 | `voice_leveler.rs`: `gain_to_default_db`                    | přeloženo na Macu                                |
 | `ai_denoiser/tests.rs`: `AEC_WAV` v `capture_replay_report` | **psáno bez překladače**                         |
@@ -231,12 +231,12 @@ měří (`EchoMeter` v `aec3.rs`), pamatuje pro dvojici mikrofon + výstup a zá
 následuje, když je echo silnější. Všechno se vypisuje do debug logu. Sdílená paměť má layout
 v18, takže **APO je potřeba přeinstalovat**.
 
-| Část                                            | Stav                                      |
-| ----------------------------------------------- | ----------------------------------------- |
-| `aec3.rs` (měřič, záložní odhad, testy)         | přeloženo a otestováno na Macu            |
-| `shm.rs` (5 nových polí, v18)                   | přeloženo a otestováno na Macu            |
-| `chain_log.rs` (řádky logu, test)               | čistá část přeložena a otestována na Macu |
-| `chain.rs`, `apo_link.rs`, `aec_delay_cache.rs` | **psáno bez překladače**                  |
+| Část                                                     | Stav                                      |
+| -------------------------------------------------------- | ----------------------------------------- |
+| `aec3.rs`, `aec3/tests.rs` (měřič, záložní odhad, testy) | přeloženo a otestováno na Macu            |
+| `shm.rs` (5 nových polí, v18)                            | přeloženo a otestováno na Macu            |
+| `chain_log.rs` (řádky logu, test)                        | čistá část přeložena a otestována na Macu |
+| `chain.rs`, `apo_link.rs`, `aec_delay_cache.rs`          | **psáno bez překladače**                  |
 
 ### 11.1 Přeložit
 
