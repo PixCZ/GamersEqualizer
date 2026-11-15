@@ -36,9 +36,9 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
     if super::setup::sonar_profiles(state) > 0 {
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let hover = trf(
-    "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
-    &[&DEFAULT_SONAR_DB_PATH],
-  );
+          "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
+          &[&DEFAULT_SONAR_DB_PATH],
+        );
   if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(hover).clicked() {
           reimport_sonar(state);
         }
@@ -167,7 +167,8 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
             profile_picker(ui, "active_game_profile", current, &refs, tr("(none)"), &mut filter, 240.0)
           {
             state.out_eq_unsaved = None;
-            state.output_eq_do(|eq, shm| eq.bind_exe(&exe, Some(choice.unwrap_or_default()), shm));
+            // "(none)" drops the binding; "" would bind the exe as "Not a game".
+            state.output_eq_do(|eq, shm| eq.bind_exe(&exe, choice, shm));
           }
         } else {
           ui.label(RichText::new(current.map_or(tr("none"), tr)).strong());
