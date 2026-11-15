@@ -27,7 +27,7 @@ pub struct LevelerSnapshot {
   pub input_gain_x10: i32,
   pub target_x10: i32,
   pub reset_seq: u32,
-  /// Settings before the leveler: when they change, it relearns fast (`plugin.rs` LevelerInputs).
+  /// Settings before the leveler: when they change, it relearns fast (`chain.rs` LevelerInputs).
   pub aec_enabled: bool,
   pub ai_strength_permille: u32,
   pub gate_db: i32,

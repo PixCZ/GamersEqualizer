@@ -21,7 +21,7 @@ const LOG_FILE: &str = "gamersequalizer.log";
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 /// Our crates up to debug (gated by `DEBUG_TO_DISK`); libraries (wgpu logs every frame at info)
 /// only warnings.
-const DEFAULT_FILTER: &str = "warn,gamersequalizer=debug,gamersequalizer_mic_vst=debug,gamersequalizer_common=debug";
+const DEFAULT_FILTER: &str = "warn,gamersequalizer=debug,gamersequalizer_mic_chain=debug,gamersequalizer_common=debug";
 /// Exists = debug lines are saved.
 const DEBUG_MARKER: &str = "save_debug";
 const DEBUG_MARKER_CHECK: Duration = Duration::from_secs(2);

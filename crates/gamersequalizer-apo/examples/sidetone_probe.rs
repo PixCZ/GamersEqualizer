@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::SHM_NAME;
 use gamersequalizer_common::sidetone::device_hash;
-use gamersequalizer_mic_vst::SharedMemoryClient;
+use gamersequalizer_mic_chain::SharedMemoryClient;
 use windows::Win32::Media::Audio::{
   eCapture, eConsole, eRender, EDataFlow, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator,
   MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,

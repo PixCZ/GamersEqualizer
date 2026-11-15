@@ -11,7 +11,7 @@ use gamersequalizer_common::sidetone::{
   device_hash, NoiseMode, SidetonePair, SidetonePairs, GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX,
   VOLUME_MAX,
 };
-use gamersequalizer_mic_vst::sidetone_denoise::nominal_delay_ms;
+use gamersequalizer_mic_chain::sidetone_denoise::nominal_delay_ms;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 

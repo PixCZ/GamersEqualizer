@@ -2228,7 +2228,7 @@ pub(crate) mod tests {
   /// Report on the developer's own recordings in the git-ignored `test_data/private/`
   /// (`speech.wav`, `keys.wav`: mono WAV). Prints gate vs no gate per model, no thresholds:
   /// a private voice can't back a shared regression test. Run:
-  /// `cargo test -p gamersequalizer-mic-vst --release private_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release private_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn private_report() {
@@ -2286,7 +2286,7 @@ pub(crate) mod tests {
   /// lost [pause suppression dB], and the speech frames with a click (click within 10 dB of the
   /// voice there): mean dB under the clean speech, shares lost > 6 / > 15 dB. Private voice
   /// when present. DFN3 also without `ClickRescue`.
-  /// `cargo test -p gamersequalizer-mic-vst --release click_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release click_report -- --ignored --nocapture`
   #[test]
   #[ignore = "report, slow"]
   fn click_report() {
@@ -2324,7 +2324,7 @@ pub(crate) mod tests {
   /// no clean reference). Per model (gate auto + lookahead, default strength) writes the processed take
   /// to `test_data/private/out/` for listening and counts speech frames DFN3 cut: 10 ms frames where
   /// RNNoise (which keeps a voice under keys) is speech-loud and the model's output > 10 dB under it.
-  /// `cargo test -p gamersequalizer-mic-vst --release keyboard_call_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release keyboard_call_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn keyboard_call_report() {
@@ -2387,7 +2387,7 @@ pub(crate) mod tests {
   /// Default strength candidates per model (gate auto + lookahead): soft% / loud% lost
   /// [pause suppression dB, far pauses dB] on the keyboard mixes (private when present) and
   /// hammered clicks at -3 dBFS (+ frames lost > 15 dB under the clicks).
-  /// `cargo test -p gamersequalizer-mic-vst --release strength_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release strength_report -- --ignored --nocapture`
   #[test]
   #[ignore = "report, slow"]
   fn strength_report() {
@@ -2445,7 +2445,7 @@ pub(crate) mod tests {
   /// louder, per model. Speech frames lost > 6 / > 15 dB, word tails (15-30 dB under the average)
   /// lost > 6 dB, then key suppression in pause frames by their distance from speech (10 ms
   /// frames after the last / before the next speech frame).
-  /// `cargo test -p gamersequalizer-mic-vst --release near_pause_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release near_pause_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn near_pause_report() {
@@ -2524,7 +2524,7 @@ pub(crate) mod tests {
   /// auto + lookahead), with and without the Silero key (`soft_net`). Per segment the level of
   /// the gated output under the same model's ungated output, dB (0 = the gate stayed open;
   /// `GATE_FLOOR_DB` = closed throughout), and the share of 10 ms frames more than 6 dB under it.
-  /// `cargo test -p gamersequalizer-mic-vst --release whisper_gate_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release whisper_gate_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn whisper_gate_report() {
@@ -2585,7 +2585,7 @@ pub(crate) mod tests {
   /// of the same build replays without a difference. DFN3, gate auto, no lookahead.
   /// `AEC_WAV=<capture>_v<n>.wav` takes the denoiser input from `test_data/private/aec_ab/`
   /// instead (an AEC3 variant written by `aec3::tests::capture_tuning_report` with `WAV=1`).
-  /// `CAP=20261109-204900 cargo test -p gamersequalizer-mic-vst --release capture_replay_report -- --ignored --nocapture`
+  /// `CAP=20261109-204900 cargo test -p gamersequalizer-mic-chain --release capture_replay_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn capture_replay_report() {
@@ -2764,7 +2764,7 @@ pub(crate) mod tests {
   /// Gate lookahead per model: soft% / loud% lost [pause suppression dB] per mix and the share
   /// of keys-only audio the gate lets through, for 0-30 ms. Private recordings when present,
   /// else the shared fixtures. Picks the `*_LOOKAHEAD_SAMPLES` constants.
-  /// `cargo test -p gamersequalizer-mic-vst --release lookahead_sweep -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release lookahead_sweep -- --ignored --nocapture`
   #[test]
   #[ignore = "report, slow"]
   fn lookahead_sweep() {
@@ -2816,7 +2816,7 @@ pub(crate) mod tests {
   /// probability and per model the output level without / with the gate (auto + lookahead,
   /// the default) and the gate's open share; then a summary split into seconds with and without
   /// speech, and CPU time. Writes the processed takes to `test_data/private/out/` for listening.
-  /// `cargo test -p gamersequalizer-mic-vst --release scenario_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release scenario_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn scenario_report() {
@@ -2932,7 +2932,7 @@ pub(crate) mod tests {
   /// DeepFilterNet 3 alone (no gate) on speech over keys, strength 0.75 and 1.0: time per second
   /// of audio, and the output against a reference saved earlier (raw f32 LE, `DFN3_REF`; written
   /// when missing). For runtime upgrades (tract 0.21 -> 0.23, 2026-11-08). Run:
-  /// `$env:DFN3_REF='<file>'; cargo test -p gamersequalizer-mic-vst --release dfn3_reference -- --ignored --nocapture`
+  /// `$env:DFN3_REF='<file>'; cargo test -p gamersequalizer-mic-chain --release dfn3_reference -- --ignored --nocapture`
   #[test]
   #[ignore = "runtime upgrade check"]
   fn dfn3_reference() {
@@ -2974,7 +2974,7 @@ pub(crate) mod tests {
   /// `test_data/private/aec_ab/`) through each model: share of 10 ms blocks the input detector
   /// hears speech / the gate is open in, in "echo only" blocks (far end playing, AEC3 took at least
   /// 15 dB off the mic: little near-end voice in them) and in blocks without a far end. Run:
-  /// `cargo test -p gamersequalizer-mic-vst --release echo_gate_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release echo_gate_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn echo_gate_report() {
@@ -3045,7 +3045,7 @@ pub(crate) mod tests {
   /// The learning voice leveler on the private recordings: denoiser (RNNoise, default gate) +
   /// leveler, the input at its own level and 12 dB / 24 dB lower (a mic set low). Prints the gain
   /// over time and the output level of voice and room sections. Run:
-  /// `cargo test -p gamersequalizer-mic-vst --release leveler_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release leveler_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn leveler_report() {
@@ -3099,7 +3099,7 @@ pub(crate) mod tests {
 
   /// Per 0.5 s of a private recording: level, raw RNNoise voice share (> 0.5) and clicky 10 ms
   /// frames (peak 20 dB over RMS: keys). For finding section bounds. Run (file in test_data/private/):
-  /// `$env:WAV="x.wav"; cargo test -p gamersequalizer-mic-vst --release vad_timeline -- --ignored --nocapture`
+  /// `$env:WAV="x.wav"; cargo test -p gamersequalizer-mic-chain --release vad_timeline -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn vad_timeline() {
@@ -3123,7 +3123,7 @@ pub(crate) mod tests {
   }
 
   /// Tuning report for the detector's hysteresis (keep threshold x active window). Run:
-  /// `cargo test -p gamersequalizer-mic-vst --release gate_sweep -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release gate_sweep -- --ignored --nocapture`
   #[test]
   #[ignore = "tuning report, slow"]
   fn gate_sweep() {

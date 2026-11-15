@@ -30,20 +30,20 @@ binary has **no network code**; latency of the microphone chain is measured and 
 
 ## Structure
 
-| Path                              | Purpose                                                                   |
-| --------------------------------- | ------------------------------------------------------------------------- |
-| `crates/gamersequalizer-common/`  | Shared by all: shared-memory layout, biquads, limiter, profiles, sidetone |
-| `crates/gamersequalizer-mic-vst/` | Microphone DSP chain, a plain library (the name is historical: no VST)    |
-| `crates/gamersequalizer-apo/`     | The APO DLL: COM object, mic / output / stream processors; probe examples |
-| `crates/gamersequalizer-daemon/`  | `gamersequalizer.exe`: service loop and window (see below)                |
-| `crates/vendor/`                  | Third-party forks (DeepFilterNet, RNNoise, Silero VAD), outside our lints |
-| `crates/build-support/`           | Version info shared by the build scripts                                  |
-| `scripts/`                        | Dev rebuild, packaging, signing, APO install / uninstall and its tests    |
-| `test_data/`                      | Test fixtures; `test_data/private/` is git-ignored (own recordings)       |
-| `docs/`                           | Build guide, AEC3 tuning notes, screenshots                               |
-| `packaging/`                      | winget manifest drafts, release notes                                     |
-| `.claude/rules/`                  | Detailed agent rules: architecture, code style, testing                   |
-| `secrets/`                        | Never read, edit, or commit                                               |
+| Path                                | Purpose                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------- |
+| `crates/gamersequalizer-common/`    | Shared by all: shared-memory layout, biquads, limiter, profiles, sidetone |
+| `crates/gamersequalizer-mic-chain/` | Microphone DSP chain (AEC, noise suppression, leveler), a plain library   |
+| `crates/gamersequalizer-apo/`       | The APO DLL: COM object, mic / output / stream processors; probe examples |
+| `crates/gamersequalizer-daemon/`    | `gamersequalizer.exe`: service loop and window (see below)                |
+| `crates/vendor/`                    | Third-party forks (DeepFilterNet, RNNoise, Silero VAD), outside our lints |
+| `crates/build-support/`             | Version info shared by the build scripts                                  |
+| `scripts/`                          | Dev rebuild, packaging, signing, APO install / uninstall and its tests    |
+| `test_data/`                        | Test fixtures; `test_data/private/` is git-ignored (own recordings)       |
+| `docs/`                             | Build guide, AEC3 tuning notes, screenshots                               |
+| `packaging/`                        | winget manifest drafts, release notes                                     |
+| `.claude/rules/`                    | Detailed agent rules: architecture, code style, testing                   |
+| `secrets/`                          | Never read, edit, or commit                                               |
 
 Inside `crates/gamersequalizer-daemon/src/`:
 

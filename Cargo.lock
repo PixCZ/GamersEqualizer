@@ -1119,7 +1119,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "gamersequalizer-common",
- "gamersequalizer-mic-vst",
+ "gamersequalizer-mic-chain",
  "jiff",
  "log",
  "muda",
@@ -1137,7 +1137,7 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "gamersequalizer-common",
- "gamersequalizer-mic-vst",
+ "gamersequalizer-mic-chain",
  "rubato",
  "windows",
  "windows-core",
@@ -1152,7 +1152,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gamersequalizer-mic-vst"
+name = "gamersequalizer-mic-chain"
 version = "0.1.0"
 dependencies = [
  "deep_filter",

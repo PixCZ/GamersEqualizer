@@ -19,7 +19,7 @@ use gamersequalizer_common::shm::APO_SHM_NAME;
 use gamersequalizer_common::streams::{
   hold_match, pick_session, StreamBus, ENVELOPE_BLOCK_HNS, ENVELOPE_LEN, HOLD_PAD_AFTER, HOLD_PAD_BEFORE, SILENCE,
 };
-use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
+use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use log::{error, info};
 use windows::core::Interface;
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;

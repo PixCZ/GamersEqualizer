@@ -4,7 +4,7 @@
 //! without a logger, so this (in the process that owns the shared memory) logs for it too.
 
 use gamersequalizer_common::shm::{DenoiseLimit, DenoiseModel, ShmHeader};
-use gamersequalizer_mic_vst::ai_denoiser::AiVoiceIsolator;
+use gamersequalizer_mic_chain::ai_denoiser::AiVoiceIsolator;
 use log::{debug, error, info, warn};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};

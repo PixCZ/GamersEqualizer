@@ -8,9 +8,9 @@ use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::shm::{
   AecState, DenoiseLimit, DenoiseModel, NOISE_GATE_AUTO, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
 };
-use gamersequalizer_mic_vst::ai_denoiser::AiVoiceIsolator;
-use gamersequalizer_mic_vst::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
-use gamersequalizer_mic_vst::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
+use gamersequalizer_mic_chain::ai_denoiser::AiVoiceIsolator;
+use gamersequalizer_mic_chain::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
+use gamersequalizer_mic_chain::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
 use std::sync::atomic::Ordering;
 
 pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);

@@ -40,7 +40,7 @@ const CHAIN_WINDOW_SAMPLES: usize = 12_000;
 /// The chain runs at 48 kHz only; the APO bridges other device rates (`RateBridge`).
 const SAMPLE_RATE: f32 = 48_000.0;
 
-pub struct GamersEqualizerPlugin {
+pub struct MicChain {
   shm_client: Option<SharedMemoryClient>,
   delay_estimator: DelayEstimator,
   aec: EchoCanceller3,
@@ -153,7 +153,7 @@ struct ChainExtremes {
   limiter_gain: f32,
 }
 
-impl GamersEqualizerPlugin {
+impl MicChain {
   /// Uses the given mapping for settings, reference audio and telemetry (the APO passes
   /// its Global mapping here).
   pub fn with_shm(shm_client: Option<SharedMemoryClient>) -> Self {
@@ -971,7 +971,7 @@ mod tests {
   /// before/after comparisons of the stages after the denoiser. Per model and input level:
   /// output level of voice / whisper / room sections (dBFS, power mean), samples at full scale
   /// (>= 0.99, per mille), peak, leveler gain at the end; and keys.wav alone. Run:
-  /// `cargo test -p gamersequalizer-mic-vst --release chain_report -- --ignored --nocapture`
+  /// `cargo test -p gamersequalizer-mic-chain --release chain_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn chain_report() {
@@ -1005,7 +1005,7 @@ mod tests {
     ];
     // (output, leveler gain at the end, share of blocks the heavy model slept, whisper section only)
     let run = |model: DenoiseModel, permille: u32, input: &[f32]| -> (Vec<f32>, f32, f32) {
-      let mut p = GamersEqualizerPlugin::with_shm(None);
+      let mut p = MicChain::with_shm(None);
       p.test_overrides = Some((model, permille));
       p.ai_denoiser.set_model(model);
       p.eq.set_bands(&bands, 48_000.0);
@@ -1125,7 +1125,7 @@ mod tests {
   fn test_nan_in_the_mic_does_not_spoil_the_delay_window() {
     const ECHO_DELAY: usize = 2_000;
     let reference = noise(120_000, 1);
-    let mut p = plugin_with_reference("nan_delay", &reference);
+    let mut p = chain_with_reference("nan_delay", &reference);
     let mut out = vec![0.0f32; BLOCK];
     let mut k = 0;
     while p.delay_estimator.last_outcome().is_none() {
@@ -1148,7 +1148,7 @@ mod tests {
   /// Regression: AEC off -> on replayed the samples AEC3 had queued before it was switched off.
   #[test]
   fn test_aec_switched_back_on_drops_audio_queued_before() {
-    let mut p = plugin_with_reference("aec_idle", &noise(120_000, 2));
+    let mut p = chain_with_reference("aec_idle", &noise(120_000, 2));
     p.shm_header().expect("mapping").aec_cached_delay_samples.store(960, Ordering::Relaxed); // AEC runs at once
     let (loud, mut out) = (noise(BLOCK, 3), vec![0.0f32; BLOCK]);
     for k in 0..20 {
@@ -1168,15 +1168,15 @@ mod tests {
   const BLOCK: usize = 441;
   const T0_HNS: u64 = 10_000_000_000;
 
-  /// Plugin on a private mapping whose loopback reference played `reference` from `T0_HNS`;
+  /// Chain on a private mapping whose loopback reference played `reference` from `T0_HNS`;
   /// RNNoise, 100 % volume.
-  fn plugin_with_reference(tag: &str, reference: &[f32]) -> GamersEqualizerPlugin {
+  fn chain_with_reference(tag: &str, reference: &[f32]) -> MicChain {
     let name = format!("Local\\GamersEqualizer_test_{tag}_{}", std::process::id());
     let mut shm = SharedMemoryClient::create_named(&name, None).expect("test mapping");
     let frames: Vec<StereoFrame> = reference.iter().map(|&s| StereoFrame { left: s, right: s }).collect();
     shm.ring_buffer().push_frames_timed(&frames, T0_HNS);
     shm.layout().header.tap_active.store(true, Ordering::Relaxed); // the loopback writer's flag
-    let mut p = GamersEqualizerPlugin::with_shm(Some(shm));
+    let mut p = MicChain::with_shm(Some(shm));
     p.test_overrides = Some((DenoiseModel::RnNoise, 1000));
     p
   }
@@ -1187,7 +1187,7 @@ mod tests {
   }
 
   /// Position in the reference (`len` samples, all written) that played at `t`.
-  fn ref_position(p: &GamersEqualizerPlugin, t: u64, len: usize) -> usize {
+  fn ref_position(p: &MicChain, t: u64, len: usize) -> usize {
     let h = p.shm_header().expect("test mapping");
     let first = h.ref_snap_index.load(Ordering::Relaxed).wrapping_sub(len as u32);
     h.ref_index_at(t).expect("reference").wrapping_sub(first) as usize

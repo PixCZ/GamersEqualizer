@@ -14,7 +14,7 @@ use gamersequalizer_common::shm::APO_SHM_NAME;
 use gamersequalizer_common::streams::{
   hold_match, HoldMatch, StreamSlot, ENVELOPE_BLOCK_HNS, ENVELOPE_LEN, HOLD_PAD_AFTER, HOLD_PAD_BEFORE,
 };
-use gamersequalizer_mic_vst::SharedMemoryClient;
+use gamersequalizer_mic_chain::SharedMemoryClient;
 use std::sync::atomic::Ordering;
 use windows::core::{Interface, GUID, PWSTR};
 use windows::Win32::Foundation::CloseHandle;

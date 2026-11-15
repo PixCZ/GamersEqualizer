@@ -20,7 +20,7 @@ use windows::Win32::System::Threading::{
 };
 
 use gamersequalizer_common::shm::StereoFrame;
-use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
+use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::apo_link::ApoLink;
 

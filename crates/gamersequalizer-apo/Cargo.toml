@@ -11,13 +11,13 @@ crate-type = ["cdylib"]
 
 [features]
 # `scripts/dev-rebuild.ps1 -Apo -DebugCapture`: the APO records the mic chain on request.
-debug-capture = ["gamersequalizer-mic-vst/debug-capture"]
+debug-capture = ["gamersequalizer-mic-chain/debug-capture"]
 
 [dependencies]
 windows = { workspace = true }
 windows-core = { workspace = true }
 gamersequalizer-common = { path = "../gamersequalizer-common" }
-gamersequalizer-mic-vst = { path = "../gamersequalizer-mic-vst" }
+gamersequalizer-mic-chain = { path = "../gamersequalizer-mic-chain" }
 # Already in the build through deep_filter; resamples the mic chain at non-48 kHz rates.
 rubato = "5"
 

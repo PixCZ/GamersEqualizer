@@ -1,5 +1,5 @@
 //! System effect APOs that audiodg.exe loads on physical endpoints, three COM classes in one DLL:
-//! - Mic chain (capture): AEC -> denoise -> EQ -> boost, from `gamersequalizer-mic-vst`, so
+//! - Mic chain (capture): AEC -> denoise -> EQ -> boost, from `gamersequalizer-mic-chain`, so
 //!   every app receives processed audio without a virtual sound card.
 //! - Output EQ (render): headphone correction + game profile as one biquad cascade per channel,
 //!   at any sample rate. The bands come from the daemon through the same Global mapping.
@@ -59,8 +59,8 @@ use gamersequalizer_common::limiter::{soft_limit, PeakLimiter};
 use gamersequalizer_common::shm::{OwnerWatch, ShmHeader, ShmLayout, APO_SHM_NAME, REF_SAMPLE_RATE};
 use gamersequalizer_common::sidetone::{device_hash, NoiseMode, SidetoneChain, SidetoneReader};
 use gamersequalizer_common::streams::{StreamBus, StreamInfo};
-use gamersequalizer_mic_vst::sidetone_denoise::{self, SidetoneDenoiser};
-use gamersequalizer_mic_vst::{GamersEqualizerPlugin, SharedMemoryClient};
+use gamersequalizer_mic_chain::sidetone_denoise::{self, SidetoneDenoiser};
+use gamersequalizer_mic_chain::{MicChain, SharedMemoryClient};
 use rate_bridge::RateBridge;
 use windows::core::{implement, IUnknown, IUnknown_Vtbl, Interface, Ref, Result, BOOL, GUID, HRESULT};
 use windows::Win32::Foundation::{
@@ -249,7 +249,7 @@ struct MicChainCount {
 }
 
 struct MicProcessor {
-  plugin: Box<GamersEqualizerPlugin>,
+  chain: Box<MicChain>,
   sidetone: Box<SidetoneTap>,
   mono_in: Vec<f32>,
   mono_out: Vec<f32>,
@@ -313,7 +313,7 @@ struct MicClock {
   anchor: Option<(i64, u64)>,
 }
 
-// SAFETY: the plugin holds `Rc`s internally (DeepFilterNet's tract graph) that never leave
+// SAFETY: the chain holds `Rc`s internally (DeepFilterNet's tract graph) that never leave
 // it; the whole Processor moves between the configuration and real-time threads as one
 // unit behind a Mutex, so no Rc is ever touched from two threads at once.
 unsafe impl Send for MicProcessor {}
@@ -1223,14 +1223,14 @@ impl MicProcessor {
     let shm_tag = endpoint_tag.clone();
     let built = catch_unwind(AssertUnwindSafe(move || {
       let shm = shared_memory_tagged(ApoKind::Mic, shm_tag.as_deref(), instance_id);
-      let mut plugin = Box::new(GamersEqualizerPlugin::with_shm(shm));
-      plugin.preload_selected_model();
+      let mut chain = Box::new(MicChain::with_shm(shm));
+      chain.preload_selected_model();
       #[cfg(feature = "debug-capture")]
-      if let Ok(map) = gamersequalizer_mic_vst::debug_capture::DebugCaptureMap::create(APO_SHM_SDDL) {
-        plugin.attach_debug_capture(map, rate);
+      if let Ok(map) = gamersequalizer_mic_chain::debug_capture::DebugCaptureMap::create(APO_SHM_SDDL) {
+        chain.attach_debug_capture(map, rate);
       }
       Box::new(MicProcessor {
-        plugin,
+        chain,
         sidetone: Box::new(SidetoneTap::new(rate, instance_id)),
         mono_in: vec![0.0; 4096],
         mono_out: vec![0.0; 4096],
@@ -1263,7 +1263,7 @@ impl MicProcessor {
       "no audio blocks arrived"
     } else if self.processed > 0 {
       "processed"
-    } else if self.plugin.shm_header().is_none() {
+    } else if self.chain.shm_header().is_none() {
       "no shared memory, passed audio through"
     } else {
       "GamersEqualizer did not drive it (not running for the user at the console), passed audio through"
@@ -1289,10 +1289,10 @@ impl MicProcessor {
       return;
     }
     // Sidetone first, from the untouched input; it has its own failure flag.
-    if let Some(layout) = self.plugin.shm_layout() {
+    if let Some(layout) = self.chain.shm_layout() {
       // This chain's own leveler, not the shared memory: every mic APO instance publishes there.
       // A failed chain no longer levels, so the sidetone goes back to the raw microphone.
-      let leveler_gain_db = if self.failed { 0.0 } else { self.plugin.leveler_gain_db() };
+      let leveler_gain_db = if self.failed { 0.0 } else { self.chain.leveler_gain_db() };
       self.sidetone.process(layout, buf, channels, qpc_hns, leveler_gain_db);
     }
     if self.failed {
@@ -1308,13 +1308,13 @@ impl MicProcessor {
     let now = Instant::now();
     // With several mic chains (MFX: one per processing mode in use) the app shows one of them.
     let publishes = self.count.publishes();
-    self.plugin.set_publishing(publishes, MIC_CHAINS.load(Ordering::Relaxed) > 1);
-    self.timing.note(now, frames, self.clock.rate, self.plugin.shm_header().filter(|_| publishes));
+    self.chain.set_publishing(publishes, MIC_CHAINS.load(Ordering::Relaxed) > 1);
+    self.timing.note(now, frames, self.clock.rate, self.chain.shm_header().filter(|_| publishes));
     // Nobody's settings to apply (app not running for the user at the console): the raw mic.
-    let Self { plugin, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, processed, .. } = self;
-    if *follow_owner && !plugin.shm_header().is_some_and(|h| owner.live(h, now)) {
+    let Self { chain, mono_in, mono_out, bridge, failed, owner, follow_owner, was_live, processed, .. } = self;
+    if *follow_owner && !chain.shm_header().is_some_and(|h| owner.live(h, now)) {
       if std::mem::replace(was_live, false) {
-        plugin.pause();
+        chain.pause();
       }
       return;
     }
@@ -1333,7 +1333,7 @@ impl MicProcessor {
       // Other rate: the bridge resamples to 48 kHz, runs the chain, and writes back into `input`.
       Some(bridge) => {
         let resampled = bridge.process(input, qpc_hns, |chain_in, chain_out, time| {
-          plugin.process_timed(&[chain_in], &mut [chain_out], time);
+          chain.process_timed(&[chain_in], &mut [chain_out], time);
         });
         // The sinc filter rings slightly past the chain's limiter ceiling: keep it at full scale.
         for (dst, &src) in output.iter_mut().zip(input.iter()) {
@@ -1342,7 +1342,7 @@ impl MicProcessor {
         resampled.is_ok()
       }
       None => {
-        plugin.process_timed(&[&*input], &mut [&mut *output], qpc_hns);
+        chain.process_timed(&[&*input], &mut [&mut *output], qpc_hns);
         true
       }
     }));
@@ -1360,7 +1360,7 @@ impl MicProcessor {
 
 impl Drop for MicProcessor {
   fn drop(&mut self) {
-    if let Some(layout) = self.plugin.shm_layout() {
+    if let Some(layout) = self.chain.shm_layout() {
       self.sidetone.release(layout);
     }
   }

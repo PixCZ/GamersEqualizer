@@ -10,7 +10,7 @@ You run the project's dev loop and report the result. Do not edit any files.
 1. From the repo root run (PowerShell), with the switches the caller asked for:
    `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev-rebuild.ps1 [-Apo] [-Test] [-Start]`
    - `-Apo`: also build the APO DLL (`target\apo`), needed when `crates/gamersequalizer-apo`,
-     `gamersequalizer-mic-vst` or `gamersequalizer-common` changed.
+     `gamersequalizer-mic-chain` or `gamersequalizer-common` changed.
    - `-Test`: the gate, `scripts\check.ps1` (format, clippy at zero warnings, all tests).
    - `-Start`: start the app again afterwards.
    Builds take several minutes: use a 600000 ms timeout.

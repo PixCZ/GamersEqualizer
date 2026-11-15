@@ -6,7 +6,7 @@ use gamersequalizer_common::profile::{collapse_slopes, slots_used, ParametricPro
 use gamersequalizer_common::shm::{AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout, APO_SHM_NAME, SHM_NAME};
 use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
-use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
+use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;

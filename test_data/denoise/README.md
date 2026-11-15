@@ -1,6 +1,6 @@
 # Denoiser test fixtures
 
-Used by the tests in `crates/gamersequalizer-mic-vst/src/ai_denoiser.rs`. Test-only, never shipped.
+Used by the tests in `crates/gamersequalizer-mic-chain/src/ai_denoiser.rs`. Test-only, never shipped.
 
 | File                 | Content                    | Source                                                                        |
 | -------------------- | -------------------------- | ----------------------------------------------------------------------------- |
@@ -19,7 +19,7 @@ To do: replace them with recordings that can be GPL or CC0.
 files `speech.wav` (clean speech) and `keys.wav` (keyboard and mouse) there and run:
 
 ```
-cargo test -p gamersequalizer-mic-vst --release private_report -- --ignored --nocapture
+cargo test -p gamersequalizer-mic-chain --release private_report -- --ignored --nocapture
 ```
 
 It prints dropouts and noise suppression with and without the gate, without thresholds.

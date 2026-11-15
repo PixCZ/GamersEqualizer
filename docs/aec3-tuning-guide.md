@@ -7,14 +7,14 @@ Příkazy jsou pro PowerShell, spouštěj je z kořene repa.
 
 ## 1. Stav: co je hotové a co není ověřené
 
-| Část                                                        | Stav                                                    |
-| ----------------------------------------------------------- | ------------------------------------------------------- |
-| `aec3.rs`: zesílení mikrofonu do AEC3 (`set_mic_gain_db`)   | přeloženo a otestováno na Macu, jen na syntetice        |
-| `aec3.rs`: testy a `capture_tuning_report`                  | běží na Macu na dvou umělých „captures"                 |
-| `plugin.rs`: předání zesílení z leveleru do AEC (2 řádky)   | **psáno bez překladače**                                |
-| `voice_leveler.rs`: `gain_to_default_db`                    | přeloženo na Macu                                       |
-| `ai_denoiser.rs`: `AEC_WAV` v `capture_replay_report`       | **psáno bez překladače**                                |
-| Cokoli na skutečných nahrávkách nebo naživo                 | **neověřeno**                                           |
+| Část                                                      | Stav                                             |
+| --------------------------------------------------------- | ------------------------------------------------ |
+| `aec3.rs`: zesílení mikrofonu do AEC3 (`set_mic_gain_db`) | přeloženo a otestováno na Macu, jen na syntetice |
+| `aec3.rs`: testy a `capture_tuning_report`                | běží na Macu na dvou umělých „captures"          |
+| `chain.rs`: předání zesílení z leveleru do AEC (2 řádky)  | **psáno bez překladače**                         |
+| `voice_leveler.rs`: `gain_to_default_db`                  | přeloženo na Macu                                |
+| `ai_denoiser.rs`: `AEC_WAV` v `capture_replay_report`     | **psáno bez překladače**                         |
+| Cokoli na skutečných nahrávkách nebo naživo               | **neověřeno**                                    |
 
 Co změna dělá: AEC3 má absolutní prahy úrovně a tichý mikrofon ho drží mimo lineární filtr. Pak
 tlumí hlas podle hlasitosti reference. Mikrofon se proto před AEC3 zesílí a za ním stejně
@@ -24,14 +24,14 @@ v krocích po 6 dB (0-24 dB). S vypnutým levelerem nebo před naučením úrovn
 ## 2. Přeložit a pustit testy
 
 ```powershell
-cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib aec3:: -- --nocapture
 cargo clippy --workspace --all-targets
 ```
 
 Čekaný výsledek: 14 testů projde, 3 jsou `ignored`. Hodnoty na Macu:
 `quiet mic, no gain` hlas -5,4 dB a pásmo 4-8 kHz -19 dB; `quiet mic, 24 dB` -1,6 a -2,4 dB.
 
-Když se nepřeloží `plugin.rs`: záměr je jen tento a nic dalšího se měnit nemá. Před
+Když se nepřeloží `chain.rs`: záměr je jen tento a nic dalšího se měnit nemá. Před
 `self.run_aec(...)` se každý blok zavolá
 
 ```rust
@@ -46,7 +46,7 @@ self.aec.set_mic_gain_db(aec_mic_gain_db);
 
 ```powershell
 $env:VARIANTS = "pregain=0;;open;pregain=0 open"
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 ```
 
 `CAP` omezí výběr (`$env:CAP = "20261109-130319,20261109-210655"`); bez něj jdou všechny captures.
@@ -123,13 +123,13 @@ Pořadí:
 
 ```powershell
 $env:VARIANTS = ";erle=10,4;erle=30,10;erle=100,30;hf=0;erle=30,10 hf=0;erle=100,30 hf=0"
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 
 $env:VARIANTS = ";len=20;len=32;len=32 erle=30,10 hf=0;len=32 open"
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 
 $env:VARIANTS = ";masks=2;masks=4;erle=30,10 hf=0 masks=2"
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 ```
 
 Co čekat podle syntetiky (skutečné repráky budou horší, echo je tam i nelineární):
@@ -151,7 +151,7 @@ Vyhrává varianta, která na reproduktorových nahrávkách (`122712`, `125717`
 - `left` nestoupne o víc než 3 dB proti `(as built)` a zůstane pod -60 dBFS,
 - `echo` neklesne o víc než 3 dB,
 - na sluchátkových nahrávkách (`115931`, `122520`) se `voice` nezhorší,
-- projde `cargo test --release -p gamersequalizer-mic-vst --lib aec3::`.
+- projde `cargo test --release -p gamersequalizer-mic-chain --lib aec3::`.
 
 Pravidlo projektu: pár propuštěných zvuků je lepší než jedno useknuté písmeno. Platí pro hudbu
 a hru. **Neplatí pro řeč z reproduktorů** (spoluhráči by slyšeli sami sebe). Takovou nahrávku
@@ -163,11 +163,11 @@ Zbytek echa po AEC3 má odstranit denoiser a gate. Ověření vítězné variant
 
 ```powershell
 $env:CAP = "20261109-130319"; $env:WAV = "1"; $env:VARIANTS = ";erle=30,10 hf=0"
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 # vznikne test_data/private/aec_ab/20261109-130319_v0.wav (as built) a _v1.wav (varianta)
 Remove-Item Env:WAV; Remove-Item Env:VARIANTS
 $env:AEC_WAV = "20261109-130319_v1.wav"
-cargo test --release -p gamersequalizer-mic-vst capture_replay_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain capture_replay_report -- --ignored --nocapture
 Remove-Item Env:AEC_WAV
 ```
 
@@ -177,7 +177,7 @@ loss" má klesnout. Stejné srovnání udělej pro `_v0.wav`. WAV soubory si tak
 
 ## 8. Zapsat výsledek
 
-1. Vítězné hodnoty do `tuning()` v `crates/gamersequalizer-mic-vst/src/aec3.rs`, například:
+1. Vítězné hodnoty do `tuning()` v `crates/gamersequalizer-mic-chain/src/aec3.rs`, například:
 
    ```rust
    cfg.erle.max_l = 30.0;
@@ -231,17 +231,17 @@ měří (`EchoMeter` v `aec3.rs`), pamatuje pro dvojici mikrofon + výstup a zá
 následuje, když je echo silnější. Všechno se vypisuje do debug logu. Sdílená paměť má layout
 v18, takže **APO je potřeba přeinstalovat**.
 
-| Část                                                   | Stav                                     |
-| ------------------------------------------------------ | ---------------------------------------- |
-| `aec3.rs` (měřič, záložní odhad, testy)                | přeloženo a otestováno na Macu           |
-| `shm.rs` (5 nových polí, v18)                          | přeloženo a otestováno na Macu           |
-| `chain_log.rs` (řádky logu, test)                      | čistá část přeložena a otestována na Macu |
-| `plugin.rs`, `apo_link.rs`, `aec_delay_cache.rs`       | **psáno bez překladače**                 |
+| Část                                            | Stav                                      |
+| ----------------------------------------------- | ----------------------------------------- |
+| `aec3.rs` (měřič, záložní odhad, testy)         | přeloženo a otestováno na Macu            |
+| `shm.rs` (5 nových polí, v18)                   | přeloženo a otestováno na Macu            |
+| `chain_log.rs` (řádky logu, test)               | čistá část přeložena a otestována na Macu |
+| `chain.rs`, `apo_link.rs`, `aec_delay_cache.rs` | **psáno bez překladače**                  |
 
 ### 11.1 Přeložit
 
 ```powershell
-cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib aec3:: -- --nocapture
 cargo test -p gamersequalizer-common
 cargo test -p gamersequalizer-daemon chain_log
 cargo clippy --workspace --all-targets
@@ -250,7 +250,7 @@ cargo clippy --workspace --all-targets
 Čekaný výsledek: 16 testů `aec3::` projde (3 `ignored`). Když se nepřeloží soubory psané naslepo,
 záměr je:
 
-- `plugin.rs`: číst `aec_cached_echo_db_x10` z hlavičky; když se změní a není 0, zavolat
+- `chain.rs`: číst `aec_cached_echo_db_x10` z hlavičky; když se změní a není 0, zavolat
   `self.aec.seed_echo_strength_db(x10 / 10)`; při přepnutí výstupu (`reference_seq`) zavolat
   `self.aec.forget_echo_strength()` (před `self.aec.reset()`) a vynulovat `cached_echo_seen`;
   v `publish_telemetry` zapsat `aec_echo_db_x10` (0 = nic, změřená hodnota záporná a nejvýš -1,
@@ -267,7 +267,7 @@ záměr je:
 
 ```powershell
 $env:VARIANTS = ""
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 ```
 
 Do DEVLOGu tabulku: nahrávka, `strength`, `fallb`, a pro kontrolu úroveň echa a reference

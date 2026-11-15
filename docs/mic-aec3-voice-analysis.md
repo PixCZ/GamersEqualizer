@@ -1,6 +1,6 @@
 # AEC3 a ztráta hlasu: analýza a nápady (2026-11-10)
 
-Vstup: DEVLOG (milníky 25, 26, 30, 36, 41, 42), `aec3.rs`, `plugin.rs`, `shm.rs`, `loopback.rs`
+Vstup: DEVLOG (milníky 25, 26, 30, 36, 41, 42), `aec3.rs`, `chain.rs`, `shm.rs`, `loopback.rs`
 a zdroják `sonora-aec3` 0.3.0 (verze z `Cargo.lock`, čteno z lokální cargo registry).
 Na tomto stroji není Rust toolchain ani `test_data/private/`, takže **nic z toho není změřeno**.
 
@@ -192,7 +192,7 @@ Výsledek A2 rozhodne, kudy dál:
 - **B1. Zesílit mikrofon před AEC3 a za ním ho zase zeslabit** (jako pre-gain DFN3, milník 36).
   Echo -68 dBFS se s +24 dB dostane na -44 dBFS, nad práh -56 dBFS. Aby se odhad v nelineárním
   režimu nezměnil, `default_gain` se násobí stejným ziskem. Zdroj zisku: boost leveleru, který už
-  dostává DFN3 (`plugin.rs:436`), ale **zaaretovaný** (změna zisku je pro AEC3 změna cesty echa;
+  dostává DFN3 (`chain.rs:436`), ale **zaaretovaný** (změna zisku je pro AEC3 změna cesty echa;
   měnit jen při resetu nebo po krocích 6 dB s hysterezí). Pozor na detekci saturace: vzorek přes
   ±32700 v měřítku int16 (`sonora/echo_canceller3.rs:180`) přepne odhad na „vše je echo".
 - **B2. Zpoždění**: `delay.use_external_delay_estimator` = true (AEC3 věří zarovnání řetězu a samo

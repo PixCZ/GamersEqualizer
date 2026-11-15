@@ -1023,7 +1023,7 @@ mod tests {
   /// capture's leveler gain as mic gain):
   /// per 5 s levels, and `test_data/private/aec_ab/<capture>_{mic,aec3}.wav` for listening and
   /// for `ai_denoiser::tests::echo_gate_report`. Run:
-  /// `cargo test --release -p gamersequalizer-mic-vst --lib capture_export -- --ignored --nocapture`
+  /// `cargo test --release -p gamersequalizer-mic-chain --lib capture_export -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn capture_export() {
@@ -1054,7 +1054,7 @@ mod tests {
   /// the capture's leveler gain), against what the chain's AEC put out live
   /// (`04_after_aec.wav`): the 100 ms windows more than 6 dB apart, then the level of the first
   /// 5 s (echo alone in most captures). For trying a tuning on a real capture.
-  /// `CAP=20261109-210655 cargo test --release -p gamersequalizer-mic-vst --lib aec3::tests::capture_replay_report -- --ignored --nocapture`
+  /// `CAP=20261109-210655 cargo test --release -p gamersequalizer-mic-chain --lib aec3::tests::capture_replay_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn capture_replay_report() {
@@ -1102,7 +1102,7 @@ mod tests {
   /// so their loss never reaches 0: compare variants, and `open` shows what the linear filter
   /// alone does. `WAV=1` writes each output to `test_data/private/aec_ab/<capture>_v<n>.wav`
   /// (n: place in `VARIANTS`), for `ai_denoiser::tests::capture_replay_report` with `AEC_WAV`.
-  /// `VARIANTS="pregain=0;;open;erle=30,10 hf=0" cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture`
+  /// `VARIANTS="pregain=0;;open;erle=30,10 hf=0" cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn capture_tuning_report() {
@@ -1171,7 +1171,7 @@ mod tests {
   /// first 0.1-0.5 s of loud reference, where AEC3 has no filter yet and the fallback is all
   /// it has; the rest as in `capture_tuning_report`, from 3 s on. Under each line the trace: when the reported
   /// strength, the fallback and the mic gain changed, as the debug log would show it.
-  /// `SCENES=";micscale=20;micscale=20 seed=auto" cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture`
+  /// `SCENES=";micscale=20;micscale=20 seed=auto" cargo test --release -p gamersequalizer-mic-chain --lib capture_echo_report -- --ignored --nocapture`
   #[test]
   #[ignore = "needs private recordings"]
   fn capture_echo_report() {
@@ -1493,7 +1493,7 @@ mod tests {
   }
 
   /// What the chain hands to `set_mic_gain_db` at each 480-sample block of a capture, from its
-  /// `vars.tsv` as `plugin.rs` does (`VoiceLeveler::gain_to_default_db`): the leveler's default
+  /// `vars.tsv` as `chain.rs` does (`VoiceLeveler::gain_to_default_db`): the leveler's default
   /// target less the learned speech level and the input gain. 0 without the file or its
   /// columns, before a level is learned, or with the leveler off.
   fn capture_gains(dir: &Path, samples: usize) -> Vec<f32> {

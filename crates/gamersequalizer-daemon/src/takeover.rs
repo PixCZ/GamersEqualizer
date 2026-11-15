@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use gamersequalizer_common::shm::SHM_NAME;
-use gamersequalizer_mic_vst::SharedMemoryClient;
+use gamersequalizer_mic_chain::SharedMemoryClient;
 use windows::core::PWSTR;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::ProcessStatus::EnumProcesses;

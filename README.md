@@ -194,7 +194,7 @@ under the same license, with the source code and with the copyright notices kept
 - The name "GamersEqualizer" and its logo are not part of that license. A modified version must use a
   different name and logo, and say that it is based on GamersEqualizer.
 - Bundled third-party code and models keep their own licenses (MIT, Apache-2.0, BSD-3-Clause); see
-  `crates/vendor/*/` and `crates/gamersequalizer-mic-vst/models/README.md`.
+  `crates/vendor/*/` and `crates/gamersequalizer-mic-chain/models/README.md`.
 - The test recordings in `test_data/denoise/` are not covered. They are third-party clips for
   non-commercial use only; see the README in that folder. They are never part of the app.
 

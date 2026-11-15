@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::{AecState, CopiedEqVersions, StereoFrame, APO_SHM_NAME};
-use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
+use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::aec_delay_cache;
 use super::console_owner::ConsoleOwner;

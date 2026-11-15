@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gamersequalizer_common::debug_capture::*;
-use gamersequalizer_mic_vst::debug_capture::DebugCaptureMap;
+use gamersequalizer_mic_chain::debug_capture::DebugCaptureMap;
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 /// No new frames for this long: the stream stopped, save what there is.

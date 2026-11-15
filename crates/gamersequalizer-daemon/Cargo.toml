@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 gamersequalizer-common = { path = "../gamersequalizer-common" }
-gamersequalizer-mic-vst = { path = "../gamersequalizer-mic-vst" }
+gamersequalizer-mic-chain = { path = "../gamersequalizer-mic-chain" }
 windows = { workspace = true }
 windows-core = { workspace = true }
 serde = { workspace = true }

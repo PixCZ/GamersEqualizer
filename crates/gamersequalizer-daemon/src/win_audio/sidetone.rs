@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use gamersequalizer_common::shm::ShmHeader;
 use gamersequalizer_common::sidetone::{device_hash, SidetonePairs};
-use gamersequalizer_mic_vst::shared_memory::SharedMemoryClient;
+use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Media::Audio::{
   IAudioCaptureClient, IAudioClient, IAudioClient3, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator,

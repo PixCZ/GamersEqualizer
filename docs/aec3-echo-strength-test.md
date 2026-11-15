@@ -25,10 +25,10 @@ Co **není**: živý test (instalace APO, log od testera). Ten přijde potom a d
 
 ```powershell
 git pull
-cargo test --release -p gamersequalizer-mic-vst --lib aec3:: -- --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib aec3:: -- --nocapture
 cargo test -p gamersequalizer-common
 cargo test -p gamersequalizer-daemon chain_log
-cargo test -p gamersequalizer-mic-vst --release
+cargo test -p gamersequalizer-mic-chain --release
 cargo clippy --workspace --all-targets
 ```
 
@@ -51,7 +51,7 @@ referencí. Výsledky AEC3 pak mají být stejné jako v milníku 44.
 
 ```powershell
 $env:VARIANTS = ""
-cargo test --release -p gamersequalizer-mic-vst --lib capture_tuning_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_tuning_report -- --ignored --nocapture
 Remove-Item Env:VARIANTS
 ```
 
@@ -71,7 +71,7 @@ Jiný `fallb` než -40 se dá čekat nejvýš u `101152` a `102403` (monitor př
 
 ```powershell
 $env:SCENES = ""
-cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_echo_report -- --ignored --nocapture
 ```
 
 Report pro každou nahrávku vypíše řádek a pod ním stopu (`trace`): kdy se změnila hlášená síla
@@ -131,7 +131,7 @@ udělá cache daemonu.
 ```powershell
 $env:SCENES = ";micscale=20;micscale=20 seed=auto;micscale=20 seed=auto gain=0.01"
 $env:CAP = "20261109-122712,20261109-130319,20261109-205013,20261109-210655,20261107-101152,20261107-102403"
-cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_echo_report -- --ignored --nocapture
 ```
 
 Názvy složek uprav podle skutečných. Když report u scény napíše „samples of the scaled mic are
@@ -196,7 +196,7 @@ V kódu se nic nemění, konstanta `ECHO_FIT_MIN_CORRELATION` zůstává 0.90.
 ```powershell
 $env:SCENES = ";fit=0.8;fit=0.7;fit=0.6;fit=0.5"
 Remove-Item Env:CAP -ErrorAction SilentlyContinue
-cargo test --release -p gamersequalizer-mic-vst --lib capture_echo_report -- --ignored --nocapture
+cargo test --release -p gamersequalizer-mic-chain --lib capture_echo_report -- --ignored --nocapture
 ```
 
 Pro každou nahrávku s referencí a každý práh zapiš: potvrzeno ano/ne, `meter`, `check`, `fallb`,

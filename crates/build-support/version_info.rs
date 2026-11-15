@@ -12,7 +12,7 @@ const SHARED_SOURCES: [&str; 14] = [
   "../../Cargo.lock",
   "../../.cargo",
   "../gamersequalizer-common",
-  "../gamersequalizer-mic-vst",
+  "../gamersequalizer-mic-chain",
   "../vendor/deep_filter/Cargo.toml",
   "../vendor/deep_filter/src",
   "../vendor/deep_filter/models",
