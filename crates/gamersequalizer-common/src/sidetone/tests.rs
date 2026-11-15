@@ -317,7 +317,7 @@ fn chain_survives_garbage_and_ramps_its_level() {
 fn chain_default_eq_removes_rumble() {
   let mut chain = SidetoneChain::new(RATE as f32);
   chain.configure(&SidetoneSettings { enabled: true, noise_mode: NoiseMode::Off, ..Default::default() }, 0.0, false);
-  chain.set_eq(&default_bands());
+  chain.set_eq(default_bands());
   let tone =
     |hz: f32| (0..RATE as usize).map(|i| 0.5 * (2.0 * PI * hz * i as f32 / RATE as f32).sin()).collect::<Vec<f32>>();
   let mut gain = |hz: f32| {

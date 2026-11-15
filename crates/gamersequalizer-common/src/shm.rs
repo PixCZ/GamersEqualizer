@@ -608,7 +608,7 @@ impl ShmHeader {
     // the APOs never run a fresh "on" with the previous pair's values.
     let version = src.sidetone_eq_version.load(Ordering::Acquire);
     if seen.sidetone != Some(version) {
-      self.write_sidetone_eq(&src.read_sidetone_eq());
+      self.write_sidetone_eq(&src.read_sidetone_eq().collect::<Vec<_>>());
       seen.sidetone = Some(version);
     }
     self.sidetone_noise_mode.store(src.sidetone_noise_mode.load(r), r);
@@ -621,20 +621,20 @@ impl ShmHeader {
     // Version first, bands after: a write in between is copied now and again next time.
     let version = src.mic_eq_version.load(Ordering::Acquire);
     if seen.mic != Some(version) {
-      self.write_mic_eq(&src.read_mic_eq());
+      self.write_mic_eq(&src.read_mic_eq().collect::<Vec<_>>());
       seen.mic = Some(version);
     }
     let version = src.out_eq_version.load(Ordering::Acquire);
     if seen.out != Some(version) {
       let (bands, preamp) = src.read_out_eq();
-      self.write_out_eq(&bands, preamp);
+      self.write_out_eq(&bands.collect::<Vec<_>>(), preamp);
       seen.out = Some(version);
     }
     for ((dst, src), seen) in self.stream_eq.iter().zip(&src.stream_eq).zip(&mut seen.streams) {
       let version = src.version.load(Ordering::Acquire);
       if *seen != Some(version) {
         let (bands, preamp) = src.read();
-        dst.write(&bands, preamp);
+        dst.write(&bands.collect::<Vec<_>>(), preamp);
         *seen = Some(version);
       }
     }
@@ -675,7 +675,7 @@ impl ShmHeader {
   }
 
   /// Output EQ bands + preamp (dB). A non-finite preamp reads as 0 dB.
-  pub fn read_out_eq(&self) -> (Vec<BiquadBand>, f32) {
+  pub fn read_out_eq(&self) -> (impl Iterator<Item = BiquadBand> + '_, f32) {
     let count = (self.out_eq_band_count.load(Ordering::Acquire) as usize).min(MAX_OUT_EQ_BANDS);
     let preamp = f32::from_bits(self.out_preamp_db_bits.load(Ordering::Relaxed));
     let preamp = if preamp.is_finite() { preamp.clamp(-48.0, 24.0) } else { 0.0 };
@@ -687,8 +687,8 @@ impl ShmHeader {
   pub fn stream_eq_active(&self) -> bool {
     !self.master_bypass.load(Ordering::Relaxed)
       && self.stream_eq.iter().any(|eq| {
-        let (bands, preamp) = eq.read();
-        !bands.is_empty() || preamp != 0.0
+        let (mut bands, preamp) = eq.read();
+        bands.next().is_some() || preamp != 0.0
       })
   }
 
@@ -815,7 +815,7 @@ impl ShmHeader {
   }
 
   /// Read the sidetone EQ. Bands with an unknown filter type are skipped.
-  pub fn read_sidetone_eq(&self) -> Vec<BiquadBand> {
+  pub fn read_sidetone_eq(&self) -> impl Iterator<Item = BiquadBand> + '_ {
     let count = (self.sidetone_eq_band_count.load(Ordering::Acquire) as usize).min(MAX_EQ_BANDS);
     read_bands(&self.sidetone_eq_bands, count)
   }
@@ -828,7 +828,7 @@ impl ShmHeader {
   }
 
   /// Read the microphone EQ. Bands with an unknown filter type are skipped.
-  pub fn read_mic_eq(&self) -> Vec<BiquadBand> {
+  pub fn read_mic_eq(&self) -> impl Iterator<Item = BiquadBand> + '_ {
     let count = (self.mic_eq_band_count.load(Ordering::Acquire) as usize).min(MAX_EQ_BANDS);
     read_bands(&self.mic_eq_bands, count)
   }
@@ -929,7 +929,7 @@ impl ShmStreamEq {
   }
 
   /// Bands + preamp (dB); a non-finite preamp reads as 0 dB.
-  pub fn read(&self) -> (Vec<BiquadBand>, f32) {
+  pub fn read(&self) -> (impl Iterator<Item = BiquadBand> + '_, f32) {
     let count = (self.band_count.load(Ordering::Acquire) as usize).min(MAX_STREAM_EQ_BANDS);
     let preamp = f32::from_bits(self.preamp_db_bits.load(Ordering::Relaxed));
     let preamp = if preamp.is_finite() { preamp.clamp(-48.0, 24.0) } else { 0.0 };
@@ -953,27 +953,24 @@ fn write_bands(slots: &[ShmEqBand], bands: &[BiquadBand]) -> usize {
 }
 
 /// Bands with an unknown filter type or non-finite values are skipped; the rest clamped.
-fn read_bands(slots: &[ShmEqBand], count: usize) -> Vec<BiquadBand> {
-  slots
-    .iter()
-    .take(count)
-    .filter_map(|slot| {
-      let filter_type = FilterType::from_u32(slot.filter_type.load(Ordering::Relaxed))?;
-      let mut band = BiquadBand {
-        enabled: slot.enabled.load(Ordering::Relaxed) != 0,
-        filter_type,
-        frequency: f32::from_bits(slot.frequency_bits.load(Ordering::Relaxed)),
-        gain_db: f32::from_bits(slot.gain_bits.load(Ordering::Relaxed)),
-        q: f32::from_bits(slot.q_bits.load(Ordering::Relaxed)),
-        slope_db: 12,
-      };
-      if !(band.frequency.is_finite() && band.gain_db.is_finite() && band.q.is_finite()) {
-        return None;
-      }
-      band.clamp_parameters();
-      Some(band)
-    })
-    .collect()
+/// Lazy, so the APOs build their EQ from it on the audio thread without allocating.
+fn read_bands(slots: &[ShmEqBand], count: usize) -> impl Iterator<Item = BiquadBand> + '_ {
+  slots.iter().take(count).filter_map(|slot| {
+    let filter_type = FilterType::from_u32(slot.filter_type.load(Ordering::Relaxed))?;
+    let mut band = BiquadBand {
+      enabled: slot.enabled.load(Ordering::Relaxed) != 0,
+      filter_type,
+      frequency: f32::from_bits(slot.frequency_bits.load(Ordering::Relaxed)),
+      gain_db: f32::from_bits(slot.gain_bits.load(Ordering::Relaxed)),
+      q: f32::from_bits(slot.q_bits.load(Ordering::Relaxed)),
+      slope_db: 12,
+    };
+    if !(band.frequency.is_finite() && band.gain_db.is_finite() && band.q.is_finite()) {
+      return None;
+    }
+    band.clamp_parameters();
+    Some(band)
+  })
 }
 
 /// NUL-terminated UTF-16, truncated to the slot count minus one.
@@ -1134,6 +1131,11 @@ mod tests {
     }
   }
 
+  /// A lazy band reader's result, comparable with `assert_eq!`.
+  fn collected((bands, preamp): (impl Iterator<Item = BiquadBand>, f32)) -> (Vec<BiquadBand>, f32) {
+    (bands.collect(), preamp)
+  }
+
   #[test]
   fn test_ring_buffer_push_read() {
     let mut mem = new_layout();
@@ -1240,7 +1242,7 @@ mod tests {
     let v0 = header.mic_eq_version.load(Ordering::Relaxed);
     header.write_mic_eq(&bands);
     assert_ne!(header.mic_eq_version.load(Ordering::Relaxed), v0);
-    assert_eq!(header.read_mic_eq(), bands);
+    assert_eq!(header.read_mic_eq().collect::<Vec<_>>(), bands);
   }
 
   #[test]
@@ -1251,11 +1253,11 @@ mod tests {
       .collect();
     src.write_out_eq(&bands, -3.5);
     src.master_bypass.store(true, Ordering::Relaxed);
-    assert_eq!(src.read_out_eq(), (bands.clone(), -3.5));
+    assert_eq!(collected(src.read_out_eq()), (bands.clone(), -3.5));
 
     let dst = ShmHeader::default();
     dst.copy_controls_from(&src, &mut CopiedEqVersions::default());
-    assert_eq!(dst.read_out_eq(), (bands, -3.5));
+    assert_eq!(collected(dst.read_out_eq()), (bands, -3.5));
     assert!(dst.master_bypass.load(Ordering::Relaxed));
   }
 
@@ -1266,8 +1268,8 @@ mod tests {
     src.stream_eq[1].write(std::slice::from_ref(&band), -1.5);
     let mut seen = CopiedEqVersions::default();
     dst.copy_controls_from(&src, &mut seen);
-    assert_eq!(dst.stream_eq[1].read(), (vec![band], -1.5));
-    assert_eq!(dst.stream_eq[0].read(), (vec![], 0.0));
+    assert_eq!(collected(dst.stream_eq[1].read()), (vec![band], -1.5));
+    assert_eq!(collected(dst.stream_eq[0].read()), (vec![], 0.0));
     // Unchanged source: nothing is written again (the APO keeps its coefficients).
     let v = dst.stream_eq[1].version.load(Ordering::Relaxed);
     dst.copy_controls_from(&src, &mut seen);
@@ -1304,7 +1306,7 @@ mod tests {
     dst.write_mic_eq(&[]); // another daemon's EQ, same version number
     let apo_cached = dst.mic_eq_version.load(Ordering::Relaxed);
     dst.copy_controls_from(&src, &mut CopiedEqVersions::default());
-    assert_eq!(dst.read_mic_eq(), vec![band]);
+    assert_eq!(dst.read_mic_eq().collect::<Vec<_>>(), vec![band]);
     // The APO re-reads only on a version it has not seen: it must change.
     assert_ne!(dst.mic_eq_version.load(Ordering::Relaxed), apo_cached);
   }
@@ -1355,7 +1357,7 @@ mod tests {
     let mut seen = CopiedEqVersions::default();
     apo.copy_controls_from(&daemon, &mut seen);
     assert_eq!(apo.read_sidetone(), wanted);
-    assert_eq!(apo.read_sidetone_eq(), bands);
+    assert_eq!(apo.read_sidetone_eq().collect::<Vec<_>>(), bands);
     // Copied again only after the next edit: every copy makes the APO rebuild its filters.
     let version = apo.sidetone_eq_version.load(Ordering::Relaxed);
     apo.copy_controls_from(&daemon, &mut seen);

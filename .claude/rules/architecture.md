@@ -78,8 +78,7 @@ service (loopback, sidetone).
 - Slow work (loading a model) runs on a helper thread and is handed over when ready; until then audio
   passes with the previous or no processing.
 - State that depends on past audio is cleared on every stream restart and mode switch, in one place.
-- Known exceptions: tract (DeepFilterNet 3, DPDFNet) allocates inside inference, and the APO's output
-  and stream EQ allocate when a new band set arrives.
+- Known exception: tract (DeepFilterNet 3, DPDFNet) allocates inside inference.
 - `debug-capture` code is feature-gated and never ships.
 
 ## Shared-memory layout

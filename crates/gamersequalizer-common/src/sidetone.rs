@@ -22,6 +22,7 @@
 use crate::biquad::BiquadCascade;
 use crate::profile::{BiquadBand, FilterType};
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Samples in the ring: 341 ms at 48 kHz, 85 ms at 192 kHz.
@@ -850,9 +851,9 @@ impl SidetoneChain {
     }
   }
 
-  /// The pair's EQ (`ShmHeader::read_sidetone_eq`). Allocates: call it only when the bands
-  /// changed, like an EQ edit in the output APO.
-  pub fn set_eq(&mut self, bands: &[BiquadBand]) {
+  /// The pair's EQ (`ShmHeader::read_sidetone_eq`). Recomputes the coefficients: call it only
+  /// when the bands changed, like an EQ edit in the output APO.
+  pub fn set_eq(&mut self, bands: impl IntoIterator<Item = impl Borrow<BiquadBand>>) {
     self.eq.set_bands(bands, self.rate);
   }
 

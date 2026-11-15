@@ -574,7 +574,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] E2 `Default`
 - [x] E3 nepoužitá pole (tady verze 21 -> 22; `vars.tsv` bez `double_talk` a `aec_taps`, 55 sloupců, debug mapování v5: patří do milníku v K)
 - [x] E4 `OwnerWatch`
-- [ ] E5 čtení pásem
+- [x] E5 čtení pásem (bez nového čtení verze, viz Nepotvrzené nálezy)
 - [ ] F1 `DeviceState`
 - [ ] F2 návrat zpět
 - [ ] F3 `Add-Type`
@@ -594,6 +594,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 
 Sem zapiš nález, který se nepodařilo předvést, a proč.
 
-| Nález                               | Co se zkoušelo                                     | Výsledek                                                                                                                       |
-| ----------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Složka profilů `aux` (nález 15, C4) | `profiles/aux` v `%APPDATA%` na Windows 11 (26300) | Složka existuje, drží 9 importovaných presetů Sonaru: ukládání funguje. Smazání by vzalo data, zůstává. Windows 10 nezkoušeno. |
+| Nález                               | Co se zkoušelo                                                                              | Výsledek                                                                                                                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Složka profilů `aux` (nález 15, C4) | `profiles/aux` v `%APPDATA%` na Windows 11 (26300)                                          | Složka existuje, drží 9 importovaných presetů Sonaru: ukládání funguje. Smazání by vzalo data, zůstává. Windows 10 nezkoušeno.                                                                       |
+| Pásma EQ napůl stará (E5)           | Kód: zapisovatel uloží pásma, pak zvýší verzi (Release); APO čte verzi (Acquire), pak pásma | Zápis během čtení změní verzi, takže příští blok čte znovu sám. Nejvýš jeden blok (~10 ms) má směs starých a nových pásem, každé platné (ořezané). Druhé čtení verze nic nepřidá, zůstává bez změny. |

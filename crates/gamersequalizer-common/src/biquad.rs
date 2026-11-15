@@ -1,4 +1,5 @@
 use crate::profile::{BiquadBand, FilterType};
+use std::borrow::Borrow;
 use std::f32::consts::PI;
 
 /// Upper bound of microphone EQ bands (also its shared-memory slot count).
@@ -221,12 +222,16 @@ impl BiquadCascade {
 
   /// Rebuild coefficients for the enabled bands (steep cuts as stacked stages, like
   /// `expand_slopes`). Filter state is kept when the stage count is unchanged, so dragging a
-  /// slider doesn't click. No allocation here (the APOs call it on the audio thread); their
-  /// `read_out_eq` / stream `read` before it still build a `Vec` on each EQ edit.
-  pub fn set_bands(&mut self, bands: &[BiquadBand], sample_rate: f32) {
+  /// slider doesn't click. No allocation here: the APOs call it on the audio thread, straight
+  /// from the shared-memory readers (`ShmHeader::read_out_eq` and the like).
+  pub fn set_bands(&mut self, bands: impl IntoIterator<Item = impl Borrow<BiquadBand>>, sample_rate: f32) {
     let old_len = self.coefs.len();
     self.coefs.clear();
-    for band in bands.iter().filter(|b| b.enabled) {
+    for band in bands {
+      let band = band.borrow();
+      if !band.enabled {
+        continue;
+      }
       let stage = |b: &BiquadBand| {
         let c = BiquadCoefficients::from_band(b, sample_rate);
         StageCoefs { b0: c.b0 as f64, b1: c.b1 as f64, b2: c.b2 as f64, a1: c.a1 as f64, a2: c.a2 as f64 }
@@ -454,7 +459,7 @@ mod tests {
       assert_eq!((got.b0, got.a1, got.a2), (c.b0 as f64, c.a1 as f64, c.a2 as f64));
     }
     // More bands than stages: capped, and still no new allocation.
-    cascade.set_bands(&vec![band(FilterType::HighPass, 80.0, 48, true); 40], 48_000.0);
+    cascade.set_bands(vec![band(FilterType::HighPass, 80.0, 48, true); 40], 48_000.0);
     assert_eq!(cascade.coefs.len(), MAX_STREAM_EQ_BANDS);
     assert_eq!(cascade.coefs.capacity(), capacity);
   }

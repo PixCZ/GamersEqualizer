@@ -368,8 +368,9 @@ impl MicChain {
     let model_before = self.ai_denoiser.active_model();
     if eq_version.is_some() && eq_version != self.eq_version {
       self.eq_version = eq_version;
-      let bands = self.shm_header().map(|h| h.read_mic_eq()).unwrap_or_default();
-      self.eq.set_bands(&bands, SAMPLE_RATE);
+      // The field, not `shm_header()`: that would borrow all of `self` while `eq` changes.
+      let bands = self.shm_client.as_ref().map(|c| c.layout().header.read_mic_eq());
+      self.eq.set_bands(bands.into_iter().flatten(), SAMPLE_RATE);
     }
 
     self.mic_rms = smooth_rms(self.mic_rms, mic_in);

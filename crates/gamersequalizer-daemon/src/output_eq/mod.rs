@@ -788,6 +788,11 @@ mod tests {
     Box::new(ShmHeader::default())
   }
 
+  /// A lazy band reader's result, comparable with `assert_eq!`.
+  fn collected((bands, preamp): (impl Iterator<Item = BiquadBand>, f32)) -> (Vec<BiquadBand>, f32) {
+    (bands.collect(), preamp)
+  }
+
   fn engine(tag: &str) -> (OutputEq, PathBuf) {
     let dir = std::env::temp_dir().join(format!("ge_output_eq_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -816,8 +821,8 @@ mod tests {
     let (mut eq, dir) = engine("layers");
     let h = header();
     eq.apply(Some(&h));
-    assert_eq!(h.read_out_eq().0.len(), 1, "headphone only, no game yet");
-    assert!(h.read_out_eq().1 < 0.0, "boost needs a negative preamp");
+    assert_eq!(collected(h.read_out_eq()).0.len(), 1, "headphone only, no game yet");
+    assert!(collected(h.read_out_eq()).1 < 0.0, "boost needs a negative preamp");
 
     let event = GameForegroundEvent {
       pid: std::process::id(),
@@ -826,15 +831,15 @@ mod tests {
     };
     eq.on_foreground(&event, true, Some(&h));
     assert_eq!(h.read_active_game().unwrap().profile, "The Division 2");
-    assert_eq!(h.read_out_eq().0.len(), 2, "headphone + game");
+    assert_eq!(collected(h.read_out_eq()).0.len(), 2, "headphone + game");
 
     eq.settings.headphone_enabled = false;
     eq.save_settings(Some(&h));
-    assert_eq!(h.read_out_eq().0.len(), 1, "A/B: headphone layer off");
+    assert_eq!(collected(h.read_out_eq()).0.len(), 1, "A/B: headphone layer off");
 
     eq.settings.enabled = false;
     eq.save_settings(Some(&h));
-    assert_eq!(h.read_out_eq(), (vec![], 0.0));
+    assert_eq!(collected(h.read_out_eq()), (vec![], 0.0));
     assert!(h.master_bypass.load(Ordering::Relaxed));
     let _ = std::fs::remove_dir_all(&dir);
   }
@@ -849,11 +854,11 @@ mod tests {
       full_path: r"C:\x\division2.exe".into(),
     };
     eq.on_foreground(&event, true, Some(&h));
-    let (out_bands, out_preamp) = h.read_out_eq();
+    let (out_bands, out_preamp) = collected(h.read_out_eq());
     assert_eq!(out_bands.len(), 2, "headphone + game");
 
     // No chat profile: the chat stream only undoes the game band (+4 dB at 3 kHz).
-    let (chat, chat_preamp) = h.stream_eq[0].read();
+    let (chat, chat_preamp) = collected(h.stream_eq[0].read());
     assert_eq!(chat.len(), 1);
     assert_eq!((chat[0].frequency, chat[0].gain_db), (3000.0, -4.0));
     let hp_only = eq.volume_change(eq.headphone_profile(), None).1;
@@ -864,17 +869,17 @@ mod tests {
     voice.bands = vec![BiquadBand { gain_db: 2.0, frequency: 2000.0, ..BiquadBand::default() }];
     eq.chat_profiles.push(voice);
     eq.select_bus_profile(StreamBus::Chat, Some("Voice".into()), Some(&h));
-    let gains: Vec<f32> = h.stream_eq[0].read().0.iter().map(|b| b.gain_db).collect();
+    let gains: Vec<f32> = collected(h.stream_eq[0].read()).0.iter().map(|b| b.gain_db).collect();
     assert_eq!(gains, vec![2.0, -4.0]);
-    assert_eq!(h.stream_eq[1].read().0.len(), 1, "media: inverse only");
+    assert_eq!(collected(h.stream_eq[1].read()).0.len(), 1, "media: inverse only");
 
     // Game layer off: nothing to undo. Master off: pass-through.
     eq.settings.game_enabled = false;
     eq.save_settings(Some(&h));
-    assert!(h.stream_eq[1].read().0.is_empty());
+    assert!(collected(h.stream_eq[1].read()).0.is_empty());
     eq.settings.enabled = false;
     eq.save_settings(Some(&h));
-    assert_eq!(h.stream_eq[0].read(), (vec![], 0.0));
+    assert_eq!(collected(h.stream_eq[0].read()), (vec![], 0.0));
     let _ = std::fs::remove_dir_all(&dir);
   }
 
@@ -885,22 +890,22 @@ mod tests {
     // Headphone profile: +3 dB low shelf only. Safe mode compensates the whole peak.
     eq.settings.loudness_match = false;
     eq.apply(Some(&h));
-    let safe = h.read_out_eq().1;
+    let safe = collected(h.read_out_eq()).1;
     assert!((safe + 3.5).abs() < 0.3, "safe preamp ~ -(3 + 0.5), got {safe}");
     // Matching: the boost is below 200 Hz, so the mid band barely needs compensation.
     eq.settings.loudness_match = true;
     eq.apply(Some(&h));
-    let matched = h.read_out_eq().1;
+    let matched = collected(h.read_out_eq()).1;
     assert!(matched > safe + 2.0, "matched {matched} should be louder than safe {safe}");
     assert!(eq.peak_after_db <= MATCH_MAX_PEAK_DB + 0.01);
     // The profile's own gain adds on top.
     eq.headphone_profile_mut().unwrap().gain_db = -2.0;
     eq.apply(Some(&h));
-    assert!((h.read_out_eq().1 - (matched - 2.0)).abs() < 0.01);
+    assert!((collected(h.read_out_eq()).1 - (matched - 2.0)).abs() < 0.01);
     // A flat profile with gain only still changes the volume.
     eq.headphone_profile_mut().unwrap().bands.clear();
     eq.apply(Some(&h));
-    assert_eq!(h.read_out_eq(), (vec![], -2.0));
+    assert_eq!(collected(h.read_out_eq()), (vec![], -2.0));
     let _ = std::fs::remove_dir_all(&dir);
   }
 

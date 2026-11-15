@@ -1074,7 +1074,7 @@ impl StreamProcessor {
       self.cascade.reset_state();
     }
     self.cascade.set_channels(channels);
-    self.cascade.set_bands(&bands, self.sample_rate);
+    self.cascade.set_bands(bands, self.sample_rate);
     self.preamp_gain = 10f32.powf(preamp_db / 20.0);
   }
 
@@ -1146,7 +1146,7 @@ impl OutputProcessor {
       if self.version != Some(version) {
         self.version = Some(version);
         let (bands, preamp_db) = h.read_out_eq();
-        self.cascade.set_bands(&bands, self.sample_rate);
+        self.cascade.set_bands(bands, self.sample_rate);
         self.preamp_gain = 10f32.powf(preamp_db / 20.0);
         self.active = !self.cascade.is_empty() || preamp_db != 0.0;
       }
@@ -1505,7 +1505,7 @@ impl SidetoneTap {
     let eq_version = h.sidetone_eq_version.load(Ordering::Acquire);
     if self.eq_version != Some(eq_version) {
       self.eq_version = Some(eq_version);
-      self.chain.set_eq(&h.read_sidetone_eq());
+      self.chain.set_eq(h.read_sidetone_eq());
     }
     if self.chain.is_silent() {
       // Off, muted or not our pair: give the ring up (a clean stop for the reader), and tell
