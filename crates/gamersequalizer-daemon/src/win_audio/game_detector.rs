@@ -53,40 +53,40 @@ impl GameDetector {
       Err(_) => return Err("game hook thread exited before reporting".to_string()),
     };
 
-    unsafe {
-      let current_clone = Arc::clone(&current_game);
+    let current_clone = Arc::clone(&current_game);
 
-      // Background worker to resolve HWND -> PID -> Image name without blocking the Win32 hook
-      std::thread::spawn(move || {
-        let mut last_pid = 0u32;
+    // Background worker to resolve HWND -> PID -> Image name without blocking the Win32 hook
+    std::thread::spawn(move || {
+      let mut last_pid = 0u32;
 
-        while let Ok(raw_hwnd) = raw_rx.recv() {
-          let hwnd = HWND(raw_hwnd as *mut _);
-          let mut pid = 0u32;
-          let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
-          if pid == 0 || pid == last_pid {
-            continue;
-          }
-          last_pid = pid;
-
-          if let Some((exe_name, full_path)) = resolve_process_name(pid) {
-            let event = GameForegroundEvent { pid, exe_name, full_path };
-
-            {
-              let mut guard = match current_clone.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-              };
-              *guard = Some(event.clone());
-            }
-
-            let _ = event_tx.send(event);
-          }
+      while let Ok(raw_hwnd) = raw_rx.recv() {
+        let hwnd = HWND(raw_hwnd as *mut _);
+        let mut pid = 0u32;
+        // SAFETY: a window handle the hook reported (a closed window only makes the call fail);
+        // `pid` is a local.
+        let _ = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        if pid == 0 || pid == last_pid {
+          continue;
         }
-      });
+        last_pid = pid;
 
-      Ok(Self { hook_thread_id, hook_thread: Some(hook_thread), rx: event_rx, current_game })
-    }
+        if let Some((exe_name, full_path)) = resolve_process_name(pid) {
+          let event = GameForegroundEvent { pid, exe_name, full_path };
+
+          {
+            let mut guard = match current_clone.lock() {
+              Ok(g) => g,
+              Err(p) => p.into_inner(),
+            };
+            *guard = Some(event.clone());
+          }
+
+          let _ = event_tx.send(event);
+        }
+      }
+    });
+
+    Ok(Self { hook_thread_id, hook_thread: Some(hook_thread), rx: event_rx, current_game })
   }
 
   pub fn poll_event(&self) -> Option<GameForegroundEvent> {
@@ -104,6 +104,7 @@ impl GameDetector {
 
 impl Drop for GameDetector {
   fn drop(&mut self) {
+    // SAFETY: posts to the hook thread's own id, which stays valid until it is joined right after.
     unsafe {
       // Ends the message loop; the hook thread unhooks itself.
       if PostThreadMessageW(self.hook_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)).is_ok()
@@ -178,6 +179,8 @@ pub fn is_process_running(pid: u32) -> bool {
 
 /// (exe name, full Win32 path like `D:\SteamLibrary\steamapps\common\...\division2.exe`).
 fn resolve_process_name(pid: u32) -> Option<(String, String)> {
+  // SAFETY: the process handle is checked and closed below; the name buffer is a local array whose length goes in
+  // `len`.
   unsafe {
     let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
     if handle.is_invalid() {

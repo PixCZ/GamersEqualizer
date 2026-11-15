@@ -79,6 +79,8 @@ pub struct DolbyAtmosGuard {
 impl DolbyAtmosGuard {
   /// Check active spatial audio status on default render endpoint
   pub fn check_spatial_status(&mut self) -> SpatialAudioStatus {
+    // SAFETY: the service and window threads initialize COM at start; on a thread without it CoCreateInstance fails
+    // and the status reads Unsupported.
     let status = unsafe { self.query_active_endpoint() };
     if status != self.last_status {
       info!("[DolbyAtmosGuard] Spatial audio status transition: {:?} -> {:?}", self.last_status, status);
@@ -87,7 +89,10 @@ impl DolbyAtmosGuard {
     status
   }
 
+  /// # Safety
+  /// COM must be initialized on the calling thread.
   unsafe fn query_active_endpoint(&self) -> SpatialAudioStatus {
+    // SAFETY: the contract above; the interfaces are created here and released when dropped.
     unsafe {
       let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
         Ok(e) => e,
@@ -117,8 +122,10 @@ pub fn spatial_status(device_id: &str) -> SpatialAudioStatus {
   }
 }
 
-/// SAFETY: COM must be initialized on the calling thread.
+/// # Safety
+/// COM must be initialized on the calling thread.
 unsafe fn device_status(device: &IMMDevice) -> SpatialAudioStatus {
+  // SAFETY: the contract above; `device` is live and the spatial client is created here; the IID is a static.
   unsafe {
     let spatial_client: ISpatialAudioClient = match device.Activate(CLSCTX_ALL, None) {
       Ok(c) => c,

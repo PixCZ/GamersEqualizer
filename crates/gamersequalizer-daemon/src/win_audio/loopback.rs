@@ -62,6 +62,8 @@ impl StreamResources {
   /// Raise this thread to an MMCSS task class; failure only costs glitch resistance.
   fn register_mmcss(&mut self, task: PCWSTR) {
     let mut task_index = 0u32;
+    // SAFETY: `task` is a static NUL-terminated name (`w!`) and the index a local; the handle is reverted in
+    // `Drop`.
     match unsafe { AvSetMmThreadCharacteristicsW(task, &mut task_index) } {
       Ok(h) => self.mmcss = Some(h),
       Err(e) => warn!("[Loopback] MMCSS registration failed (continuing): {}", e),
@@ -71,6 +73,9 @@ impl StreamResources {
 
 impl Drop for StreamResources {
   fn drop(&mut self) {
+    // SAFETY: the handles and the format block come from this session (`register_mmcss`, CreateEventW,
+    // GetMixFormat), are checked for validity and released once, here; the COM objects that used them are locals
+    // declared after this struct, so they are released first.
     unsafe {
       if let Some(h) = self.mmcss.take() {
         let _ = AvRevertMmThreadCharacteristics(h);
@@ -93,6 +98,7 @@ pub fn spawn(
   std::thread::Builder::new()
     .name("GamersEqualizer_SpeakerLoopback".into())
     .spawn(move || {
+      // SAFETY: COM init for this thread with no reserved pointer; it stays for the thread's life.
       unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
       }
@@ -137,6 +143,8 @@ pub fn resolve_render_id(explicit: Option<&str>) -> Option<String> {
   if let Some(id) = explicit {
     return Some(id.to_string());
   }
+  // SAFETY: COM calls on interfaces created here; on a thread without COM, CoCreateInstance fails and this returns
+  // None.
   unsafe {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
     let dev = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
@@ -146,6 +154,7 @@ pub fn resolve_render_id(explicit: Option<&str>) -> Option<String> {
 
 /// Id of the Windows default microphone (the endpoint the APO most likely runs on).
 pub fn resolve_default_capture_id() -> Option<String> {
+  // SAFETY: as `resolve_render_id`.
   unsafe {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
     let dev = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole).ok()?;
@@ -153,7 +162,10 @@ pub fn resolve_default_capture_id() -> Option<String> {
   }
 }
 
+/// # Safety
+/// COM is initialized on this thread (`dev` is a live device).
 unsafe fn device_id(dev: &IMMDevice) -> Option<String> {
+  // SAFETY: the contract above; the id string GetId allocates is freed once below.
   unsafe {
     let pw = dev.GetId().ok()?;
     let id = pw.to_string().ok();
@@ -169,6 +181,10 @@ fn run_loopback(
   shm: &mut SharedMemoryClient,
   apo: &mut ApoLink,
 ) -> Result<(), String> {
+  // SAFETY: COM calls on interfaces created in this block, on the loopback thread (COM initialized in `spawn`). The
+  // device name is NUL-terminated and outlives the call; `res` owns the format block and the event and frees them
+  // after the COM objects. GetBuffer's data holds `n` frames of `fmt.channels` floats (48 kHz float is checked
+  // above) until ReleaseBuffer.
   unsafe {
     let mut res = StreamResources::new();
     res.register_mmcss(w!("Audio"));
@@ -278,12 +294,16 @@ fn run_loopback(
 
 /// Initialize a shared-mode client at 48 kHz float32 (WASAPI converts and resamples);
 /// falls back to the device mix format if the driver refuses.
+///
+/// # Safety
+/// `mix_fmt` is the client's own mix format (`GetMixFormat`), alive for the call; COM is initialized.
 unsafe fn init_client_48k_float(
   client: &IAudioClient,
   mix_fmt: *const WAVEFORMATEX,
   flags: u32,
   buffer_hns: i64,
 ) -> Result<StreamFormat, String> {
+  // SAFETY: the contract above; the wanted format is a local that outlives both Initialize calls.
   unsafe {
     let mix = *mix_fmt;
     // Plain WAVEFORMATEX only describes mono/stereo unambiguously; we only need channel 0 anyway.
@@ -316,7 +336,10 @@ unsafe fn init_client_48k_float(
   }
 }
 
+/// # Safety
+/// `p_fmt` is null or a live `WAVEFORMATEX`, a whole `WAVEFORMATEXTENSIBLE` when its tag says so.
 unsafe fn is_float_format(p_fmt: *const WAVEFORMATEX) -> bool {
+  // SAFETY: the contract above: the tag is read first, the extensible fields only when the tag says they exist.
   unsafe {
     if p_fmt.is_null() {
       return false;

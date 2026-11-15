@@ -126,6 +126,8 @@ fn windows_note(xml: &str) -> ApoNote {
 /// # Safety
 /// `event` must be a live event handle from `EvtNext`.
 unsafe fn render_xml(event: EVT_HANDLE) -> Option<String> {
+  // SAFETY: the contract above; both calls get the same live handle, the second a buffer of the size the first one
+  // asked for (the byte count is passed).
   unsafe {
     let mut used = 0u32;
     let mut count = 0u32;

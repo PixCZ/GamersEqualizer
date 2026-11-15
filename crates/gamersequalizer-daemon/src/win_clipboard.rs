@@ -62,14 +62,12 @@ fn copy_utf16(text: &str) -> Result<(), String> {
   }
 
   // SAFETY: the clipboard is open on this thread (OpenClipboard succeeded above).
-  let result = unsafe { EmptyClipboard() }
-    .map_err(|e| format!("EmptyClipboard failed: {e}"))
+  let result = unsafe { EmptyClipboard() }.map_err(|e| format!("EmptyClipboard failed: {e}")).and_then(|()| {
     // SAFETY: clipboard open and emptied; `hglobal` holds NUL-terminated UTF-16.
-    .and_then(|()| {
-      unsafe { SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0))) }
-        .map(|_| ())
-        .map_err(|e| format!("SetClipboardData failed: {e}"))
-    });
+    unsafe { SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0))) }
+      .map(|_| ())
+      .map_err(|e| format!("SetClipboardData failed: {e}"))
+  });
   if result.is_err() {
     free(hglobal);
   }

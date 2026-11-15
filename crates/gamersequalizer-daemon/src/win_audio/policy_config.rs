@@ -1,6 +1,6 @@
 use windows::Win32::Media::Audio::ERole;
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-use windows::core::{GUID, HRESULT, PCWSTR};
+use windows::core::{GUID, HRESULT, HSTRING, PCWSTR};
 use windows_core::Interface;
 
 pub const CLSID_POLICY_CONFIG_CLIENT: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
@@ -37,8 +37,10 @@ pub struct IPolicyConfig_Vtbl {
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct IPolicyConfig(pub windows_core::IUnknown);
+pub struct IPolicyConfig(windows_core::IUnknown);
 
+// SAFETY: a transparent IUnknown whose vtable is `IPolicyConfig_Vtbl`, the layout of the (undocumented)
+// IPolicyConfig interface with this IID; the field is private, so only `new` makes one, through a QI for it.
 unsafe impl windows_core::Interface for IPolicyConfig {
   type Vtable = IPolicyConfig_Vtbl;
   const IID: GUID = IID_IPOLICY_CONFIG;
@@ -46,17 +48,21 @@ unsafe impl windows_core::Interface for IPolicyConfig {
 
 impl IPolicyConfig {
   pub fn new() -> windows_core::Result<Self> {
+    // SAFETY: CoCreateInstance with static GUIDs; it returns the object only through a QI for `IID`.
     unsafe { CoCreateInstance(&CLSID_POLICY_CONFIG_CLIENT, None, CLSCTX_ALL) }
   }
 
-  pub fn set_default_endpoint(&self, device_id: PCWSTR, role: ERole) -> windows_core::Result<()> {
+  pub fn set_default_endpoint(&self, device_id: &str, role: ERole) -> windows_core::Result<()> {
+    let id = HSTRING::from(device_id);
+    // SAFETY: `self` is an IPolicyConfig (see the `Interface` impl), so its vtable has this layout; `id` is
+    // NUL-terminated and outlives the call.
     unsafe {
       let vtbl = self.0.vtable() as *const _ as *const IPolicyConfig_Vtbl;
-      ((*vtbl).SetDefaultEndpoint)(self.0.as_raw(), device_id, role).ok()
+      ((*vtbl).SetDefaultEndpoint)(self.0.as_raw(), PCWSTR(id.as_ptr()), role).ok()
     }
   }
 
-  pub fn set_default_endpoint_all_roles(&self, device_id: PCWSTR) -> windows_core::Result<()> {
+  pub fn set_default_endpoint_all_roles(&self, device_id: &str) -> windows_core::Result<()> {
     use windows::Win32::Media::Audio::{eCommunications, eConsole, eMultimedia};
     self.set_default_endpoint(device_id, eConsole)?;
     self.set_default_endpoint(device_id, eMultimedia)?;

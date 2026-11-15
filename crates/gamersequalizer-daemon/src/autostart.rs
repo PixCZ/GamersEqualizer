@@ -11,6 +11,8 @@ const RUN_VALUE_NAME: PCWSTR = w!("GamersEqualizer");
 
 /// Check if GamersEqualizer is configured to automatically start with Windows
 pub fn is_autostart_enabled() -> bool {
+  // SAFETY: static NUL-terminated names; the value buffer is a local whose byte size is passed; the key is closed
+  // before returning.
   unsafe {
     let mut hkey = Default::default();
     if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_SUBKEY, Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
@@ -37,6 +39,8 @@ pub fn is_autostart_enabled() -> bool {
 
 /// Enable or disable starting in background with Windows
 pub fn set_autostart(enable: bool) -> Result<(), String> {
+  // SAFETY: static NUL-terminated names; the value bytes view `wide_cmd`, which outlives the call; the key is
+  // closed once before returning.
   unsafe {
     let mut hkey = Default::default();
     let status = RegOpenKeyExW(HKEY_CURRENT_USER, RUN_KEY_SUBKEY, Some(0), KEY_WRITE, &mut hkey);

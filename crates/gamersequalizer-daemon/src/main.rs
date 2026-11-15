@@ -1,3 +1,4 @@
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod apo_notes;
@@ -115,13 +116,16 @@ fn run_background_daemon() {
 
   // Single-instance daemon guard via named Win32 mutex
   let mutex_name = w!(r"Local\GamersEqualizer_Daemon_Mutex");
+  // SAFETY: a static name and no security attributes; the handle is closed at the end of this function.
   let mutex = unsafe { CreateMutexW(None, true, mutex_name) };
+  // SAFETY: reads this thread's last error, set by the CreateMutexW call just above.
   if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
     info!("[GamersEqualizer] Background daemon is already active. Exiting duplicate process.");
     return;
   }
   debug!("[GamersEqualizer] Acquired daemon mutex.");
 
+  // SAFETY: COM init for this thread with no reserved pointer; the service thread keeps it for its life.
   unsafe {
     let res = CoInitializeEx(None, COINIT_MULTITHREADED);
     debug!("[GamersEqualizer] CoInitializeEx: {:?}", res);
@@ -156,6 +160,8 @@ fn run_background_daemon() {
   // Before anything reads a device id: settings follow devices that got a new id meanwhile.
   heal_device_ids(&win_audio, storage.base_dir(), shm_ptr);
   if let Some(ptr) = shm_ptr {
+    // SAFETY: the mapping stays mapped until the service exits (unmapped after the loop), and no other reference to
+    // the header is held while this block runs, as in `heal_device_ids`.
     let header = unsafe { &mut (*ptr.as_ptr()).header };
     header.daemon_active.store(true, Ordering::SeqCst);
     header.shutdown_daemon_signal.store(false, Ordering::SeqCst);
@@ -216,6 +222,7 @@ fn run_background_daemon() {
         // Close the window first, or its watchdog would start the service again.
         tray::close_window();
         if let Some(ptr) = shm_ptr {
+          // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop); atomics only.
           unsafe { ptr.as_ref() }.header.daemon_active.store(false, Ordering::SeqCst);
         }
         break;
@@ -238,6 +245,7 @@ fn run_background_daemon() {
 
     // Check shutdown signal from UI or user
     if let Some(ptr) = shm_ptr {
+      // SAFETY: as above: still mapped, atomics only.
       let header = unsafe { &ptr.as_ref().header };
       if header.shutdown_daemon_signal.load(Ordering::Relaxed) {
         info!("[GamersEqualizer] Shutdown signal received. Exiting daemon.");
@@ -388,17 +396,21 @@ fn run_background_daemon() {
     let _ = handle.join();
   }
   if let Some(ptr) = shm_ptr {
+    // SAFETY: the view from `open_or_create_shm`, unmapped once here; nothing uses `shm_ptr` after the loop
+    // (the threads and `AppState` have mappings of their own).
     unsafe {
       let _ =
         UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: ptr.as_ptr() as *mut _ });
     }
   }
   if let Some(h) = shm_handle {
+    // SAFETY: the mapping handle from `open_or_create_shm`, closed once here.
     unsafe {
       let _ = CloseHandle(h);
     }
   }
   if let Ok(m) = mutex {
+    // SAFETY: the mutex handle from the start of this function, closed once here.
     unsafe {
       let _ = CloseHandle(m);
     }
@@ -422,6 +434,7 @@ fn run_gui_mode() {
   // Ensure background service is running; if not, spawn it detached
   ensure_daemon_running();
 
+  // SAFETY: COM init for the window thread with no reserved pointer; it stays for the window's life.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
   }
@@ -611,9 +624,12 @@ pub(crate) fn installed_copy_ready(state: &AppState) -> bool {
 
 /// True while a background service process lives (it holds the mutex until it exits).
 pub(crate) fn daemon_running() -> bool {
+  // SAFETY: a static name and no security attributes; the handle is closed below.
   let mutex = unsafe { CreateMutexW(None, false, w!(r"Local\GamersEqualizer_Daemon_Mutex")) };
+  // SAFETY: reads this thread's last error, set by the CreateMutexW call just above.
   let running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
   if let Ok(m) = mutex {
+    // SAFETY: the handle CreateMutexW returned above, closed once.
     unsafe {
       let _ = CloseHandle(m);
     }

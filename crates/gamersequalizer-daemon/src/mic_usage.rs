@@ -144,6 +144,8 @@ fn in_use_since(parent: HKEY, app: &str) -> Option<u64> {
 fn read_qword(parent: HKEY, subkey: &HSTRING, value: &str) -> Option<u64> {
   let mut data = 0u64;
   let mut size = std::mem::size_of::<u64>() as u32;
+  // SAFETY: `data` and `size` are locals sized for the REG_QWORD the flags allow; the strings are NUL-terminated
+  // and outlive the call.
   let res = unsafe {
     RegGetValueW(
       parent,
@@ -160,11 +162,13 @@ fn read_qword(parent: HKEY, subkey: &HSTRING, value: &str) -> Option<u64> {
 
 fn open_key(parent: HKEY, path: &HSTRING) -> Option<HKEY> {
   let mut key = HKEY::default();
+  // SAFETY: a NUL-terminated path that outlives the call; the key is closed by the caller (`close_key`).
   let res = unsafe { RegOpenKeyExW(parent, PCWSTR(path.as_ptr()), Some(0), KEY_READ, &mut key) };
   (res == ERROR_SUCCESS).then_some(key)
 }
 
 fn close_key(key: HKEY) {
+  // SAFETY: a key `open_key` opened, closed once by its caller.
   unsafe {
     let _ = RegCloseKey(key);
   }
@@ -176,6 +180,7 @@ fn subkey_names(key: HKEY) -> Vec<String> {
   let mut buf = [0u16; 256];
   for index in 0.. {
     let mut len = buf.len() as u32;
+    // SAFETY: `buf` is a local whose length goes in `len`; Windows writes at most that many units.
     let res = unsafe { RegEnumKeyExW(key, index, Some(PWSTR(buf.as_mut_ptr())), &mut len, None, None, None, None) };
     if res != ERROR_SUCCESS {
       break; // ERROR_NO_MORE_ITEMS, or a key we can't read: stop either way.

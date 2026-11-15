@@ -40,6 +40,8 @@ pub struct WinSqliteLib {
 
 impl WinSqliteLib {
   pub fn load() -> Result<Self, String> {
+    // SAFETY: winsqlite3.dll stays loaded for the process's life (never freed), so the function pointers stay
+    // valid; each is transmuted to the signature the SQLite C API documents for that symbol.
     unsafe {
       let h_mod = LoadLibraryW(w!("winsqlite3.dll")).map_err(|e| format!("Failed to load winsqlite3.dll: {}", e))?;
 
@@ -79,6 +81,8 @@ impl WinSqliteLib {
   fn open(&self, path: &str, flags: c_int) -> Result<WinSqliteConn<'_>, String> {
     let c_path = CString::new(path).map_err(|e| e.to_string())?;
     let mut db_ptr: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `c_path` is NUL-terminated and outlives the call; a failed open's handle is closed once and never
+    // used, a good one is owned by the returned connection.
     unsafe {
       let rc = (self.fn_open_v2)(c_path.as_ptr(), &mut db_ptr, flags, std::ptr::null());
       if rc != SQLITE_OK {
@@ -168,6 +172,8 @@ impl<'a> WinSqliteConn<'a> {
     let sql = CString::new(sql).map_err(|e| e.to_string())?;
 
     let mut stmt: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `sql` is NUL-terminated and outlives the prepare; the statement is finalized once on every path, and
+    // each column text is copied before the next step invalidates it.
     unsafe {
       let rc = (self.lib.fn_prepare_v2)(self.db, sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut());
       if rc != SQLITE_OK {
@@ -211,6 +217,7 @@ impl<'a> WinSqliteConn<'a> {
 impl<'a> Drop for WinSqliteConn<'a> {
   fn drop(&mut self) {
     if !self.db.is_null() {
+      // SAFETY: the handle from a successful open, closed once.
       unsafe {
         let _ = (self.lib.fn_close_v2)(self.db);
       }

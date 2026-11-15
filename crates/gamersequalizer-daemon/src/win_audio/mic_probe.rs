@@ -129,6 +129,7 @@ fn probe_render(id: &str) -> Result<u64, String> {
 /// # Safety
 /// `capture` belongs to a started shared-mode capture client.
 unsafe fn drain(capture: &IAudioCaptureClient) -> Result<u64, String> {
+  // SAFETY: the contract above; each packet is released before the next one is asked for.
   unsafe {
     let mut total = 0u64;
     while capture.GetNextPacketSize().map_err(|e| format!("GetNextPacketSize: {e}"))? > 0 {
@@ -152,6 +153,8 @@ unsafe fn write_zero_pcm(
   buf_size: u32,
   block_align: usize,
 ) -> Result<u64, String> {
+  // SAFETY: the contract above; GetBuffer hands out `avail` frames, `byte_len` is `avail * block_align` bytes
+  // (overflow checked), written as zeros before the release.
   unsafe {
     let pad = client.GetCurrentPadding().map_err(|e| format!("GetCurrentPadding: {e}"))?;
     let avail = buf_size.saturating_sub(pad);

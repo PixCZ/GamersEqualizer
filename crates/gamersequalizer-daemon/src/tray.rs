@@ -131,6 +131,7 @@ impl TrayManager {
 
   /// Principle 1: Air-gapped update check via OS default browser
   pub fn open_updates_browser() {
+    // SAFETY: static NUL-terminated strings (`w!`) and no window; the shell opens the link in the user's browser.
     unsafe {
       ShellExecuteW(
         None,
@@ -228,17 +229,20 @@ impl Default for TrayHost {
 
 /// The open main window, if any.
 pub fn find_window() -> Option<HWND> {
+  // SAFETY: a NUL-terminated title that outlives the call; a missing window is an error, not a handle.
   unsafe { FindWindowW(PCWSTR::null(), &HSTRING::from(WINDOW_TITLE)) }.ok().filter(|h| !h.is_invalid())
 }
 
 /// The main window is open and the active window (its own bar shows problems; no notification).
 pub fn window_in_front() -> bool {
+  // SAFETY: no arguments; the handle is only compared.
   find_window().is_some_and(|h| unsafe { GetForegroundWindow() } == h)
 }
 
 /// Brings an existing window to the front (restoring it if minimized). Returns false if none is open.
 pub fn focus_window() -> bool {
   let Some(hwnd) = find_window() else { return false };
+  // SAFETY: plain window calls on a handle from `find_window`; a window closed meanwhile only makes them fail.
   unsafe {
     let _ = ShowWindow(hwnd, if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW });
     let _ = SetForegroundWindow(hwnd);
@@ -249,6 +253,7 @@ pub fn focus_window() -> bool {
 /// Asks the window to close normally (it saves its geometry on the way out).
 pub fn close_window() {
   if let Some(hwnd) = find_window() {
+    // SAFETY: posting to a handle from `find_window`; a window closed meanwhile only makes the call fail.
     unsafe {
       let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
     }
@@ -271,6 +276,7 @@ pub(crate) fn show_or_launch_window() {
 
 fn pump_messages() {
   let mut msg = MSG::default();
+  // SAFETY: `msg` is a local that each call fills before the next one reads it.
   unsafe {
     while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
       let _ = TranslateMessage(&msg);

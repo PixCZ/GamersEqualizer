@@ -252,6 +252,7 @@ impl OpenFailure {
 /// # Safety
 /// COM must be initialized on this thread.
 unsafe fn open_device(id: &str) -> windows::core::Result<IMMDevice> {
+  // SAFETY: the contract above; `wide` is NUL-terminated and outlives GetDevice.
   unsafe {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
     let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
@@ -266,6 +267,8 @@ unsafe fn open_device(id: &str) -> windows::core::Result<IMMDevice> {
 /// # Safety
 /// COM must be initialized on this thread.
 unsafe fn open_stream<S: Interface>(id: &str, low_latency: bool, tag: &str) -> windows::core::Result<Stream<S>> {
+  // SAFETY: the contract above; `format` owns the mix format block (freed by `MixFormat`) and outlives Initialize;
+  // it is the last field of `Stream`, so it is freed after the client.
   unsafe {
     let device = open_device(id)?;
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
@@ -290,6 +293,8 @@ unsafe fn open_stream<S: Interface>(id: &str, low_latency: bool, tag: &str) -> w
 /// # Safety
 /// `format` is the client's mix format; COM must be initialized on this thread.
 unsafe fn init_low_latency(client: &IAudioClient, format: *mut WAVEFORMATEX, tag: &str) -> bool {
+  // SAFETY: the contract above; the out values are locals, and the current-format block is freed (`MixFormat`) once
+  // it has been read.
   unsafe {
     let Ok(client3) = client.cast::<IAudioClient3>() else {
       return false;

@@ -81,6 +81,7 @@ impl IMMNotificationClient_Impl for EndpointNotificationHandler_Impl {
       return Ok(());
     }
 
+    // SAFETY: Windows passes the id for this call only: null or NUL-terminated, and null is checked first.
     let current_id = unsafe {
       if pwstrdefaultdeviceid.is_null() { String::new() } else { pwstrdefaultdeviceid.to_string().unwrap_or_default() }
     };
@@ -123,6 +124,8 @@ pub struct EndpointLockManager {
 
 impl EndpointLockManager {
   pub fn new(state: Arc<EndpointLockState>) -> windows_core::Result<Self> {
+    // SAFETY: COM is initialized on this thread first; the enumerator is free-threaded (MTA) and lives in `self`,
+    // and the callback registered on it is unregistered in `Drop` before either is released.
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
       let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -197,9 +200,7 @@ impl EndpointLockManager {
   /// Set Windows system default audio endpoint
   pub fn set_as_default_device(&self, device_id: &str) -> windows_core::Result<()> {
     let policy = IPolicyConfig::new()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let pcwstr = PCWSTR(wide.as_ptr());
-    policy.set_default_endpoint_all_roles(pcwstr)?;
+    policy.set_default_endpoint_all_roles(device_id)?;
     if let Ok(mut guard) = self.state.current_default_device_id.lock() {
       *guard = Some(device_id.to_string());
     }
@@ -212,9 +213,7 @@ impl EndpointLockManager {
   pub fn set_as_communications_device(&self, device_id: &str) -> windows_core::Result<()> {
     use windows::Win32::Media::Audio::eCommunications;
     let policy = IPolicyConfig::new()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let pcwstr = PCWSTR(wide.as_ptr());
-    policy.set_default_endpoint(pcwstr, eCommunications)?;
+    policy.set_default_endpoint(device_id, eCommunications)?;
     info!("[EndpointLock] Set Windows communications default endpoint to: {}", device_id);
     Ok(())
   }
@@ -222,9 +221,7 @@ impl EndpointLockManager {
   /// Set Windows default recording device (microphone)
   pub fn set_as_default_recording_device(&self, device_id: &str) -> windows_core::Result<()> {
     let policy = IPolicyConfig::new()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let pcwstr = PCWSTR(wide.as_ptr());
-    policy.set_default_endpoint_all_roles(pcwstr)?;
+    policy.set_default_endpoint_all_roles(device_id)?;
     info!("[EndpointLock] Set Windows default recording endpoint to: {}", device_id);
     Ok(())
   }
@@ -232,6 +229,8 @@ impl EndpointLockManager {
   /// Enumerate active capture recording devices (microphones)
   pub fn enumerate_capture_devices(&self) -> Vec<AudioEndpointInfo> {
     let mut list = Vec::new();
+    // SAFETY: COM calls on `self.enumerator` (MTA, alive with `self`) and the interfaces it returns;
+    // `get_endpoint_info` frees the strings it reads.
     unsafe {
       let default_id = self.get_default_capture_id().unwrap_or_default();
       if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
@@ -250,6 +249,7 @@ impl EndpointLockManager {
   }
 
   pub fn get_default_capture_id(&self) -> Option<String> {
+    // SAFETY: COM calls on `self.enumerator`; the id string GetId allocates is freed once below.
     unsafe {
       if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
         && let Ok(pwstr) = device.GetId()
@@ -265,6 +265,7 @@ impl EndpointLockManager {
   /// Enumerate active output playback devices
   pub fn enumerate_playback_devices(&self) -> Vec<AudioEndpointInfo> {
     let mut list = Vec::new();
+    // SAFETY: as `enumerate_capture_devices`.
     unsafe {
       let default_id = self.get_default_output_id().unwrap_or_default();
       if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
@@ -283,6 +284,7 @@ impl EndpointLockManager {
   }
 
   pub fn get_default_output_id(&self) -> Option<String> {
+    // SAFETY: as `get_default_capture_id`.
     unsafe {
       if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
         && let Ok(pwstr) = device.GetId()
@@ -296,6 +298,7 @@ impl EndpointLockManager {
   }
 
   pub fn get_default_communications_id(&self) -> Option<String> {
+    // SAFETY: as `get_default_capture_id`.
     unsafe {
       use windows::Win32::Media::Audio::eCommunications;
       if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
@@ -342,20 +345,26 @@ impl EndpointLockManager {
 
 impl Drop for EndpointLockManager {
   fn drop(&mut self) {
+    // SAFETY: unregisters the callback `new` registered on this enumerator, once.
     unsafe {
       let _ = self.enumerator.UnregisterEndpointNotificationCallback(&self.client);
     }
   }
 }
 
+/// # Safety
+/// COM is initialized on this thread (`device` is a live device).
 pub(crate) unsafe fn get_endpoint_info(
   device: &IMMDevice,
   default_id: &str,
 ) -> windows_core::Result<AudioEndpointInfo> {
+  // SAFETY: the contract above; both strings Windows allocates are freed once, on every path.
   unsafe {
     let pwstr = device.GetId()?;
-    let id = pwstr.to_string()?;
+    let id = pwstr.to_string();
+    // Freed before `?`: an id that is not valid UTF-16 must not leak the string.
     windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+    let id = id?;
 
     let mut name = "Unknown Device".to_string();
     if let Ok(props) = device.OpenPropertyStore(STGM_READ)

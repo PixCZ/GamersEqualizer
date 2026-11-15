@@ -258,6 +258,8 @@ impl ChatMixController {
   /// The mic to work with: the Windows default, unless it is a virtual device (then the first
   /// physical one). Not the first in the list: on a laptop that is often a different mic.
   pub fn find_physical_microphone() -> Option<String> {
+    // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+    // interface is created in this block and released when dropped.
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
       let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
@@ -682,6 +684,8 @@ impl ChatMixController {
   pub fn list_active_sessions(&self) -> Vec<AudioSessionInfo> {
     let mut result = Vec::new();
     let mut seen_pids = HashSet::new();
+    // SAFETY: COM calls on the session interfaces from `get_all_session_managers` (which initializes COM on this
+    // thread), used only inside this block.
     unsafe {
       for manager in get_all_session_managers() {
         if let Ok(enumerator) = manager.GetSessionEnumerator() {
@@ -720,6 +724,8 @@ impl ChatMixController {
 
   /// (session instance id, volume control, channel) of every app session on every device.
   unsafe fn enumerate_active_sessions_raw(&self) -> Vec<(String, ISimpleAudioVolume, AudioBus)> {
+    // SAFETY: the session interfaces come from `get_all_session_managers`, which initializes COM on this thread;
+    // the returned ones carry their own references.
     unsafe {
       let mut list = Vec::new();
       for manager in get_all_session_managers() {
@@ -768,6 +774,7 @@ fn session_action(last: Option<f32>, target: f32) -> SessionAction {
 }
 
 unsafe fn session_instance_id(control: &IAudioSessionControl2) -> Option<String> {
+  // SAFETY: a live session control; the identifier string it allocates is freed once below.
   unsafe {
     let p = control.GetSessionInstanceIdentifier().ok()?;
     let id = p.to_string().ok();
@@ -820,6 +827,8 @@ fn with_endpoint<I: Interface + Clone, T>(
 }
 
 unsafe fn activate_endpoint<I: Interface>(device_id: &str) -> Option<I> {
+  // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+  // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
@@ -884,6 +893,8 @@ pub fn set_endpoint_mute(device_id: &str, muted: bool) {
 }
 
 pub fn get_system_master_volume() -> Option<(f32, bool)> {
+  // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+  // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
@@ -896,6 +907,8 @@ pub fn get_system_master_volume() -> Option<(f32, bool)> {
 }
 
 pub fn set_system_master_volume(level: f32) {
+  // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+  // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -908,6 +921,8 @@ pub fn set_system_master_volume(level: f32) {
 }
 
 pub fn set_system_master_mute(muted: bool) {
+  // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+  // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -920,6 +935,8 @@ pub fn set_system_master_mute(muted: bool) {
 }
 
 pub fn get_system_mic_volume() -> Option<(f32, bool)> {
+  // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+  // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
@@ -932,6 +949,8 @@ pub fn get_system_mic_volume() -> Option<(f32, bool)> {
 }
 
 pub fn get_system_mic_peak() -> Option<f32> {
+  // SAFETY: COM is initialized on this thread first (an already initialized thread keeps its apartment); every
+  // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
@@ -957,6 +976,8 @@ fn is_own_exe(exe: &str) -> bool {
 }
 
 unsafe fn get_all_session_managers() -> Vec<IAudioSessionManager2> {
+  // SAFETY: COM is initialized on this thread before the enumerator is created; the returned managers carry their
+  // own references.
   unsafe {
     let mut managers = Vec::new();
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -977,6 +998,8 @@ unsafe fn get_all_session_managers() -> Vec<IAudioSessionManager2> {
 }
 
 pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
+  // SAFETY: the process handle is checked and closed below; the name buffer is a local array whose length the call
+  // gets.
   unsafe {
     let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
     if handle.is_invalid() {
@@ -1041,6 +1064,7 @@ mod tests {
   #[test]
   #[ignore = "needs a real output and mic (CI runners have none); run manually: cargo test -- --ignored"]
   fn test_system_volume_query() {
+    // SAFETY: COM init for the test thread, no reserved pointer.
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }

@@ -305,10 +305,13 @@ impl AppState {
   }
 
   pub fn shm_header(&self) -> Option<&ShmHeader> {
+    // SAFETY: the view lives as long as `self` (unmapped in `Drop`); other processes change the header only through
+    // atomics after setup.
     self.shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header })
   }
 
   pub fn shm_header_mut(&mut self) -> Option<&mut ShmHeader> {
+    // SAFETY: as `shm_header`; `&mut self` keeps this process's references to the header exclusive.
     self.shm_ptr.map(|mut ptr| unsafe { &mut ptr.as_mut().header })
   }
 
@@ -543,12 +546,15 @@ impl AppState {
 impl Drop for AppState {
   fn drop(&mut self) {
     if let Some(ptr) = self.shm_ptr {
+      // SAFETY: the view from `open_or_create_shm`, unmapped once; the references `shm_header` hands out borrow
+      // `self`, so none outlives this.
       unsafe {
         let _ =
           UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: ptr.as_ptr() as *mut _ });
       }
     }
     if let Some(h) = self.shm_handle {
+      // SAFETY: the mapping handle from `open_or_create_shm`, closed once.
       unsafe {
         let _ = CloseHandle(h);
       }
@@ -599,6 +605,9 @@ fn save_mic_profile(storage: &ProfileStorage, profile: &ParametricProfile) {
 /// Open the daemon <-> window mapping; a new one (nothing else runs) gets the defaults, the
 /// Windows volumes and then the user's saved choices from `settings_dir`.
 pub(crate) fn open_or_create_shm(settings_dir: &Path) -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
+  // SAFETY: the name is NUL-terminated and outlives the calls; the view is the layout's size or null (checked, the
+  // handle is then closed). Defaults are written only into a mapping no one set up yet (magic not set), before the
+  // pointer is handed out.
   unsafe {
     let wide_name: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
     let size_bytes = ShmLayout::total_size_bytes() as u32;
