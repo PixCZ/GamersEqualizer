@@ -551,7 +551,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 ## Kontrolní seznam
 
 - [x] A1 verze překladače 1.100.0 (zbývá ruční běh Release)
-- [ ] A2 formát
+- [x] A2 formát
 - [ ] A3 clippy na nulu
 - [ ] A4 `check.ps1`, CI, pravidlo na GitHubu (ruční)
 - [ ] B1 instalátor, řádek 886
