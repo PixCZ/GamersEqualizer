@@ -406,6 +406,22 @@ function ConvertTo-FxJson($snapshot) {
     ConvertTo-Json -Depth 5
 }
 
+# The rollback target: the snapshot without our effects. On an update it holds them already, and a
+# rollback must take them out (audiodg crashed, the device did not open). A list that held only
+# ours goes, as before the first install made it; the driver's own empty list stays.
+function Remove-OurEffects($snapshot) {
+  $ours = @($Classes.Values | ForEach-Object { $_.Clsid })
+  $records = @(foreach ($rec in @($snapshot.Records)) {
+      if ([Microsoft.Win32.RegistryValueKind]$rec.Kind -ne [Microsoft.Win32.RegistryValueKind]::MultiString) { $rec; continue }
+      $all = @($rec.Value | Where-Object { $null -ne $_ })
+      [string[]]$rest = @($all | Where-Object { $ours -notcontains $_ })
+      if ($rest.Count -gt 0 -or $all.Count -eq 0) { [pscustomobject]@{ Name = $rec.Name; Kind = $rec.Kind; Value = $rest } }
+    })
+  $copy = [pscustomobject]@{ Flow = $snapshot.Flow; Id = $snapshot.Id; Records = $records }
+  if ($snapshot.Created) { $copy | Add-Member -NotePropertyName Created -NotePropertyValue $true }
+  $copy
+}
+
 # Exact value-only restore via SetValue + QueryValues (reg.exe import fails on TrustedInstaller subkeys).
 function Restore-FxSnapshot($snapshot) {
   $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($snapshot.Flow)\$($snapshot.Id)\FxProperties"
@@ -855,7 +871,7 @@ foreach ($job in $jobs) {
   Say "Target: $($job.Name) $($job.Id)`: $what"
 }
 
-# --- Snapshot: in memory for the rollback below, and on disk for apo-uninstall.ps1 ----------
+# --- Snapshot: in memory for the rollback below (without ours), and on disk for apo-uninstall.ps1
 # The disk copy is the driver's own effects without ours. It is refreshed while the endpoint holds
 # none of our effects (a driver update or a rollback since the last install changed them), and
 # kept while ours are in it: then it is the last state from before GamersEqualizer.
@@ -893,7 +909,7 @@ foreach ($job in @($jobs)) {
     $made = Test-BackupCreated $backupFile
   }
   if ($made) { $snap | Add-Member -NotePropertyName Created -NotePropertyValue $true }
-  $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap
+  $FxSnapshots["$($job.Flow):$($job.Id)"] = Remove-OurEffects $snap
   $json = ConvertTo-FxJson $snap
   $holdsOurs = @($Classes.Values | Where-Object { $json -match [regex]::Escape($_.Clsid) }).Count -gt 0
   if (-not $holdsOurs -or -not (Test-Path $backupFile)) {

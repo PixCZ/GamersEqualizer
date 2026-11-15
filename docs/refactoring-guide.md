@@ -576,7 +576,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] E4 `OwnerWatch`
 - [x] E5 čtení pásem (bez nového čtení verze, viz Nepotvrzené nálezy)
 - [x] F1 `DeviceState`
-- [ ] F2 návrat zpět
+- [x] F2 návrat zpět
 - [ ] F3 `Add-Type`
 - [ ] F4 společný začátek skriptů
 - [ ] F5 dokumentace instalátoru

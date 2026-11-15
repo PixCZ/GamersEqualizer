@@ -5,7 +5,8 @@ $script = Join-Path (Split-Path $PSScriptRoot) 'apo-install.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
-  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated'
+  'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated',
+  'Remove-OurEffects'
 $variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
 $pieces = $ast.FindAll({
     param($n)
@@ -129,6 +130,25 @@ Check 'json: dword' ($byName['dw'].Value -eq 7 -and $byName['dw'].Kind -eq 'DWor
 Check 'json: an existing key is not marked created' ($back.Created -eq $false) ''
 $made = ConvertTo-FxJson ([pscustomobject]@{ Flow = 'Capture'; Id = $guid; Records = @(); Created = $true }) | ConvertFrom-Json
 Check 'json: a made key is marked created, no values' ($made.Created -eq $true -and @($made.Values).Count -eq 0) "got $($made | ConvertTo-Json -Compress)"
+
+# --- Remove-OurEffects: an update's rollback target holds no effect of ours -------------------
+$update = [pscustomobject]@{
+  Flow = 'Render'; Id = $guid; Created = $true
+  Records = @(
+    [pscustomobject]@{ Name = "$FxGuid,15"; Kind = $kinds::MultiString; Value = [string[]]@($oem, $Classes.Render.Clsid.ToUpper()) }
+    [pscustomobject]@{ Name = "$FxGuid,13"; Kind = $kinds::MultiString; Value = [string[]]@($Classes.Stream.Clsid) }
+    [pscustomobject]@{ Name = "$FxGuid,14"; Kind = $kinds::MultiString; Value = [string[]]@() }
+    [pscustomobject]@{ Name = "$FxGuid,5"; Kind = $kinds::String; Value = $oem }
+  )
+}
+$target = Remove-OurEffects $update
+$byName = @{}
+$target.Records | ForEach-Object { $byName[$_.Name] = $_ }
+Check 'rollback target: ours out, the driver effect stays' ((@($byName["$FxGuid,15"].Value) -join ',') -eq $oem) "got '$(@($byName["$FxGuid,15"].Value) -join ',')'"
+Check 'rollback target: a list of ours only goes' (-not $byName.ContainsKey("$FxGuid,13")) ''
+Check 'rollback target: the driver''s empty list stays' ($byName.ContainsKey("$FxGuid,14")) ''
+Check 'rollback target: other values stay' ($byName["$FxGuid,5"].Value -eq $oem -and $target.Created -and $target.Id -eq $guid) ''
+Check 'rollback target: the snapshot itself is unchanged' (@($update.Records).Count -eq 4 -and @($update.Records[0].Value).Count -eq 2) ''
 
 # --- Made FxProperties keys -------------------------------------------------------------------
 # Compiles here too (pwsh), so a C# error shows before the script reaches Windows; the
