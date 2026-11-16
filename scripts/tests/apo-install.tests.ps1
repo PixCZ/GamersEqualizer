@@ -179,6 +179,8 @@ Check 'rollback target: a made key only ours used goes' ([bool](Get-RollbackTarg
 $shared = Get-RollbackTarget (MadeKey @($oem, $ourMic)) $true
 Check 'rollback target: a made key other effects use now stays' (-not $shared.Created -and (@($shared.Records[0].Value) -join ',') -eq $oem) ''
 Check 'rollback target: the driver''s own key stays' (-not (Get-RollbackTarget (MadeKey @($ourMic)) $false).Created) ''
+# The backup still says "made", but ours are gone: the key may be one the driver made since.
+Check 'rollback target: a key without ours stays' (-not (Get-RollbackTarget (MadeKey @()) $true).Created) ''
 
 # --- Made FxProperties keys -------------------------------------------------------------------
 # Compiles here too (pwsh), so a C# error shows before the script reaches Windows; the

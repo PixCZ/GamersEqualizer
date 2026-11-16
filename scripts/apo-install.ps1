@@ -283,10 +283,13 @@ function Remove-OurEffects($snapshot) {
 
 # What the self-test's rollback puts back: the snapshot without our effects. A key an earlier
 # install made ($madeEarlier, from its backup) that nothing else uses goes as a whole, as on that
-# install's own rollback; apo-uninstall.ps1 decides the same way.
+# install's own rollback; apo-uninstall.ps1 decides the same way. Only while ours are in it: the
+# backup is kept only that long, and a key without them may be one the driver made since.
 function Get-RollbackTarget($snapshot, [bool]$madeEarlier) {
   $target = Remove-OurEffects $snapshot
-  if ($madeEarlier -and -not $target.Created) {
+  $before = @($snapshot.Records | ForEach-Object { $_.Value }) -join ' '
+  $heldOurs = @($Classes.Values | Where-Object { $before -match [regex]::Escape($_.Clsid) }).Count -gt 0
+  if ($madeEarlier -and $heldOurs -and -not $target.Created) {
     $text = @($target.Records | ForEach-Object { $_.Value }) -join ' '
     $foreign = @([regex]::Matches($text, '\{[0-9a-fA-F-]{36}\}') | ForEach-Object { $_.Value } |
         Where-Object { $_ -ne $NullGuid -and $_ -ne $DefaultProcessingMode })
