@@ -111,8 +111,9 @@ impl WindowTracker {
   }
 }
 
-/// [x, y, width, height] of all monitors together, in pixels (= points at 100 % scaling;
-/// close enough for an "is it visible at all" check).
+/// [x, y, width, height] of all monitors together, in points like the saved position: `load` runs
+/// before winit makes the process DPI aware, and until then Windows scales these to 96 DPI. With
+/// two monitors at different scaling it is approximate; enough for "is it visible at all".
 fn virtual_screen() -> Option<[f32; 4]> {
   // SAFETY: plain metric queries without pointers.
   let (x, y, w, h) = unsafe {
