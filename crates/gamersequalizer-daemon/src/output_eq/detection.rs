@@ -47,8 +47,6 @@ impl OutputEq {
     }
     let facts = self.facts_for(&event.full_path, owner);
     let matched = game_match::resolve(&self.settings, &self.game_profiles, &facts);
-    // Its sound goes to Game only when it is a game; anything else is Media (`bus_for_exe`).
-    crate::win_audio::app_channels::set_detected_game(&exe, matched.is_some());
     let label = matched.as_ref().map(|m| m.label.clone()).unwrap_or_else(|| exe.clone());
     self.recent_apps.retain(|a| a.exe_name != exe);
     if self.recent_apps.len() >= RECENT_APPS {
@@ -61,6 +59,10 @@ impl OutputEq {
     if !owner {
       return;
     }
+    // Its sound goes to Game only when it is a game; anything else is Media (`bus_for_exe`). The
+    // owner alone says so: a follower knows only what the owner's genre cache holds, and would
+    // call a Steam tool that is not in it yet a game.
+    crate::win_audio::app_channels::set_detected_game(&exe, matched.is_some());
     let how = game_match::explain(&self.settings, &facts, matched.as_ref());
     match matched {
       Some(m) => {

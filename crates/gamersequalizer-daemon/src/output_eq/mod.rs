@@ -165,6 +165,7 @@ impl OutputEq {
 mod tests {
   use super::*;
   use crate::sonar_importer::DELETED_DIR;
+  use crate::win_audio::app_channels::{self, AppChannel};
   use gamersequalizer_common::profile::FilterType;
 
   fn header() -> Box<ShmHeader> {
@@ -334,6 +335,13 @@ mod tests {
     };
     follower.on_foreground(&event, false, Some(&h));
     assert_eq!(h.read_active_game(), None, "only the owner decides");
+    // Nor does a follower say what is a game (an exe of its own: the store is process-wide).
+    let bound =
+      GameForegroundEvent { exe_name: "followed.exe".into(), full_path: r"C:\x\followed.exe".into(), ..event.clone() };
+    follower.settings.bindings.insert("followed.exe".into(), "The Division 2".into());
+    follower.on_foreground(&bound, false, Some(&h));
+    assert_eq!(follower.recent_apps[0].matched.as_ref().and_then(|m| m.profile.as_deref()), Some("The Division 2"));
+    assert_eq!(app_channels::channel_for("followed.exe"), AppChannel::Media, "its sound stays where the owner put it");
     owner.on_foreground(&event, true, Some(&h));
     follower.tick(false, Some("dev-1".into()), Some(&h));
     assert_eq!(follower.game_profile_name(), Some("The Division 2"));
