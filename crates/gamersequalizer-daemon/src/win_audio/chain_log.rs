@@ -242,6 +242,8 @@ impl ChainLog {
     let iv = self.interval.replace(Interval::new(at, *d))?;
     let s = &iv.start;
     let blocks = growth(s.blocks, d.blocks);
+    // No block in the interval: the levels are the mapping's seed (-120) or an earlier stream's.
+    let heard = |x10: i32| if blocks == 0 { "none".to_string() } else { level(x10) };
     let voice = if blocks == 0 {
       "n/a".to_string()
     } else {
@@ -256,9 +258,9 @@ impl ChainLog {
        Windows mic volume {} (default device {}), automatic level {}, clips {}, load avg {:.1} % peak {:.1} %, \
        latency {}",
       at.duration_since(iv.since).as_secs_f32(),
-      level(d.mic_level_x10),
-      level(d.out_level_x10),
-      level(d.ref_level_x10),
+      heard(d.mic_level_x10),
+      heard(d.out_level_x10),
+      heard(d.ref_level_x10),
       d.erle_x10 as f32 / 10.0,
       echo_with_fit(d),
       db(d.fallback_echo_x10),
@@ -526,5 +528,10 @@ mod tests {
     assert_eq!(log.summary(&s, t0 + Duration::from_secs(5)), None);
     let line = log.summary(&s, t0 + SUMMARY_EVERY).unwrap();
     assert!(line.contains("voice 25 % of 1000 blocks"), "{line}");
+
+    // The mic stream stopped: no level was measured, whatever the mapping still holds.
+    (s.dsp.mic_level_x10, s.dsp.out_level_x10, s.dsp.ref_level_x10) = (-1200, -1200, -1200);
+    let idle = log.summary(&s, t0 + SUMMARY_EVERY * 2).unwrap();
+    assert!(idle.contains("mic none dBFS, out none dBFS, ref none dBFS") && idle.contains("of 0 blocks"), "{idle}");
   }
 }
