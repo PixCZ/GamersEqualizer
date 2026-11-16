@@ -90,7 +90,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
     super::profile_bar::render_output_notice(ui, state, OutputLayer::Game);
     if state.output_eq.game_profile().is_some() {
       ui.add_space(4.0);
-      volume_row(ui, state, OutputLayer::Game);
+      volume_row(ui, state, OutputLayer::Game, None);
       ui.add_space(4.0);
     }
     let r = &state.output_eq.result;
@@ -257,7 +257,9 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
 
 /// Volume of the shown profile, the loudness-matching switch, and the resulting volume change.
 /// Used by the Headphones, Game, Chat and Media tabs.
-pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer) {
+/// `bus_volume`: (volume change, peak) of a chat / media channel, which its tab has already
+/// computed for the graph; None = the output's own.
+pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer, bus_volume: Option<(f32, f32)>) {
   ui.horizontal_wrapped(|ui| {
     ui.label(tr("Volume of this profile"));
     let profile = state.output_eq.layer_profile_mut(layer);
@@ -290,13 +292,7 @@ pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer) {
     }
   });
 
-  let (preamp, peak) = match layer.bus() {
-    Some(bus) => {
-      let (_, preamp, peak) = state.output_eq.bus_result(bus);
-      (preamp, peak)
-    }
-    None => (state.output_eq.preamp_db, state.output_eq.peak_after_db),
-  };
+  let (preamp, peak) = bus_volume.unwrap_or((state.output_eq.preamp_db, state.output_eq.peak_after_db));
   let mut summary = trf("Total volume change: {} dB.", &[&format!("{preamp:+.1}")]);
   if peak > 0.05 {
     summary.push(' ');
@@ -403,11 +399,11 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
   });
 
   theme::card(ui, |ui| {
+    let (result, preamp, peak) = state.output_eq.bus_result(bus);
     if state.output_eq.bus_profile(bus).is_some() {
-      volume_row(ui, state, layer);
+      volume_row(ui, state, layer, Some((preamp, peak)));
       ui.add_space(4.0);
     }
-    let (result, preamp, _) = state.output_eq.bus_result(bus);
     let mut changed = false;
 
     // Graph: this profile (editable dots) over the headphone correction and the sum.

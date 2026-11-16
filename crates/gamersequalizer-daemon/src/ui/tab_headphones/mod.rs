@@ -102,7 +102,7 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
     super::profile_bar::render_output_notice(ui, state, OutputLayer::Headphone);
     if state.output_eq.headphone_profile().is_some() {
       ui.add_space(4.0);
-      super::tab_eq::volume_row(ui, state, OutputLayer::Headphone);
+      super::tab_eq::volume_row(ui, state, OutputLayer::Headphone, None);
     }
   });
 

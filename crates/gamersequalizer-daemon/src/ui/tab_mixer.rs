@@ -381,10 +381,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       }
     });
   });
-
-  // Always apply volume adjustments to WASAPI sessions and sync with background daemon
-  win_audio.chatmix.apply_mix();
-  state.sync_mixer_to_shm(&win_audio.chatmix);
+  // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
 }
 
 fn render_strip(
