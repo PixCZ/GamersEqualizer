@@ -185,17 +185,35 @@ run it unasked; updates the user picks go into their own commit.
   `# vX.Y.Z` comment, because a tag can be moved to other code (the release job holds the signing
   certificate). Check that each SHA still belongs to that tag upstream
   (`git ls-remote https://github.com/<owner>/<repo>`; GitHub also accepts SHAs from forks) and list newer
-  releases. An update takes the new tag's SHA and comment; never switch to a bare tag.
+  releases, and flag any action whose version still runs on a deprecated Node (`runs.using` in its
+  `action.yml`; GitHub warns about it in the run). An update takes the new tag's SHA and comment; never
+  switch to a bare tag.
 - **Rust crates** (whole workspace, `Cargo.lock`): `cargo update --dry-run --verbose` lists
   semver-compatible updates (`Updating`) and newer major versions (`Unchanged ... (available: ...)`); it
-  works on the Mac too. Known vulnerabilities: `cargo audit` (installed on the dev PC; the `Audit` workflow
-  runs it weekly and on every lockfile change, also over the vendor lockfiles). Report what would change, which major bumps need code changes, and any
-  advisories. After applying, build, test and clippy (`dev-rebuild` agent).
+  works on the Mac too. Known vulnerabilities: `cargo audit` (installed on the dev PC; the `Audit`
+  workflow runs it weekly and on every lockfile change, also over the vendor lockfiles). Report what
+  would change, which major bumps need code changes, and any advisories. After applying, build, test and
+  clippy (`dev-rebuild` agent).
 - **Rust toolchain** (`rust-toolchain.toml`, used by the dev PC and both workflows): compare the pinned
   version with the current stable (`rustup check`). A bump goes into its own commit and passes the
   gate (format and clippy can change with it).
 
-## Ground rules
+## Release notes
+
+`packaging/release-notes/<tag>.md` (exactly the tag's name, e.g. `0.2.0.md`) goes above the generated
+notes of the GitHub Release (`release.yml` reads it from the tagged commit, so it must be committed
+before the tag). Draft it as `next.md` while working and rename it before tagging. Written for gamers
+who use the app, not for developers; `packaging/release-notes/0.2.0.md` is the model:
+
+- **One theme with a name** as the heading (`## Rock solid`), then a short paragraph saying what the
+  release means for the user as a whole. Not a list of changes.
+- **Three to five bullets** that carry the theme, each a bold benefit ("Your sound survives a failed
+  update.") plus one plain sentence on what the user notices.
+- **Small fixes in one "Also:" sentence.** Leave out what the user cannot notice: refactoring,
+  logging, tests, CI, forward compatibility, installer internals.
+- Then `### Removed` (only when something went away, with what to do instead) and `### Updating`.
+- Short: it fits on one screen. No internal names (APO, shared memory, AEC3); say what it does
+  ("the echo canceller", "the microphone effect").
 
 - No global installs (`npm -g`, `pip install` outside a venv). Dependencies go into the project; system tools via `winget`, and ask first.
 - Don't add a dependency when the stdlib or an existing dep does the job.
