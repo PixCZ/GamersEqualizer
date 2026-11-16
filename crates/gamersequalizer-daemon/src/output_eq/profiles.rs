@@ -93,6 +93,15 @@ impl OutputEq {
     }
   }
 
+  pub(super) fn layer_profiles_mut(&mut self, layer: OutputLayer) -> &mut Vec<ParametricProfile> {
+    match layer {
+      OutputLayer::Headphone => &mut self.headphone_profiles,
+      OutputLayer::Game => &mut self.game_profiles,
+      OutputLayer::Chat => &mut self.chat_profiles,
+      OutputLayer::Media => &mut self.media_profiles,
+    }
+  }
+
   pub fn layer_profile_name(&self, layer: OutputLayer) -> Option<&str> {
     match layer {
       OutputLayer::Headphone => self.headphone_profile_name(),
@@ -136,37 +145,45 @@ impl OutputEq {
     self.save_settings(shm);
   }
 
-  pub fn save_bus_profile(&mut self, bus: StreamBus, shm: Option<&ShmHeader>) {
-    if let Some(p) = self.bus_profile(bus).cloned()
-      && let Err(e) = self.storage.save_profile(&p)
+  /// Save the active profile's edits in `layer` (after a slider is released).
+  pub fn save_layer_profile(&mut self, layer: OutputLayer, shm: Option<&ShmHeader>) {
+    if let Some(p) = self.layer_profile(layer)
+      && let Err(e) = self.storage.save_layer_profile(layer, p)
     {
-      warn!("[OutputEq] could not save {bus:?} profile {}: {e}", p.name);
+      warn!("[OutputEq] {e}");
     }
     self.notify(shm);
   }
 
-  /// Save the active profile's edits in `layer` (after a slider is released).
-  pub fn save_layer_profile(&mut self, layer: OutputLayer, shm: Option<&ShmHeader>) {
-    match layer {
-      OutputLayer::Headphone => self.save_headphone_profile(shm),
-      OutputLayer::Game => self.save_game_profile(shm),
-      OutputLayer::Chat => self.save_bus_profile(StreamBus::Chat, shm),
-      OutputLayer::Media => self.save_bus_profile(StreamBus::Media, shm),
-    }
-  }
-
+  /// Moves the profile file to `profiles/_deleted` (recoverable) and forgets every reference
+  /// to it: the headphone assignments, game bindings and fallback, or the chat / media pick
+  /// (that channel falls back to flat). Returns where the file went.
   pub fn delete_layer_profile(
     &mut self,
     layer: OutputLayer,
     name: &str,
     shm: Option<&ShmHeader>,
   ) -> Result<PathBuf, String> {
+    let moved = self.storage.move_to_deleted(&self.storage.layer_profile_path(layer, name))?;
+    self.layer_profiles_mut(layer).retain(|p| p.name != name);
+    let s = &mut self.settings;
     match layer {
-      OutputLayer::Headphone => self.delete_headphone_profile(name, shm),
-      OutputLayer::Game => self.delete_game_profile(name, shm),
-      OutputLayer::Chat => self.delete_bus_profile(StreamBus::Chat, name, shm),
-      OutputLayer::Media => self.delete_bus_profile(StreamBus::Media, name, shm),
+      OutputLayer::Headphone => s.headphone_by_device.retain(|_, p| p != name),
+      OutputLayer::Game => {
+        s.bindings.retain(|_, p| p != name);
+        if s.fallback_game_profile.as_deref() == Some(name) {
+          s.fallback_game_profile = None;
+        }
+      }
+      OutputLayer::Chat | OutputLayer::Media => {
+        let selected = if layer == OutputLayer::Chat { &mut s.chat_profile } else { &mut s.media_profile };
+        if selected.as_deref() == Some(name) {
+          *selected = None;
+        }
+      }
     }
+    self.save_settings(shm);
+    Ok(moved)
   }
 
   /// Add or replace a profile in `layer` and select it, except on the Game layer while a
@@ -195,17 +212,10 @@ impl OutputEq {
     }
     if let Some(vad) = layer.vad() {
       profile.vad_type = vad;
-      self.storage.save_profile(&profile).map_err(|e| e.to_string())?;
-    } else {
-      self.save_headphone_to_disk(&profile)?;
     }
+    self.storage.save_layer_profile(layer, &profile)?;
 
-    let list = match layer {
-      OutputLayer::Headphone => &mut self.headphone_profiles,
-      OutputLayer::Game => &mut self.game_profiles,
-      OutputLayer::Chat => &mut self.chat_profiles,
-      OutputLayer::Media => &mut self.media_profiles,
-    };
+    let list = self.layer_profiles_mut(layer);
     list.retain(|p| !same_profile_slot(&p.name, &name));
     list.push(profile);
     list.sort_by_key(|p| p.name.to_lowercase());
@@ -222,71 +232,6 @@ impl OutputEq {
       OutputLayer::Media => self.select_bus_profile(StreamBus::Media, Some(name), shm),
     }
     Ok(())
-  }
-
-  /// Save the active headphone profile's edits (after a slider is released).
-  pub fn save_headphone_profile(&mut self, shm: Option<&ShmHeader>) {
-    if let Some(p) = self.headphone_profile().cloned()
-      && let Err(e) = self.save_headphone_to_disk(&p)
-    {
-      warn!("[OutputEq] {e}");
-    }
-    self.notify(shm);
-  }
-
-  pub fn save_game_profile(&mut self, shm: Option<&ShmHeader>) {
-    if let Some(p) = self.game_profile().cloned()
-      && let Err(e) = self.storage.save_profile(&p)
-    {
-      warn!("[OutputEq] could not save game profile {}: {e}", p.name);
-    }
-    self.notify(shm);
-  }
-
-  /// Moves the profile file to `profiles/_deleted` (recoverable) and forgets every reference
-  /// to it. Returns where the file went.
-  pub fn delete_headphone_profile(&mut self, name: &str, shm: Option<&ShmHeader>) -> Result<PathBuf, String> {
-    let path =
-      self.storage.get_headphones_directory().join(format!("{}.json", ProfileStorage::sanitize_filename(name)));
-    let moved = self.storage.move_to_deleted(&path)?;
-    self.headphone_profiles.retain(|p| p.name != name);
-    self.settings.headphone_by_device.retain(|_, p| p != name);
-    self.save_settings(shm);
-    Ok(moved)
-  }
-
-  /// Same for a game profile; also drops bindings and the fallback that point to it.
-  pub fn delete_game_profile(&mut self, name: &str, shm: Option<&ShmHeader>) -> Result<PathBuf, String> {
-    let dir = self.storage.get_vad_directory(VadType::Game);
-    let moved = self.storage.move_to_deleted(&dir.join(format!("{}.json", ProfileStorage::sanitize_filename(name))))?;
-    self.game_profiles.retain(|p| p.name != name);
-    self.settings.bindings.retain(|_, p| p != name);
-    if self.settings.fallback_game_profile.as_deref() == Some(name) {
-      self.settings.fallback_game_profile = None;
-    }
-    self.save_settings(shm);
-    Ok(moved)
-  }
-
-  /// Same for a chat / media profile; the channel falls back to flat if it was selected.
-  pub fn delete_bus_profile(&mut self, bus: StreamBus, name: &str, shm: Option<&ShmHeader>) -> Result<PathBuf, String> {
-    let vad = match bus {
-      StreamBus::Chat => VadType::Chat,
-      StreamBus::Media => VadType::Media,
-      _ => return Err(format!("{bus:?} has no profiles")),
-    };
-    let dir = self.storage.get_vad_directory(vad);
-    let moved = self.storage.move_to_deleted(&dir.join(format!("{}.json", ProfileStorage::sanitize_filename(name))))?;
-    let (list, selected) = match bus {
-      StreamBus::Chat => (&mut self.chat_profiles, &mut self.settings.chat_profile),
-      _ => (&mut self.media_profiles, &mut self.settings.media_profile),
-    };
-    list.retain(|p| p.name != name);
-    if selected.as_deref() == Some(name) {
-      *selected = None;
-    }
-    self.save_settings(shm);
-    Ok(moved)
   }
 
   /// Add or replace a headphone profile (AutoEQ import) and use it on the current output.
@@ -306,13 +251,5 @@ impl OutputEq {
       None => self.settings.headphone_by_device.remove(&device),
     };
     self.save_settings(shm);
-  }
-
-  fn save_headphone_to_disk(&self, profile: &ParametricProfile) -> Result<(), String> {
-    let dir = self.storage.get_headphones_directory();
-    let path = dir.join(format!("{}.json", ProfileStorage::sanitize_filename(&profile.name)));
-    serde_json::to_string_pretty(profile).map_err(|e| e.to_string()).and_then(|json| {
-      settings::write_atomic(&path, &json).map_err(|e| format!("could not save {}: {e}", path.display()))
-    })
   }
 }

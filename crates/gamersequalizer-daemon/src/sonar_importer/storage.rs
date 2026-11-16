@@ -1,3 +1,4 @@
+use crate::output_eq::OutputLayer;
 use gamersequalizer_common::profile::{ParametricProfile, VadType};
 use std::fs;
 use std::io;
@@ -39,8 +40,13 @@ impl ProfileStorage {
     self.base_dir.join(vad.as_str())
   }
 
-  pub fn get_headphones_directory(&self) -> PathBuf {
-    self.base_dir.join("headphones")
+  /// Folder of an output layer's profiles: headphones apart, the others by their category.
+  pub fn dir_for(&self, layer: OutputLayer) -> PathBuf {
+    layer.vad().map_or_else(|| self.base_dir.join("headphones"), |vad| self.get_vad_directory(vad))
+  }
+
+  pub fn layer_profile_path(&self, layer: OutputLayer, name: &str) -> PathBuf {
+    self.dir_for(layer).join(format!("{}.json", Self::sanitize_filename(name)))
   }
 
   /// Sanitize filename for Windows NTFS
@@ -75,30 +81,24 @@ impl ProfileStorage {
     Ok(target)
   }
 
-  /// Save profile as JSON
+  /// Save profile as JSON, into the folder of its `vad_type`.
   pub fn save_profile(&self, profile: &ParametricProfile) -> io::Result<PathBuf> {
-    let dir = self.get_vad_directory(profile.vad_type);
-    fs::create_dir_all(&dir)?;
+    write_profile(&self.get_vad_directory(profile.vad_type), profile)
+  }
 
-    let filename = format!("{}.json", Self::sanitize_filename(&profile.name));
-    let path = dir.join(filename);
+  /// Save into an output layer's folder (a headphone profile's `vad_type` names no folder).
+  pub fn save_layer_profile(&self, layer: OutputLayer, profile: &ParametricProfile) -> Result<PathBuf, String> {
+    let dir = self.dir_for(layer);
+    write_profile(&dir, profile).map_err(|e| format!("could not save {} in {}: {e}", profile.name, dir.display()))
+  }
 
-    let json = serde_json::to_string_pretty(profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    // Not `File::create` + write: a power cut in between left a 0-byte file, and the profile
-    // (and every binding to it) vanished from the UI.
-    crate::output_eq::settings::write_atomic(&path, &json)?;
-    Ok(path)
+  pub fn load_layer_profiles(&self, layer: OutputLayer) -> Vec<ParametricProfile> {
+    self.load_profiles_from_dir(&self.dir_for(layer))
   }
 
   /// Load all profiles for a given VAD category
   pub fn load_profiles_for_vad(&self, vad: VadType) -> Vec<ParametricProfile> {
     let dir = self.get_vad_directory(vad);
-    self.load_profiles_from_dir(&dir)
-  }
-
-  /// Load headphone calibration profiles
-  pub fn load_headphone_profiles(&self) -> Vec<ParametricProfile> {
-    let dir = self.get_headphones_directory();
     self.load_profiles_from_dir(&dir)
   }
 
@@ -124,6 +124,15 @@ impl ProfileStorage {
     result.sort_by_key(|p| p.name.to_lowercase());
     result
   }
+}
+
+fn write_profile(dir: &Path, profile: &ParametricProfile) -> io::Result<PathBuf> {
+  let path = dir.join(format!("{}.json", ProfileStorage::sanitize_filename(&profile.name)));
+  let json = serde_json::to_string_pretty(profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+  // Not `File::create` + write: a power cut in between left a 0-byte file, and the profile
+  // (and every binding to it) vanished from the UI. `write_atomic` also creates the folder.
+  crate::output_eq::settings::write_atomic(&path, &json)?;
+  Ok(path)
 }
 
 /// Trust boundary: profiles are user-editable files ("gain_db": 1e39 parses as inf and went

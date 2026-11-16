@@ -117,10 +117,10 @@ impl OutputEq {
     let settings = OutputEqSettings::load_or_default(&settings_path);
     let genres = genre::GenreLookup::new(storage.base_dir());
     let mut engine = Self {
-      headphone_profiles: storage.load_headphone_profiles(),
-      game_profiles: storage.load_profiles_for_vad(VadType::Game),
-      chat_profiles: storage.load_profiles_for_vad(VadType::Chat),
-      media_profiles: storage.load_profiles_for_vad(VadType::Media),
+      headphone_profiles: storage.load_layer_profiles(OutputLayer::Headphone),
+      game_profiles: storage.load_layer_profiles(OutputLayer::Game),
+      chat_profiles: storage.load_layer_profiles(OutputLayer::Chat),
+      media_profiles: storage.load_layer_profiles(OutputLayer::Media),
       storage,
       settings_path,
       settings,
@@ -154,10 +154,9 @@ impl OutputEq {
   /// Re-read the profile folders (after a Sonar import).
   pub fn reload(&mut self) {
     self.settings = OutputEqSettings::load_or_default(&self.settings_path);
-    self.headphone_profiles = self.storage.load_headphone_profiles();
-    self.game_profiles = self.storage.load_profiles_for_vad(VadType::Game);
-    self.chat_profiles = self.storage.load_profiles_for_vad(VadType::Chat);
-    self.media_profiles = self.storage.load_profiles_for_vad(VadType::Media);
+    for layer in [OutputLayer::Headphone, OutputLayer::Game, OutputLayer::Chat, OutputLayer::Media] {
+      *self.layer_profiles_mut(layer) = self.storage.load_layer_profiles(layer);
+    }
     self.facts_cache.clear();
   }
 }
@@ -298,19 +297,24 @@ mod tests {
     let (mut eq, dir) = engine("delete");
     eq.settings.fallback_game_profile = Some("The Division 2".into());
     eq.settings.bindings.insert("x.exe".into(), "The Division 2".into());
-    let moved = eq.delete_headphone_profile("Rode NTH-100", None).unwrap();
+    let moved = eq.delete_layer_profile(OutputLayer::Headphone, "Rode NTH-100", None).unwrap();
     assert!(moved.exists() && moved.starts_with(dir.join(DELETED_DIR)));
     assert_eq!(eq.headphone_profile_name(), None);
     assert!(eq.headphone_profiles.is_empty());
 
-    eq.delete_game_profile("The Division 2", None).unwrap();
+    eq.delete_layer_profile(OutputLayer::Game, "The Division 2", None).unwrap();
     assert!(eq.game_profiles.is_empty() && eq.settings.bindings.is_empty());
     assert_eq!(eq.settings.fallback_game_profile, None);
     // Nothing left to delete: an error, no panic.
-    assert!(eq.delete_game_profile("The Division 2", None).is_err());
+    assert!(eq.delete_layer_profile(OutputLayer::Game, "The Division 2", None).is_err());
     // Reloading from disk confirms the files are gone from the profile folders.
+    // A chat profile in use: the channel goes back to flat.
+    eq.add_layer_profile(OutputLayer::Chat, ParametricProfile::new("Voice", VadType::Chat), None).unwrap();
+    assert_eq!(eq.bus_profile_name(StreamBus::Chat), Some("Voice"));
+    eq.delete_layer_profile(OutputLayer::Chat, "Voice", None).unwrap();
+    assert_eq!(eq.bus_profile_name(StreamBus::Chat), None);
     eq.reload();
-    assert!(eq.game_profiles.is_empty() && eq.headphone_profiles.is_empty());
+    assert!(eq.game_profiles.is_empty() && eq.headphone_profiles.is_empty() && eq.chat_profiles.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
   }
 

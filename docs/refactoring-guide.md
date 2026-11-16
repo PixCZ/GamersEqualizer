@@ -586,7 +586,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] G4 drobnosti řetězce (`frame_fifo.rs` s `FrameInput`/`FrameOutput`, i pro DPDFNet s překryvem oken)
 - [x] G5 vstupní body COM (`guarded`; zbývá ruční nahrávka `-DebugCapture` před fází a po ní)
 - [x] H dělení souborů (hotovo: `common/sidetone`, `apo/lib.rs`, `ai_denoiser/`, `chain/`, `aec3/echo_meter.rs`, `health/`, `win_audio/apo_install/`, `win_audio/chatmix/`, `ui/state/` + `shm_mapping.rs`, `output_eq/`, `ui/tab_headphones/autoeq_wizard.rs`, `daemon/main.rs` (smyčka služby zůstala jedna funkce: rozdělit ji na `follow_mic` a spol. není přesun), `common/shm/`; změna chování hotová: služba bez `AppState`)
-- [ ] I1 až I8 (hotovo: I1 `Channel` a `ChatMixController::write_levels` pro službu i okno; vyvážení dál zapisuje jen okno)
+- [ ] I1 až I8 (hotovo: I1 `Channel` a `ChatMixController::write_levels` pro službu i okno; vyvážení dál zapisuje jen okno; I2 `ProfileStorage::dir_for`, `save_layer_profile`, `load_layer_profiles`, jedno uložení a smazání vrstvy v `OutputEq`)
 - [ ] J menší nálezy
 - [ ] K úklid
 
