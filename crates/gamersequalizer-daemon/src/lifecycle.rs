@@ -66,10 +66,12 @@ pub(crate) fn daemon_running() -> bool {
   // Open, never create: a mutex created here for a moment made a service starting at that
   // instant see it as taken and exit.
   // SAFETY: a static name; the handle is closed below.
-  let Ok(mutex) =
-    (unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!(r"Local\GamersEqualizer_Daemon_Mutex")) })
-  else {
-    return false;
+  let mutex = match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!(r"Local\GamersEqualizer_Daemon_Mutex")) }
+  {
+    Ok(mutex) => mutex,
+    // It is there, held by a service with more rights (started from a window run as
+    // administrator): running. Starting a second service next to it is the thing to avoid.
+    Err(e) => return e.code() == ERROR_ACCESS_DENIED.to_hresult(),
   };
   // SAFETY: the handle OpenMutexW returned above, closed once.
   unsafe {

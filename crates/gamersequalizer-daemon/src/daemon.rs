@@ -33,7 +33,9 @@ pub(super) fn run_background_daemon() {
   // SAFETY: a static name and no security attributes; the handle is closed at the end of this function.
   let mutex = unsafe { CreateMutexW(None, true, mutex_name) };
   // SAFETY: reads this thread's last error, set by the CreateMutexW call just above.
-  if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+  let last_error = unsafe { GetLastError() };
+  // Access denied: it exists too, held by a service with more rights (see `daemon_running`).
+  if last_error == ERROR_ALREADY_EXISTS || last_error == ERROR_ACCESS_DENIED {
     info!("[GamersEqualizer] Background daemon is already active. Exiting duplicate process.");
     return;
   }
