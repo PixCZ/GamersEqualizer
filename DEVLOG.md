@@ -2969,15 +2969,21 @@ refactoring, then a review of every step and its fixes. No new features.
 **Open: to check by hand on Windows**
 
 - The review's fixes were written on a Mac: type-checked and clippy-clean for the Windows target, the
-  installer self-check run under `pwsh`; the Rust tests of the daemon, the APO and the mic chain run
-  first in CI.
+  installer self-check run under `pwsh`. Checked: the Rust tests of the daemon, the APO and the mic
+  chain pass in CI and in the gate on the dev PC.
 - Installer as administrator: an update whose self-test rolls back. Checked: an update that fails
   (installed DLL held open) keeps every endpoint's effects; its reason now reaches the log in a silent
   run too (the trap said it only with `-FromApp`, the uninstaller's as well).
 - "(none)" for a detected game in the window; Master behind Sonar when a monitor is plugged in; the
   window on a second monitor at 150 % that is then unplugged.
-- A `-DebugCapture` recording of the mic chain against one from before (pause, model switch, output
-  switch). Checked: `sidetone_probe` with nothing else playing (it renders only blocks flagged
+- Checked: a `-DebugCapture` take (60 s: speech, a pause, a model switch, an output switch and back)
+  against one from 2026-11-10. No click (no output step > 0.25, also within 100 ms of every switch),
+  no clipping, no block gap, load median 1.9 % (4.2 %). The denoiser sleeps ~3 s into the pause and
+  wakes on the first syllable (out follows the mic onset within one 10 ms step); DeepFilterNet ->
+  RNNoise switches its lead 40 -> 20 ms without a step. On the other output the AEC starts from that
+  device's cached delay (243 samples, 25-32 on the Realtek); without the reference for 0.1 s at each
+  switch. Only short beeps played, so the ERLE says nothing here.
+- Checked: `sidetone_probe` with nothing else playing (it renders only blocks flagged
   silent) still mixes the sidetone in, ~100 blocks/s on the Realtek output: the engine hands the
   output effect valid blocks, so the early return on a silent block does not cost the sidetone.
 - A Release workflow run with the pinned toolchain; the branch rule on GitHub that requires CI.
