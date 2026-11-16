@@ -106,6 +106,29 @@ pub struct MicChain {
   test_overrides: Option<(DenoiseModel, u32)>,
 }
 
+/// The chain's settings, read from shared memory once per block (defaults without a mapping).
+/// Raw values: the leveler compares them as they are (`LevelerInputs`), the capture records them.
+struct MicSettings {
+  aec_enabled: bool,
+  ai_strength_permille: u32,
+  /// `NOISE_GATE_*` or a threshold, dB.
+  gate_db: i32,
+  /// Mic volume, 1000 = 100 % (0 in the mapping reads as 100 %).
+  mic_permille: u32,
+  model: DenoiseModel,
+  denoise_retry_seq: u32,
+  eq_version: Option<u32>,
+  cached_delay: u32,
+  cached_echo_x10: i32,
+  /// None without a mapping: the output counts as unchanged.
+  reference_seq: Option<u32>,
+  leveler_on: bool,
+  input_gain_x10: i32,
+  leveler_target_x10: i32,
+  leveler_reset_seq: u32,
+  leveler_saved_x10: i32,
+}
+
 /// Everything before the leveler that changes the speech level it learns: when any of it changes,
 /// the learned level is stale. Raw shared-memory values, so a slider drag is "changed" every block.
 /// The Windows mic volume is not part of it: the leveler is told its gain and compensates it.
@@ -281,51 +304,16 @@ impl MicChain {
     #[cfg(feature = "debug-capture")]
     let capturing = self.capture_input(mic_in, mic_qpc_hns);
 
-    // Fetch control parameters from shared memory
-    let mut aec_enabled = true;
-    let mut ai_strength = 0.75f32;
-    let mut gate_db = NOISE_GATE_AUTO_LOOKAHEAD as f32; // the default until settings are read
-    let mut mic_permille = 1000u32;
-    let mut model = DenoiseModel::RnNoise;
-    let mut denoise_retry_seq = 0;
-    let mut eq_version = None;
-    let mut cached_delay = 0u32;
-    let mut cached_echo_x10 = 0;
-    let mut reference_seq = self.reference_seq_seen;
-    let mut leveler_on = true;
-    let mut input_gain_x10 = 0;
-    let (mut leveler_target_x10, mut leveler_reset_seq, mut leveler_saved_x10) =
-      (MIC_LEVELER_DEFAULT_TARGET_DB_X10, 0, 0);
-    if let Some(header) = self.shm_header() {
-      leveler_on = header.mic_leveler_enabled.load(Ordering::Relaxed);
-      input_gain_x10 = header.mic_input_gain_db_x10.load(Ordering::Relaxed);
-      leveler_target_x10 = header.mic_leveler_target_db_x10.load(Ordering::Relaxed);
-      leveler_reset_seq = header.mic_leveler_reset_seq.load(Ordering::Relaxed);
-      leveler_saved_x10 = header.mic_leveler_saved_level_db_x10.load(Ordering::Relaxed);
-      // Acquire before the cached delay: the daemon stores the new output's delay first.
-      reference_seq = header.aec_reference_seq.load(Ordering::Acquire);
-      cached_delay = header.aec_cached_delay_samples.load(Ordering::Relaxed);
-      cached_echo_x10 = header.aec_cached_echo_db_x10.load(Ordering::Relaxed);
-      aec_enabled = header.aec_enabled.load(Ordering::Relaxed);
-      ai_strength = header.ai_voice_strength_permille.load(Ordering::Relaxed) as f32 / 1000.0;
-      gate_db = header.noise_gate_threshold_db.load(Ordering::Relaxed) as f32;
-      let p = header.mic_volume_permille.load(Ordering::Relaxed);
-      if p > 0 {
-        mic_permille = p;
-      }
-      model = DenoiseModel::from_u32(header.denoise_model.load(Ordering::Relaxed));
-      denoise_retry_seq = header.denoise_retry_seq.load(Ordering::Relaxed);
-      eq_version = Some(header.mic_eq_version.load(Ordering::Acquire));
-    }
+    #[cfg_attr(not(test), expect(unused_mut, reason = "only the tests change it"))]
+    let mut s = MicSettings::read(self.shm_header());
     #[cfg(test)]
-    if let Some((m, p)) = self.test_overrides {
-      model = m;
-      mic_permille = p;
+    if let Some((model, permille)) = self.test_overrides {
+      (s.model, s.mic_permille) = (model, permille);
     }
 
     // Speaker output switched: the locked delay and the learned echo path are the old
     // device's. Start over, warm-started below with the delay remembered for the new one.
-    if reference_seq != self.reference_seq_seen {
+    if let Some(reference_seq) = s.reference_seq.filter(|&seq| seq != self.reference_seq_seen) {
       self.reference_seq_seen = reference_seq;
       log::info!("[AEC] speaker output changed: echo delay and filter start over");
       self.delay_estimator.forget_lock();
@@ -338,36 +326,36 @@ impl MicChain {
 
     // Delay remembered from an earlier session (daemon cache): only as a warm start, a delay
     // measured in this session wins.
-    if cached_delay != self.cached_delay_seen {
-      self.cached_delay_seen = cached_delay;
-      if cached_delay > 0 && self.delay_estimator.current_delay().is_none() {
-        log::info!("[AEC] warm start with cached echo delay {:.1} ms", cached_delay as f32 / 48.0);
-        self.delay_estimator.set_cached_delay(cached_delay as usize);
+    if s.cached_delay != self.cached_delay_seen {
+      self.cached_delay_seen = s.cached_delay;
+      if s.cached_delay > 0 && self.delay_estimator.current_delay().is_none() {
+        log::info!("[AEC] warm start with cached echo delay {:.1} ms", s.cached_delay as f32 / 48.0);
+        self.delay_estimator.set_cached_delay(s.cached_delay as usize);
       }
     }
 
     // Echo strength remembered for this mic and output: AEC3's fallback echo estimate is right
     // from the first frame, until the strength is measured in this session.
-    if cached_echo_x10 != self.cached_echo_seen {
-      self.cached_echo_seen = cached_echo_x10;
-      if cached_echo_x10 != 0 {
-        self.aec.seed_echo_strength_db(cached_echo_x10 as f32 / 10.0);
+    if s.cached_echo_x10 != self.cached_echo_seen {
+      self.cached_echo_seen = s.cached_echo_x10;
+      if s.cached_echo_x10 != 0 {
+        self.aec.seed_echo_strength_db(s.cached_echo_x10 as f32 / 10.0);
       }
     }
 
-    self.ai_denoiser.set_strength(ai_strength);
-    self.ai_denoiser.set_gate_threshold_db(gate_db);
+    self.ai_denoiser.set_strength(s.ai_strength_permille as f32 / 1000.0);
+    self.ai_denoiser.set_gate_threshold_db(s.gate_db as f32);
     // Never blocks: a heavy model not loaded yet loads on its own thread, RNNoise runs meanwhile.
-    if model != self.ai_denoiser.selected_model() {
-      self.ai_denoiser.request_model(model);
+    if s.model != self.ai_denoiser.selected_model() {
+      self.ai_denoiser.request_model(s.model);
     }
-    if self.denoise_retry_seen.is_some_and(|s| s != denoise_retry_seq) {
+    if self.denoise_retry_seen.is_some_and(|seen| seen != s.denoise_retry_seq) {
       self.ai_denoiser.retry();
     }
-    self.denoise_retry_seen = Some(denoise_retry_seq);
+    self.denoise_retry_seen = Some(s.denoise_retry_seq);
     let model_before = self.ai_denoiser.active_model();
-    if eq_version.is_some() && eq_version != self.eq_version {
-      self.eq_version = eq_version;
+    if s.eq_version.is_some() && s.eq_version != self.eq_version {
+      self.eq_version = s.eq_version;
       // The field, not `shm_header()`: that would borrow all of `self` while `eq` changes.
       let bands = self.shm_client.as_ref().map(|c| c.layout().header.read_mic_eq());
       self.eq.set_bands(bands.into_iter().flatten(), SAMPLE_RATE);
@@ -380,10 +368,10 @@ impl MicChain {
     // Stage 1: Classical DSP Acoustic Echo Cancellation (NO AI)
     // AEC3 gets the mic at call level, by the speech level the leveler learned: at a quiet
     // mic's level it would duck the voice (`aec3.rs`, "Mic gain"). Nothing learned: no gain.
-    let aec_mic_gain_db = self.leveler.gain_to_default_db().filter(|_| leveler_on).unwrap_or(0.0);
+    let aec_mic_gain_db = self.leveler.gain_to_default_db().filter(|_| s.leveler_on).unwrap_or(0.0);
     self.aec.set_mic_gain_db(aec_mic_gain_db);
     self.aec_ref_offset = None;
-    self.aec_state = if aec_enabled {
+    self.aec_state = if s.aec_enabled {
       self.run_aec(frames, mic_qpc_hns)
     } else {
       self.aec_idle = true; // switched back on: flush what it queued before
@@ -411,7 +399,7 @@ impl MicChain {
     // The closed gate goes as far further down as the leveler lifts (last block's gain), so
     // pauses don't get louder with a quiet mic.
     self.pre_high_pass.process(mic);
-    let leveler_boost_db = if leveler_on { self.leveler.gain_db() } else { 0.0 };
+    let leveler_boost_db = if s.leveler_on { self.leveler.gain_db() } else { 0.0 };
     self.ai_denoiser.set_gate_floor_extra_db(leveler_boost_db);
     self.ai_denoiser.set_pre_gain_db(leveler_boost_db);
     self.ai_denoiser.process_samples(mic);
@@ -431,16 +419,16 @@ impl MicChain {
 
     // Stage 4: Learning voice leveler (speech to one level; learns only while the detector hears speech)
     // "Learn again" (a new sequence number): forget, and don't take the old saved level back.
-    if self.leveler_reset_seen.is_some_and(|s| s != leveler_reset_seq) {
+    if self.leveler_reset_seen.is_some_and(|seen| seen != s.leveler_reset_seq) {
       self.leveler.reset();
       self.leveler_seed_blocked = true;
     }
-    self.leveler_reset_seen = Some(leveler_reset_seq);
+    self.leveler_reset_seen = Some(s.leveler_reset_seq);
     // A setting before the leveler moved (volume, denoiser, EQ, ...): relearn fast, gain held.
     let inputs = LevelerInputs {
-      aec_enabled,
-      ai_strength_permille: (ai_strength * 1000.0).round() as u32,
-      gate_db: gate_db as i32,
+      aec_enabled: s.aec_enabled,
+      ai_strength_permille: s.ai_strength_permille,
+      gate_db: s.gate_db,
       active_model: self.ai_denoiser.active_model().to_u32(),
       eq_version: self.eq_version,
     };
@@ -448,12 +436,12 @@ impl MicChain {
       self.leveler.relearn();
     }
     self.leveler_inputs = Some(inputs);
-    self.leveler.set_input_gain_db(input_gain_x10 as f32 / 10.0);
-    self.leveler.set_target_db(leveler_target_x10 as f32 / 10.0);
-    if leveler_on {
+    self.leveler.set_input_gain_db(s.input_gain_x10 as f32 / 10.0);
+    self.leveler.set_target_db(s.leveler_target_x10 as f32 / 10.0);
+    if s.leveler_on {
       // Level learned in an earlier stream on this mic (it may arrive a few blocks late).
-      if leveler_saved_x10 != 0 && !self.leveler_seed_blocked {
-        self.leveler.seed(leveler_saved_x10 as f32 / 10.0);
+      if s.leveler_saved_x10 != 0 && !self.leveler_seed_blocked {
+        self.leveler.seed(s.leveler_saved_x10 as f32 / 10.0);
       }
       self.leveler.process(mic, self.ai_denoiser.heard_voice(), self.ai_denoiser.output_lead_samples());
     } else {
@@ -467,7 +455,7 @@ impl MicChain {
     // Stage 5: volume + peak limiter, always last so EQ boosts can't clip. With the leveler the
     // mic volume (0..300 %) is how loud others hear you: 100 % = the target, 50 % = 6 dB under it
     // (the leveler took the Windows volume out of the input). Without it: only the boost > 100 %.
-    let boost = if leveler_on || mic_permille > 1000 { mic_permille as f32 / 1000.0 } else { 1.0 };
+    let boost = if s.leveler_on || s.mic_permille > 1000 { s.mic_permille as f32 / 1000.0 } else { 1.0 };
     for sample in mic.iter_mut() {
       *sample *= boost;
     }
@@ -502,18 +490,7 @@ impl MicChain {
     }
     #[cfg(feature = "debug-capture")]
     if capturing {
-      let settings = BlockSettings {
-        aec_enabled,
-        ai_strength,
-        gate_db,
-        leveler_on,
-        leveler_target_db: leveler_target_x10 as f32 / 10.0,
-        input_gain_db: input_gain_x10 as f32 / 10.0,
-        mic_volume: mic_permille as f32 / 1000.0,
-        boost,
-        load,
-      };
-      self.capture_finish(frames, mic_qpc_hns, &settings);
+      self.capture_finish(frames, mic_qpc_hns, &s, boost, load);
     }
     self.block_counter = self.block_counter.wrapping_add(1);
     if self.block_counter.is_multiple_of(TELEMETRY_EVERY_BLOCKS) {
@@ -739,7 +716,7 @@ impl MicChain {
   }
 
   #[cfg(feature = "debug-capture")]
-  fn capture_finish(&mut self, frames: usize, mic_qpc_hns: Option<u64>, s: &BlockSettings) {
+  fn capture_finish(&mut self, frames: usize, mic_qpc_hns: Option<u64>, s: &MicSettings, boost: f32, load: f32) {
     let Some(cap) = self.capture.as_ref() else {
       return;
     };
@@ -780,19 +757,19 @@ impl MicChain {
       self.ai_denoiser.selected_model().to_u32() as f32,
       self.ai_denoiser.active_model().to_u32() as f32,
       self.ai_denoiser.limit().to_u32() as f32,
-      s.ai_strength,
-      s.gate_db,
+      s.ai_strength_permille as f32 / 1000.0,
+      s.gate_db as f32,
       b(self.ai_denoiser.heard_voice()),
       self.ai_denoiser.output_lead_samples() as f32,
       self.eq_version.map_or(-1.0, |v| v as f32),
       b(s.leveler_on),
-      s.leveler_target_db,
+      s.leveler_target_x10 as f32 / 10.0,
       self.leveler.gain_db(),
       self.leveler.level_db().unwrap_or(f32::NAN),
-      s.input_gain_db,
-      s.mic_volume,
-      s.boost,
-      s.load,
+      s.input_gain_x10 as f32 / 10.0,
+      s.mic_permille as f32 / 1000.0,
+      boost,
+      load,
       dn.in_prob,
       dn.out_prob,
       dn.rescue_prob,
@@ -823,18 +800,48 @@ impl MicChain {
   }
 }
 
-/// Per-block settings the capture records next to the chain's state.
-#[cfg(feature = "debug-capture")]
-struct BlockSettings {
-  aec_enabled: bool,
-  ai_strength: f32,
-  gate_db: f32,
-  leveler_on: bool,
-  leveler_target_db: f32,
-  input_gain_db: f32,
-  mic_volume: f32,
-  boost: f32,
-  load: f32,
+impl MicSettings {
+  fn read(header: Option<&ShmHeader>) -> Self {
+    let Some(h) = header else {
+      return Self {
+        aec_enabled: true,
+        ai_strength_permille: 750,
+        gate_db: NOISE_GATE_AUTO_LOOKAHEAD,
+        mic_permille: 1000,
+        model: DenoiseModel::RnNoise,
+        denoise_retry_seq: 0,
+        eq_version: None,
+        cached_delay: 0,
+        cached_echo_x10: 0,
+        reference_seq: None,
+        leveler_on: true,
+        input_gain_x10: 0,
+        leveler_target_x10: MIC_LEVELER_DEFAULT_TARGET_DB_X10,
+        leveler_reset_seq: 0,
+        leveler_saved_x10: 0,
+      };
+    };
+    let relaxed = Ordering::Relaxed;
+    // Acquire before the cached delay: the daemon stores the new output's delay first.
+    let reference_seq = Some(h.aec_reference_seq.load(Ordering::Acquire));
+    Self {
+      aec_enabled: h.aec_enabled.load(relaxed),
+      ai_strength_permille: h.ai_voice_strength_permille.load(relaxed),
+      gate_db: h.noise_gate_threshold_db.load(relaxed),
+      mic_permille: Some(h.mic_volume_permille.load(relaxed)).filter(|&p| p > 0).unwrap_or(1000),
+      model: DenoiseModel::from_u32(h.denoise_model.load(relaxed)),
+      denoise_retry_seq: h.denoise_retry_seq.load(relaxed),
+      eq_version: Some(h.mic_eq_version.load(Ordering::Acquire)),
+      cached_delay: h.aec_cached_delay_samples.load(relaxed),
+      cached_echo_x10: h.aec_cached_echo_db_x10.load(relaxed),
+      reference_seq,
+      leveler_on: h.mic_leveler_enabled.load(relaxed),
+      input_gain_x10: h.mic_input_gain_db_x10.load(relaxed),
+      leveler_target_x10: h.mic_leveler_target_db_x10.load(relaxed),
+      leveler_reset_seq: h.mic_leveler_reset_seq.load(relaxed),
+      leveler_saved_x10: h.mic_leveler_saved_level_db_x10.load(relaxed),
+    }
+  }
 }
 
 impl Default for ChainExtremes {
