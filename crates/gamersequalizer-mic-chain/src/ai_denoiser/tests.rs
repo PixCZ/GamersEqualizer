@@ -172,6 +172,73 @@ fn test_heavy_model_sleeps_in_pauses_and_wakes_without_a_gap() {
   }
 }
 
+/// Regression (tester 2026-11-16, "hiss every ~7 s of silence", heavy models only): a wake in a
+/// pause let the output detector hear RNNoise's stand-in output, whose noise opened the gate.
+#[test]
+fn test_wake_without_voice_keeps_the_gate_closed() {
+  let noise = |secs: f32, amplitude: f32, seed: u32| {
+    let mut x = seed;
+    (0..(secs * 48_000.0) as usize)
+      .map(|_| {
+        x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        ((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * amplitude
+      })
+      .collect::<Vec<f32>>()
+  };
+  // 3 s of a quiet room puts the model to sleep; the room getting 16 dB louder wakes it.
+  let mut input = noise(3.0, 1e-3, 1);
+  input.extend(noise(1.0, 6.3e-3, 2));
+  for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+    let mut iso = AiVoiceIsolator::new();
+    iso.set_model(model);
+    iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+    let (mut woke, mut opened) = (false, 0);
+    for (i, block) in input.chunks_mut(480).enumerate() {
+      let was = iso.asleep();
+      iso.process_samples(block);
+      woke |= was && !iso.asleep();
+      if i >= 300 && iso.debug_state().gate_hold_left > 0 {
+        opened += 1;
+      }
+    }
+    assert!(woke, "{model:?}: the louder room must wake the model");
+    assert_eq!(opened, 0, "{model:?}: gate opened in {opened} blocks without a voice");
+  }
+}
+
+/// Regression (tester 2026-11-16, after the fix above: "after a long silence, hiss every ~2 s"):
+/// asleep, the 2017 RNNoise rated room noise as speech that `in_net` rated 0.00 while awake
+/// (capture 20261110-141328: 0.44-0.85), so the model woke 30 ms after falling asleep, the gate
+/// opened, and 2 s later the same again. Only real room noise fools it, so this checks the rule
+/// itself: asleep or not, the input detector is `in_net`.
+#[test]
+fn test_asleep_the_input_detector_stays_in_net() {
+  let mut x = 1u32;
+  let input: Vec<f32> = (0..5 * 48_000)
+    .map(|_| {
+      x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+      ((x >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 1e-3
+    })
+    .collect();
+  for model in [DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+    let mut iso = AiVoiceIsolator::new();
+    iso.set_model(model);
+    iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+    let mut reference = VoiceNet::new_input();
+    let mut asleep_blocks = 0;
+    for block in input.clone().chunks_mut(480) {
+      let mut expected = -1.0f32;
+      reference.process(block, |p| expected = expected.max(p));
+      iso.process_samples(block);
+      if iso.asleep() {
+        asleep_blocks += 1;
+        assert_eq!(iso.debug_state().in_prob, expected, "{model:?}: asleep, another detector heard the input");
+      }
+    }
+    assert!(asleep_blocks > 100, "{model:?}: asleep only {asleep_blocks} blocks");
+  }
+}
+
 #[test]
 fn test_live_switch_loads_off_thread_while_rnnoise_runs() {
   // Regression: a live switch loaded the model inside the audio callback (0.1-0.2 s stall).
@@ -1287,6 +1354,90 @@ fn capture_replay_report() {
   eprintln!("PAUSES without voice {p_len}: median {p_median:.1} dBFS, 90th percentile {p_90:.1} dBFS");
 }
 
+/// Hiss bursts in pauses (tester report 2026-11-16: "every ~7 s of silence a fraction of a second
+/// of hiss", heavy models only). Replays each capture's denoiser input with every model, sleep on
+/// and off, gate auto + lookahead, the capture's leveler gains as in the chain, and counts 100 ms
+/// windows in a pause (standalone Silero < 0.1 for +-300 ms) over -80 dBFS before the leveler
+/// (RNNoise, which the tester heard as clean, is the reference).
+/// `CAPS=20261110-141254,20261110-141328 cargo test -p gamersequalizer-mic-chain --release pause_burst_report -- --ignored --nocapture`
+#[test]
+#[ignore = "needs private recordings"]
+fn pause_burst_report() {
+  let caps = std::env::var("CAPS").unwrap_or("20261110-141254,20261110-141328,20261116-122126".into());
+  for cap in caps.split(',') {
+    let dir = format!("../private/captures/{cap}");
+    if !std::path::Path::new(FIXTURES).join(&dir).join("vars.tsv").exists() {
+      eprintln!("skipped: no capture {cap}");
+      continue;
+    }
+    let x = read_wav_48k(&format!("{dir}/04_after_aec.wav"));
+    let vars = std::fs::read_to_string(std::path::Path::new(FIXTURES).join(&dir).join("vars.tsv")).unwrap();
+    let mut lines = vars.lines();
+    let col = lines.next().unwrap().split('\t').position(|h| h == "leveler_gain_db").unwrap();
+    let gains: Vec<f32> = lines.map(|l| l.split('\t').nth(col).unwrap().parse().unwrap()).collect();
+    let (mut vad, mut probs) = (Vad48k::new().unwrap(), Vec::new());
+    x.chunks(480).for_each(|b| vad.process(b, |p| probs.push(p)));
+    let windows = x.len() / 4800;
+    let silero = |t: usize| {
+      (0..4).map(|k| probs.get((t * 4800) / silero_vad::CHUNK_48K + k).copied().unwrap_or(0.0)).fold(0.0f32, f32::max)
+    };
+    let pause: Vec<bool> = (0..windows).map(|t| (t.saturating_sub(3)..=t + 3).all(|u| silero(u) < 0.1)).collect();
+    for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+      for sleep in [true, false] {
+        let mut iso = AiVoiceIsolator::new();
+        iso.set_model(model);
+        iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+        if !sleep {
+          iso.sleep_after = usize::MAX;
+        }
+        let mut out = x.clone();
+        let mut wakes = 0;
+        // Per block: asleep, input detector heard voice, gate hold.
+        let mut trace: Vec<(bool, bool, usize)> = Vec::new();
+        for (b, g) in out.chunks_mut(480).zip(&gains) {
+          let was = iso.asleep();
+          iso.set_gate_floor_extra_db(*g);
+          iso.set_pre_gain_db(*g);
+          iso.process_samples(b);
+          wakes += (was && !iso.asleep()) as usize;
+          trace.push((iso.asleep(), iso.heard_voice, iso.debug_state().gate_hold_left));
+        }
+        // Wakes in a pause: what woke the model, after how long asleep, and whether the gate opened.
+        let mut slept_at = 0;
+        for i in 1..trace.len() {
+          if !trace[i - 1].0 && trace[i].0 {
+            slept_at = i;
+          }
+          if trace[i - 1].0 && !trace[i].0 && pause.get(i / 10).copied().unwrap_or(false) {
+            let cause = if trace[i - 1].1 { "voice detector" } else { "activity" };
+            let open = trace[i..(i + 30).min(trace.len())].iter().filter(|t| t.2 > 0).count();
+            eprintln!(
+              "  wake {:.2} s after {} ms asleep: {cause}, gate open {open} of the next 30 blocks",
+              i as f32 / 100.0,
+              (i - slept_at) * 10
+            );
+          }
+        }
+        let lat = latency_samples(model) + lookahead_samples(model);
+        let w: Vec<f32> =
+          (0..windows).map(|t| db(rms(out.get(t * 4800 + lat..(t + 1) * 4800 + lat).unwrap_or(&[])))).collect();
+        let mut quiet: Vec<f32> = (30..windows).filter(|&t| pause[t]).map(|t| w[t]).collect();
+        quiet.sort_by(f32::total_cmp);
+        let median = quiet.get(quiet.len() / 2).copied().unwrap_or(-120.0);
+        let peak = quiet.last().copied().unwrap_or(-120.0);
+        let bursts: Vec<usize> = (30..windows).filter(|&t| pause[t] && w[t] > -80.0).collect();
+        let at: Vec<String> = bursts.iter().take(12).map(|&t| format!("{:.1}", t as f32 / 10.0)).collect();
+        eprintln!(
+          "{cap} {model:?} sleep {sleep}: pause windows {}, median {median:.1}, peak {peak:.1} dBFS, over -80: {} (wakes {wakes}) at [{}] s",
+          quiet.len(),
+          bursts.len(),
+          at.join(" ")
+        );
+      }
+    }
+  }
+}
+
 #[derive(Debug)]
 struct ClickQuality {
   quality: Quality,
@@ -1533,6 +1684,50 @@ fn scenario_report() {
       10.0 * (energy(u, &speech) / energy(&input, &speech)).log10(),
       cut as f32 / vf.max(1) as f32 * 100.0
     );
+  }
+}
+
+/// CPU of each mic-chain part on 10 s of speech over keys, % of one core (time / audio length):
+/// what to cut when the meter reads high (tester 2026-11-16: 27 % with a heavy model). Run:
+/// `cargo test -p gamersequalizer-mic-chain --release cpu_breakdown_report -- --ignored --nocapture`
+#[test]
+#[ignore = "timing report"]
+fn cpu_breakdown_report() {
+  let (_, mixed) = speech_over_keyboard(-30.0, 0.0);
+  let x: Vec<f32> = mixed.iter().cycle().take(10 * 48_000).copied().collect();
+  let secs = x.len() as f32 / 48_000.0;
+  let time = |name: &str, f: &mut dyn FnMut(&mut [f32])| {
+    let mut y = x.clone();
+    let t = Instant::now();
+    y.chunks_mut(480).for_each(&mut *f);
+    eprintln!("CPU {name:<34} {:6.2} % of a core", t.elapsed().as_secs_f32() / secs * 100.0);
+  };
+  let mut rnn = RnNoiseEngine::new();
+  time("RNNoise 2017 denoiser + its VAD", &mut |b| rnn.process(b, 0.75, |_| {}));
+  let mut in_net = VoiceNet::new_input();
+  time("in_net (RNNoise 0.2, detector only)", &mut |b| in_net.process(b, |_| {}));
+  let mut out_net = VoiceNet::new();
+  time("out_net (RNNoise 2017 VAD)", &mut |b| out_net.process(b, |_| {}));
+  let mut silero = Vad48k::new().unwrap();
+  time("Silero VAD", &mut |b| silero.process(b, |_| {}));
+  let mut df = DeepFilterEngine::load().unwrap();
+  time("DeepFilterNet 3 alone", &mut |b| df.process(b, 0.75, 1.0));
+  let mut dp = DpdfEngine::load().unwrap();
+  time("DPDFNet alone", &mut |b| dp.process(b, atten_lim(0.75)));
+  let mut aec = crate::aec3::EchoCanceller3::new();
+  let reference = x.clone();
+  let mut pos = 0;
+  time("echo canceller (AEC3, stereo ref)", &mut |b| {
+    let r = &reference[pos..pos + b.len()];
+    aec.process_block_stereo(r, r, b);
+    pos += b.len();
+  });
+  for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+    let mut iso = AiVoiceIsolator::new();
+    iso.set_model(model);
+    iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+    iso.sleep_after = usize::MAX; // speech: awake
+    time(&format!("whole denoiser, {model:?}, awake"), &mut |b| iso.process_samples(b));
   }
 }
 

@@ -168,14 +168,14 @@ pub struct AiVoiceIsolator {
   df_pre_gain: f32,
   gate: NoiseGate,
   /// Speech on the raw input (the leveler; the gate, a model latency ahead of the output). Fed by
-  /// the RNNoise denoiser's own voice probability while it runs, else by `in_net`.
+  /// RNNoise's own voice probability when it is the model, else by `in_net` (asleep too).
   vad: VoiceHysteresis,
   /// Same detector on the denoised output: keys are gone there, so it keeps hearing a voice the
   /// raw-input one loses under typing (private voice, keys at -10 dB SNR: RNNoise's probability
   /// on soft syllables fell from ~0.95 to <0.1 and the gate cut 18-31 % of them).
   vad_out: VoiceHysteresis,
-  /// RNNoise run only for its voice probability: on the raw input while no RNNoise denoises it
-  /// (RNNoise 0.2, Full; ~10x the 2017 pass, ~2.8 % of a core). Its probability describes the
+  /// RNNoise run only for its voice probability: on the raw input while a heavy model is selected,
+  /// asleep or not (RNNoise 0.2, Full; ~10x the 2017 pass, ~2.8 % of a core). Its probability describes the
   /// frame before the one just fed (one frame of network lookahead), so it reports 10 ms later
   /// than the 2017 detector did; it still leads the heavy model's output by that model's
   /// latency - 10 ms (DFN3 30 ms, DPDFNet 50 ms) plus the lookahead, so the output latency does
@@ -535,8 +535,10 @@ impl AiVoiceIsolator {
     // 40 ms, a chunk 32 ms).
     let soft_voice_now = soft_net.is_none() || soft_recent[0].max(soft_recent[1]) > RESCUE_SOFT_PROB;
     // Raw-input detector, a model latency ahead of the output (opens on word onsets in time):
-    // RNNoise's own voice probability while it denoises alone, else `in_net` (RNNoise 0.2).
-    if heavy_on {
+    // RNNoise's own voice probability when it is the model, else `in_net` (RNNoise 0.2), also
+    // while RNNoise stands in: the 2017 net rated room noise as speech that `in_net` rated 0.00,
+    // and woke the model 30 ms after it fell asleep (tester 2026-11-16: hiss every ~2 s).
+    if heavy {
       let (open, keep) = in_net.thresholds();
       in_net.process(samples, |p| {
         *in_prob = in_prob.max(p);
@@ -567,7 +569,7 @@ impl AiVoiceIsolator {
         None => &mut *samples,
       };
       rnnoise.process(buf, strength, |p| {
-        if !heavy_on {
+        if !heavy {
           *in_prob = in_prob.max(p);
           voice |= vad.frame(p);
         }
@@ -591,8 +593,11 @@ impl AiVoiceIsolator {
     }
     // The output detector, in step with the output (its hold needs no latency on top). Not while
     // a heavy model sleeps: it would hear the keys RNNoise leaves in (DFN3, loud typing: gate
-    // open 25 % instead of 1 %); the input detector alone wakes the model.
-    if gate_on && (heavy_on || !heavy) {
+    // open 25 % instead of 1 %); the input detector alone wakes the model. Nor while it wakes:
+    // the output is still RNNoise's for a model latency, and its noise opened the gate for 200 ms
+    // on every wake in a pause (tester 2026-11-16: hiss every ~7 s, heavy models only).
+    let waking = takeover.is_some_and(|t| !t.to_sleep);
+    if gate_on && (heavy_on || !heavy) && !waking {
       out_net.process(samples, |p| {
         *out_prob = out_prob.max(p);
         voice_out |= vad_out.frame(p);
@@ -710,7 +715,6 @@ impl AiVoiceIsolator {
       if let Some(dp) = self.dpdfnet.as_mut() {
         dp.restart();
       }
-      self.in_net.input.clear();
     }
     let fade_at = if to_sleep { latency.max(STAND_IN_WARMUP_SAMPLES) } else { latency };
     self.sleep.takeover = Some(Takeover { to_sleep, done: 0, fade_at });
