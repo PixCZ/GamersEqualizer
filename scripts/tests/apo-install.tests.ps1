@@ -6,8 +6,8 @@ $scripts = 'apo-common.ps1', 'apo-install.ps1' | ForEach-Object { Join-Path (Spl
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
   'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated',
-  'Remove-OurEffects', 'Restore-InstallStart'
-$variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
+  'Remove-OurEffects', 'Restore-InstallStart', 'Get-RollbackTarget'
+$variables = '$FxGuid', '$NullGuid', '$DefaultProcessingMode', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
 $pieces = @(foreach ($script in $scripts) {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
     $ast.FindAll({
@@ -152,6 +152,22 @@ Check 'rollback target: a list of ours only goes' (-not $byName.ContainsKey("$Fx
 Check 'rollback target: the driver''s empty list stays' ($byName.ContainsKey("$FxGuid,14")) ''
 Check 'rollback target: other values stay' ($byName["$FxGuid,5"].Value -eq $oem -and $target.Created -and $target.Id -eq $guid) ''
 Check 'rollback target: the snapshot itself is unchanged' (@($update.Records).Count -eq 4 -and @($update.Records[0].Value).Count -eq 2) ''
+
+# --- Get-RollbackTarget: a key an earlier install made goes with the update's rollback --------
+# Left in place, the next install would back it up as the driver's own and no uninstall delete it.
+function MadeKey([string[]]$effects) {
+  [pscustomobject]@{
+    Flow = 'Capture'; Id = $guid
+    Records = @(
+      [pscustomobject]@{ Name = "$FxGuid,15"; Kind = $kinds::MultiString; Value = $effects }
+      [pscustomobject]@{ Name = 'modes'; Kind = $kinds::MultiString; Value = [string[]]@($DefaultProcessingMode) }
+    )
+  }
+}
+Check 'rollback target: a made key only ours used goes' ([bool](Get-RollbackTarget (MadeKey @($ourMic)) $true).Created) ''
+$shared = Get-RollbackTarget (MadeKey @($oem, $ourMic)) $true
+Check 'rollback target: a made key other effects use now stays' (-not $shared.Created -and (@($shared.Records[0].Value) -join ',') -eq $oem) ''
+Check 'rollback target: the driver''s own key stays' (-not (Get-RollbackTarget (MadeKey @($ourMic)) $false).Created) ''
 
 # --- Made FxProperties keys -------------------------------------------------------------------
 # Compiles here too (pwsh), so a C# error shows before the script reaches Windows; the

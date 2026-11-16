@@ -281,6 +281,20 @@ function Remove-OurEffects($snapshot) {
   $copy
 }
 
+# What the self-test's rollback puts back: the snapshot without our effects. A key an earlier
+# install made ($madeEarlier, from its backup) that nothing else uses goes as a whole, as on that
+# install's own rollback; apo-uninstall.ps1 decides the same way.
+function Get-RollbackTarget($snapshot, [bool]$madeEarlier) {
+  $target = Remove-OurEffects $snapshot
+  if ($madeEarlier -and -not $target.Created) {
+    $text = @($target.Records | ForEach-Object { $_.Value }) -join ' '
+    $foreign = @([regex]::Matches($text, '\{[0-9a-fA-F-]{36}\}') | ForEach-Object { $_.Value } |
+        Where-Object { $_ -ne $NullGuid -and $_ -ne $DefaultProcessingMode })
+    if (-not $foreign) { $target | Add-Member -NotePropertyName Created -NotePropertyValue $true }
+  }
+  $target
+}
+
 # The install failed half-way: every endpoint back to how this run found it. An update's endpoint
 # keeps the effects it had (not the rollback target: that would take them out of a working
 # endpoint); a key this run made goes.
@@ -775,13 +789,12 @@ foreach ($job in @($jobs)) {
   }
   else { $snap = Get-FxSnapshot $job.Flow $job.Id }
   $backupFile = Join-Path $BackupDir "$($job.Id)-FxProperties-original.json"
+  $madeEarlier = (Test-Path $backupFile) -and (Test-BackupCreated $backupFile)
   # A key an earlier install made, left empty by a failed delete, is still to be deleted.
-  if (-not $made -and @($snap.Records).Count -eq 0 -and (Test-Path $backupFile)) {
-    $made = Test-BackupCreated $backupFile
-  }
+  if (-not $made -and @($snap.Records).Count -eq 0) { $made = $madeEarlier }
   if ($made) { $snap | Add-Member -NotePropertyName Created -NotePropertyValue $true }
   $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap
-  $RollbackTargets["$($job.Flow):$($job.Id)"] = Remove-OurEffects $snap
+  $RollbackTargets["$($job.Flow):$($job.Id)"] = Get-RollbackTarget $snap $madeEarlier
   $json = ConvertTo-FxJson $snap
   $holdsOurs = @($Classes.Values | Where-Object { $json -match [regex]::Escape($_.Clsid) }).Count -gt 0
   if (-not $holdsOurs -or -not (Test-Path $backupFile)) {
