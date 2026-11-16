@@ -112,6 +112,8 @@ pub struct EchoCanceller3 {
   /// (its delay line, `AEC3_LATENCY_SAMPLES`, and ~25 samples of band-split filter tail after it).
   stale_frame: bool,
   erle_db: f32,
+  /// A failed frame was logged: on the audio thread a failure is logged once, not per frame.
+  failure_logged: bool,
   /// Mic gain AEC3 was built for (dB, a multiple of `MIC_GAIN_STEP_DB`) and as a factor.
   mic_gain_db: f32,
   mic_gain: f32,
@@ -185,6 +187,7 @@ impl EchoCanceller3 {
       buffered: false,
       stale_frame: false,
       erle_db: 0.0,
+      failure_logged: false,
       mic_gain_db: 0.0,
       mic_gain: 1.0,
       wanted_gain_db: 0.0,
@@ -344,7 +347,9 @@ impl EchoCanceller3 {
     let failed = rendered.is_err() || captured.is_err() || !self.out_frame.iter().all(|s| s.is_finite());
     if failed {
       // Never drop the mic: pass this frame through unprocessed.
-      log::warn!("[AEC3] frame failed (render {rendered:?}, capture {captured:?}), passed through");
+      if !std::mem::replace(&mut self.failure_logged, true) {
+        log::warn!("[AEC3] frame failed (render {rendered:?}, capture {captured:?}), passed through (logged once)");
+      }
       self.out_frame.copy_from_slice(&self.in_mic);
     }
     // AEC3 puts the mic out `AEC3_LATENCY_SAMPLES` later: the start of its frame is still the
