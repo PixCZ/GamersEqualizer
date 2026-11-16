@@ -114,7 +114,7 @@ fn stream_eq_fades_in_on_pairing_and_out_on_master_switch() {
   let control = SharedMemoryClient::open_existing(&name).unwrap();
   let (h, table) = (&control.layout().header, &control.layout().streams);
   let mut p = StreamProcessor::create(shm, 48_000.0, 2, 0).unwrap();
-  let (index, _) = p.slot.unwrap();
+  let (index, owner) = p.slot.unwrap();
   // 10 ms blocks of a 1 kHz sine.
   let mut phase = 0usize;
   let mut block = |p: &mut StreamProcessor| -> (Vec<f32>, Vec<f32>) {
@@ -170,6 +170,14 @@ fn stream_eq_fades_in_on_pairing_and_out_on_master_switch() {
   let (dry, out) = block(&mut p);
   assert_eq!(out, dry);
   assert!(!p.failed);
+
+  // Another instance took the slot over: this one neither records into it nor runs its EQ.
+  h.master_bypass.store(false, Ordering::Relaxed);
+  table.slots[index].owner.store(owner + 1, Ordering::Relaxed);
+  let frames = table.slots[index].frames.load(Ordering::Relaxed);
+  let (dry, out) = block(&mut p);
+  assert_eq!(out, dry);
+  assert_eq!(table.slots[index].frames.load(Ordering::Relaxed), frames);
 }
 
 #[test]

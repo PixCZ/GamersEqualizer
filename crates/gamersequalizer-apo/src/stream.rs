@@ -44,10 +44,13 @@ impl StreamProcessor {
     if channels == 0 {
       return;
     }
-    let Some((index, _)) = self.slot else {
+    let Some((index, owner)) = self.slot else {
       return;
     };
-    let Some(slot) = self.shm.layout().streams.slots.get(index) else {
+    // Another instance took the slot over (it counted this one stale): its level and channel
+    // are not this stream's, so pass through.
+    let Some(slot) = self.shm.layout().streams.slots.get(index).filter(|s| s.owner.load(Ordering::Relaxed) == owner)
+    else {
       return;
     };
     if let Some(now) = now_hns() {
