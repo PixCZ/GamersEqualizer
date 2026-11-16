@@ -2974,8 +2974,10 @@ refactoring, then a review of every step and its fixes. No new features.
 - Installer as administrator: an update whose self-test rolls back. Checked: an update that fails
   (installed DLL held open) keeps every endpoint's effects; its reason now reaches the log in a silent
   run too (the trap said it only with `-FromApp`, the uninstaller's as well).
-- "(none)" for a detected game in the window; Master behind Sonar when a monitor is plugged in; the
-  window on a second monitor at 150 % that is then unplugged.
+- Master behind Sonar when a monitor is plugged in; the window on a second monitor at 150 % that is
+  then unplugged. Checked: "(none)" in the window for a game found by genre (Star Trek: Voyager)
+  binds `<no profile>`; the service takes it within a second, keeps it when the game comes back to
+  the foreground ("set by you to have no profile"), and "Reset" in the window reaches the service.
 - Checked: a `-DebugCapture` take (60 s: speech, a pause, a model switch, an output switch and back)
   against one from 2026-11-10. No click (no output step > 0.25, also within 100 ms of every switch),
   no clipping, no block gap, load median 1.9 % (4.2 %). The denoiser sleeps ~3 s into the pause and
