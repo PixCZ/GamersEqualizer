@@ -92,16 +92,7 @@ pub(super) fn run_background_daemon() {
     last_mic_version = header.mic_id_version.load(Ordering::Relaxed);
     last_default_mic = win_audio.endpoint_lock.get_default_capture_id();
 
-    header.master_volume_permille.store((win_audio.chatmix.master_volume * 1000.0).round() as u32, Ordering::Relaxed);
-    header.master_muted.store(win_audio.chatmix.master_muted, Ordering::Relaxed);
-    header.game_volume_permille.store((win_audio.chatmix.game_volume * 1000.0).round() as u32, Ordering::Relaxed);
-    header.game_muted.store(win_audio.chatmix.game_muted, Ordering::Relaxed);
-    header.chat_volume_permille.store((win_audio.chatmix.chat_volume * 1000.0).round() as u32, Ordering::Relaxed);
-    header.chat_muted.store(win_audio.chatmix.chat_muted, Ordering::Relaxed);
-    header.media_volume_permille.store((win_audio.chatmix.media_volume * 1000.0).round() as u32, Ordering::Relaxed);
-    header.media_muted.store(win_audio.chatmix.media_muted, Ordering::Relaxed);
-    header.mic_volume_permille.store((win_audio.chatmix.mic_volume * 1000.0).round() as u32, Ordering::Relaxed);
-    header.mic_muted.store(win_audio.chatmix.mic_muted, Ordering::Relaxed);
+    win_audio.chatmix.write_levels(header);
   }
 
   // Of the window's state the service needs the output EQ, the mic EQ and the saved audio
@@ -199,13 +190,9 @@ pub(super) fn run_background_daemon() {
             mix.game_device_id, mix.chat_device_id, mix.media_device_id
           );
           // A newly bound channel shows its endpoint's level, not the per-app one it had.
-          let permille = |v: f32| (v * 1000.0).round() as u32;
-          header.game_volume_permille.store(permille(mix.game_volume), Ordering::Relaxed);
-          header.game_muted.store(mix.game_muted, Ordering::Relaxed);
-          header.chat_volume_permille.store(permille(mix.chat_volume), Ordering::Relaxed);
-          header.chat_muted.store(mix.chat_muted, Ordering::Relaxed);
-          header.media_volume_permille.store(permille(mix.media_volume), Ordering::Relaxed);
-          header.media_muted.store(mix.media_muted, Ordering::Relaxed);
+          mix.game.write_to(&header.game_volume_permille, &header.game_muted);
+          mix.chat.write_to(&header.chat_volume_permille, &header.chat_muted);
+          mix.media.write_to(&header.media_volume_permille, &header.media_muted);
         }
       }
       if cur_mic_ver != last_mic_version || default_mic != last_default_mic || devices_changed {
@@ -251,21 +238,10 @@ pub(super) fn run_background_daemon() {
       if sync_due {
         last_volume_sync = Some(Instant::now());
         // The wish (may be a boost > 100 %) is what the window wrote; Windows only shows <= 100 %.
-        win_audio.chatmix.mic_volume = header.mic_volume_permille.load(Ordering::Relaxed) as f32 / 1000.0;
+        win_audio.chatmix.mic.volume = header.mic_volume_permille.load(Ordering::Relaxed) as f32 / 1000.0;
       }
       if sync_due && win_audio.chatmix.sync_from_system() {
-        header
-          .master_volume_permille
-          .store((win_audio.chatmix.master_volume * 1000.0).round() as u32, Ordering::Relaxed);
-        header.master_muted.store(win_audio.chatmix.master_muted, Ordering::Relaxed);
-        header.game_volume_permille.store((win_audio.chatmix.game_volume * 1000.0).round() as u32, Ordering::Relaxed);
-        header.game_muted.store(win_audio.chatmix.game_muted, Ordering::Relaxed);
-        header.chat_volume_permille.store((win_audio.chatmix.chat_volume * 1000.0).round() as u32, Ordering::Relaxed);
-        header.chat_muted.store(win_audio.chatmix.chat_muted, Ordering::Relaxed);
-        header.media_volume_permille.store((win_audio.chatmix.media_volume * 1000.0).round() as u32, Ordering::Relaxed);
-        header.media_muted.store(win_audio.chatmix.media_muted, Ordering::Relaxed);
-        header.mic_volume_permille.store((win_audio.chatmix.mic_volume * 1000.0).round() as u32, Ordering::Relaxed);
-        header.mic_muted.store(win_audio.chatmix.mic_muted, Ordering::Relaxed);
+        win_audio.chatmix.write_levels(header);
       }
       if sync_due {
         let mic_id =
@@ -291,13 +267,13 @@ pub(super) fn run_background_daemon() {
 
       let bal = (header.chatmix_balance_permille.load(Ordering::Relaxed) as f32) / 1000.0;
 
-      win_audio.chatmix.game_volume = g_vol;
-      win_audio.chatmix.chat_volume = c_vol;
-      win_audio.chatmix.media_volume = med_vol;
+      win_audio.chatmix.game.volume = g_vol;
+      win_audio.chatmix.chat.volume = c_vol;
+      win_audio.chatmix.media.volume = med_vol;
 
-      win_audio.chatmix.game_muted = g_mute;
-      win_audio.chatmix.chat_muted = c_mute;
-      win_audio.chatmix.media_muted = med_mute;
+      win_audio.chatmix.game.muted = g_mute;
+      win_audio.chatmix.chat.muted = c_mute;
+      win_audio.chatmix.media.muted = med_mute;
 
       win_audio.chatmix.balance = bal;
 

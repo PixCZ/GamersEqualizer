@@ -243,18 +243,7 @@ impl AppState {
 
   pub fn sync_mixer_to_shm(&self, chatmix: &ChatMixController) {
     if let Some(h) = self.shm_header() {
-      h.master_volume_permille.store((chatmix.master_volume * 1000.0).round() as u32, Ordering::Relaxed);
-      h.game_volume_permille.store((chatmix.game_volume * 1000.0).round() as u32, Ordering::Relaxed);
-      h.chat_volume_permille.store((chatmix.chat_volume * 1000.0).round() as u32, Ordering::Relaxed);
-      h.media_volume_permille.store((chatmix.media_volume * 1000.0).round() as u32, Ordering::Relaxed);
-      h.mic_volume_permille.store((chatmix.mic_volume * 1000.0).round() as u32, Ordering::Relaxed);
-
-      h.master_muted.store(chatmix.master_muted, Ordering::Relaxed);
-      h.game_muted.store(chatmix.game_muted, Ordering::Relaxed);
-      h.chat_muted.store(chatmix.chat_muted, Ordering::Relaxed);
-      h.media_muted.store(chatmix.media_muted, Ordering::Relaxed);
-      h.mic_muted.store(chatmix.mic_muted, Ordering::Relaxed);
-
+      chatmix.write_levels(h);
       h.chatmix_balance_permille.store((chatmix.balance * 1000.0).round() as i32, Ordering::Relaxed);
     }
   }

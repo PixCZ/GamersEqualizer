@@ -151,16 +151,16 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_run
   let r = Ordering::Relaxed;
   let level = |a: &std::sync::atomic::AtomicU32| a.load(r) as f32 / 1000.0;
   if chatmix.game_device_id.is_none() {
-    chatmix.game_volume = level(&h.game_volume_permille);
-    chatmix.game_muted = h.game_muted.load(r);
+    chatmix.game.volume = level(&h.game_volume_permille);
+    chatmix.game.muted = h.game_muted.load(r);
   }
   if chatmix.chat_device_id.is_none() {
-    chatmix.chat_volume = level(&h.chat_volume_permille);
-    chatmix.chat_muted = h.chat_muted.load(r);
+    chatmix.chat.volume = level(&h.chat_volume_permille);
+    chatmix.chat.muted = h.chat_muted.load(r);
   }
   if chatmix.media_device_id.is_none() {
-    chatmix.media_volume = level(&h.media_volume_permille);
-    chatmix.media_muted = h.media_muted.load(r);
+    chatmix.media.volume = level(&h.media_volume_permille);
+    chatmix.media.muted = h.media_muted.load(r);
   }
   chatmix.balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
   let auto = h.mic_auto_gain_permille.load(r);
@@ -168,16 +168,16 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_run
   if service_runs {
     // The window read its own guess of the mic (maybe the default capture device, not the mic
     // in use): writing that back moved the headset from 53 % to 40 % at window start.
-    chatmix.mic_volume = mic;
-    chatmix.last_applied_mic_vol = mic.min(1.0);
+    chatmix.mic.volume = mic;
+    chatmix.mic.applied_volume = mic.min(1.0);
     chatmix.mic_hw_auto = (auto > 0).then_some(auto as f32 / 1000.0);
     return;
   }
   if auto > 0 {
     chatmix.adopt_mic_auto(mic, auto as f32 / 1000.0);
   }
-  if mic > 1.0 && chatmix.mic_volume >= MIC_FULL {
-    chatmix.mic_volume = mic;
+  if mic > 1.0 && chatmix.mic.volume >= MIC_FULL {
+    chatmix.mic.volume = mic;
   }
 }
 
@@ -239,21 +239,21 @@ mod tests {
     let h = ShmHeader::default();
     h.mic_volume_permille.store(530, Ordering::Relaxed);
     let mut window = ChatMixController::new();
-    (window.mic_device_id, window.mic_volume) = (Some("{headset}".into()), 0.40);
+    (window.mic_device_id, window.mic.volume) = (Some("{headset}".into()), 0.40);
     restore_mixer(&h, &mut window, true);
-    assert_eq!((window.mic_volume, window.last_applied_mic_vol, window.mic_hw_auto), (0.53, 0.53, None));
+    assert_eq!((window.mic.volume, window.mic.applied_volume, window.mic_hw_auto), (0.53, 0.53, None));
     // A re-bind with the same mic (first frame, replug) does not re-read and undo the wish.
     assert!(!window.use_mic(window.mic_device_id.clone()));
-    assert_eq!((window.mic_volume, window.last_applied_mic_vol), (0.53, 0.53));
+    assert_eq!((window.mic.volume, window.mic.applied_volume), (0.53, 0.53));
 
     // Service start: only a boost over a Windows mic at 100 % is taken from the mapping.
     let mut service = ChatMixController::new();
-    service.mic_volume = 0.40;
+    service.mic.volume = 0.40;
     restore_mixer(&h, &mut service, false);
-    assert_eq!(service.mic_volume, 0.40);
+    assert_eq!(service.mic.volume, 0.40);
     h.mic_volume_permille.store(2000, Ordering::Relaxed);
-    service.mic_volume = 1.0;
+    service.mic.volume = 1.0;
     restore_mixer(&h, &mut service, false);
-    assert_eq!(service.mic_volume, 2.0);
+    assert_eq!(service.mic.volume, 2.0);
   }
 }

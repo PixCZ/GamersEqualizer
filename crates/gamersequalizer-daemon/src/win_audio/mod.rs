@@ -68,11 +68,11 @@ mod tests {
       println!("Bound Chat endpoint:   {:?}", s.chatmix.chat_device_id);
       println!("Bound Media endpoint:  {:?}", s.chatmix.media_device_id);
       println!("Channel volumes:");
-      println!("  Master: {:.1}%", s.chatmix.master_volume * 100.0);
-      println!("  Game:   {:.1}%", s.chatmix.game_volume * 100.0);
-      println!("  Chat:   {:.1}%", s.chatmix.chat_volume * 100.0);
-      println!("  Media:  {:.1}%", s.chatmix.media_volume * 100.0);
-      println!("  Mic:    {:.1}%", s.chatmix.mic_volume * 100.0);
+      println!("  Master: {:.1}%", s.chatmix.master.volume * 100.0);
+      println!("  Game:   {:.1}%", s.chatmix.game.volume * 100.0);
+      println!("  Chat:   {:.1}%", s.chatmix.chat.volume * 100.0);
+      println!("  Media:  {:.1}%", s.chatmix.media.volume * 100.0);
+      println!("  Mic:    {:.1}%", s.chatmix.mic.volume * 100.0);
     }
   }
 }

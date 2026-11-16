@@ -1,7 +1,9 @@
 use super::app_channels::{self, AppChannel};
 use super::endpoint_lock::{AudioEndpointInfo, get_endpoint_info};
+use gamersequalizer_common::shm::ShmHeader;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread::LocalKey;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
@@ -43,18 +45,26 @@ pub struct AudioSessionInfo {
   pub bus: AudioBus,
 }
 
+/// One mixer channel: what the user (or an app) wants, and what this process last wrote to or
+/// saw in Windows, so an unchanged level touches no COM.
+#[derive(Debug, Clone, Copy)]
+pub struct Channel {
+  pub volume: f32,
+  pub muted: bool,
+  /// `restore_mixer` sets it for the mic so a window started next to the service does not write
+  /// its own reading over the wish.
+  pub(crate) applied_volume: f32,
+  applied_muted: bool,
+}
+
 pub struct ChatMixController {
   pub balance: f32, // -1.0 (100% Game, 0% Chat) .. 0.0 (Equal) .. +1.0 (0% Game, 100% Chat)
-  pub master_volume: f32,
-  pub game_volume: f32,
-  pub chat_volume: f32,
-  pub media_volume: f32,
-  pub mic_volume: f32,
-  pub master_muted: bool,
-  pub game_muted: bool,
-  pub chat_muted: bool,
-  pub media_muted: bool,
-  pub mic_muted: bool,
+  pub master: Channel,
+  pub game: Channel,
+  pub chat: Channel,
+  pub media: Channel,
+  /// `volume` is the wish and may be a boost above 100 %; Windows gets at most 100 %.
+  pub mic: Channel,
 
   // Dedicated hardware or virtual endpoints for channels
   pub master_device_id: Option<String>,
@@ -63,25 +73,11 @@ pub struct ChatMixController {
   pub media_device_id: Option<String>,
   pub mic_device_id: Option<String>,
   pub mic_peak_level: f32,
-  /// Windows mic volume the automatic input gain set (`mic_volume` stays what the user or an app
+  /// Windows mic volume the automatic input gain set (`mic.volume` stays what the user or an app
   /// asked for). Seeing exactly this level in Windows is ours, anything else is someone's wish.
   pub mic_hw_auto: Option<f32>,
   /// When someone else (user, app) last changed the mic volume: the automatic gain waits.
   pub mic_changed_at: Option<Instant>,
-
-  // Track last applied values to avoid redundant COM calls
-  last_applied_master_vol: f32,
-  last_applied_master_muted: bool,
-  last_applied_game_vol: f32,
-  last_applied_game_muted: bool,
-  last_applied_chat_vol: f32,
-  last_applied_chat_muted: bool,
-  last_applied_media_vol: f32,
-  last_applied_media_muted: bool,
-  /// Mic volume this process last wrote (or saw) in Windows; `restore_mixer` sets it so a
-  /// window started next to the service does not write its own reading over the wish.
-  pub(crate) last_applied_mic_vol: f32,
-  last_applied_mic_muted: bool,
 
   /// Off in the window while the background service runs: one process owns session volumes.
   pub sessions_enabled: bool,
@@ -91,6 +87,52 @@ pub struct ChatMixController {
   session_set: HashMap<String, f32>,
   last_session_targets: Option<(f32, f32, f32)>,
   last_session_pass: Option<Instant>,
+}
+
+impl Channel {
+  fn new(volume: f32, muted: bool) -> Self {
+    Self { volume, muted, applied_volume: volume, applied_muted: muted }
+  }
+
+  /// A level read from Windows becomes the wish (a newly bound endpoint).
+  fn adopt(&mut self, (volume, muted): (f32, bool)) {
+    *self = Self::new(volume, muted);
+  }
+
+  /// Someone else changed the level in Windows: that is the new wish. True if anything changed.
+  fn follow(&mut self, (volume, muted): (f32, bool)) -> bool {
+    let moved = (volume - self.applied_volume).abs() > VOLUME_EPSILON;
+    if moved {
+      (self.volume, self.applied_volume) = (volume, volume);
+    }
+    self.follow_mute(muted) || moved
+  }
+
+  fn follow_mute(&mut self, muted: bool) -> bool {
+    let flipped = muted != self.applied_muted;
+    if flipped {
+      (self.muted, self.applied_muted) = (muted, muted);
+    }
+    flipped
+  }
+
+  /// Writes to Windows only what moved since the last write; Windows takes at most 100 %.
+  fn push(&mut self, set_volume: impl FnOnce(f32), set_mute: impl FnOnce(bool)) {
+    let target = self.volume.min(1.0);
+    if (target - self.applied_volume).abs() > VOLUME_EPSILON {
+      set_volume(target);
+      self.applied_volume = target;
+    }
+    if self.muted != self.applied_muted {
+      set_mute(self.muted);
+      self.applied_muted = self.muted;
+    }
+  }
+
+  pub fn write_to(&self, volume_permille: &AtomicU32, muted: &AtomicBool) {
+    volume_permille.store((self.volume * 1000.0).round() as u32, Ordering::Relaxed);
+    muted.store(self.muted, Ordering::Relaxed);
+  }
 }
 
 impl ChatMixController {
@@ -104,16 +146,11 @@ impl ChatMixController {
 
     Self {
       balance: 0.0,
-      master_volume: initial_master_vol,
-      game_volume: 1.0,
-      chat_volume: 1.0,
-      media_volume: 1.0,
-      mic_volume: initial_mic_vol,
-      master_muted: initial_master_muted,
-      game_muted: false,
-      chat_muted: false,
-      media_muted: false,
-      mic_muted: initial_mic_muted,
+      master: Channel::new(initial_master_vol, initial_master_muted),
+      game: Channel::new(1.0, false),
+      chat: Channel::new(1.0, false),
+      media: Channel::new(1.0, false),
+      mic: Channel::new(initial_mic_vol, initial_mic_muted),
       master_device_id: None,
       game_device_id: None,
       chat_device_id: None,
@@ -122,21 +159,20 @@ impl ChatMixController {
       mic_peak_level: 0.0,
       mic_hw_auto: None,
       mic_changed_at: None,
-      last_applied_master_vol: initial_master_vol,
-      last_applied_master_muted: initial_master_muted,
-      last_applied_game_vol: 1.0,
-      last_applied_game_muted: false,
-      last_applied_chat_vol: 1.0,
-      last_applied_chat_muted: false,
-      last_applied_media_vol: 1.0,
-      last_applied_media_muted: false,
-      last_applied_mic_vol: initial_mic_vol,
-      last_applied_mic_muted: initial_mic_muted,
       sessions_enabled: true,
       session_set: HashMap::new(),
       last_session_targets: None,
       last_session_pass: None,
     }
+  }
+
+  /// All five channels into the shared memory (the balance is the window's alone).
+  pub fn write_levels(&self, h: &ShmHeader) {
+    self.master.write_to(&h.master_volume_permille, &h.master_muted);
+    self.game.write_to(&h.game_volume_permille, &h.game_muted);
+    self.chat.write_to(&h.chat_volume_permille, &h.chat_muted);
+    self.media.write_to(&h.media_volume_permille, &h.media_muted);
+    self.mic.write_to(&h.mic_volume_permille, &h.mic_muted);
   }
 
   /// The mic to work with: the Windows default, unless it is a virtual device (then the first
@@ -212,19 +248,12 @@ impl ChatMixController {
 
   /// Master level (the mic is resolved only by `use_mic`).
   fn read_bound_levels(&mut self) {
-    // Initialize channel volumes directly from the resolved endpoints
-    if let Some(ref id) = self.master_device_id {
-      if let Some((v, m)) = get_endpoint_volume(id) {
-        self.master_volume = v;
-        self.master_muted = m;
-        self.last_applied_master_vol = v;
-        self.last_applied_master_muted = m;
-      }
-    } else if let Some((v, m)) = get_system_master_volume() {
-      self.master_volume = v;
-      self.master_muted = m;
-      self.last_applied_master_vol = v;
-      self.last_applied_master_muted = m;
+    let level = match self.master_device_id {
+      Some(ref id) => get_endpoint_volume(id),
+      None => get_system_master_volume(),
+    };
+    if let Some(level) = level {
+      self.master.adopt(level);
     }
   }
 
@@ -241,9 +270,8 @@ impl ChatMixController {
     if id.is_none() || id == self.mic_device_id {
       return false;
     }
-    if let Some((v, m)) = id.as_deref().and_then(get_endpoint_volume) {
-      (self.mic_volume, self.mic_muted) = (v, m);
-      (self.last_applied_mic_vol, self.last_applied_mic_muted) = (v, m);
+    if let Some(level) = id.as_deref().and_then(get_endpoint_volume) {
+      self.mic.adopt(level);
     }
     self.mic_device_id = id;
     true
@@ -251,31 +279,14 @@ impl ChatMixController {
 
   /// Game / Chat / Media levels from their own endpoints, where bound.
   fn read_channel_levels(&mut self) {
-    if let Some(ref id) = self.game_device_id
-      && let Some((v, m)) = get_endpoint_volume(id)
-    {
-      self.game_volume = v;
-      self.game_muted = m;
-      self.last_applied_game_vol = v;
-      self.last_applied_game_muted = m;
-    }
-
-    if let Some(ref id) = self.chat_device_id
-      && let Some((v, m)) = get_endpoint_volume(id)
-    {
-      self.chat_volume = v;
-      self.chat_muted = m;
-      self.last_applied_chat_vol = v;
-      self.last_applied_chat_muted = m;
-    }
-
-    if let Some(ref id) = self.media_device_id
-      && let Some((v, m)) = get_endpoint_volume(id)
-    {
-      self.media_volume = v;
-      self.media_muted = m;
-      self.last_applied_media_vol = v;
-      self.last_applied_media_muted = m;
+    for (channel, id) in [
+      (&mut self.game, &self.game_device_id),
+      (&mut self.chat, &self.chat_device_id),
+      (&mut self.media, &self.media_device_id),
+    ] {
+      if let Some(level) = id.as_deref().and_then(get_endpoint_volume) {
+        channel.adopt(level);
+      }
     }
   }
 
@@ -283,94 +294,44 @@ impl ChatMixController {
   pub fn sync_from_system(&mut self) -> bool {
     let mut changed = false;
 
-    // 1. MASTER: Sync with physical master endpoint
-    let master_vol_opt =
-      if let Some(ref id) = self.master_device_id { get_endpoint_volume(id) } else { get_system_master_volume() };
-    if let Some((sys_vol, sys_muted)) = master_vol_opt {
-      if (sys_vol - self.last_applied_master_vol).abs() > 0.005 {
-        self.master_volume = sys_vol;
-        self.last_applied_master_vol = sys_vol;
-        changed = true;
-      }
-      if sys_muted != self.last_applied_master_muted {
-        self.master_muted = sys_muted;
-        self.last_applied_master_muted = sys_muted;
-        changed = true;
+    let master = match self.master_device_id {
+      Some(ref id) => get_endpoint_volume(id),
+      None => get_system_master_volume(),
+    };
+    if let Some(level) = master {
+      changed |= self.master.follow(level);
+    }
+    // Game / Chat / Media only where they have a dedicated endpoint.
+    for (channel, id) in [
+      (&mut self.game, &self.game_device_id),
+      (&mut self.chat, &self.chat_device_id),
+      (&mut self.media, &self.media_device_id),
+    ] {
+      if let Some(level) = id.as_deref().and_then(get_endpoint_volume) {
+        changed |= channel.follow(level);
       }
     }
 
-    // 2. GAME: Sync with dedicated Game endpoint if present
-    if let Some(ref id) = self.game_device_id
-      && let Some((sys_vol, sys_muted)) = get_endpoint_volume(id)
-    {
-      if (sys_vol - self.last_applied_game_vol).abs() > 0.005 {
-        self.game_volume = sys_vol;
-        self.last_applied_game_vol = sys_vol;
-        changed = true;
-      }
-      if sys_muted != self.last_applied_game_muted {
-        self.game_muted = sys_muted;
-        self.last_applied_game_muted = sys_muted;
-        changed = true;
-      }
-    }
-
-    // 3. CHAT: Sync with dedicated Chat endpoint if present
-    if let Some(ref id) = self.chat_device_id
-      && let Some((sys_vol, sys_muted)) = get_endpoint_volume(id)
-    {
-      if (sys_vol - self.last_applied_chat_vol).abs() > 0.005 {
-        self.chat_volume = sys_vol;
-        self.last_applied_chat_vol = sys_vol;
-        changed = true;
-      }
-      if sys_muted != self.last_applied_chat_muted {
-        self.chat_muted = sys_muted;
-        self.last_applied_chat_muted = sys_muted;
-        changed = true;
-      }
-    }
-
-    // 4. MEDIA: Sync with dedicated Media endpoint if present
-    if let Some(ref id) = self.media_device_id
-      && let Some((sys_vol, sys_muted)) = get_endpoint_volume(id)
-    {
-      if (sys_vol - self.last_applied_media_vol).abs() > 0.005 {
-        self.media_volume = sys_vol;
-        self.last_applied_media_vol = sys_vol;
-        changed = true;
-      }
-      if sys_muted != self.last_applied_media_muted {
-        self.media_muted = sys_muted;
-        self.last_applied_media_muted = sys_muted;
-        changed = true;
-      }
-    }
-
-    // 5. MIC: Sync with the mic in use only; without one there is nothing to follow (the
+    // MIC: Sync with the mic in use only; without one there is nothing to follow (the
     // default capture device may be another mic, whose volume is not this one's wish).
     let mic_vol_opt = self.mic_device_id.as_deref().and_then(get_endpoint_volume);
     if let Some((sys_mic_vol, sys_mic_muted)) = mic_vol_opt {
-      let expected = self.mic_hw_auto.unwrap_or(self.mic_volume.min(1.0));
+      let expected = self.mic_hw_auto.unwrap_or(self.mic.volume.min(1.0));
       if (sys_mic_vol - expected).abs() > 0.015 {
         // Someone else moved it: that is the volume they want, the automatic gain steps back.
-        self.mic_volume = sys_mic_vol;
-        self.last_applied_mic_vol = sys_mic_vol;
+        self.mic.volume = sys_mic_vol;
+        self.mic.applied_volume = sys_mic_vol;
         self.mic_hw_auto = None;
         self.mic_changed_at = Some(Instant::now());
         changed = true;
       }
-      if sys_mic_muted != self.last_applied_mic_muted {
-        self.mic_muted = sys_mic_muted;
-        self.last_applied_mic_muted = sys_mic_muted;
-        changed = true;
-      }
+      changed |= self.mic.follow_mute(sys_mic_muted);
     }
 
-    // 6. MIC PEAK: Read instantaneous audio peak level from physical mic
+    // MIC PEAK: Read instantaneous audio peak level from physical mic
     let peak_opt = if let Some(ref id) = self.mic_device_id { get_endpoint_peak(id) } else { get_system_mic_peak() };
     if let Some(peak) = peak_opt {
-      let boost = if self.mic_volume > 1.0 { self.mic_volume } else { 1.0 };
+      let boost = if self.mic.volume > 1.0 { self.mic.volume } else { 1.0 };
       let effective_peak = (peak * boost).clamp(0.0, 1.0);
       if effective_peak >= self.mic_peak_level {
         self.mic_peak_level = effective_peak;
@@ -391,18 +352,18 @@ impl ChatMixController {
   /// Automatic input gain off: Windows gets the volume the user/app asked for back.
   pub fn clear_mic_hw_auto(&mut self, device_id: &str) {
     if self.mic_hw_auto.take().is_some() {
-      let level = self.mic_volume.min(1.0);
+      let level = self.mic.volume.min(1.0);
       set_endpoint_volume(device_id, level);
-      self.last_applied_mic_vol = level;
+      self.mic.applied_volume = level;
     }
   }
 
   /// Take over a wish + automatic level from another process (window start, service restart):
   /// only while Windows still shows that automatic level, else someone changed it meanwhile.
   pub fn adopt_mic_auto(&mut self, wish: f32, auto: f32) {
-    if (self.mic_volume - auto).abs() <= 0.015 {
-      self.mic_volume = wish;
-      self.last_applied_mic_vol = wish.min(1.0);
+    if (self.mic.volume - auto).abs() <= 0.015 {
+      self.mic.volume = wish;
+      self.mic.applied_volume = wish.min(1.0);
       self.mic_hw_auto = Some(auto);
     }
   }
@@ -426,88 +387,38 @@ impl ChatMixController {
     let b = self.balance;
     let (game_scale, chat_scale) = if b <= 0.0 { (1.0, 1.0 + b) } else { (1.0 - b, 1.0) };
 
-    let g = if self.game_muted || self.master_muted { 0.0 } else { (self.game_volume * game_scale).clamp(0.0, 1.0) };
+    let g = if self.game.muted || self.master.muted { 0.0 } else { (self.game.volume * game_scale).clamp(0.0, 1.0) };
 
-    let c = if self.chat_muted || self.master_muted { 0.0 } else { (self.chat_volume * chat_scale).clamp(0.0, 1.0) };
+    let c = if self.chat.muted || self.master.muted { 0.0 } else { (self.chat.volume * chat_scale).clamp(0.0, 1.0) };
 
     (g, c)
   }
 
   pub fn get_media_volume(&self) -> f32 {
-    if self.media_muted || self.master_muted { 0.0 } else { self.media_volume.clamp(0.0, 1.0) }
+    if self.media.muted || self.master.muted { 0.0 } else { self.media.volume.clamp(0.0, 1.0) }
   }
 
   /// Apply calculated volumes to live Windows Audio System and Sessions
   pub fn apply_mix(&mut self) {
-    // 1. MASTER: Sync master volume to Windows Hardware Endpoint
-    if (self.master_volume - self.last_applied_master_vol).abs() > 0.005 {
-      if let Some(ref id) = self.master_device_id {
-        set_endpoint_volume(id, self.master_volume);
-      } else {
-        set_system_master_volume(self.master_volume);
-      }
-      self.last_applied_master_vol = self.master_volume;
+    match self.master_device_id {
+      Some(ref id) => self.master.push(|v| set_endpoint_volume(id, v), |m| set_endpoint_mute(id, m)),
+      None => self.master.push(set_system_master_volume, set_system_master_mute),
     }
-    if self.master_muted != self.last_applied_master_muted {
-      if let Some(ref id) = self.master_device_id {
-        set_endpoint_mute(id, self.master_muted);
-      } else {
-        set_system_master_mute(self.master_muted);
-      }
-      self.last_applied_master_muted = self.master_muted;
-    }
-
-    // 2. GAME: Sync to dedicated Game endpoint if present
-    if let Some(ref id) = self.game_device_id {
-      if (self.game_volume - self.last_applied_game_vol).abs() > 0.005 {
-        set_endpoint_volume(id, self.game_volume);
-        self.last_applied_game_vol = self.game_volume;
-      }
-      if self.game_muted != self.last_applied_game_muted {
-        set_endpoint_mute(id, self.game_muted);
-        self.last_applied_game_muted = self.game_muted;
+    // Game / Chat / Media only where they have a dedicated endpoint (else `apply_session_mix`). The
+    // mic only to the mic in use, never to the default capture device (that copied one mic's
+    // volume onto another: laptop mic + USB headset, webcam).
+    for (channel, id) in [
+      (&mut self.game, &self.game_device_id),
+      (&mut self.chat, &self.chat_device_id),
+      (&mut self.media, &self.media_device_id),
+      (&mut self.mic, &self.mic_device_id),
+    ] {
+      if let Some(id) = id {
+        channel.push(|v| set_endpoint_volume(id, v), |m| set_endpoint_mute(id, m));
       }
     }
 
-    // 3. CHAT: Sync to dedicated Chat endpoint if present
-    if let Some(ref id) = self.chat_device_id {
-      if (self.chat_volume - self.last_applied_chat_vol).abs() > 0.005 {
-        set_endpoint_volume(id, self.chat_volume);
-        self.last_applied_chat_vol = self.chat_volume;
-      }
-      if self.chat_muted != self.last_applied_chat_muted {
-        set_endpoint_mute(id, self.chat_muted);
-        self.last_applied_chat_muted = self.chat_muted;
-      }
-    }
-
-    // 4. MEDIA: Sync to dedicated Media endpoint if present
-    if let Some(ref id) = self.media_device_id {
-      if (self.media_volume - self.last_applied_media_vol).abs() > 0.005 {
-        set_endpoint_volume(id, self.media_volume);
-        self.last_applied_media_vol = self.media_volume;
-      }
-      if self.media_muted != self.last_applied_media_muted {
-        set_endpoint_mute(id, self.media_muted);
-        self.last_applied_media_muted = self.media_muted;
-      }
-    }
-
-    // 5. MIC: Sync microphone volume to the mic in use, never to the default capture device
-    // (that copied one mic's volume onto another: laptop mic + USB headset, webcam).
-    if let Some(ref id) = self.mic_device_id {
-      let target_hw_mic = self.mic_volume.min(1.0);
-      if (target_hw_mic - self.last_applied_mic_vol).abs() > 0.005 {
-        set_endpoint_volume(id, target_hw_mic);
-        self.last_applied_mic_vol = target_hw_mic;
-      }
-      if self.mic_muted != self.last_applied_mic_muted {
-        set_endpoint_mute(id, self.mic_muted);
-        self.last_applied_mic_muted = self.mic_muted;
-      }
-    }
-
-    // 6. Per-app session volumes (fallback mode without dedicated channel endpoints).
+    // Per-app session volumes (fallback mode without dedicated channel endpoints).
     self.apply_session_mix();
   }
 
@@ -834,18 +745,42 @@ mod tests {
     let dev = |id: &str, name: &str| AudioEndpointInfo { id: id.into(), name: name.into(), is_default: false };
     let mut mix = ChatMixController::new();
     mix.mic_device_id = Some("mic".into());
-    let (master, mic_volume) = (mix.master_device_id.clone(), mix.mic_volume);
+    let (master, mic_volume) = (mix.master_device_id.clone(), mix.mic.volume);
     assert!(!mix.bind_channel_endpoints(&[dev("phones", "Headphones")]));
     let sonar = [dev("phones", "Headphones"), dev("game", "SteelSeries Sonar - Gaming")];
     assert!(mix.bind_channel_endpoints(&sonar));
     assert_eq!(mix.game_device_id.as_deref(), Some("game"));
     assert!(!mix.bind_channel_endpoints(&sonar), "unchanged devices: nothing to report");
     assert_eq!(
-      (mix.master_device_id.clone(), mix.mic_device_id.as_deref(), mix.mic_volume),
+      (mix.master_device_id.clone(), mix.mic_device_id.as_deref(), mix.mic.volume),
       (master, Some("mic"), mic_volume)
     );
     // The guard returns before any session pass (which would stamp `last_session_pass`).
     mix.apply_session_mix();
     assert!(mix.last_session_pass.is_none());
+  }
+
+  #[test]
+  fn channel_follows_windows_without_losing_an_unsent_mute() {
+    let mut ch = Channel::new(0.5, false);
+    ch.muted = true; // clicked, not pushed yet
+    assert!(!ch.follow((0.502, false)), "rounding noise is no change");
+    assert!(ch.muted && ch.volume == 0.5);
+    assert!(ch.follow((0.3, true)));
+    assert_eq!((ch.volume, ch.applied_volume, ch.muted, ch.applied_muted), (0.3, 0.3, true, true));
+  }
+
+  #[test]
+  fn channel_push_writes_only_changes_and_caps_at_full() {
+    let mut ch = Channel::new(1.0, false);
+    let (mut volumes, mut mutes) = (Vec::new(), Vec::new());
+    ch.volume = 2.0; // a mic boost
+    ch.push(|v| volumes.push(v), |m| mutes.push(m));
+    assert!(volumes.is_empty() && mutes.is_empty(), "Windows already sits at 100 %");
+    ch.volume = 0.4;
+    ch.muted = true;
+    ch.push(|v| volumes.push(v), |m| mutes.push(m));
+    ch.push(|v| volumes.push(v), |m| mutes.push(m));
+    assert_eq!((volumes, mutes), (vec![0.4], vec![true]));
   }
 }

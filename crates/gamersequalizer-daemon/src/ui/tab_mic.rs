@@ -145,13 +145,13 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       theme::card_title(ui, Some((icons::MIC, ACCENT)), tr("Microphone input & sensitivity"));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let p = theme::palette(ui);
-        let (mute_text, mute_color) = if win_audio.chatmix.mic_muted {
+        let (mute_text, mute_color) = if win_audio.chatmix.mic.muted {
           (theme::with_icon(icons::MUTE, tr("Muted")), p.err)
         } else {
           (theme::with_icon(icons::MIC, tr("Active")), p.text)
         };
         if ui.button(RichText::new(mute_text).color(mute_color)).clicked() {
-          win_audio.chatmix.mic_muted = !win_audio.chatmix.mic_muted;
+          win_audio.chatmix.mic.muted = !win_audio.chatmix.mic.muted;
         }
       });
     });
@@ -221,10 +221,10 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       // Sensitivity 0% .. 300%
       ui.label(tr("Sensitivity"));
       ui.horizontal(|ui| {
-        let mut vol = win_audio.chatmix.mic_volume;
+        let mut vol = win_audio.chatmix.mic.volume;
         ui.spacing_mut().slider_width = BAR_WIDTH;
         if ui.add(egui::Slider::new(&mut vol, 0.0..=3.0).show_value(false)).changed() {
-          win_audio.chatmix.mic_volume = vol;
+          win_audio.chatmix.mic.volume = vol;
         }
         let readout = if vol <= 1.0 {
           trf("{} % (native)", &[&format!("{:.0}", vol * 100.0)])
@@ -233,7 +233,7 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
         };
         ui.label(theme::strong(readout, 14.0).color(theme::adapt(ui, EQ_COLOR)));
         if ui.button(tr("Reset to 100 %")).clicked() {
-          win_audio.chatmix.mic_volume = 1.0;
+          win_audio.chatmix.mic.volume = 1.0;
         }
       });
       ui.end_row();

@@ -153,14 +153,14 @@ impl MicGainLink {
 
     // Only a volume the device applies itself helps against clipping or noise; a software volume
     // just scales after the converter (the leveler does that already).
-    let on = hardware && h.mic_leveler_enabled.load(r) && !h.master_bypass.load(r) && !chatmix.mic_muted;
+    let on = hardware && h.mic_leveler_enabled.load(r) && !h.master_bypass.load(r) && !chatmix.mic.muted;
     if on {
       let input = MicGainInput {
         now: Instant::now(),
         clips: h.mic_input_clips.load(r),
         speech_ms: h.mic_speech_ms.load(r),
         leveler_gain_db: h.mic_leveler_gain_db_x10.load(r) as f32 / 10.0,
-        level: chatmix.mic_hw_auto.unwrap_or(chatmix.mic_volume.min(1.0)),
+        level: chatmix.mic_hw_auto.unwrap_or(chatmix.mic.volume.min(1.0)),
         changed_at: chatmix.mic_changed_at,
       };
       if let Some(level) = self.auto.tick(input) {
@@ -175,7 +175,7 @@ impl MicGainLink {
     } else {
       self.auto.reset();
       if chatmix.mic_hw_auto.is_some() {
-        info!("[MicGain] off: Windows mic volume back to {:.0} %", chatmix.mic_volume.min(1.0) * 100.0);
+        info!("[MicGain] off: Windows mic volume back to {:.0} %", chatmix.mic.volume.min(1.0) * 100.0);
         chatmix.clear_mic_hw_auto(id);
       }
     }
