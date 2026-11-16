@@ -26,6 +26,10 @@ one's settings. The output EQ warning names the output it is about.
 settings this version does not know, also when you save over them, and a profile this version cannot
 read at all is never overwritten.
 
+**Smaller fixes.** The filter in the profile lists can be typed into again: a click into it no longer
+closes the list. An install or uninstall without a window (winget, `--install --silent`) now writes
+why it failed into the app's log, not only its exit code.
+
 ### Removed
 
 **No more copy of the microphone to a virtual cable.** Earlier versions also sent the processed
