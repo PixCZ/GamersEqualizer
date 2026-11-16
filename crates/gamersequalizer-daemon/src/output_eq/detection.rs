@@ -131,22 +131,23 @@ impl OutputEq {
   }
 
   /// Launcher facts and genre of an exe, gathered once per path (cleared by `reload`). Not the
-  /// `owner`: the genre only from the owner's cache, and not kept, so a later event picks up
-  /// what the owner has looked up since.
+  /// `owner`: its launcher facts are kept too (disk and registry reads), but the genre comes from
+  /// the owner's cache each time, so a later event picks up what the owner has looked up since.
   fn facts_for(&mut self, full_path: &str, owner: bool) -> GameFacts {
-    if let Some(f) = self.facts_cache.get(full_path) {
-      return f.clone();
-    }
-    let mut facts = launchers::gather_facts(full_path);
+    let launcher = match self.facts_cache.get(full_path) {
+      Some((facts, true)) => return facts.clone(),
+      Some((facts, false)) => facts.clone(),
+      None => launchers::gather_facts(full_path),
+    };
+    let mut facts = launcher.clone();
     // Always looked up: it also tells Steam tools from games, whatever the genre switch says.
     let found = if owner { self.genres.lookup(full_path, &facts) } else { self.genres.cached(full_path, &facts) };
     facts.not_a_game = found.not_a_game;
     if self.settings.detect_genres {
       facts.genre = found.genre;
     }
-    if owner {
-      self.facts_cache.insert(full_path.to_string(), facts.clone());
-    }
+    let kept = if owner { (facts.clone(), true) } else { (launcher, false) };
+    self.facts_cache.insert(full_path.to_string(), kept);
     facts
   }
 

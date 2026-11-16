@@ -106,7 +106,9 @@ pub struct OutputEq {
   /// This process decides the active game (set by `tick` / `on_foreground`).
   is_owner: bool,
   last_alive_check: Instant,
-  facts_cache: HashMap<String, GameFacts>,
+  /// Per exe path. `true`: with the genre this process looked up as the owner, final. `false`:
+  /// launcher facts alone, the genre is asked again.
+  facts_cache: HashMap<String, (GameFacts, bool)>,
   genres: genre::GenreLookup,
   seen_settings_version: Option<u32>,
 }
@@ -342,6 +344,8 @@ mod tests {
     follower.on_foreground(&bound, false, Some(&h));
     assert_eq!(follower.recent_apps[0].matched.as_ref().and_then(|m| m.profile.as_deref()), Some("The Division 2"));
     assert_eq!(app_channels::channel_for("followed.exe"), AppChannel::Media, "its sound stays where the owner put it");
+    // It reads the launchers' files once per exe; the genre it asks the owner's cache each time.
+    assert!(matches!(follower.facts_cache.get(r"C:\x\followed.exe"), Some((_, false))));
     owner.on_foreground(&event, true, Some(&h));
     follower.tick(false, Some("dev-1".into()), Some(&h));
     assert_eq!(follower.game_profile_name(), Some("The Division 2"));
