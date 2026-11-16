@@ -115,7 +115,7 @@ function Say([string]$text, [string]$color) {
 
 # This script writes composite effect lists only (several effects per slot); Windows reads them
 # from Windows 10 version 1803 (build 17134) on. Stop before anything changes on an older one.
-# Must match MIN_WINDOWS_BUILD in apo_install.rs.
+# Must match MIN_WINDOWS_BUILD in apo_install/elevated.rs.
 $MinWindowsBuild = 17134
 $WindowsBuild = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuild
 if ($WindowsBuild -lt $MinWindowsBuild) {

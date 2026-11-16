@@ -1,5 +1,5 @@
 # Shared by apo-install.ps1 and apo-uninstall.ps1. The app puts this text in place of their
-# `# @common` line before it writes and hashes them (win_audio/apo_install.rs), so the elevated
+# `# @common` line before it writes and hashes them (win_audio/apo_install/elevated.rs), so the elevated
 # run is still one checked text; run from disk, they dot-source this file.
 
 # Known-folder lookup, not $env:ProgramFiles: the user can override that variable in

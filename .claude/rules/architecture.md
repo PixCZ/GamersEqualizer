@@ -106,7 +106,7 @@ service (loopback, sidetone).
 - Only `apo-install.ps1` / `apo-uninstall.ps1` run as administrator, plus the app's `--probe-mic` /
   `--probe-render` mode, which the install script starts elevated from its own copy of the exe. The
   scripts are built into the exe, written to disk, and the elevated bootstrap checks their SHA-256
-  before running them (`win_audio/apo_install.rs`).
+  before running them (`win_audio/apo_install/elevated.rs`).
 - Elevated code never reads or loads anything a non-admin process can still change after that check.
 - No second route to admin rights.
 

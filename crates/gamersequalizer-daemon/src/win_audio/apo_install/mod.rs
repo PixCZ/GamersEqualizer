@@ -26,15 +26,21 @@ use windows::core::{GUID, PCWSTR, PWSTR, w};
 
 use crate::i18n::tr;
 
+mod elevated;
+mod location;
+mod registry;
+
+pub(crate) use elevated::*;
+pub use location::*;
+use registry::*;
+
 /// Must match CLSID_MIC_APO / CLSID_OUTPUT_EQ_APO / CLSID_STREAM_APO in
 /// crates/gamersequalizer-apo/src/lib.rs.
 const MIC_APO_CLSID: &str = "{17e8d42e-dc01-4bd0-90ff-ad7c83a5ddea}";
 const OUTPUT_APO_CLSID: &str = "{6b0f3c1e-8f2a-4d7b-9a51-3e2c7d4b9f10}";
 const STREAM_APO_CLSID: &str = "{3c9a5e21-7d4f-4b8e-a1c6-5f2e8d9b0a47}";
 const ALL_CLSIDS: [&str; 3] = [MIC_APO_CLSID, OUTPUT_APO_CLSID, STREAM_APO_CLSID];
-const DLL_NAME: &str = "gamersequalizer_apo.dll";
-/// The app itself, installed next to its effects: `%ProgramFiles%\GamersEqualizer\<this>`.
-const EXE_NAME: &str = "gamersequalizer.exe";
+
 /// The scripts are built into the exe, so a tester gets one exe + the DLL. Written out to
 /// `%LOCALAPPDATA%\GamersEqualizer\scripts` right before each elevated run.
 const SCRIPT_NAME: &str = "apo-install.ps1";
@@ -79,10 +85,7 @@ const DEVICE_STATE_ACTIVE: u32 = 1;
 /// `PKEY_AudioEndpoint_Disable_SysFx`: 1 = audio enhancements off for the device.
 const DISABLE_SYSFX_VALUE: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
 const WINDOWS_VERSION_KEY: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
-/// Oldest Windows build the installer runs on: Windows 10 version 1803, the first that reads
-/// composite effect lists. Must match `$MinWindowsBuild` in scripts/apo-install.ps1, which
-/// checks again before it changes anything.
-const MIN_WINDOWS_BUILD: u32 = 17134;
+
 const AUDIO_KEY: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio";
 /// Physical devices never offered for our effects unless they are the ones in use: Bluetooth
 /// hands-free (call-quality mic of a headset that also has a stereo output) and VR headsets.
@@ -178,42 +181,6 @@ pub fn check_flow(flow: Flow, endpoint_id: Option<&str>) -> ApoCheck {
   }
 }
 
-/// The installed app to start instead of this process: this exe runs from elsewhere (the
-/// unzipped folder, an old autostart entry) and the installed copy is the same build or
-/// newer. None in the dev tree, for the installed copy itself, and while the installed DLL is
-/// missing (removed by an antivirus, a half-done uninstall): the installed copy could not put
-/// it back, a copy from the ZIP can.
-pub fn handover_target() -> Option<PathBuf> {
-  let this = std::env::current_exe().ok()?;
-  let installed = installed_exe().filter(|_| installed_dll().is_some())?;
-  if same_path(&this, &installed) || in_dev_tree(this.parent()?) {
-    return None;
-  }
-  let installed_at = file_stamp(&installed)?;
-  let this_at = file_stamp(&this)?;
-  (installed_at >= this_at).then_some(installed)
-}
-
-/// The exe "start with Windows" should run: the installed copy once there is one.
-pub fn autostart_exe() -> Option<PathBuf> {
-  let this = std::env::current_exe().ok()?;
-  let installed = installed_exe().filter(|_| !this.parent().is_some_and(in_dev_tree));
-  Some(installed.unwrap_or(this))
-}
-
-/// This exe still has to be installed: (installed copy's build time if any, this exe's).
-/// None in the dev tree, for the installed copy itself and for an older or equal build.
-fn app_to_install() -> Option<(Option<SystemTime>, SystemTime)> {
-  let this = std::env::current_exe().ok()?;
-  let target = installed_exe_path()?;
-  if same_path(&this, &target) || in_dev_tree(this.parent()?) {
-    return None;
-  }
-  let this_at = file_stamp(&this)?;
-  let installed_at = file_stamp(&target);
-  installed_at.is_none_or(|t| this_at > t).then_some((installed_at, this_at))
-}
-
 /// Starts the install script elevated for every (flow, endpoint GUID): one UAC prompt and one
 /// Windows audio restart. Returns once the window is launched; the caller re-checks afterwards.
 pub fn launch_install_many(targets: &[(Flow, &str)]) -> Result<(), String> {
@@ -263,80 +230,8 @@ pub fn mic_in_mfx(guid: &str) -> bool {
   read_string_value(&key, MFX_LIST_VALUE).is_some_and(|list| list.to_ascii_lowercase().contains(MIC_APO_CLSID))
 }
 
-/// The elevated installer uses files from the app's (user-writable) folder only when its own
-/// copy hashes as given here: the DLL it installs and this exe, which it runs with
-/// `--probe-mic` to check that Windows starts the mic chain. `endpoints` None: the app alone.
-/// Returns the exit code when `run` waits.
-fn launch_installer(endpoints: Option<&str>, run: ScriptRun) -> Result<Option<u32>, String> {
-  // An unreadable build is left to the script's own check.
-  if windows_build().is_some_and(|build| build < MIN_WINDOWS_BUILD) {
-    return Err(
-      tr("The Windows effects need Windows 10 version 1803 or newer. Nothing was installed or changed.").to_string(),
-    );
-  }
-  let dll = bundled_dll().ok_or("APO DLL not found next to the app")?;
-  let dll_hash = file_sha256(&dll)?;
-  let own_exe = std::env::current_exe().map_err(|e| e.to_string());
-  // The installer copies this exe next to the effects (not a dev build: that runs in place)
-  // and runs it with --probe-mic.
-  let app = match own_exe.and_then(|exe| file_sha256(&exe).map(|hash| (hash, exe))) {
-    Ok((hash, exe)) => {
-      let in_place = if exe.parent().is_some_and(in_dev_tree) { " -NoAppInstall" } else { "" };
-      format!(" -AppExe {} -AppExeSha256 {hash}{in_place}", ps_quote(&exe.to_string_lossy()))
-    }
-    Err(e) => {
-      log::warn!("[Setup] the installer skips the app copy and the microphone check (own exe: {e})");
-      String::new()
-    }
-  };
-  let target = match endpoints {
-    Some(endpoints) => format!("-Endpoint {}", ps_quote(endpoints)),
-    None => "-AppOnly".to_string(),
-  };
-  let args = format!(
-    "{target} -SourceDll {} -SourceDllSha256 {dll_hash}{app} -AppVersion {}{}",
-    ps_quote(&dll.to_string_lossy()),
-    ps_quote(env!("GAMERSEQUALIZER_VERSION")),
-    from_app_arg(run)
-  );
-  run_script_elevated(SCRIPT_NAME, SCRIPT, &args, "installer", run)
-}
-
-/// `-FromApp` keeps the script's window open on errors (Enter closes it); never when silent.
-fn from_app_arg(run: ScriptRun) -> &'static str {
-  match run {
-    ScriptRun::Wait { silent: true } => "",
-    _ => " -FromApp",
-  }
-}
-
 fn windows_build() -> Option<u32> {
   read_string_value(WINDOWS_VERSION_KEY, "CurrentBuild")?.trim().parse().ok()
-}
-
-/// Hex SHA-256 of a file (the app's exe is tens of MB: read once per install).
-fn file_sha256(path: &Path) -> Result<String, String> {
-  let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-  sha256_hex(&data)
-}
-
-/// `Capture:{guid}:MFX`, or `:EFX` when it is in MFX already: the slot it moves to.
-fn switch_arg(guid: &str, in_mfx: bool) -> Result<String, String> {
-  let to = if in_mfx { "EFX" } else { "MFX" };
-  Ok(format!("{}:{to}", endpoint_args(&[(Flow::Capture, guid)])?))
-}
-
-/// `Capture:{guid},Render:{guid}` (one PowerShell array argument, no spaces).
-fn endpoint_args(targets: &[(Flow, &str)]) -> Result<String, String> {
-  let mut parts = Vec::with_capacity(targets.len());
-  for (flow, guid) in targets {
-    // The GUID came from the device id; reject anything that could break the command line.
-    if guid.is_empty() || !guid.chars().all(|c| c.is_ascii_hexdigit() || "{}-".contains(c)) {
-      return Err(format!("unexpected endpoint id {guid}"));
-    }
-    parts.push(format!("{}:{guid}", flow.as_str()));
-  }
-  Ok(parts.join(","))
 }
 
 /// One log line with what decides whether Windows runs effects on this endpoint: its effect
@@ -534,15 +429,6 @@ pub fn is_registered() -> bool {
     })
 }
 
-fn uninstall_args(script_dir: Option<&Path>, run: ScriptRun) -> String {
-  let mut args = format!("-RemoveBackups{}", from_app_arg(run));
-  if let Some(dir) = script_dir {
-    args.push_str(" -ScriptDir ");
-    args.push_str(&ps_quote(&dir.to_string_lossy()));
-  }
-  args
-}
-
 /// Starts the uninstall script elevated (UAC prompt): puts back each endpoint's effect settings
 /// from the installer's backups (`%ProgramFiles%\GamersEqualizer\apo-backup`), removes every APO
 /// class from every endpoint (plus Default-only streaming modes on emptied slots of endpoints
@@ -552,141 +438,6 @@ fn uninstall_args(script_dir: Option<&Path>, run: ScriptRun) -> String {
 pub fn launch_uninstall(run: ScriptRun) -> Result<Option<u32>, String> {
   let args = uninstall_args(scripts_dir().as_deref(), run);
   run_script_elevated(UNINSTALL_SCRIPT_NAME, UNINSTALL_SCRIPT, &args, "uninstaller", run)
-}
-
-/// `System32\WindowsPowerShell\v1.0\powershell.exe` from the known folder, never a bare
-/// `powershell.exe` (searched in the current / exe folder first) or `%SystemRoot%`
-/// (user-overridable).
-pub(crate) fn powershell_exe() -> Result<PathBuf, String> {
-  let system = known_folder(&FOLDERID_System).ok_or("System32 folder not found")?;
-  Ok(system.join("WindowsPowerShell").join("v1.0").join("powershell.exe"))
-}
-
-/// Runs a built-in script elevated with `args` (PowerShell syntax, already quoted).
-/// The script is too long for the command line (`-EncodedCommand` ~33k chars, limit 32k), so
-/// it goes to a user-writable file; the elevated side reads it once into memory and runs that
-/// text only if its SHA-256 matches the one computed from `content` here. A same-user process
-/// that swaps the file in between gets a refusal, not code running as admin. The bootstrap
-/// itself travels in the command line. Module autoload is pinned to the system folder (the
-/// user's Documents module folder would otherwise come first and could shadow cmdlets).
-/// `ScriptRun::Wait` blocks until the script ends and returns its exit code.
-fn run_script_elevated(
-  name: &str,
-  content: &str,
-  args: &str,
-  what: &str,
-  run: ScriptRun,
-) -> Result<Option<u32>, String> {
-  let content = with_common(content);
-  let path = write_script(name, &content)?;
-  let hash = sha256_hex(content.as_bytes())?;
-  let bootstrap = elevated_bootstrap(&path.to_string_lossy(), &hash, args);
-  let params = format!("-NoProfile -ExecutionPolicy Bypass -EncodedCommand {}", encode_command(&bootstrap));
-  let exe = powershell_exe()?;
-  let exe_w: Vec<u16> = exe.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
-  let params_w: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
-  let wait = matches!(run, ScriptRun::Wait { .. });
-  let mut info = SHELLEXECUTEINFOW {
-    cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-    fMask: if wait { SEE_MASK_NOCLOSEPROCESS } else { Default::default() },
-    lpVerb: w!("runas"),
-    lpFile: PCWSTR(exe_w.as_ptr()),
-    lpParameters: PCWSTR(params_w.as_ptr()),
-    nShow: if run == (ScriptRun::Wait { silent: true }) { SW_HIDE.0 } else { SW_SHOWNORMAL.0 },
-    ..Default::default()
-  };
-  // SAFETY: `info` and the NUL-terminated strings it points to live in this frame.
-  if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
-    remove_file_if_regular(&path);
-    if let Some(dir) = path.parent() {
-      prune_empty_script_dirs(dir);
-    }
-    return Err(format!("could not start the {what} (cancelled UAC prompt? {e})"));
-  }
-  if !wait || info.hProcess.is_invalid() {
-    return Ok(None);
-  }
-  let mut code = 0u32;
-  // SAFETY: SEE_MASK_NOCLOSEPROCESS handed us this process handle; it is closed once, here.
-  let read = unsafe {
-    WaitForSingleObject(info.hProcess, INFINITE);
-    let read = GetExitCodeProcess(info.hProcess, &mut code);
-    let _ = CloseHandle(info.hProcess);
-    read
-  };
-  read.map_err(|e| format!("could not read the {what}'s exit code: {e}"))?;
-  Ok(Some(code))
-}
-
-/// PowerShell run by `-EncodedCommand`: check the script file's hash, then run its text.
-fn elevated_bootstrap(script_path: &str, sha256_hex: &str, args: &str) -> String {
-  let path = ps_quote(script_path);
-  // A hidden (silent) run has nobody to press Enter.
-  let pause = if args.contains("-FromApp") { "Read-Host 'Press Enter to close'; " } else { "" };
-  [
-    "$env:PSModulePath = [IO.Path]::Combine([Environment]::GetFolderPath('System'), 'WindowsPowerShell\\v1.0\\Modules')"
-      .to_string(),
-    format!("$c = [IO.File]::ReadAllText({path})"),
-    "$h = -join ([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($c)) | ForEach-Object { $_.ToString('x2') })".to_string(),
-    format!(
-      "if ($h -ne '{sha256_hex}') {{ Write-Host 'The script was changed after the app wrote it; not running it.' -ForegroundColor Red; {pause}exit 1 }}"
-    ),
-    // Dot-sourced: its top-level variables must land in the script scope, which the scripts'
-    // functions use as `$script:X` (`&` would give them a child scope; `$script:X` was then null).
-    format!(". ([scriptblock]::Create($c)) {args}"),
-  ]
-  .join("\n")
-}
-
-/// `script` with `apo-common.ps1` in place of the line that loads it from disk.
-fn with_common(script: &str) -> String {
-  script.replacen(COMMON_LINE, COMMON_SCRIPT, 1)
-}
-
-/// `-EncodedCommand` takes base64 of UTF-16LE.
-fn encode_command(script: &str) -> String {
-  let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-  base64(&bytes)
-}
-
-fn base64(bytes: &[u8]) -> String {
-  const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-  for chunk in bytes.chunks(3) {
-    let at = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
-    let n = (at(0) << 16) | (at(1) << 8) | at(2);
-    for (i, shift) in [18u32, 12, 6, 0].into_iter().enumerate() {
-      // `n >> shift & 63` is always < 64.
-      let symbol = ALPHABET.get(((n >> shift) & 63) as usize).copied().unwrap_or(b'=');
-      out.push(if i <= chunk.len() { char::from(symbol) } else { '=' });
-    }
-  }
-  out
-}
-
-fn sha256_hex(data: &[u8]) -> Result<String, String> {
-  let mut digest = [0u8; 32];
-  // SAFETY: the SHA-256 pseudo-handle (Windows 10+) needs no open/close; buffers are local.
-  let status = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, data, &mut digest) };
-  if status.is_err() {
-    return Err(format!("SHA-256 failed (0x{:08x})", status.0));
-  }
-  Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-/// PowerShell single-quoted literal: nothing inside is expanded, `'` is doubled.
-pub(crate) fn ps_quote(s: &str) -> String {
-  format!("'{}'", s.replace('\'', "''"))
-}
-
-fn known_folder(id: &GUID) -> Option<PathBuf> {
-  // SAFETY: on success the shell allocates the string; it is copied, then freed once.
-  unsafe {
-    let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
-    let path = p.to_string();
-    CoTaskMemFree(Some(p.0 as *const _));
-    path.ok().map(PathBuf::from)
-  }
 }
 
 impl Flow {
@@ -706,148 +457,6 @@ impl Flow {
   }
 }
 
-/// `%ProgramFiles%\GamersEqualizer` by known folder, not the variable (the user can override it).
-fn program_dir() -> Option<PathBuf> {
-  Some(known_folder(&FOLDERID_ProgramFiles)?.join("GamersEqualizer"))
-}
-
-fn installed_dll() -> Option<PathBuf> {
-  let path = program_dir()?.join("apo").join(DLL_NAME);
-  path.is_file().then_some(path)
-}
-
-/// Where the installer puts the app (whether or not it is there yet).
-fn installed_exe_path() -> Option<PathBuf> {
-  Some(program_dir()?.join(EXE_NAME))
-}
-
-fn installed_exe() -> Option<PathBuf> {
-  installed_exe_path().filter(|path| path.is_file())
-}
-
-/// `dir` is `target/<profile>/` of the source tree (`Cargo.toml` next to `target`): a
-/// developer's build, which runs in place and is never installed.
-fn in_dev_tree(dir: &Path) -> bool {
-  dir.parent().is_some_and(|target| {
-    target.file_name().is_some_and(|n| n.eq_ignore_ascii_case("target"))
-      && target.parent().is_some_and(|root| root.join("Cargo.toml").is_file())
-  })
-}
-
-/// Windows paths compare without case.
-fn same_path(a: &Path, b: &Path) -> bool {
-  a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
-}
-
-/// In the dev tree the `target/apo` build first: `target/release` may hold a stale DLL from a
-/// plain `--release` build, which is not the unwinding `apo` profile. The installed app
-/// reinstalls its installed DLL (a new device, another slot). Otherwise only next to the exe
-/// (the unzipped folder): an exe in `Downloads\x\` must not pick up whatever sits in
-/// `Downloads\apo\`.
-fn bundled_dll() -> Option<PathBuf> {
-  let dir = exe_dir()?;
-  if installed_exe_path().is_some_and(|installed| installed.parent().is_some_and(|p| same_path(p, &dir))) {
-    return installed_dll();
-  }
-  let dev = in_dev_tree(&dir).then(|| dir.join("..").join("apo").join(DLL_NAME));
-  dev.into_iter().chain([dir.join(DLL_NAME)]).find(|p| p.is_file())
-}
-
-fn scripts_dir() -> Option<PathBuf> {
-  let base = std::env::var_os("LOCALAPPDATA")?;
-  Some(PathBuf::from(base).join("GamersEqualizer").join("scripts"))
-}
-
-/// Writes a built-in script fresh before every run, so an old or edited copy is never used.
-/// The folder is user-writable; `run_script_elevated` checks the hash before running it.
-fn write_script(name: &str, content: &str) -> Result<PathBuf, String> {
-  let dir = scripts_dir().ok_or("LOCALAPPDATA is not set")?;
-  std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-  let path = dir.join(name);
-  std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
-  Ok(path)
-}
-
-/// Removes temporary scripts staged in `%LOCALAPPDATA%\GamersEqualizer\scripts` and drops
-/// empty directories without deleting unrelated sibling folders (such as diagnostic logs).
-pub(crate) fn cleanup_staged_scripts() {
-  if let Some(dir) = scripts_dir() {
-    cleanup_staged_scripts_in(&dir);
-  }
-}
-
-fn cleanup_staged_scripts_in(dir: &Path) {
-  if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
-    return;
-  }
-  for name in [SCRIPT_NAME, UNINSTALL_SCRIPT_NAME] {
-    remove_file_if_regular(&dir.join(name));
-  }
-  prune_empty_script_dirs(dir);
-}
-
-fn remove_file_if_regular(file: &Path) {
-  if std::fs::symlink_metadata(file).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file()) {
-    let _ = std::fs::remove_file(file);
-  }
-}
-
-fn prune_empty_script_dirs(dir: &Path) {
-  if std::fs::symlink_metadata(dir).is_ok_and(|m| !m.file_type().is_symlink()) {
-    let _ = std::fs::remove_dir(dir);
-  }
-  if let Some(parent) = dir.parent()
-    && std::fs::symlink_metadata(parent).is_ok_and(|m| !m.file_type().is_symlink())
-  {
-    let _ = std::fs::remove_dir(parent);
-  }
-}
-
-fn hklm_subkeys(key: &str) -> Vec<String> {
-  /// Bound for the enumeration (a PC never has this many audio endpoints).
-  const MAX_SUBKEYS: u32 = 4096;
-  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
-  let mut hkey = HKEY::default();
-  let mut out = Vec::new();
-  // SAFETY: the handle is closed below; the name buffer is a local array of the size passed.
-  unsafe {
-    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
-      return out;
-    }
-    for index in 0..MAX_SUBKEYS {
-      let mut name = [0u16; 256];
-      let mut len = name.len() as u32;
-      if RegEnumKeyExW(hkey, index, Some(PWSTR(name.as_mut_ptr())), &mut len, None, None, None, None) != ERROR_SUCCESS {
-        break;
-      }
-      out.push(String::from_utf16_lossy(name.get(..len as usize).unwrap_or_default()));
-    }
-    let _ = RegCloseKey(hkey);
-  }
-  out
-}
-
-fn hklm_key_exists(key: &str) -> bool {
-  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
-  let mut hkey = HKEY::default();
-  // SAFETY: NUL-terminated key name owned by this frame; the handle is closed right away.
-  unsafe {
-    if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(key_w.as_ptr()), Some(0), KEY_READ, &mut hkey) != ERROR_SUCCESS {
-      return false;
-    }
-    let _ = RegCloseKey(hkey);
-  }
-  true
-}
-
-fn exe_dir() -> Option<PathBuf> {
-  std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
-}
-
-fn file_stamp(path: &Path) -> Option<SystemTime> {
-  std::fs::metadata(path).ok()?.modified().ok()
-}
-
 fn format_time(t: SystemTime) -> String {
   jiff::Timestamp::try_from(t)
     .map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()).strftime("%d.%m.%Y %H:%M").to_string())
@@ -858,97 +467,6 @@ fn format_time(t: SystemTime) -> String {
 pub(crate) fn endpoint_guid_of(capture_id: &str) -> Option<String> {
   let (_, guid) = capture_id.rsplit_once('.')?;
   (guid.starts_with('{') && guid.ends_with('}')).then(|| guid.to_string())
-}
-
-fn endpoints_root(flow: Flow) -> String {
-  format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\{}", flow.as_str())
-}
-
-fn endpoint_has_any_clsid(flow: Flow, guid: &str) -> bool {
-  let lists = endpoint_fx_lists(flow, guid);
-  lists.iter().any(|list| flow.clsids().iter().any(|clsid| list.contains(clsid)))
-}
-
-/// True only when all required CLSIDs sit in composite slots whose streaming modes include the
-/// Default processing mode and whose own legacy value (SFX `,1`/`,5`, MFX `,6`, EFX `,7`) does not
-/// shadow them. A legacy value on another slot is harmless (measured: `,5`/`,6` left `,15` running).
-fn endpoint_has_apo(flow: Flow, guid: &str) -> bool {
-  let key = format!("{}\\{guid}\\FxProperties", endpoints_root(flow));
-  let slots = FX_LIST_VALUES.map(|n| read_string_value(&key, n));
-  let modes = FX_MODE_VALUES.map(|(_, n)| read_string_value(&key, n));
-  let legacy = FX_LEGACY_VALUES.map(|(_, n)| read_string_value(&key, n));
-  endpoint_fx_configured(flow, &slots, &modes, &legacy)
-}
-
-fn endpoint_fx_configured(
-  flow: Flow,
-  slots: &[Option<String>; 3],
-  modes: &[Option<String>; 3],
-  legacy: &[Option<String>; 4],
-) -> bool {
-  let in_use = |raw: &Option<String>| {
-    raw
-      .as_deref()
-      .is_some_and(|raw| raw.split('\n').map(str::trim).any(|s| !s.is_empty() && !s.eq_ignore_ascii_case(NULL_GUID)))
-  };
-  // FX_LEGACY_VALUES order: LFX, SFX, MFX, EFX; slots: SFX, MFX, EFX.
-  let [lfx, sfx, mfx, efx] = legacy;
-  let shadowed = [in_use(lfx) || in_use(sfx), in_use(mfx), in_use(efx)];
-  flow.clsids().iter().all(|clsid| {
-    slots.iter().zip(modes.iter()).zip(shadowed).any(|((slot, mode), shadowed)| {
-      let has_clsid = slot.as_deref().is_some_and(|s| s.to_ascii_lowercase().contains(clsid));
-      let has_mode = mode.as_deref().is_some_and(|m| m.to_ascii_lowercase().contains(DEFAULT_PROCESSING_MODE));
-      has_clsid && has_mode && !shadowed
-    })
-  })
-}
-
-/// The endpoint's composite effect lists, lowercased. Only these: the install script writes
-/// nothing else (a legacy value is copied into the composite list, never edited).
-fn endpoint_fx_lists(flow: Flow, guid: &str) -> Vec<String> {
-  let key = format!("{}\\{guid}\\FxProperties", endpoints_root(flow));
-  FX_LIST_VALUES.iter().filter_map(|value| read_string_value(&key, value)).map(|l| l.to_ascii_lowercase()).collect()
-}
-
-/// REG_SZ or REG_MULTI_SZ as one string (NULs become '\n').
-fn read_string_value(key: &str, value: &str) -> Option<String> {
-  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
-  let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-  let flags = RRF_RT_REG_SZ | RRF_RT_REG_MULTI_SZ;
-  let mut size = 0u32;
-  // SAFETY: first call only queries the size; the second writes into a buffer of that size.
-  unsafe {
-    let key_p = PCWSTR(key_w.as_ptr());
-    let value_p = PCWSTR(value_w.as_ptr());
-    RegGetValueW(HKEY_LOCAL_MACHINE, key_p, value_p, flags, None, None, Some(&mut size)).ok().ok()?;
-    let mut buf = vec![0u16; (size as usize).div_ceil(2)];
-    RegGetValueW(HKEY_LOCAL_MACHINE, key_p, value_p, flags, None, Some(buf.as_mut_ptr().cast()), Some(&mut size))
-      .ok()
-      .ok()?;
-    Some(String::from_utf16_lossy(&buf).replace('\0', "\n"))
-  }
-}
-
-fn read_dword_value(key: &str, value: &str) -> Option<u32> {
-  let key_w: Vec<u16> = key.encode_utf16().chain(std::iter::once(0)).collect();
-  let value_w: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-  let mut data = 0u32;
-  let mut size = std::mem::size_of::<u32>() as u32;
-  // SAFETY: the out buffer is a local u32 of the size passed.
-  unsafe {
-    RegGetValueW(
-      HKEY_LOCAL_MACHINE,
-      PCWSTR(key_w.as_ptr()),
-      PCWSTR(value_w.as_ptr()),
-      RRF_RT_REG_DWORD,
-      None,
-      Some(&mut data as *mut u32 as *mut _),
-      Some(&mut size),
-    )
-    .ok()
-    .ok()?;
-  }
-  Some(data)
 }
 
 #[cfg(test)]

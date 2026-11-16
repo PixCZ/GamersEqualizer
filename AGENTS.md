@@ -134,7 +134,7 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
 
 - Installed layout: the installer (one admin prompt) copies the exe to `%ProgramFiles%\GamersEqualizer\`
   next to `apo\gamersequalizer_apo.dll`. A copy started from elsewhere then starts the installed one
-  (`handover_target` in `apo_install.rs`), and "start with Windows" points there. A newer copy ends
+  (`handover_target` in `apo_install/location.rs`), and "start with Windows" points there. A newer copy ends
   an older running one first (`takeover.rs`), so an update is "unpack, start, click Update". A dev build
   (`target\<profile>\`) runs in place and is never installed. User data stays in `%APPDATA%\GamersEqualizer`.
 - The installer registers the app in "Add or remove programs" (`HKLM\...\Uninstall\GamersEqualizer`,
@@ -157,7 +157,7 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   in the ZIP name is then `dev`. The `version` in the Cargo.toml files is not shown anywhere.
   Old ZIPs are never deleted or overwritten; only `target/package/staging` is cleared.
 - `apo-install.ps1` / `apo-uninstall.ps1` are built into the exe (`include_str!` in
-  `win_audio/apo_install.rs`) and written to `%LOCALAPPDATA%\GamersEqualizer\scripts` before each
+  `win_audio/apo_install/`) and written to `%LOCALAPPDATA%\GamersEqualizer\scripts` before each
   elevated run. What both share is in `scripts/apo-common.ps1`: run from disk they dot-source it
   (the `# @common` line), the app puts its text in that line's place before writing and hashing.
   The DLL stays a separate file next to the exe (audiodg loads it from disk).
