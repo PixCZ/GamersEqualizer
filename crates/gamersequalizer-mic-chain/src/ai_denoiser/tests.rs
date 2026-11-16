@@ -278,8 +278,10 @@ fn test_flush_drops_audio_from_before_and_keeps_the_model() {
     assert_eq!(isolator.active_model(), model);
     // A model switch right after a flush: the new engine's first output is not the old one's.
     isolator.flush();
+    isolator.rescue.hold_left = 4800;
     isolator.reset_engines();
     assert_eq!(isolator.mute_left, 0, "{model:?}: a switch still silences the next model");
+    assert_eq!(isolator.rescue.hold_left, 0, "{model:?}: the click rescue kept the old engine's hold");
   }
 }
 

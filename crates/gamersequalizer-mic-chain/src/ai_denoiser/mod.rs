@@ -792,10 +792,12 @@ impl AiVoiceIsolator {
     }
   }
 
-  /// Fresh engines for a model switch: sleep cleared, nothing left to silence, RNNoise's network
-  /// state new, the heavy models' buffers emptied.
+  /// Fresh engines for a model switch: sleep and the click rescue cleared (its hold is the old
+  /// engine's, or from before a bypass), nothing left to silence, RNNoise's network state new, the
+  /// heavy models' buffers emptied.
   fn reset_engines(&mut self) {
     self.sleep.clear();
+    self.rescue.reset();
     self.mute_left = 0;
     self.rnnoise.reset();
     if let Some(df) = self.deepfilter.as_mut() {
