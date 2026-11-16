@@ -330,7 +330,7 @@ pub struct ShmHeader {
   pub aec_echo_fit_permille: AtomicI32,
   pub aec_echo_slope_permille: AtomicI32,
 
-  // --- v20: sidetone (own voice in the headphones), see `sidetone.rs` ---
+  // --- v20: sidetone (own voice in the headphones), see `sidetone/` ---
   /// Daemon -> APOs: sidetone is on for the current microphone + output pair. The values
   /// below are that pair's (`write_sidetone` / `read_sidetone`).
   pub sidetone_enabled: AtomicBool,

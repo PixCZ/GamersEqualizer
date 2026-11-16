@@ -1,3 +1,4 @@
+use super::ring::{MARGIN_SECONDS, STALE_CLAIMS};
 use super::*;
 use std::f32::consts::PI;
 

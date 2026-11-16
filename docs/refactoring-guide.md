@@ -585,7 +585,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] G3 nastavení jednou
 - [x] G4 drobnosti řetězce (`frame_fifo.rs` s `FrameInput`/`FrameOutput`, i pro DPDFNet s překryvem oken)
 - [x] G5 vstupní body COM (`guarded`; zbývá ruční nahrávka `-DebugCapture` před fází a po ní)
-- [ ] H dělení souborů
+- [ ] H dělení souborů (`shm.rs` se nepovedlo: příkazy shellu odmítla automatická bezpečnostní kontrola, soubor zůstal celý; skript na rozdělení je připravený, udělat znovu)
 - [ ] I1 až I8
 - [ ] J menší nálezy
 - [ ] K úklid
