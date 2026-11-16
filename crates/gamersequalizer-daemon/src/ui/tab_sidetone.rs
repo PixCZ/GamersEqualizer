@@ -214,33 +214,12 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     egui::Grid::new("sidetone_vol_grid").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
       ui.label(tr("Volume"));
       // 0 % .. 300 %, the same scale as the microphone's "Sensitivity".
-      ui.horizontal(|ui| {
-        ui.spacing_mut().slider_width = 280.0;
-        if ui.add(egui::Slider::new(&mut settings.volume, 0.0..=VOLUME_MAX).show_value(false)).changed() {
-          changed = true;
-        }
-        let percent = format!("{:.0}", settings.volume * 100.0);
-        let readout = if settings.volume <= 1.0 {
-          format!("{percent} %")
-        } else {
-          trf("{} % (+{} dB boost)", &[&percent, &format!("{:.1}", 20.0 * settings.volume.log10())])
-        };
-        ui.label(theme::strong(readout, 14.0).color(theme::adapt(ui, ACCENT)));
-        if ui.button(tr("Reset to 100 %")).clicked() {
-          settings.volume = 1.0;
-          changed = true;
-        }
-      });
+      changed |= theme::percent_volume(ui, &mut settings.volume, VOLUME_MAX, 280.0, ACCENT);
       ui.end_row();
 
       ui.label(tr("Level"));
       ui.horizontal(|ui| {
-        let db_text = if peak > 0.0001 {
-          format!("{:.0} % ({:.1} dBFS)", (peak * 100.0).round(), 20.0 * peak.log10())
-        } else {
-          "0 % (-inf dBFS)".to_string()
-        };
-        theme::meter(ui, peak, 280.0, theme::level_color(ui, peak), &db_text);
+        theme::meter(ui, peak, 280.0, theme::level_color(ui, peak), &theme::level_text(peak));
       });
       ui.end_row();
 

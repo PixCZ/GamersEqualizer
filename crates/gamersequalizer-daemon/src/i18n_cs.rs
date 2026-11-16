@@ -831,8 +831,6 @@ pub static CS: &[(&str, &str)] = &[
     "Applied after noise suppression, before the boost/limiter. Changes are live and kept across restarts; \"Save as…\" keeps them as a named preset.",
     "Použije se po potlačení hluku, před zesílením/limiterem. Změny platí hned a zůstávají i po restartu; „Uložit jako…“ je uloží jako pojmenovanou předvolbu.",
   ),
-  ("{} % (native)", "{} % (nativně)"),
-  ("{} % (+{} dB boost)", "{} % (zesílení +{} dB)"),
   ("Unknown state {} (newer DSP build?)", "Neznámý stav {} (novější verze DSP?)"),
   (
     "After all filters your voice is delayed by {} in total (measured)",

@@ -343,6 +343,40 @@ pub fn meter_with(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: 
 
 /// Meter color for a signal level or load (0..1 of full scale): green, amber near the top,
 /// red at the top.
+/// A volume with a defined 100 %: "80 %", above that the boost: "250 % (+8.0 dB)". Short
+/// enough for a mixer strip.
+pub fn volume_text(volume: f32) -> String {
+  if volume <= 1.0 {
+    format!("{:.0} %", volume * 100.0)
+  } else {
+    format!("{:.0} % (+{:.1} dB)", volume * 100.0, 20.0 * volume.log10())
+  }
+}
+
+/// Horizontal volume slider 0 ..= `max` with its readout and "Reset to 100 %". True if changed.
+pub fn percent_volume(ui: &mut Ui, volume: &mut f32, max: f32, width: f32, color: Color32) -> bool {
+  ui.horizontal(|ui| {
+    ui.spacing_mut().slider_width = width;
+    let mut changed = ui.add(egui::Slider::new(volume, 0.0..=max).show_value(false)).changed();
+    ui.label(strong(volume_text(*volume), 14.0).color(adapt(ui, color)));
+    if ui.button(crate::i18n::tr("Reset to 100 %")).clicked() {
+      *volume = 1.0;
+      changed = true;
+    }
+    changed
+  })
+  .inner
+}
+
+/// A meter's peak (0..1) as text: "42 % (-7.5 dBFS)".
+pub fn level_text(peak: f32) -> String {
+  if peak > 0.0001 {
+    format!("{:.0} % ({:.1} dBFS)", (peak * 100.0).round(), 20.0 * peak.log10())
+  } else {
+    "0 % (-inf dBFS)".to_string()
+  }
+}
+
 pub fn level_color(ui: &Ui, fraction: f32) -> Color32 {
   let p = palette(ui);
   if fraction > 0.95 {

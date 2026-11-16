@@ -441,12 +441,7 @@ fn render_strip(
           ui.add_sized(Vec2::new(26.0, strip.fader_h), fader);
         }
 
-        let vol_pct = if *volume <= 1.0 {
-          format!("{:.0} %", *volume * 100.0)
-        } else {
-          format!("{:.0} % (+{:.1} dB)", *volume * 100.0, 20.0 * volume.log10())
-        };
-        ui.label(theme::strong(vol_pct, 15.0));
+        ui.label(theme::strong(theme::volume_text(*volume), 15.0));
 
         let (mute_text, mute_color) = if *is_muted {
           (theme::with_icon(icons::MUTE, tr("Muted")), p.err)

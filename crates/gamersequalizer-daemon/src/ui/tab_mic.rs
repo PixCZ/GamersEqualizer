@@ -204,12 +204,7 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       // Live input meter
       ui.label(tr("Live input level"));
       let peak = win_audio.chatmix.mic_peak_level;
-      let db_text = if peak > 0.0001 {
-        format!("{:.0} % ({:.1} dBFS)", (peak * 100.0).round(), 20.0 * peak.log10())
-      } else {
-        "0 % (-inf dBFS)".to_string()
-      };
-      theme::meter(ui, peak, BAR_WIDTH * 1.6, theme::level_color(ui, peak), &db_text);
+      theme::meter(ui, peak, BAR_WIDTH * 1.6, theme::level_color(ui, peak), &theme::level_text(peak));
       ui.end_row();
 
       if let Some(clips) = state.shm_header().map(|h| h.mic_input_clips.load(Ordering::Relaxed)) {
@@ -220,22 +215,7 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
 
       // Sensitivity 0% .. 300%
       ui.label(tr("Sensitivity"));
-      ui.horizontal(|ui| {
-        let mut vol = win_audio.chatmix.mic.volume;
-        ui.spacing_mut().slider_width = BAR_WIDTH;
-        if ui.add(egui::Slider::new(&mut vol, 0.0..=3.0).show_value(false)).changed() {
-          win_audio.chatmix.mic.volume = vol;
-        }
-        let readout = if vol <= 1.0 {
-          trf("{} % (native)", &[&format!("{:.0}", vol * 100.0)])
-        } else {
-          trf("{} % (+{} dB boost)", &[&format!("{:.0}", vol * 100.0), &format!("{:.1}", 20.0 * vol.log10())])
-        };
-        ui.label(theme::strong(readout, 14.0).color(theme::adapt(ui, EQ_COLOR)));
-        if ui.button(tr("Reset to 100 %")).clicked() {
-          win_audio.chatmix.mic.volume = 1.0;
-        }
-      });
+      theme::percent_volume(ui, &mut win_audio.chatmix.mic.volume, 3.0, BAR_WIDTH, EQ_COLOR);
       ui.end_row();
     });
 
