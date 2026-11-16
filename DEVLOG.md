@@ -2977,6 +2977,7 @@ refactoring, then a review of every step and its fixes. No new features.
 - "(none)" for a detected game in the window; Master behind Sonar when a monitor is plugged in; the
   window on a second monitor at 150 % that is then unplugged.
 - A `-DebugCapture` recording of the mic chain against one from before (pause, model switch, output
-  switch); `sidetone_probe` with nothing else playing (the output APO only zeroes a block flagged
-  silent, so the sidetone may not be mixed in).
+  switch). Checked: `sidetone_probe` with nothing else playing (it renders only blocks flagged
+  silent) still mixes the sidetone in, ~100 blocks/s on the Realtek output: the engine hands the
+  output effect valid blocks, so the early return on a silent block does not cost the sidetone.
 - A Release workflow run with the pinned toolchain; the branch rule on GitHub that requires CI.
