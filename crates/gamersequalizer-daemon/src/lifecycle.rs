@@ -63,17 +63,19 @@ pub(crate) fn installed_copy_ready(state: &AppState) -> bool {
 
 /// True while a background service process lives (it holds the mutex until it exits).
 pub(crate) fn daemon_running() -> bool {
-  // SAFETY: a static name and no security attributes; the handle is closed below.
-  let mutex = unsafe { CreateMutexW(None, false, w!(r"Local\GamersEqualizer_Daemon_Mutex")) };
-  // SAFETY: reads this thread's last error, set by the CreateMutexW call just above.
-  let running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
-  if let Ok(m) = mutex {
-    // SAFETY: the handle CreateMutexW returned above, closed once.
-    unsafe {
-      let _ = CloseHandle(m);
-    }
+  // Open, never create: a mutex created here for a moment made a service starting at that
+  // instant see it as taken and exit.
+  // SAFETY: a static name; the handle is closed below.
+  let Ok(mutex) =
+    (unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, w!(r"Local\GamersEqualizer_Daemon_Mutex")) })
+  else {
+    return false;
+  };
+  // SAFETY: the handle OpenMutexW returned above, closed once.
+  unsafe {
+    let _ = CloseHandle(mutex);
   }
-  running
+  true
 }
 
 /// Check if daemon mutex exists, and start detached background process if not.
