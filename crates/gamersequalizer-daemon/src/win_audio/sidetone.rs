@@ -480,21 +480,21 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
         log::warn!("[Sidetone] CoInitializeEx: {com:?}");
       }
       log::info!("[Sidetone] started");
-      let shm = match SharedMemoryClient::open_or_create() {
-        Ok(c) => c,
-        Err(e) => {
-          log::error!("[Sidetone] shared memory unavailable: {e}");
-          return;
-        }
+      let Some(shm) = super::worker::open_shm("Sidetone", || true) else {
+        return;
       };
       let mut worker = WorkerState::new(shm);
+      let mut seen = super::worker::RepeatFilter::default();
       loop {
         if let Err(e) = worker.iteration() {
-          log::warn!("[Sidetone] iteration failed: {e}");
+          if seen.is_new(&e.to_string()) {
+            log::warn!("[Sidetone] iteration failed (logged once until it changes): {e}");
+          }
           worker.render_stream = None;
           worker.capture_stream = None;
           std::thread::sleep(SLEEP_ON_ERROR);
         } else {
+          seen.reset();
           std::thread::sleep(POLL);
         }
       }

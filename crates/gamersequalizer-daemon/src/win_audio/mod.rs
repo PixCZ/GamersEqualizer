@@ -19,6 +19,7 @@ pub mod policy_config;
 pub mod shell;
 pub mod sidetone;
 pub mod stream_router;
+pub mod worker;
 
 pub use chatmix::{AudioBus, AudioSessionInfo, ChatMixController};
 pub use dolby_atmos::{DolbyAtmosGuard, SpatialAudioStatus, SpatialFormat};

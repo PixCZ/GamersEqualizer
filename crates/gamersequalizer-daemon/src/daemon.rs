@@ -211,14 +211,14 @@ pub(super) fn run_background_daemon() {
         }
       }
 
-      // The Windows default output changed (in Windows, in the window, in another app): the
-      // Master channel and the echo reference follow it. Only the output is re-resolved; the
-      // mic choice and levels stay (`bind_endpoints` would reset them). Before this the service
-      // kept capturing the reference from the output it started with.
-      if last_output_check.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL) {
+      // The Windows default output changed (in Windows, in the window, in another app), or a
+      // device came or went (the headset behind Sonar unplugged: Master kept a dead id): the
+      // Master channel and the echo reference follow. Only the output is re-resolved; the mic
+      // choice and levels stay (`bind_endpoints` would reset them).
+      if devices_changed || last_output_check.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL) {
         last_output_check = Some(Instant::now());
         let default_out = win_audio.endpoint_lock.get_default_output_id();
-        if default_out.is_some() && default_out != last_default_out {
+        if default_out.is_some() && (devices_changed || default_out != last_default_out) {
           let devices = win_audio.endpoint_lock.enumerate_playback_devices();
           let master = win_audio::chatmix::physical_endpoint_id(&devices, default_out.as_deref());
           if master != win_audio.chatmix.master_device_id {

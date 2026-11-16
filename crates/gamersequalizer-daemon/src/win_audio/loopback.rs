@@ -22,7 +22,7 @@ use gamersequalizer_common::shm::StereoFrame;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::apo_link::ApoLink;
-use super::mmdevice;
+use super::{mmdevice, worker};
 
 const LOOPBACK_BUFFER_MS: i64 = 20;
 const HNS_PER_MS: i64 = 10_000;
@@ -102,13 +102,10 @@ pub fn spawn(
       unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
       }
-      let mut shm = match SharedMemoryClient::open_or_create() {
-        Ok(c) => c,
-        Err(e) => {
-          warn!("[Loopback] shared memory unavailable, AEC will have no reference: {}", e);
-          return;
-        }
+      let Some(mut shm) = worker::open_shm("Loopback", || running.load(Ordering::SeqCst)) else {
+        return;
       };
+      let mut seen = worker::RepeatFilter::default();
       let mut apo = ApoLink::new();
       info!("[Loopback] speaker reference thread started");
       while running.load(Ordering::SeqCst) {
@@ -120,11 +117,14 @@ pub fn spawn(
           continue;
         }
         let wanted = reference_id.lock().ok().and_then(|g| g.clone());
-        if let Err(e) = run_loopback(&running, &reference_id, wanted.as_deref(), &mut shm, &mut apo) {
-          if e.contains(DEVICE_INVALIDATED) {
-            info!("[Loopback] output device was reset (Windows audio restarted or device changed), reconnecting");
-          } else {
-            warn!("[Loopback] iteration error: {}. Retrying in 1 s...", e);
+        if let Err(e) = run_loopback(&running, &reference_id, wanted.as_deref(), &mut shm, &mut apo, &mut seen) {
+          // An unplugged output fails the same way every second: logged once until it changes.
+          if seen.is_new(&e) {
+            if e.contains(DEVICE_INVALIDATED) {
+              info!("[Loopback] output device was reset (Windows audio restarted or device changed), reconnecting");
+            } else {
+              warn!("[Loopback] iteration error: {}. Retrying every 1 s...", e);
+            }
           }
           apo.tick(&shm, false);
           std::thread::sleep(Duration::from_secs(1));
@@ -158,6 +158,7 @@ fn run_loopback(
   explicit_id: Option<&str>,
   shm: &mut SharedMemoryClient,
   apo: &mut ApoLink,
+  seen: &mut worker::RepeatFilter,
 ) -> Result<(), String> {
   // SAFETY: COM calls on interfaces created in this block, on the loopback thread (COM initialized in `spawn`). The
   // device name is NUL-terminated and outlives the call; `res` owns the format block and the event and frees them
@@ -197,6 +198,7 @@ fn run_loopback(
     client.SetEventHandle(res.cap_event).map_err(|e| format!("SetEventHandle: {}", e))?;
     let capture: IAudioCaptureClient = client.GetService().map_err(|e| format!("GetService: {}", e))?;
     client.Start().map_err(|e| format!("Start: {}", e))?;
+    seen.reset();
 
     info!("[Loopback] capturing speaker reference from {:?} ({} ch)", opened_id, fmt.channels);
     apo.set_render_device(opened_id.clone());
