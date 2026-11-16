@@ -11,6 +11,7 @@ use gamersequalizer_common::shm::{
 use gamersequalizer_mic_chain::ai_denoiser::AiVoiceIsolator;
 use gamersequalizer_mic_chain::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
 use gamersequalizer_mic_chain::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
 pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
@@ -665,9 +666,20 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
   };
   ui.horizontal(|ui| {
     ui.label(theme::caption(tr("CPU load:")));
-    let value = trf("{} % (peak {} %)", &[&format!("{:.0}", load.avg * 100.0), &format!("{:.0}", load.peak * 100.0)]);
+    // The chain runs on one audio thread: Task Manager spreads the same time over every logical
+    // processor. Read once, not per frame (paint path).
+    static THREADS: OnceLock<usize> = OnceLock::new();
+    let threads = *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let value = trf(
+      "{} % of one core (peak {} %), about {} % of the whole CPU",
+      &[
+        &format!("{:.0}", load.avg * 100.0),
+        &format!("{:.0}", load.peak * 100.0),
+        &format!("{:.1}", load.avg * 100.0 / threads as f32),
+      ],
+    );
     theme::meter(ui, load.avg, 180.0, color, &value).on_hover_text(tr(
-      "Time the mic chain needs per audio block, as a share of the block's length. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+      "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
     ));
     let late = RichText::new(trf("late blocks: {}", &[&load.late_blocks])).small();
     ui.label(if load.late_blocks > 0 { late.color(p.warn) } else { late.weak() });

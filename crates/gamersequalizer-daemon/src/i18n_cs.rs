@@ -833,8 +833,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Auto", "Automaticky"),
   ("CPU load:", "Zatížení CPU:"),
   (
-    "Time the mic chain needs per audio block, as a share of the block's length. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
-    "Čas, který řetězec mikrofonu potřebuje na jeden zvukový blok, jako podíl délky bloku. Nad 100 % blok nestihne: praskání nebo výpadky. Trvalé přetížení přepne DeepFilterNet nebo DPDFNet na RNNoise (viz Protokol).",
+    "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+    "Čas, který řetězec mikrofonu potřebuje na jeden zvukový blok, jako podíl délky bloku. Řetězec běží na jednom jádru procesoru, takže jde o vytížení tohoto jednoho jádra; Správce úloh ukazuje stejnou práci rozpočítanou na všechna jádra. Nad 100 % blok nestihne: praskání nebo výpadky. Trvalé přetížení přepne DeepFilterNet nebo DPDFNet na RNNoise (viz Protokol).",
   ),
   ("Stage 3: Voice parametric EQ", "Fáze 3: Parametrický EQ hlasu"),
   (
@@ -866,7 +866,10 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Limited ({}), running: {}", "Omezeno ({}), běží: {}"),
   ("{} could not be loaded by the audio engine, still on {}.", "Zvukové jádro nedokázalo načíst {}, stále běží {}."),
-  ("{} % (peak {} %)", "{} % (špička {} %)"),
+  (
+    "{} % of one core (peak {} %), about {} % of the whole CPU",
+    "{} % jednoho jádra (špička {} %), asi {} % celého procesoru",
+  ),
   ("late blocks: {}", "opožděné bloky: {}"),
   (
     "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing sometimes gets through (most often with RNNoise, which removes the least).",
