@@ -8,8 +8,7 @@ use crate::win_audio::{AudioEndpointInfo, WinAudioSystem};
 use egui::{RichText, Ui};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::sidetone::{
-  GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX, NoiseMode, SidetonePair, SidetonePairs, VOLUME_MAX,
-  device_hash,
+  GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX, NoiseMode, SidetonePair, VOLUME_MAX, device_hash,
 };
 use gamersequalizer_mic_chain::sidetone_denoise::nominal_delay_ms;
 use std::sync::atomic::Ordering;
@@ -32,7 +31,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     win_audio.endpoint_lock.get_default_output_id(),
   );
   let Some(pair_key) = pair_ids else {
-    save_if_dirty(state, &mut saved_pairs);
+    state.save_sidetone_pair();
     theme::status_line(ui, Severity::Warning, tr("Sidetone needs a microphone and an output device."));
     return;
   };
@@ -44,7 +43,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
 
   // 2. Load the pair; edits of the previous one are saved first (the device switched mid-drag).
   if state.sidetone_ui.pair.is_none() || state.sidetone_ui.pair_key != pair_key {
-    save_if_dirty(state, &mut saved_pairs);
+    if let Some(saved) = state.save_sidetone_pair() {
+      saved_pairs = saved;
+    }
     let pair = saved_pairs
       .find(&pair_key.0, &pair_key.1)
       .cloned()
@@ -442,20 +443,5 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     }
     state.sidetone_ui.pair = Some(pair);
   }
-
-  // Saved once the pointer is released, not on every drag frame.
-  if !ui.ctx().input(|i| i.pointer.any_down()) {
-    save_if_dirty(state, &mut saved_pairs);
-  }
-}
-
-/// Saves the pair being edited when it has unsaved changes.
-fn save_if_dirty(state: &mut AppState, saved_pairs: &mut SidetonePairs) {
-  if !std::mem::take(&mut state.sidetone_ui.dirty) {
-    return;
-  }
-  if let Some(pair) = state.sidetone_ui.pair.clone() {
-    saved_pairs.upsert(pair);
-    sidetone::save(saved_pairs.clone());
-  }
+  // Saved by `AppState::save_pending` once the pointer is released.
 }

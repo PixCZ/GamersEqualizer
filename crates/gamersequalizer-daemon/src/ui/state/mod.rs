@@ -5,7 +5,7 @@ use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus,
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::ParametricProfile;
 use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout};
-use gamersequalizer_common::sidetone::SidetonePair;
+use gamersequalizer_common::sidetone::{SidetonePair, SidetonePairs};
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
@@ -107,7 +107,7 @@ pub struct AppState {
   /// None until first read, so a seq left over in shared memory doesn't count as live.
   mic_dsp_seen: (Option<u32>, Option<std::time::Instant>),
   denoise_switched_at: Option<std::time::Instant>,
-  /// Mic chain + mixer choices as last written to disk (see `save_audio_settings_if_changed`).
+  /// Mic chain + mixer choices as last written to disk (see `save_pending`).
   audio_settings_saved: super::audio_settings::AudioSettings,
   started_at: std::time::Instant,
 }
@@ -294,14 +294,35 @@ impl AppState {
 
   /// Remember the mic chain and mixer across restarts. Call once per frame; writes only when
   /// something changed and no slider is being dragged.
-  pub fn save_audio_settings_if_changed(&mut self, dragging: bool) {
+  /// Everything edited but not on disk yet: the output EQ layer, the mic EQ, the sidetone pair
+  /// and the audio settings. Called from every frame, whatever tab is shown, once the pointer is
+  /// released (not on every drag frame), and on exit.
+  pub fn save_pending(&mut self, dragging: bool) {
     if dragging {
       return;
     }
-    let Some(now) = self.shm_header().map(super::audio_settings::AudioSettings::from_header) else {
-      return;
-    };
-    self.audio_settings_saved.save_if_changed(now, self.storage.base_dir());
+    if let Some(layer) = self.out_eq_unsaved.take() {
+      self.output_eq_do(|eq, shm| eq.save_layer_profile(layer, shm));
+    }
+    if std::mem::take(&mut self.mic_eq_unsaved) {
+      self.apply_mic_eq();
+    }
+    self.save_sidetone_pair();
+    if let Some(now) = self.shm_header().map(super::audio_settings::AudioSettings::from_header) {
+      self.audio_settings_saved.save_if_changed(now, self.storage.base_dir());
+    }
+  }
+
+  /// Saves the sidetone pair being edited if it has unsaved changes; returns the saved list.
+  pub fn save_sidetone_pair(&mut self) -> Option<SidetonePairs> {
+    if !std::mem::take(&mut self.sidetone_ui.dirty) {
+      return None;
+    }
+    let pair = self.sidetone_ui.pair.clone()?;
+    let (mut pairs, _) = crate::win_audio::sidetone::pairs();
+    pairs.upsert(pair);
+    crate::win_audio::sidetone::save(pairs.clone());
+    Some(pairs)
   }
 
   pub fn denoise_models(&self) -> (DenoiseModel, DenoiseModel) {

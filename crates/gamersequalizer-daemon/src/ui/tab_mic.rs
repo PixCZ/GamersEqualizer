@@ -736,11 +736,6 @@ fn eq_section(ui: &mut Ui, state: &mut AppState) {
       state.sync_mic_eq_to_shm();
       state.mic_eq_unsaved = true;
     }
-    // Save once the slider is released, not on every drag frame.
-    if state.mic_eq_unsaved && !ui.ctx().input(|i| i.pointer.any_down()) {
-      state.mic_eq_unsaved = false;
-      state.apply_mic_eq();
-    }
   });
 }
 

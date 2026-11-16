@@ -72,12 +72,6 @@ impl eframe::App for GamersEqualizerApp {
     let output = self.win_audio.chatmix.master_device_id.clone();
     self.state.output_eq_do(|eq, shm| eq.tick(owner, output, shm));
     self.state.active_game_name = self.state.output_eq.active_game.as_ref().map(|g| g.label.clone());
-    // Save an output EQ band edit once the slider is released, not on every drag frame.
-    if !ctx.input(|i| i.pointer.any_down())
-      && let Some(layer) = self.state.out_eq_unsaved.take()
-    {
-      self.state.output_eq_do(|eq, shm| eq.save_layer_profile(layer, shm));
-    }
 
     // 3. Refresh endpoints and track Windows system default device changes in real time
     self.win_audio.endpoint_lock.enforce_lock();
@@ -197,7 +191,7 @@ impl eframe::App for GamersEqualizerApp {
     self.win_audio.chatmix.sessions_enabled = !self.state.is_daemon_active();
     self.win_audio.chatmix.apply_mix();
     self.state.sync_mixer_to_shm(&self.win_audio.chatmix);
-    self.state.save_audio_settings_if_changed(ctx.input(|i| i.pointer.any_down()));
+    self.state.save_pending(ctx.input(|i| i.pointer.any_down()));
 
     // Bridge any egui output copy command to Windows clipboard
     ctx.output(|o| {
@@ -217,5 +211,6 @@ impl eframe::App for GamersEqualizerApp {
 
   fn on_exit(&mut self) {
     self.window.save();
+    self.state.save_pending(false);
   }
 }

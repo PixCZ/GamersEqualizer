@@ -134,7 +134,8 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
         .clicked()
       {
         state.signal_daemon_shutdown();
-        std::process::exit(0);
+        // A normal close: `on_exit` still saves the window and pending edits.
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
       }
     });
   });
@@ -307,8 +308,9 @@ fn uninstall_card(ui: &mut Ui, state: &mut AppState) {
       if go {
         match crate::uninstall::uninstall_all(state.uninstall_ui.remove_user_data) {
           Ok(()) => {
+            // The data cleanup waits for this process to end, so saving on exit is harmless.
             state.signal_daemon_shutdown();
-            std::process::exit(0);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
           }
           Err(e) => {
             log::warn!("[Settings] uninstall failed: {e}");
