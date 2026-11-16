@@ -12,7 +12,10 @@ use gamersequalizer_common::sidetone::{
 };
 use gamersequalizer_mic_chain::sidetone_denoise::nominal_delay_ms;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// The default devices are a Windows audio call: asked twice a second, not every frame.
+const DEVICES_RECHECK: Duration = Duration::from_millis(500);
 
 pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   theme::page_header(
@@ -25,12 +28,15 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
 
   // 1. The pair the worker follows (same rule: `sidetone::active_pair`), and its names.
   let (mut saved_pairs, _) = sidetone::pairs();
-  let pair_ids = sidetone::active_pair(
-    state.selected_mic_endpoint_id.clone(),
-    || win_audio.endpoint_lock.get_default_capture_id(),
-    win_audio.endpoint_lock.get_default_output_id(),
-  );
-  let Some(pair_key) = pair_ids else {
+  if state.sidetone_ui.devices_checked.is_none_or(|t| t.elapsed() >= DEVICES_RECHECK) {
+    state.sidetone_ui.devices_checked = Some(Instant::now());
+    state.sidetone_ui.devices = sidetone::active_pair(
+      state.selected_mic_endpoint_id.clone(),
+      || win_audio.endpoint_lock.get_default_capture_id(),
+      win_audio.endpoint_lock.get_default_output_id(),
+    );
+  }
+  let Some(pair_key) = state.sidetone_ui.devices.clone() else {
     state.save_sidetone_pair();
     theme::status_line(ui, Severity::Warning, tr("Sidetone needs a microphone and an output device."));
     return;

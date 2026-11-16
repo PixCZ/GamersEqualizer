@@ -46,6 +46,10 @@ pub struct SidetoneUi {
   pub last_reader_beat_time: Option<std::time::Instant>,
   pub last_writer_beat: u32,
   pub last_writer_beat_time: Option<std::time::Instant>,
+  /// (mic id, output id) sidetone follows, read from Windows at most every `DEVICES_RECHECK`
+  /// (`tab_sidetone.rs`), not on every frame.
+  pub devices: Option<(String, String)>,
+  pub devices_checked: Option<std::time::Instant>,
 }
 
 pub struct AppState {
