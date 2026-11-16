@@ -30,7 +30,8 @@ impl StreamProcessor {
         shm,
         slot,
         sample_rate,
-        eq: EqFade::new(BiquadCascade::default(), sample_rate, 4096),
+        // Room for this stream's channels now: `build` runs on the audio thread.
+        eq: EqFade::new(BiquadCascade::with_channels(channels as usize), sample_rate, 4096),
         built: None,
         owner: OwnerWatch::default(),
         failed: false,
@@ -93,7 +94,8 @@ impl StreamProcessor {
     self.eq.crossfade(buf, channels, goal, |_| {});
   }
 
-  /// Load the bands of `target` (allocates; only when its version changed).
+  /// Load the bands of `target`, only when its version changed. Allocates only if the engine
+  /// sends another channel count than `create` was told.
   fn build(&mut self, target: Option<(StreamBus, u32)>, channels: usize, fresh: bool) {
     self.built = target;
     let Some(eq) = target.and_then(|(bus, _)| bus.eq_index()).and_then(|i| self.shm.layout().header.stream_eq.get(i))
