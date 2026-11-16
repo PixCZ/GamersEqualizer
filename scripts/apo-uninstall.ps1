@@ -37,8 +37,9 @@ trap {
   # `finally` that restarts audio never runs. Start it here first (no-op when it is running).
   Start-Service Audiosrv -ErrorAction SilentlyContinue -WarningAction SilentlyContinue
   $script:AudioStopped = $false
+  # Always said: a silent run (winget, `--uninstall --silent`) has only the log to tell why.
+  Say "`nUninstall failed: $_" Red
   if ($FromApp) {
-    Say "`nUninstall failed: $_" Red
     Read-Host 'Press Enter to close'
     exit 1
   }

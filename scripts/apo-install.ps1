@@ -80,12 +80,13 @@ trap {
       try { Restore-FxSnapshot $made } catch { Say "Removing the effect list made for $($made.Flow) $($made.Id) failed: $_" Red }
     }
   }
+  # Always said: a silent run (winget, `--install --silent`) has only the log to tell why.
+  $loc = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) {
+    " (line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim()))"
+  }
+  else { '' }
+  Say "`nInstall failed: $_$loc" Red
   if ($FromApp) {
-    $loc = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptLineNumber) {
-      " (line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim()))"
-    }
-    else { '' }
-    Say "`nInstall failed: $_$loc" Red
     Read-Host 'Press Enter to close'
     exit 1
   }

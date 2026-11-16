@@ -275,5 +275,20 @@ foreach ($case in $openCases) {
   Check "probe open: $($case.Name)" $ok "expected '$($case.Want)', got '$got' (started $started, threw $threw)"
 }
 
+# --- The trap says why the run failed also without -FromApp (a silent run has only the log) -----
+foreach ($script in $parsed.Keys | Where-Object { $_ -notlike '*apo-common.ps1' }) {
+  $trap = $parsed[$script].Find({ param($n) $n -is [System.Management.Automation.Language.TrapStatementAst] }, $false)
+  $say = if ($trap) {
+    $trap.Body.Find({
+        param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.Extent.Text -match '^Say "`n(Install|Uninstall) failed: \$_'
+      }, $true)
+  }
+  $inIf = $false
+  for ($n = $say; $n -and $n -ne $trap; $n = $n.Parent) {
+    if ($n -is [System.Management.Automation.Language.IfStatementAst]) { $inIf = $true }
+  }
+  Check "trap says the failure: $(Split-Path -Leaf $script)" ([bool]$say -and -not $inIf) 'missing, or only under a condition'
+}
+
 if ($failed) { throw "$failed of $total checks failed." }
 Write-Host "apo-install: $total checks passed."

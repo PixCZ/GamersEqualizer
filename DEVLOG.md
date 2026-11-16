@@ -2971,7 +2971,9 @@ refactoring, then a review of every step and its fixes. No new features.
 - The review's fixes were written on a Mac: type-checked and clippy-clean for the Windows target, the
   installer self-check run under `pwsh`; the Rust tests of the daemon, the APO and the mic chain run
   first in CI.
-- Installer as administrator: an update that fails, and an update whose self-test rolls back.
+- Installer as administrator: an update whose self-test rolls back. Checked: an update that fails
+  (installed DLL held open) keeps every endpoint's effects; its reason now reaches the log in a silent
+  run too (the trap said it only with `-FromApp`, the uninstaller's as well).
 - "(none)" for a detected game in the window; Master behind Sonar when a monitor is plugged in; the
   window on a second monitor at 150 % that is then unplugged.
 - A `-DebugCapture` recording of the mic chain against one from before (pause, model switch, output
