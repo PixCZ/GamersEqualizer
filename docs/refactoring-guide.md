@@ -514,7 +514,7 @@ dnes opravdu používá (`main.rs:191` a dál), ať nic nevypadne.
 - **I2. Vrstvy EQ:** `ProfileStorage::dir_for(layer)` a jedno čtení, uložení a smazání pro všechny
   čtyři vrstvy (`output_eq/mod.rs:156-493`).
 - **I3. Prolínání EQ v APO:** `EqFade { cascade, preamp_gain, wet, step, scratch }` pro výstup i stream.
-  Přidej chybějící test přepnutí kanálu Chat -> Média (`apo/src/lib.rs:957-964`).
+  Přidej chybějící test přepnutí kanálu Chat -> Média (`apo/src/stream.rs`).
 - **I4. Ovladače:** `theme::percent_volume` a `theme::level_text` místo tří kopií.
 - **I5. Zařízení přes COM:** `win_audio/mmdevice.rs` místo asi patnácti opsaných výčtů; při tom
   uvolnit text z `GetId` (`chatmix.rs:261`).
@@ -533,7 +533,7 @@ dnes opravdu používá (`main.rs:191` a dál), ať nic nevypadne.
 ## Fáze J: menší nálezy
 
 Seznam je v auditu („Menší nálezy“). Vezmi každý ve fázi, která na dané místo sahá; co zbyde, tady.
-Jeden je hypotéza a potřebuje **ruční krok**: APO výstupu na „tichém“ bloku (`apo/src/lib.rs:1758-1763`),
+Jeden je hypotéza a potřebuje **ruční krok**: APO výstupu na „tichém“ bloku (`process_connection` v `apo/src/entry.rs`),
 zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 
 ---
@@ -585,7 +585,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] G3 nastavení jednou
 - [x] G4 drobnosti řetězce (`frame_fifo.rs` s `FrameInput`/`FrameOutput`, i pro DPDFNet s překryvem oken)
 - [x] G5 vstupní body COM (`guarded`; zbývá ruční nahrávka `-DebugCapture` před fází a po ní)
-- [ ] H dělení souborů (`shm.rs` se nepovedlo: příkazy shellu odmítla automatická bezpečnostní kontrola, soubor zůstal celý; skript na rozdělení je připravený, udělat znovu)
+- [ ] H dělení souborů (hotovo: `common/sidetone`, `apo/lib.rs`; `shm.rs` se nepovedlo: příkazy shellu odmítla automatická bezpečnostní kontrola, soubor zůstal celý; skript na rozdělení je připravený, udělat znovu)
 - [ ] I1 až I8
 - [ ] J menší nálezy
 - [ ] K úklid
