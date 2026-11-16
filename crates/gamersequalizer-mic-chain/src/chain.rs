@@ -1140,6 +1140,56 @@ mod tests {
     assert!(p.mic_mono_temp[..BLOCK].iter().all(|&s| s == 0.0), "samples from before the switch came out");
   }
 
+  /// Safety net for changes that must not change the sound: speech, keys and an echo of the
+  /// reference through the whole chain (AEC, RNNoise, leveler, limiter), with a pause, a master
+  /// bypass, AEC off and on and "Learn again" on the way. Energy per second of the output must
+  /// stay what it was; a change that is meant to alter the sound updates `EXPECTED` with a reason.
+  #[test]
+  fn test_whole_chain_output_stays_the_same() {
+    use crate::ai_denoiser::tests::read_wav_48k;
+    const SECONDS: usize = 8;
+    const ECHO_DELAY: usize = 960;
+    const EXPECTED: [f64; SECONDS] = [5.0476, 568.84, 108.94, 70.691, 194.11, 148.51, 63.333, 68.401];
+    let speech = read_wav_48k("speech_clean.wav");
+    let keys = read_wav_48k("1-137-A-32.wav");
+    let reference: Vec<f32> = noise(SECONDS * 48_000 + 48_000, 7).iter().map(|s| s * 0.4).collect();
+    let mut p = chain_with_reference("golden", &reference);
+    let header = p.shm_header().expect("mapping");
+    header.aec_cached_delay_samples.store(ECHO_DELAY as u32, Ordering::Relaxed);
+    let mut energy = [0.0f64; SECONDS];
+    let mut out = vec![0.0f32; FRAME_480];
+    for k in 0..SECONDS * 100 {
+      let t = T0_HNS + 5_000_000 + (k * FRAME_480) as u64 * 10_000_000 / 48_000;
+      let start = ref_position(&p, t, reference.len());
+      let mic: Vec<f32> = (0..FRAME_480)
+        .map(|i| {
+          let n = k * FRAME_480 + i;
+          let echo = (start + i).checked_sub(ECHO_DELAY).map_or(0.0, |j| reference[j]);
+          speech[n % speech.len()] + 0.5 * keys[n % keys.len()] + 0.2 * echo
+        })
+        .collect();
+      let h = p.shm_header().expect("mapping");
+      match k {
+        200 => p.pause(),
+        300..305 => h.master_bypass.store(true, Ordering::Relaxed),
+        400..410 => h.aec_enabled.store(false, Ordering::Relaxed),
+        500 => _ = h.mic_leveler_reset_seq.fetch_add(1, Ordering::Relaxed),
+        _ => {
+          h.master_bypass.store(false, Ordering::Relaxed);
+          h.aec_enabled.store(true, Ordering::Relaxed);
+        }
+      }
+      p.process_timed(&[&mic], &mut [&mut out], Some(t));
+      energy[k / 100] += out.iter().map(|&s| f64::from(s) * f64::from(s)).sum::<f64>();
+    }
+    eprintln!("energy per second: {energy:?}");
+    for (second, (got, want)) in energy.iter().zip(EXPECTED).enumerate() {
+      assert!((got - want).abs() <= 1e-3 * want.abs().max(1e-6), "second {second}: {got} vs {want}");
+    }
+  }
+
+  const FRAME_480: usize = 480;
+
   /// Blocks that don't line up with AEC3's 480-sample frames, so it queues output.
   const BLOCK: usize = 441;
   const T0_HNS: u64 = 10_000_000_000;
