@@ -1,5 +1,6 @@
 use super::app_channels::{self, AppChannel};
 use super::endpoint_lock::{AudioEndpointInfo, get_endpoint_info};
+use super::mmdevice;
 use gamersequalizer_common::shm::ShmHeader;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -9,10 +10,10 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{
-  AudioSessionStateActive, DEVICE_STATE_ACTIVE, IAudioSessionControl2, IAudioSessionManager2, IMMDevice,
-  IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eConsole, eRender,
+  AudioSessionStateActive, DEVICE_STATE_ACTIVE, IAudioSessionControl2, IAudioSessionManager2, ISimpleAudioVolume,
+  eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
 use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows_core::Interface;
@@ -182,12 +183,9 @@ impl ChatMixController {
     // interface is created in this block and released when dropped.
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-      let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-      let default_id = enumerator
-        .GetDefaultAudioEndpoint(eCapture, eConsole)
-        .and_then(|d| d.GetId())
-        .ok()
-        .and_then(|id| id.to_string().ok());
+      let enumerator = mmdevice::enumerator().ok()?;
+      let default_id =
+        enumerator.GetDefaultAudioEndpoint(eCapture, eConsole).ok().and_then(|d| mmdevice::device_id(&d));
       let collection = enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE).ok()?;
       let count = collection.GetCount().ok()?;
       let devices: Vec<AudioEndpointInfo> = (0..count)
@@ -594,7 +592,7 @@ unsafe fn get_all_session_managers() -> Vec<IAudioSessionManager2> {
   unsafe {
     let mut managers = Vec::new();
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+    if let Ok(enumerator) = mmdevice::enumerator()
       && let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
       && let Ok(count) = collection.GetCount()
     {

@@ -16,10 +16,10 @@ use gamersequalizer_common::sidetone::{SidetonePairs, device_hash};
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use windows::Win32::Media::Audio::{
   AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_ENGINE_PERIODICITY_LOCKED, AUDCLNT_SHAREMODE_SHARED, IAudioCaptureClient,
-  IAudioClient, IAudioClient3, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
+  IAudioClient, IAudioClient3, IAudioRenderClient, WAVEFORMATEX,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
-use windows::core::{Interface, PCWSTR};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
+use windows::core::Interface;
 
 use super::loopback;
 use crate::output_eq::settings::write_atomic;
@@ -249,17 +249,6 @@ impl OpenFailure {
   }
 }
 
-/// # Safety
-/// COM must be initialized on this thread.
-unsafe fn open_device(id: &str) -> windows::core::Result<IMMDevice> {
-  // SAFETY: the contract above; `wide` is NUL-terminated and outlives GetDevice.
-  unsafe {
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-    enumerator.GetDevice(PCWSTR(wide.as_ptr()))
-  }
-}
-
 /// Opens and starts a shared-mode stream on device `id`; `tag` ("capture" / "render") names it
 /// in the log. With `low_latency` it asks for the engine's shortest period and falls back to
 /// the default one.
@@ -270,7 +259,7 @@ unsafe fn open_stream<S: Interface>(id: &str, low_latency: bool, tag: &str) -> w
   // SAFETY: the contract above; `format` owns the mix format block (freed by `MixFormat`) and outlives Initialize;
   // it is the last field of `Stream`, so it is freed after the client.
   unsafe {
-    let device = open_device(id)?;
+    let device = super::mmdevice::device(id)?;
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
     let format = MixFormat(client.GetMixFormat()?);
     let granted = low_latency && init_low_latency(&client, format.0, tag);

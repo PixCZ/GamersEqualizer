@@ -10,10 +10,9 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Media::Audio::{
   AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
   AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-  IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
-  WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
+  IAudioCaptureClient, IAudioClient, IMMDevice, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Threading::{
   AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, WaitForSingleObject,
 };
@@ -23,6 +22,7 @@ use gamersequalizer_common::shm::StereoFrame;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::apo_link::ApoLink;
+use super::mmdevice;
 
 const LOOPBACK_BUFFER_MS: i64 = 20;
 const HNS_PER_MS: i64 = 10_000;
@@ -143,35 +143,13 @@ pub fn resolve_render_id(explicit: Option<&str>) -> Option<String> {
   if let Some(id) = explicit {
     return Some(id.to_string());
   }
-  // SAFETY: COM calls on interfaces created here; on a thread without COM, CoCreateInstance fails and this returns
-  // None.
-  unsafe {
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let dev = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-    device_id(&dev)
-  }
+  // On a thread without COM this returns None.
+  mmdevice::default_device_id(eRender, eConsole)
 }
 
 /// Id of the Windows default microphone (the endpoint the APO most likely runs on).
 pub fn resolve_default_capture_id() -> Option<String> {
-  // SAFETY: as `resolve_render_id`.
-  unsafe {
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let dev = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole).ok()?;
-    device_id(&dev)
-  }
-}
-
-/// # Safety
-/// COM is initialized on this thread (`dev` is a live device).
-unsafe fn device_id(dev: &IMMDevice) -> Option<String> {
-  // SAFETY: the contract above; the id string GetId allocates is freed once below.
-  unsafe {
-    let pw = dev.GetId().ok()?;
-    let id = pw.to_string().ok();
-    CoTaskMemFree(Some(pw.as_ptr() as *const _));
-    id
-  }
+  mmdevice::default_device_id(eCapture, eConsole)
 }
 
 fn run_loopback(
@@ -189,18 +167,15 @@ fn run_loopback(
     let mut res = StreamResources::new();
     res.register_mmcss(w!("Audio"));
 
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-      .map_err(|e| format!("CoCreateInstance MMDeviceEnumerator failed: {}", e))?;
+    let enumerator =
+      mmdevice::enumerator().map_err(|e| format!("CoCreateInstance MMDeviceEnumerator failed: {}", e))?;
     let dev: IMMDevice = match explicit_id {
-      Some(id) => {
-        let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-        enumerator.GetDevice(PCWSTR(wide.as_ptr())).map_err(|e| format!("GetDevice {}: {}", id, e))?
-      }
+      Some(id) => mmdevice::device(id).map_err(|e| format!("GetDevice {}: {}", id, e))?,
       None => {
         enumerator.GetDefaultAudioEndpoint(eRender, eConsole).map_err(|e| format!("No default output device: {}", e))?
       }
     };
-    let opened_id = device_id(&dev);
+    let opened_id = mmdevice::device_id(&dev);
 
     let client: IAudioClient = dev.Activate(CLSCTX_ALL, None).map_err(|e| format!("Activate: {}", e))?;
     let mix: *mut WAVEFORMATEX = client.GetMixFormat().map_err(|e| format!("GetMixFormat: {}", e))?;
@@ -240,7 +215,8 @@ fn run_loopback(
       if explicit_id.is_none() && last_default_check.elapsed() >= DEFAULT_CHECK_INTERVAL {
         last_default_check = Instant::now();
         // Reuses this stream's enumerator (a new one each second was needless COM churn).
-        let default_now = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok().and_then(|d| device_id(&d));
+        let default_now =
+          enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok().and_then(|d| mmdevice::device_id(&d));
         if default_now != opened_id {
           info!("[Loopback] Windows default output changed, reopening");
           break;

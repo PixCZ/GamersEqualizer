@@ -23,10 +23,9 @@ use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use log::{error, info};
 use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
 use windows::Win32::Media::Audio::{
-  AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
-  eConsole, eRender,
+  AudioSessionStateActive, IAudioSessionControl2, IAudioSessionManager2, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::core::Interface;
@@ -182,12 +181,8 @@ impl Router {
   fn refresh_sessions(&mut self) -> Result<(), String> {
     // SAFETY: COM calls on interfaces we own; strings freed with CoTaskMemFree.
     unsafe {
-      let devices: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
-      let device = devices.GetDefaultAudioEndpoint(eRender, eConsole).map_err(|e| format!("default output: {e}"))?;
-      let id = device.GetId().map_err(|e| format!("device id: {e}"))?;
-      let id_text = id.to_string().unwrap_or_default();
-      CoTaskMemFree(Some(id.0 as *const _));
+      let device = super::mmdevice::default_device(eRender, eConsole).map_err(|e| format!("default output: {e}"))?;
+      let id_text = super::mmdevice::device_id(&device).ok_or("default output: no readable id")?;
       if self.manager.as_ref().is_none_or(|(current, _)| *current != id_text) {
         let manager: IAudioSessionManager2 =
           device.Activate(CLSCTX_ALL, None).map_err(|e| format!("session manager: {e}"))?;

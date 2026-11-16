@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
   DEVICE_STATE, DEVICE_STATE_ACTIVE, EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, IMMNotificationClient,
-  IMMNotificationClient_Impl, MMDeviceEnumerator, eCapture, eConsole, eRender,
+  IMMNotificationClient_Impl, eCapture, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, STGM_READ};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, STGM_READ};
 use windows::core::{PCWSTR, implement};
 
 use super::policy_config::IPolicyConfig;
@@ -128,7 +128,7 @@ impl EndpointLockManager {
     // and the callback registered on it is unregistered in `Drop` before either is released.
     unsafe {
       let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-      let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+      let enumerator = super::mmdevice::enumerator()?;
       let client: IMMNotificationClient = EndpointNotificationHandler::new(Arc::clone(&state)).into();
       enumerator.RegisterEndpointNotificationCallback(&client)?;
 
@@ -249,16 +249,13 @@ impl EndpointLockManager {
   }
 
   pub fn get_default_capture_id(&self) -> Option<String> {
-    // SAFETY: COM calls on `self.enumerator`; the id string GetId allocates is freed once below.
+    // SAFETY: a COM call on `self.enumerator`; `device_id` frees the id text.
     unsafe {
-      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
-        && let Ok(pwstr) = device.GetId()
-      {
-        let s = pwstr.to_string().ok();
-        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-        return s;
-      }
-      None
+      self
+        .enumerator
+        .GetDefaultAudioEndpoint(eCapture, eConsole)
+        .ok()
+        .and_then(|device| super::mmdevice::device_id(&device))
     }
   }
 
@@ -286,14 +283,11 @@ impl EndpointLockManager {
   pub fn get_default_output_id(&self) -> Option<String> {
     // SAFETY: as `get_default_capture_id`.
     unsafe {
-      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
-        && let Ok(pwstr) = device.GetId()
-      {
-        let s = pwstr.to_string().ok();
-        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-        return s;
-      }
-      None
+      self
+        .enumerator
+        .GetDefaultAudioEndpoint(eRender, eConsole)
+        .ok()
+        .and_then(|device| super::mmdevice::device_id(&device))
     }
   }
 
@@ -301,14 +295,11 @@ impl EndpointLockManager {
     // SAFETY: as `get_default_capture_id`.
     unsafe {
       use windows::Win32::Media::Audio::eCommunications;
-      if let Ok(device) = self.enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
-        && let Ok(pwstr) = device.GetId()
-      {
-        let s = pwstr.to_string().ok();
-        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
-        return s;
-      }
-      None
+      self
+        .enumerator
+        .GetDefaultAudioEndpoint(eRender, eCommunications)
+        .ok()
+        .and_then(|device| super::mmdevice::device_id(&device))
     }
   }
 

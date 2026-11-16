@@ -1,10 +1,9 @@
 use log::info;
 use serde::{Deserialize, Serialize};
 use windows::Win32::Media::Audio::{
-  IMMDevice, IMMDeviceEnumerator, ISpatialAudioClient, ISpatialAudioObjectRenderStream, MMDeviceEnumerator, eConsole,
-  eRender,
+  IMMDevice, ISpatialAudioClient, ISpatialAudioObjectRenderStream, eConsole, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::Win32::System::Com::CLSCTX_ALL;
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RegGetValueW};
 use windows::core::{Interface, PCWSTR};
 
@@ -94,11 +93,7 @@ impl DolbyAtmosGuard {
   unsafe fn query_active_endpoint(&self) -> SpatialAudioStatus {
     // SAFETY: the contract above; the interfaces are created here and released when dropped.
     unsafe {
-      let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-        Ok(e) => e,
-        Err(_) => return SpatialAudioStatus::Unsupported,
-      };
-      match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+      match super::mmdevice::default_device(eRender, eConsole) {
         Ok(device) => device_status(&device),
         Err(_) => SpatialAudioStatus::Unsupported,
       }
@@ -108,14 +103,9 @@ impl DolbyAtmosGuard {
 
 /// Spatial sound on one output (full endpoint id), for the tray's setup check.
 pub fn spatial_status(device_id: &str) -> SpatialAudioStatus {
-  let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-  // SAFETY: COM is initialized on the calling thread; `wide` is NUL-terminated and outlives the call.
+  // SAFETY: COM is initialized on the calling thread; the device is live for the call.
   unsafe {
-    let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-      Ok(e) => e,
-      Err(_) => return SpatialAudioStatus::Unsupported,
-    };
-    match enumerator.GetDevice(PCWSTR(wide.as_ptr())) {
+    match super::mmdevice::device(device_id) {
       Ok(device) => device_status(&device),
       Err(_) => SpatialAudioStatus::Unsupported,
     }

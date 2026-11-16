@@ -7,12 +7,8 @@ use log::{info, warn};
 use std::ptr::{null_mut, write_bytes};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Media::Audio::{
-  AUDCLNT_SHAREMODE_SHARED, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator,
-  MMDeviceEnumerator,
-};
-use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
-use windows::core::PCWSTR;
+use windows::Win32::Media::Audio::{AUDCLNT_SHAREMODE_SHARED, IAudioCaptureClient, IAudioClient, IAudioRenderClient};
+use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 
 /// Long enough for the audio engine to build the graph and start the capture effect.
 const CAPTURE_PROBE_TIME: Duration = Duration::from_secs(3);
@@ -60,10 +56,7 @@ fn open_shared_client(id: &str) -> Result<(IAudioClient, usize), String> {
   // SAFETY: plain WASAPI setup; `mix` is inspected before `CoTaskMemFree` frees it once.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator =
-      CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| format!("MMDeviceEnumerator: {e}"))?;
-    let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-    let device = enumerator.GetDevice(PCWSTR(wide.as_ptr())).map_err(|e| format!("GetDevice {id}: {e}"))?;
+    let device = super::mmdevice::device(id).map_err(|e| format!("GetDevice {id}: {e}"))?;
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|e| format!("Activate: {e}"))?;
     let mix = client.GetMixFormat().map_err(|e| format!("GetMixFormat: {e}"))?;
     let block_align = usize::from((*mix).nBlockAlign);

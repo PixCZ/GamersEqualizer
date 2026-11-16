@@ -14,6 +14,7 @@ pub mod leveler_log;
 pub mod loopback;
 pub mod mic_gain;
 pub mod mic_probe;
+pub mod mmdevice;
 pub mod policy_config;
 pub mod shell;
 pub mod sidetone;

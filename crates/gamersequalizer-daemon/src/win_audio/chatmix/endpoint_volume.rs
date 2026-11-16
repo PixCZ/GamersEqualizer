@@ -54,9 +54,7 @@ unsafe fn activate_endpoint<I: Interface>(device_id: &str) -> Option<I> {
   // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let device: IMMDevice = enumerator.GetDevice(windows::core::PCWSTR(wide.as_ptr())).ok()?;
+    let device = mmdevice::device(device_id).ok()?;
     device.Activate::<I>(CLSCTX_ALL, None).ok()
   }
 }
@@ -120,8 +118,7 @@ pub fn get_system_master_volume() -> Option<(f32, bool)> {
   // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+    let device = mmdevice::default_device(eRender, eConsole).ok()?;
     let endpoint_vol: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
     let level = endpoint_vol.GetMasterVolumeLevelScalar().ok()?;
     let muted = endpoint_vol.GetMute().ok()?;
@@ -134,8 +131,7 @@ pub fn set_system_master_volume(level: f32) {
   // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-      && let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+    if let Ok(device) = mmdevice::default_device(eRender, eConsole)
       && let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
     {
       let _ = endpoint_vol.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null());
@@ -148,8 +144,7 @@ pub fn set_system_master_mute(muted: bool) {
   // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
-      && let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+    if let Ok(device) = mmdevice::default_device(eRender, eConsole)
       && let Ok(endpoint_vol) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
     {
       let _ = endpoint_vol.SetMute(muted, std::ptr::null());
@@ -162,8 +157,7 @@ pub fn get_system_mic_volume() -> Option<(f32, bool)> {
   // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole).ok()?;
+    let device = mmdevice::default_device(eCapture, eConsole).ok()?;
     let endpoint_vol: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None).ok()?;
     let level = endpoint_vol.GetMasterVolumeLevelScalar().ok()?;
     let muted = endpoint_vol.GetMute().ok()?;
@@ -176,8 +170,7 @@ pub fn get_system_mic_peak() -> Option<f32> {
   // interface is created in this block and released when dropped.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-    let device: IMMDevice = enumerator.GetDefaultAudioEndpoint(eCapture, eConsole).ok()?;
+    let device = mmdevice::default_device(eCapture, eConsole).ok()?;
     let meter: IAudioMeterInformation = device.Activate(CLSCTX_ALL, None).ok()?;
     meter.GetPeakValue().ok()
   }
