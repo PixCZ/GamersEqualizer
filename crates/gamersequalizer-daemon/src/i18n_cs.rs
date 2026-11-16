@@ -522,6 +522,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Volume change {} dB", "Změna hlasitosti {} dB"),
   ("Automatic", "Automaticky"),
   ("Not a game", "Není hra"),
+  ("Game, no profile", "Hra, bez profilu"),
   // --- headphones ---
   (
     "The master switch in the header is OFF: nothing is applied right now.",

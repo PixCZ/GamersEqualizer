@@ -6,7 +6,7 @@ use super::state::{ActiveTab, AppState, OutputLayer};
 use super::theme::{self, Severity, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::output_eq::auto_preamp::generate_log_frequencies;
-use crate::output_eq::game_match::MatchMethod;
+use crate::output_eq::game_match::{BOUND_NO_PROFILE, MatchMethod};
 use crate::sonar_importer::{DEFAULT_SONAR_DB_PATH, import_sonar, read_sonar_sources};
 use egui::{Color32, RichText, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
@@ -21,6 +21,8 @@ const COMBINED_COLOR: Color32 = Color32::from_rgb(50, 230, 120);
 /// Picker value meaning "decide automatically" in the per-app binding combo.
 const AUTO: &str = tk("Automatic");
 const NOT_A_GAME: &str = tk("Not a game");
+/// Picker value meaning "a game that gets no profile of its own" (`BOUND_NO_PROFILE`).
+const NO_PROFILE: &str = tk("Game, no profile");
 
 pub fn render_tab_eq(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
   match tab {
@@ -167,8 +169,10 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
             profile_picker(ui, "active_game_profile", current, &refs, tr("(none)"), &mut filter, 240.0)
           {
             state.out_eq_unsaved = None;
-            // "(none)" drops the binding; "" would bind the exe as "Not a game".
-            state.output_eq_do(|eq, shm| eq.bind_exe(&exe, choice, shm));
+            // "(none)": still a game, without a profile of its own. Not "" (that is "Not a game")
+            // and not an unbound exe: detection would pick the same profile again.
+            let binding = choice.unwrap_or_else(|| BOUND_NO_PROFILE.to_string());
+            state.output_eq_do(|eq, shm| eq.bind_exe(&exe, Some(binding), shm));
           }
         } else {
           ui.label(RichText::new(current.map_or(tr("none"), tr)).strong());
@@ -211,8 +215,8 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
   ui.label(theme::caption(tr(
     "Apps that were in the foreground. Assign a profile if a game is not recognized, or mark an app as not a game.",
   )));
-  let (auto, not_a_game) = (tr(AUTO), tr(NOT_A_GAME));
-  let mut names: Vec<String> = vec![auto.to_string(), not_a_game.to_string()];
+  let (auto, not_a_game, no_profile) = (tr(AUTO), tr(NOT_A_GAME), tr(NO_PROFILE));
+  let mut names: Vec<String> = vec![auto.to_string(), not_a_game.to_string(), no_profile.to_string()];
   names.extend(state.output_eq.game_profiles.iter().map(|p| p.name.clone()));
   let refs: Vec<&str> = names.iter().map(String::as_str).collect();
   let apps = state.output_eq.recent_apps.clone();
@@ -236,6 +240,7 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
       let current = match bound.as_deref() {
         None => auto,
         Some("") => not_a_game,
+        Some(BOUND_NO_PROFILE) => no_profile,
         Some(p) => p,
       };
       if let Some(Some(choice)) =
@@ -244,6 +249,7 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
         let binding = match choice.as_str() {
           c if c == auto => None,
           c if c == not_a_game => Some(String::new()),
+          c if c == no_profile => Some(BOUND_NO_PROFILE.to_string()),
           p => Some(p.to_string()),
         };
         let exe = app.exe_name.clone();

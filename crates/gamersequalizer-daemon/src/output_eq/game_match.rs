@@ -1,6 +1,6 @@
 //! Which game profile belongs to a foreground process. Pure logic over facts gathered by
 //! `launchers` (so it is testable without Steam installed). Order of precedence:
-//! 1. the user's binding for this exe (or "not a game"),
+//! 1. the user's binding for this exe (a profile, "a game without a profile" or "not a game"),
 //! 2. a launcher id the Sonar profile lists (`1_<steam appid>`, `8_<ubisoft id>`, ...),
 //! 3. names (launcher title, exe product name, exe name) matched against profile names,
 //! 4. the game's genre (`genre`) picks the built-in genre profile,
@@ -10,6 +10,11 @@ use super::genre::Genre;
 use super::settings::OutputEqSettings;
 use gamersequalizer_common::profile::ParametricProfile;
 use std::collections::BTreeSet;
+
+/// Binding value for "a game, but without a profile of its own": detection picks none for it and
+/// the profile for "no game runs" plays. Reserved: a profile of this name cannot be bound. An
+/// older version does not know it, finds no such profile and detects the game by itself.
+pub const BOUND_NO_PROFILE: &str = "<no profile>";
 
 /// Ignored when comparing names: articles, publisher prefixes, build/edition noise.
 const STOPWORDS: [&str; 24] = [
@@ -92,6 +97,9 @@ pub fn resolve(settings: &OutputEqSettings, profiles: &[ParametricProfile], fact
     if bound.is_empty() {
       return None; // marked "not a game"
     }
+    if bound == BOUND_NO_PROFILE {
+      return Some(GameMatch { profile: None, label: label.clone(), method: MatchMethod::Binding });
+    }
     if let Some(p) = profiles.iter().find(|p| &p.name == bound) {
       return found(p, MatchMethod::Binding);
     }
@@ -170,6 +178,7 @@ pub fn explain(settings: &OutputEqSettings, facts: &GameFacts, matched: Option<&
   let profile = |m: &GameMatch| m.profile.clone().unwrap_or_default();
   match matched {
     Some(m) => match m.method {
+      MatchMethod::Binding if m.profile.is_none() => format!("game {}, set by you to have no profile", m.label),
       MatchMethod::Binding => format!("game {}, assigned by you to profile {}", m.label, profile(m)),
       MatchMethod::LauncherId => format!("game {}, profile {} by launcher id ({seen})", m.label, profile(m)),
       MatchMethod::Name => format!("game {}, profile {} by name ({seen})", m.label, profile(m)),
@@ -402,6 +411,11 @@ mod tests {
     let r = resolve(&s, &profiles(), &facts("weird.exe", &[], &[])).unwrap();
     assert_eq!((r.profile.as_deref(), r.method), (Some("Elden Ring"), MatchMethod::Binding));
     assert_eq!(resolve(&s, &profiles(), &facts("division2.exe", &["1_2221490"], &[])), None);
+    // "No profile" for a game detection would give one: still a game, the profile gone.
+    s.bindings.insert("division2.exe".into(), BOUND_NO_PROFILE.into());
+    let r = resolve(&s, &profiles(), &facts("division2.exe", &["1_2221490"], &[])).unwrap();
+    assert_eq!((r.profile.as_deref(), r.method), (None, MatchMethod::Binding));
+    assert!(explain(&s, &facts("division2.exe", &["1_2221490"], &[]), Some(&r)).contains("no profile"));
 
     let off = OutputEqSettings { auto_detect: false, ..Default::default() };
     assert_eq!(resolve(&off, &profiles(), &facts("cs2.exe", &["1_730"], &[])), None);
