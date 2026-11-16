@@ -156,7 +156,9 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   Old ZIPs are never deleted or overwritten; only `target/package/staging` is cleared.
 - `apo-install.ps1` / `apo-uninstall.ps1` are built into the exe (`include_str!` in
   `win_audio/apo_install.rs`) and written to `%LOCALAPPDATA%\GamersEqualizer\scripts` before each
-  elevated run. The DLL stays a separate file next to the exe (audiodg loads it from disk).
+  elevated run. What both share is in `scripts/apo-common.ps1`: run from disk they dot-source it
+  (the `# @common` line), the app puts its text in that line's place before writing and hashing.
+  The DLL stays a separate file next to the exe (audiodg loads it from disk).
 - The C runtime is linked statically (`.cargo/config.toml`), so testers need no Visual C++ Redistributable;
   `package.ps1` fails if a binary still imports `VCRUNTIME140.dll`. The same file turns on Control
   Flow Guard for every build; `package.ps1` fails if a binary lacks it or exports `VSTPluginMain`.

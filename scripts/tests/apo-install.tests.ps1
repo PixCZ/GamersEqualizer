@@ -1,20 +1,23 @@
 # Self-check of the pure helpers in apo-install.ps1. Touches nothing; runs anywhere PowerShell
 # does (also `pwsh` on macOS / Linux):  pwsh scripts/tests/apo-install.tests.ps1
 $ErrorActionPreference = 'Stop'
-$script = Join-Path (Split-Path $PSScriptRoot) 'apo-install.ps1'
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
+# apo-common.ps1 is what the app puts in place of the script's `# @common` line.
+$scripts = 'apo-common.ps1', 'apo-install.ps1' | ForEach-Object { Join-Path (Split-Path $PSScriptRoot) $_ }
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
   'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated',
   'Remove-OurEffects'
 $variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
-$pieces = $ast.FindAll({
-    param($n)
-    ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions) -or
-    ($n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -in $variables)
-  }, $false)
+$pieces = @(foreach ($script in $scripts) {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
+    $ast.FindAll({
+        param($n)
+        ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions) -or
+        ($n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -in $variables)
+      }, $false)
+  })
 $expected = $functions.Count + $variables.Count
-if ($pieces.Count -ne $expected) { throw "Expected $expected functions and variables in $script; found $($pieces.Count)." }
+if ($pieces.Count -ne $expected) { throw "Expected $expected functions and variables in $($scripts -join ', '); found $($pieces.Count)." }
 $pieces | ForEach-Object { Invoke-Expression $_.Extent.Text }
 
 $failed = 0

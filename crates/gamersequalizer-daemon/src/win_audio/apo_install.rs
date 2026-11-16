@@ -41,6 +41,10 @@ const SCRIPT_NAME: &str = "apo-install.ps1";
 const SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-install.ps1"));
 const UNINSTALL_SCRIPT_NAME: &str = "apo-uninstall.ps1";
 const UNINSTALL_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-uninstall.ps1"));
+/// What both scripts share. Run from disk they load it with `COMMON_LINE`; the app puts its text
+/// in that line's place (`with_common`), so the elevated run is one text with one hash.
+const COMMON_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/apo-common.ps1"));
+const COMMON_LINE: &str = r#". "$PSScriptRoot\apo-common.ps1"  # @common"#;
 /// Composite MFX (mode effect) list: the mic effect moves there on mics that never start EFX.
 const MFX_LIST_VALUE: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14";
 /// Composite SFX/MFX/EFX effect lists in an endpoint's FxProperties.
@@ -573,7 +577,8 @@ fn run_script_elevated(
   what: &str,
   run: ScriptRun,
 ) -> Result<Option<u32>, String> {
-  let path = write_script(name, content)?;
+  let content = with_common(content);
+  let path = write_script(name, &content)?;
   let hash = sha256_hex(content.as_bytes())?;
   let bootstrap = elevated_bootstrap(&path.to_string_lossy(), &hash, args);
   let params = format!("-NoProfile -ExecutionPolicy Bypass -EncodedCommand {}", encode_command(&bootstrap));
@@ -631,6 +636,11 @@ fn elevated_bootstrap(script_path: &str, sha256_hex: &str, args: &str) -> String
     format!(". ([scriptblock]::Create($c)) {args}"),
   ]
   .join("\n")
+}
+
+/// `script` with `apo-common.ps1` in place of the line that loads it from disk.
+fn with_common(script: &str) -> String {
+  script.replacen(COMMON_LINE, COMMON_SCRIPT, 1)
 }
 
 /// `-EncodedCommand` takes base64 of UTF-16LE.
@@ -951,7 +961,8 @@ mod tests {
     let has = |script: &str, text: &str| script.to_lowercase().contains(&text.to_lowercase());
     let fx_guid = FX_ASSOC_VALUE.split(',').next().unwrap();
     let modes_guid = FX_MODE_VALUES[0].1.split(',').next().unwrap();
-    for script in [SCRIPT, UNINSTALL_SCRIPT] {
+    let (install, uninstall) = (with_common(SCRIPT), with_common(UNINSTALL_SCRIPT));
+    for script in [&install, &uninstall] {
       assert!(has(script, &format!("$FxGuid = '{fx_guid}'")));
       assert!(has(script, &format!("$ModesGuid = '{modes_guid}'")));
       for text in ALL_CLSIDS.iter().chain(&[NULL_GUID, DEFAULT_PROCESSING_MODE]) {
@@ -961,12 +972,12 @@ mod tests {
     let values = FX_LIST_VALUES.iter().chain(FX_LEGACY_VALUES.iter().chain(&FX_MODE_VALUES).map(|(_, v)| v));
     for value in values {
       let text = format!("\"{}\"", value.replace(fx_guid, "$FxGuid").replace(modes_guid, "$ModesGuid"));
-      assert!(has(SCRIPT, &text), "{text}");
+      assert!(has(&install, &text), "{text}");
     }
     for text in [ENDPOINT_NAME_VALUE, DEVICE_NAME_VALUE, DISABLE_SYSFX_VALUE] {
-      assert!(has(SCRIPT, &format!("'{text}'")), "{text}");
+      assert!(has(&install, &format!("'{text}'")), "{text}");
     }
-    assert!(has(SCRIPT, &format!("DeviceState -band {DEVICE_STATE_MASK:#X}) -eq {DEVICE_STATE_ACTIVE}")));
+    assert!(has(&install, &format!("DeviceState -band {DEVICE_STATE_MASK:#X}) -eq {DEVICE_STATE_ACTIVE}")));
   }
 
   #[test]
@@ -1010,7 +1021,16 @@ mod tests {
   #[test]
   fn scripts_have_no_bom_so_the_elevated_hash_matches() {
     // `ReadAllText` drops a BOM, `include_str!` keeps it: the hashes would never match.
-    assert!(!SCRIPT.starts_with('\u{feff}') && !UNINSTALL_SCRIPT.starts_with('\u{feff}'));
+    assert!([SCRIPT, UNINSTALL_SCRIPT, COMMON_SCRIPT].iter().all(|s| !s.starts_with('\u{feff}')));
+  }
+
+  #[test]
+  fn both_scripts_get_the_common_part_once() {
+    for script in [SCRIPT, UNINSTALL_SCRIPT] {
+      assert_eq!(script.matches(COMMON_LINE).count(), 1);
+      let full = with_common(script);
+      assert!(!full.contains(COMMON_LINE) && full.contains(COMMON_SCRIPT));
+    }
   }
 
   /// Runs the bootstrap (not elevated) on a tiny script: unchanged runs with the arguments,

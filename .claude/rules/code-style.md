@@ -60,8 +60,9 @@ undocumented_unsafe_blocks = "deny"
 
 ## PowerShell (`scripts/`)
 
-- `apo-install.ps1` / `apo-uninstall.ps1` run elevated under Windows PowerShell 5.1; their self-check
-  (`scripts/tests/apo-install.tests.ps1`) also runs under `pwsh` on macOS. Code must work in both.
+- `apo-install.ps1` / `apo-uninstall.ps1` (and `apo-common.ps1`, which both include) run elevated under
+  Windows PowerShell 5.1; their self-check (`scripts/tests/apo-install.tests.ps1`) also runs under
+  `pwsh` on macOS. Code must work in both.
 - Constants shared with Rust (CLSIDs, registry value names, device-state bits) must agree with
   `win_audio/apo_install.rs` (test `scripts_use_the_same_constants`).
 
