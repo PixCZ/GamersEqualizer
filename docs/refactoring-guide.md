@@ -538,6 +538,92 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 
 ---
 
+## Fáze R: nálezy z kontroly větve (16. 11.)
+
+Kontrola všech 87 commitů od `69198dd`, čtením kódu na Macu (bez překladu). Přesuny („move only“,
+testy do `tests.rs`), formát a edice 2024 jsou ověřené strojově a čisté. Níže je, co kontrola našla
+v commitech měnících chování. Platí pravidla práce shora: jeden nález, jeden commit, nejdřív test.
+„Ověřeno v kódu“ = dohledáno na řádku; „Odvozeno z kódu“ = sled kroků vychází, neběželo to.
+
+**Opravit před sloučením**
+
+- **R1. Neúspěšná aktualizace odebere naše efekty** (`1df592d`, `scripts/apo-install.ps1:771`
+  a `864-871`) — *Ověřeno v kódu*. `$FxSnapshots` teď drží snímek bez našich efektů a obnovuje z něj
+  i `catch` kolem instalace. Když aktualizace spadne dřív, než na zařízení cokoli změní („The DLL next
+  to the app changed ... nothing installed“, zamčená DLL u `Move-Item`), zařízení o naše efekty přijde,
+  hláška říká „nic nenainstalováno“ a řádek `Rolled back` chybí. Oprava: `catch` obnovuje z plného
+  snímku (stav na začátku běhu), snímek bez našich efektů zůstane jen pro návrat po zkoušce
+  (`Rollback-Job`, `Resolve-ProbeOpen`, pád audiodg po startu). Test do `apo-install.tests.ps1`.
+- **R2. Po návratu z aktualizace si další instalace uloží smíšený stav jako „původní“ zálohu**
+  (`1df592d` s pravidlem z `f7abe93`, `apo-install.ps1:766-777`) — *Odvozeno z kódu*. Po návratu na
+  zařízení nezůstane naše CLSID, ale zůstane režim Default z `Ensure-ProcessingMode` a klíč, který
+  udělala dřívější instalace. Příští instalace proto zálohu přepíše: `Created` je pryč (odinstalace
+  klíč nesmaže) a náš Default je zapsaný jako ovladačův. Oprava: když snímek drží naše efekty a záloha
+  existuje, je cílem návratu záloha (poslední stav před GamersEqualizerem včetně `Created`).
+- **R3. Okno bez role vlastníka zapíše „je to hra“** (`5529b86`,
+  `output_eq/detection.rs:50`) — *Ověřeno v kódu*, časování je hypotéza. `set_detected_game` běží
+  i v okně, které má jen `GenreLookup::cached`. U nástroje ze Steamu, který v cache ještě není, je
+  `not_a_game` prázdné, `resolve` vrátí hru bez profilu a okno zapíše Game do `detected_apps.json`.
+  Služba pak svůj zápis „není hra“ přeskočí, pokud si soubor ještě nenačetla, a zvuk nástroje zůstane
+  mimo kanál Média do dalšího přepnutí na něj. Oprava: `set_detected_game` až za `if !owner { return; }`.
+- **R4. Okno bez role vlastníka čte disk a registry při každém přepnutí okna** (`5529b86`,
+  `detection.rs:140-147`) — *Ověřeno v kódu*. `facts_cache` se plní jen vlastníkovi, takže okno při
+  každé události znovu pouští `gather_facts` (složky Steamu, `.acf`, manifesty Epicu, registry, verze
+  exe) a čte celou cache žánrů. Dřív jednou na cestu. Oprava: fakta bez žánru si okno pamatuje, znovu
+  se ptá jen `cached()` na žánr.
+- **R5. „(žádný)“ u automaticky rozpoznané hry neudělá nic** (`f83a216`, `ui/tab_eq.rs:166-170`,
+  `output_eq/game_match.rs:91-119`) — *Ověřeno v kódu*. Oprava je přesně podle návodu (B4), ale hra
+  rozpoznaná podle launcheru, jména nebo žánru žádnou vazbu nemá: `bind_exe(None)` nic nesmaže
+  a `resolve` vrátí stejný profil. „Odebrat profil“ (nález 7) tak z toho řádku nejde. Chce rozhodnutí
+  uživatele: buď volbu pojmenovat „Automaticky“, když shoda není z vazby, nebo přidat vazbu „hra bez
+  profilu“. Je to i zbývající ruční zkouška B4.
+- **R6. Master může přeskočit na jiné zařízení při každém připojení výstupu** (`a72bd4f`,
+  `daemon.rs:218-223`) — *Odvozeno z kódu*, záleží na pořadí výčtu. Je-li výchozí výstup virtuální
+  (Sonar), vrací `physical_endpoint_id` první fyzické zařízení výčtu a teď se volá při každém
+  `devices_changed`. Připojený monitor nebo USB zařízení, které je ve výčtu dřív, vezme Master i
+  referenci pro AEC. Oprava: při samotném `devices_changed` Master nechat, dokud je ve výčtu a není
+  virtuální; hledat znovu, jen když zmizel nebo se změnil výchozí výstup.
+
+**Malé, na jeden řádek až pár řádků**
+
+- **R7.** „Uložit jako“ přes profil z novější verze zahodí jeho `extra` (`71a08ca`,
+  `output_eq/profiles.rs:204-208`: větev náhrady kopíruje `name`, `game_ids`, `is_custom`, ne
+  `extra`). Stejně tak `SidetonePairs` (`common/src/sidetone/pairs.rs:31`) nemá `extra` pro klíče na
+  nejvyšší úrovni `sidetone.json`; komentář na řádku 5 „Unknown JSON fields are ignored“ už neplatí.
+- **R8.** EQ streamu alokuje na zvukovém vlákně (`apo/src/stream.rs:33`): kaskáda vzniká pro jeden
+  kanál, první `build` u sterea ji zvětší. `architecture.md` po `adbefee` tuhle výjimku už neuvádí.
+  Oprava: `BiquadCascade::with_channels(channels as usize)` jako v `output.rs:34`.
+- **R9.** Log řetězce píše „-120.0“ místo „none“, dokud nepřijde telemetrie (`cf6786a`:
+  `init_defaults` teď dává -1200 i skutečnému mapování, `win_audio/chain_log.rs:445` zná jen 0).
+- **R10.** Brána nehlídá skripty pro Windows PowerShell 5.1: `scripts/tests/apo-install.tests.ps1:12`
+  zahazuje chyby parseru, `apo-uninstall.ps1` neparsuje vůbec a CI i `check.ps1` pouští test jen pod
+  `pwsh` 7. Oprava: chyby parseru všech tří skriptů = selhání; na Windows pustit test i přes
+  `powershell.exe -NoProfile -File`.
+- **R11.** Po „Zastavit službu a ukončit“ a po odinstalaci log tvrdí „Background service continues
+  running uninterrupted“ (`208ca11`, `main.rs:245`).
+- **R12.** `daemon_running` (`lifecycle.rs:65-79`): `ERROR_ACCESS_DENIED` z `OpenMutexW` brát jako
+  „běží“ (služba spuštěná z okna se správcem). Není to regrese, stará kontrola se chovala stejně.
+- **R13.** Komentáře, které neplatí: „APO or bridge“ (`ui/state/mic_status.rs:79,99`,
+  `win_audio/apo_link.rs:140`, `win_audio/dsp_watch.rs:39`, `win_audio/leveler_log.rs:2`); SAFETY
+  v `mic-chain/src/shared_memory.rs:31,77-79` („fresh mapping“, ale `create_named` otevírá i hotové)
+  a v `daemon/src/shm_mapping.rs:16-18` (kontrola `magic` a `init_defaults` nejsou mezi procesy
+  atomické); `568e72d`: kontrola verze při otevření se u staré DLL s novým exe neuplatní, protože
+  jména mapování verzi nesou, `[ApoLink]` tedy dál hlásí jen „not found“.
+- **R14.** `rescue.reset()` z `flush` do `reset_engines` (`ai_denoiser/mod.rs:640`, `797`): po vypnutí
+  a zapnutí potlačení šumu zůstává stav záchrany kliknutí z doby před vypnutím.
+
+**Vědomé kompromisy, neopravovat bez důvodu**
+
+- Dvě stejná zařízení (`09417db`): po odpojení jednoho přejde jeho nastavení na druhé a zpět se
+  nevrátí. Commit to zvolil kvůli „zařízení se vrátí do prvního portu“.
+- `reset_engines` nuluje `mute_left` (`4b564a6`, G2): přepnutí na DeepFilterNet hned po pauze může
+  pustit zbytek zvuku z jeho stavu. Bez pauzy se to dělo už dřív.
+- AEC3 po `reset()` ztlumí první rámec, i když je zpožďovací linka prázdná (`f9d0fa6`): asi 1 ms.
+- Kdo nahrával z „CABLE Output“ nebo „Sonar - Microphone“, má po aktualizaci ticho a v logu o tom
+  nic není; říkají to jen poznámky k vydání (`3c0129b`).
+
+---
+
 ## Fáze K: úklid
 
 - `DEVLOG.md`: jeden stručný milník anglicky. Co se změnilo ve struktuře, nová verze sdílené paměti,
@@ -588,6 +674,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] H dělení souborů (hotovo: `common/sidetone`, `apo/lib.rs`, `ai_denoiser/`, `chain/`, `aec3/echo_meter.rs`, `health/`, `win_audio/apo_install/`, `win_audio/chatmix/`, `ui/state/` + `shm_mapping.rs`, `output_eq/`, `ui/tab_headphones/autoeq_wizard.rs`, `daemon/main.rs` (smyčka služby zůstala jedna funkce: rozdělit ji na `follow_mic` a spol. není přesun), `common/shm/`; změna chování hotová: služba bez `AppState`)
 - [x] I1 až I8 (hotovo: I1 `Channel` a `ChatMixController::write_levels` pro službu i okno; vyvážení dál zapisuje jen okno; I2 `ProfileStorage::dir_for`, `save_layer_profile`, `load_layer_profiles`, jedno uložení a smazání vrstvy v `OutputEq`; I3 `apo/src/eq_fade.rs` a test přepnutí Chat -> Média; I4 `theme::percent_volume`, `volume_text`, `level_text`: údaj nad 100 % všude krátce „250 % (+8.0 dB)“, bez „(nativně)“ a „zesílení“, aby se vešel do pásu mixéru; I5 `win_audio/mmdevice.rs` (bez `CoInitializeEx`: vlákno okna si apartmán volí samo), text z `GetId` v `find_physical_microphone` už neuniká; I6 `AppState::save_pending` z každého snímku a z `on_exit`, obě `process::exit` nahradilo zavření okna (úklid dat při odinstalaci čeká na konec procesu); bez testu: chce celý `AppState`; I7 `FilterType::Unknown(String)` (APO pásmo přeskočí, editor ho ukáže jako „Filtr z novější verze“), `extra` u profilu, `OutputEqSettings`, `UiPrefs` a `SidetonePair`, `AudioSettings::save` nechá neznámé klíče souboru (struktura se staví ze sdílené paměti), `refuse_unreadable`: soubor profilu, který tahle verze nepřečte, se nepřepíše (kontrola při uložení, ne v kreslení); `VadType` bez `Unknown`: profil s neznámým typem se při načtení přeskočí a `refuse_unreadable` ho chrání, `Unknown` by vzal `Copy` na 95 místech; `BiquadBand` bez `extra` (64 literálů), neznámé pole pásma se uložením ztratí, doplnit, až pásmo dostane nové pole; I8 Master se hledá i při `devices_changed`, `win_audio/worker.rs`: `RepeatFilter` (stejná chyba za sebou v logu jednou; `loopback` i `sidetone`) a `open_shm` se zkoušením znovu po 1 až 30 s místo konce vlákna)
 - [x] J menší nálezy (hotovo: průvodce AutoEQ hlásí chybu uložení a zůstane na kroku, vybraný soubor nad 1 MB nečte; `set_autostart` zavře klíč i při chybě; `daemon_running` mutex jen otevírá; karta odposlechu se ptá Windows na výchozí zařízení dvakrát za vteřinu, ne v každém snímku; `bus_result` a `apply_mix` jednou za snímek, log se skládá jen při změně už dřív; „Reset“ hry v okně převezme vlastník, bez nového pole ve sdílené paměti; okno jako následovník bere žánr jen z cache služby (`GenreLookup::cached`), `appinfo.vdf` čte jen vlastník, okno tedy jen bez běžící služby; APO streamu po převzetí slotu jiným procesem pustí zvuk beze změny; už dřív hotové: vstupní body COM (G5), `GetId` (I5), `capture_time_hns` (D2), AEC3 a `leveler_seed_blocked` (G), alokace při změně EQ (kaskáda má místo předem), `layout_mut` soukromé, prázdné a zdvojené testy, test překladů (B6, nepoužité české klíče žádné), záloha efektů v `AGENTS.md` (F5); odloženo: telemetrie výstupu (poslední zápis vyhrává mezi zařízeními) chce nové pole se zařízením ve sdílené paměti a čítače po zařízeních i pro kontrolu zdraví, která čte tentýž čítač; okno mimo obrazovku a tichý blok: viz Nepotvrzené nálezy)
+- [ ] R nálezy z kontroly větve (R1 až R6 před sloučením, R7 až R14 malé)
 - [ ] K úklid
 
 ## Nepotvrzené nálezy
