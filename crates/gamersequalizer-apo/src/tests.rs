@@ -462,3 +462,9 @@ fn endpoint_device_id_rejects_blocks_it_does_not_know() {
     assert_eq!(endpoint_device_id(size_of::<APOInitSystemEffects2>() as u32, &init as *const _ as *const u8), None);
   }
 }
+
+#[test]
+fn a_panic_in_a_com_entry_point_fails_the_call_instead_of_unwinding() {
+  assert_eq!(guarded("test", E_UNEXPECTED, || S_OK), S_OK);
+  assert_eq!(guarded("test", E_UNEXPECTED, || -> HRESULT { panic!("in an entry point") }), E_UNEXPECTED);
+}

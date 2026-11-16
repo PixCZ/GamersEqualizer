@@ -13,9 +13,11 @@ logged, shown, retried, never unwound.
 | `gamersequalizer.exe`          | The egui window; closing it leaves the service running  | `panic = "abort"`: a panic ends the window  |
 
 - The APO is built with `panic = "unwind"` (profiles `apo`, `apo-dist`) and wraps every call into the
-  DSP chain and every processor build / drop in `catch_unwind`. The COM entry points themselves
-  (`DllGetClassObject`, `CreateInstance`, Initialize, LockForProcess) are not guarded and must not
-  panic. The exe aborts on panic, so there the only protection is not panicking.
+  DSP chain and every processor build / drop in `catch_unwind`. The COM entry points that build
+  something (`DllGetClassObject`, `CreateInstance`, Initialize, LockForProcess) run in `guarded`:
+  a panic fails that call with `E_UNEXPECTED` and leaves an `[ApoNote]`. The other entry points
+  only check pointers and copy values. The exe aborts on panic, so there the only protection is
+  not panicking.
 - How the processes share state:
   - Shared memory (`gamersequalizer-common/src/shm.rs`): a `Local\` mapping between window and service,
     and a `Global\` mapping the APO creates inside audiodg. The service mirrors settings into it and

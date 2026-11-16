@@ -10,7 +10,8 @@
 //!
 //! Runs inside audiodg: a crash kills audio for the whole system. Build with the `apo`
 //! profile (panic = "unwind"); every call into the DSP chain is wrapped in `catch_unwind`, and
-//! after a panic the APO passes audio through unchanged. The real-time path never blocks
+//! after a panic the APO passes audio through unchanged. The COM entry points that build
+//! something are wrapped too (`guarded`): a panic there fails that call with `E_UNEXPECTED`. The real-time path never blocks
 //! (`try_lock` only).
 //!
 //! Settings, the speaker reference and AEC telemetry go through the Global mapping
@@ -62,8 +63,8 @@ use gamersequalizer_mic_chain::sidetone_denoise::{self, SidetoneDenoiser};
 use gamersequalizer_mic_chain::{MicChain, SharedMemoryClient};
 use rate_bridge::RateBridge;
 use windows::Win32::Foundation::{
-  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER, PROPERTYKEY,
-  S_FALSE, S_OK,
+  CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_NOINTERFACE, E_OUTOFMEMORY, E_POINTER,
+  E_UNEXPECTED, PROPERTYKEY, S_FALSE, S_OK,
 };
 use windows::Win32::Media::Audio::Apo::{
   APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_CONNECTION_PROPERTY_V2, APO_FLAG, APO_FLAG_DEFAULT,
@@ -383,25 +384,27 @@ pub unsafe extern "system" fn DllGetClassObject(
   riid: *const GUID,
   ppv: *mut *mut c_void,
 ) -> HRESULT {
-  // SAFETY: COM passes its own pointers or null; each is null-checked before it is read or written, and `query`
-  // writes the interface to the checked `ppv`.
-  unsafe {
-    if ppv.is_null() {
-      return E_POINTER;
+  guarded("DllGetClassObject", E_UNEXPECTED, || {
+    // SAFETY: COM passes its own pointers or null; each is null-checked before it is read or written, and `query`
+    // writes the interface to the checked `ppv`.
+    unsafe {
+      if ppv.is_null() {
+        return E_POINTER;
+      }
+      *ppv = null_mut();
+      if rclsid.is_null() || riid.is_null() {
+        return E_INVALIDARG;
+      }
+      let Some(kind) = ApoKind::from_clsid(&*rclsid) else {
+        return CLASS_E_CLASSNOTAVAILABLE;
+      };
+      // Each step Windows takes towards a running effect is noted once, so the last note shows
+      // where it stopped (class -> instance -> initialized -> formats -> stream).
+      note(Level::Info, format!("{}: class requested", kind.friendly_name()));
+      let factory: IClassFactory = ApoFactory { kind }.into();
+      factory.query(riid, ppv)
     }
-    *ppv = null_mut();
-    if rclsid.is_null() || riid.is_null() {
-      return E_INVALIDARG;
-    }
-    let Some(kind) = ApoKind::from_clsid(&*rclsid) else {
-      return CLASS_E_CLASSNOTAVAILABLE;
-    };
-    // Each step Windows takes towards a running effect is noted once, so the last note shows
-    // where it stopped (class -> instance -> initialized -> formats -> stream).
-    note(Level::Info, format!("{}: class requested", kind.friendly_name()));
-    let factory: IClassFactory = ApoFactory { kind }.into();
-    factory.query(riid, ppv)
-  }
+  })
 }
 
 /// Shortcut: never unload. audiodg keeps APOs alive anyway; tracking live objects for a
@@ -417,27 +420,29 @@ pub extern "system" fn DllCanUnloadNow() -> HRESULT {
 
 impl IClassFactory_Impl for ApoFactory_Impl {
   fn CreateInstance(&self, outer: Ref<'_, IUnknown>, riid: *const GUID, object: *mut *mut c_void) -> Result<()> {
-    let outer = outer.as_ref();
-    if object.is_null() || riid.is_null() {
-      return Err(E_POINTER.into());
-    }
-    // SAFETY: both pointers checked non-null above; COM owns them.
-    unsafe {
-      *object = null_mut();
-      let name = self.kind.friendly_name();
-      // An aggregated object may only be asked for its inner IUnknown.
-      if outer.is_some() && *riid != IUnknown::IID {
-        note(Level::Warning, format!("{name}: refused an aggregated instance asked for {:?}", *riid));
-        return Err(CLASS_E_NOAGGREGATION.into());
+    guarded("CreateInstance", Err(E_UNEXPECTED.into()), || {
+      let outer = outer.as_ref();
+      if object.is_null() || riid.is_null() {
+        return Err(E_POINTER.into());
       }
-      let inner = ApoObject::create(outer.map(|o| o.as_raw()), self.kind);
-      let hr = inner_query_interface(inner, riid, object);
-      inner_release(inner); // drop the creation reference; frees the object if QI failed
-      let how = if outer.is_some() { "aggregated" } else { "not aggregated" };
-      let level = if hr.is_ok() { Level::Info } else { Level::Warning };
-      note(level, format!("{name}: instance created ({how}): {hr:?}"));
-      hr.ok()
-    }
+      // SAFETY: both pointers checked non-null above; COM owns them.
+      unsafe {
+        *object = null_mut();
+        let name = self.kind.friendly_name();
+        // An aggregated object may only be asked for its inner IUnknown.
+        if outer.is_some() && *riid != IUnknown::IID {
+          note(Level::Warning, format!("{name}: refused an aggregated instance asked for {:?}", *riid));
+          return Err(CLASS_E_NOAGGREGATION.into());
+        }
+        let inner = ApoObject::create(outer.map(|o| o.as_raw()), self.kind);
+        let hr = inner_query_interface(inner, riid, object);
+        inner_release(inner); // drop the creation reference; frees the object if QI failed
+        let how = if outer.is_some() { "aggregated" } else { "not aggregated" };
+        let level = if hr.is_ok() { Level::Info } else { Level::Warning };
+        note(level, format!("{name}: instance created ({how}): {hr:?}"));
+        hr.ok()
+      }
+    })
   }
 
   fn LockServer(&self, _lock: BOOL) -> Result<()> {
@@ -630,31 +635,33 @@ unsafe extern "system" fn apo_get_registration_properties(
 }
 
 unsafe extern "system" fn apo_initialize(this: *mut c_void, size: u32, data: *const u8) -> HRESULT {
-  // SAFETY: COM calls this slot only through our interface pointer at `OFF_APO` of a live `ApoObject` and holds a
-  // reference for the call (`object`); `data` is the engine's init block of `size` bytes (or null), which each helper
-  // checks before reading a version's fields.
-  unsafe {
-    let st = state::<OFF_APO>(this);
-    if st.locked.load(Ordering::Acquire) {
-      return APOERR_APO_LOCKED;
+  guarded("Initialize", E_UNEXPECTED, || {
+    // SAFETY: COM calls this slot only through our interface pointer at `OFF_APO` of a live `ApoObject` and holds a
+    // reference for the call (`object`); `data` is the engine's init block of `size` bytes (or null), which each helper
+    // checks before reading a version's fields.
+    unsafe {
+      let st = state::<OFF_APO>(this);
+      if st.locked.load(Ordering::Acquire) {
+        return APOERR_APO_LOCKED;
+      }
+      let device_id = endpoint_device_id(size, data);
+      if let Some(guid) = endpoint_guid_from_init(size, data, device_id.as_deref()) {
+        let _ = st.endpoint_tag.set(guid);
+      }
+      let mode = processing_mode(size, data);
+      if let Some(mode) = mode {
+        st.mode.0.store((mode >> 64) as u64, Ordering::Relaxed);
+        st.mode.1.store(mode as u64, Ordering::Relaxed);
+      }
+      // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
+      let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
+      note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
+      if let Some(hash) = device_id.as_deref().map(device_hash) {
+        st.endpoint.store(hash, Ordering::Relaxed);
+      }
+      S_OK
     }
-    let device_id = endpoint_device_id(size, data);
-    if let Some(guid) = endpoint_guid_from_init(size, data, device_id.as_deref()) {
-      let _ = st.endpoint_tag.set(guid);
-    }
-    let mode = processing_mode(size, data);
-    if let Some(mode) = mode {
-      st.mode.0.store((mode >> 64) as u64, Ordering::Relaxed);
-      st.mode.1.store(mode as u64, Ordering::Relaxed);
-    }
-    // The block size tells which APOInitSystemEffects version Windows passed (the mode is in v2+).
-    let mode = mode.map_or_else(|| "not given".to_string(), |m| format!("{:?}", GUID::from_u128(m)));
-    note_for(st, Level::Info, format!("initialized ({size}-byte init block, mode {mode})"));
-    if let Some(hash) = device_id.as_deref().map(device_hash) {
-      st.endpoint.store(hash, Ordering::Relaxed);
-    }
-    S_OK
-  }
+  })
 }
 
 unsafe extern "system" fn apo_is_input_format_supported(
@@ -783,64 +790,70 @@ unsafe extern "system" fn cfg_lock_for_process(
   num_outputs: u32,
   outputs: *const *const APO_CONNECTION_DESCRIPTOR,
 ) -> HRESULT {
-  // SAFETY: COM calls this slot only through our interface pointer at `OFF_CFG` of a live `ApoObject` and holds a
-  // reference for the call (`object`); the one input descriptor is null-checked, its `pFormat` is the engine's media
-  // type or null.
-  unsafe {
-    let st = state::<OFF_CFG>(this);
-    if st.locked.load(Ordering::Acquire) {
-      return APOERR_APO_LOCKED;
-    }
-    if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
-      note_for(st, Level::Warning, format!("refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
-      return APOERR_NUM_CONNECTIONS_INVALID;
-    }
-    let input = *inputs;
-    if input.is_null() {
-      return E_POINTER;
-    }
-    let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
-    let Some(format) = offered.filter(is_supported_format) else {
-      let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
-      note_for(st, Level::Warning, format!("stream format not supported ({what}); Windows runs the stream without it"));
-      return APOERR_FORMAT_NOT_SUPPORTED;
-    };
+  guarded("LockForProcess", E_UNEXPECTED, || {
+    // SAFETY: COM calls this slot only through our interface pointer at `OFF_CFG` of a live `ApoObject` and holds a
+    // reference for the call (`object`); the one input descriptor is null-checked, its `pFormat` is the engine's media
+    // type or null.
+    unsafe {
+      let st = state::<OFF_CFG>(this);
+      if st.locked.load(Ordering::Acquire) {
+        return APOERR_APO_LOCKED;
+      }
+      if num_inputs != 1 || num_outputs != 1 || inputs.is_null() || outputs.is_null() {
+        note_for(st, Level::Warning, format!("refused a stream with {num_inputs} inputs and {num_outputs} outputs"));
+        return APOERR_NUM_CONNECTIONS_INVALID;
+      }
+      let input = *inputs;
+      if input.is_null() {
+        return E_POINTER;
+      }
+      let offered = (*input).pFormat.as_ref().and_then(uncompressed_format);
+      let Some(format) = offered.filter(is_supported_format) else {
+        let what = offered.as_ref().map_or_else(|| "unreadable".to_string(), describe_format);
+        note_for(
+          st,
+          Level::Warning,
+          format!("stream format not supported ({what}); Windows runs the stream without it"),
+        );
+        return APOERR_FORMAT_NOT_SUPPORTED;
+      };
 
-    st.channels.store(format.dwSamplesPerFrame, Ordering::Release);
-    let rate = format.fFramesPerSecond;
-    st.rate.store(rate as u32, Ordering::Release);
-    let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
-    let tag = st.endpoint_tag.get().cloned();
-    let endpoint = st.endpoint.load(Ordering::Relaxed);
-    let processor = match st.kind {
-      ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|mut p| {
-        p.sidetone.endpoint_hash = endpoint;
-        Processor::Mic(p)
-      }),
-      ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
-        p.sidetone_endpoint = endpoint;
-        Processor::Output(p)
-      }),
-      ApoKind::Stream => shared_memory(st)
-        .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
-        .map(Processor::Stream),
-    };
-    let level = if processor.is_some() { Level::Info } else { Level::Warning };
-    let outcome = match &processor {
-      Some(Processor::Mic(_)) => format!("started, mic chains running here: {}", MIC_CHAINS.load(Ordering::Relaxed)),
-      Some(_) => "started".to_string(),
-      None => "no chain, passes audio through".to_string(),
-    };
-    let msg = format!("stream {}, mode {:?}: {outcome}", describe_format(&format), GUID::from_u128(mode));
-    note_for(st, level, msg);
-    if let Ok(mut slot) = st.processor.lock() {
-      // Replacing drops a previous processor: keep a destructor panic inside this DLL.
-      let old = std::mem::replace(&mut *slot, processor);
-      let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
+      st.channels.store(format.dwSamplesPerFrame, Ordering::Release);
+      let rate = format.fFramesPerSecond;
+      st.rate.store(rate as u32, Ordering::Release);
+      let mode = (u128::from(st.mode.0.load(Ordering::Relaxed)) << 64) | u128::from(st.mode.1.load(Ordering::Relaxed));
+      let tag = st.endpoint_tag.get().cloned();
+      let endpoint = st.endpoint.load(Ordering::Relaxed);
+      let processor = match st.kind {
+        ApoKind::Mic => MicProcessor::create(rate as u32, tag.clone(), st.instance_id).map(|mut p| {
+          p.sidetone.endpoint_hash = endpoint;
+          Processor::Mic(p)
+        }),
+        ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
+          p.sidetone_endpoint = endpoint;
+          Processor::Output(p)
+        }),
+        ApoKind::Stream => shared_memory(st)
+          .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
+          .map(Processor::Stream),
+      };
+      let level = if processor.is_some() { Level::Info } else { Level::Warning };
+      let outcome = match &processor {
+        Some(Processor::Mic(_)) => format!("started, mic chains running here: {}", MIC_CHAINS.load(Ordering::Relaxed)),
+        Some(_) => "started".to_string(),
+        None => "no chain, passes audio through".to_string(),
+      };
+      let msg = format!("stream {}, mode {:?}: {outcome}", describe_format(&format), GUID::from_u128(mode));
+      note_for(st, level, msg);
+      if let Ok(mut slot) = st.processor.lock() {
+        // Replacing drops a previous processor: keep a destructor panic inside this DLL.
+        let old = std::mem::replace(&mut *slot, processor);
+        let _ = catch_unwind(AssertUnwindSafe(move || drop(old)));
+      }
+      st.locked.store(true, Ordering::Release);
+      S_OK
     }
-    st.locked.store(true, Ordering::Release);
-    S_OK
-  }
+  })
 }
 
 unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -> HRESULT {
@@ -899,6 +912,16 @@ fn note_tagged(kind: ApoKind, endpoint_tag: Option<&str>, instance_id: u32, leve
   let text = format!("{prefix}: {msg}");
   let key = if endpoint_tag.is_some() { text.clone() } else { format!("#{instance_id}:{text}") };
   event_log::note(level, &key, &text);
+}
+
+/// Runs a COM entry point that builds something (class, instance, init, stream): a panic in it
+/// returns `on_panic` and leaves a note, where unwinding out of `extern "system"` would abort
+/// audiodg and every sound on the system with it.
+fn guarded<T>(entry: &str, on_panic: T, f: impl FnOnce() -> T) -> T {
+  catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+    note(Level::Warning, format!("{entry} panicked; Windows goes on without this effect"));
+    on_panic
+  })
 }
 
 /// An Application log note keyed by its own text: each distinct text once per process.
