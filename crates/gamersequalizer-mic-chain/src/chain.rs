@@ -1134,10 +1134,14 @@ mod tests {
     p.shm_header().expect("mapping").aec_enabled.store(false, Ordering::Relaxed);
     p.process_timed(&[&loud], &mut [&mut out], Some(block_hns(20)));
     p.shm_header().expect("mapping").aec_enabled.store(true, Ordering::Relaxed);
-    // The AEC stage alone (later stages keep their own history): silence in, silence out.
-    p.mic_mono_temp[..BLOCK].fill(0.0);
-    p.run_aec(BLOCK, Some(block_hns(21)));
-    assert!(p.mic_mono_temp[..BLOCK].iter().all(|&s| s == 0.0), "samples from before the switch came out");
+    // The AEC stage alone (later stages keep their own history): silence in, silence out. Two
+    // whole frames: the first frame AEC3 puts out after the gap starts with its own delay line.
+    for k in 0..2 {
+      p.mic_mono_temp[..FRAME_480].fill(0.0);
+      p.run_aec(FRAME_480, Some(block_hns(21) + k * 100_000));
+      let peak = p.mic_mono_temp[..FRAME_480].iter().fold(0.0f32, |m, s| m.max(s.abs()));
+      assert!(peak < 1e-3, "block {k}: samples from before the switch came out (peak {peak})");
+    }
   }
 
   /// Safety net for changes that must not change the sound: speech, keys and an echo of the
@@ -1149,7 +1153,8 @@ mod tests {
     use crate::ai_denoiser::tests::read_wav_48k;
     const SECONDS: usize = 8;
     const ECHO_DELAY: usize = 960;
-    const EXPECTED: [f64; SECONDS] = [5.0476, 568.84, 108.94, 70.691, 194.11, 148.51, 63.333, 68.401];
+    // G1 (2026-11-16): seconds 2.. changed, AEC3's first frame after a pause is silenced.
+    const EXPECTED: [f64; SECONDS] = [5.0476, 568.84, 113.22, 74.089, 196.25, 172.34, 67.444, 68.037];
     let speech = read_wav_48k("speech_clean.wav");
     let keys = read_wav_48k("1-137-A-32.wav");
     let reference: Vec<f32> = noise(SECONDS * 48_000 + 48_000, 7).iter().map(|s| s * 0.4).collect();

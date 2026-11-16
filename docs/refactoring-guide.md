@@ -580,7 +580,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] F3 `Add-Type` (potvrzeno: zapisuje `.cs`, `.cmdline` a `.dll` do `$env:TEMP`; TEMP se mění jen kolem `Add-Type`, ne v bootstrapu, protože odinstalace do TEMP přesouvá svůj zamčený exe)
 - [x] F4 společný začátek skriptů (jen doslova stejné kusy; `Say`, `Set-FxValue` a obnova se liší chováním, zůstávají)
 - [x] F5 dokumentace instalátoru (záloha: platí kód, přepíše se, dokud zařízení nenese náš efekt)
-- [ ] G1 AEC3 po pauze
+- [x] G1 AEC3 po pauze (ztlumen celý první rámec po `flush`, ne jen 430 vzorků: za nimi je ~25 vzorků dozvuku filtrů dělení pásem)
 - [ ] G2 jedno čištění stavu
 - [ ] G3 nastavení jednou
 - [ ] G4 drobnosti řetězce

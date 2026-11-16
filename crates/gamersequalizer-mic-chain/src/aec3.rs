@@ -108,6 +108,9 @@ pub struct EchoCanceller3 {
   render_out: [Vec<f32>; 2],
   out_queue: VecDeque<f32>,
   buffered: bool,
+  /// The next frame AEC3 puts out is silenced: after a `flush` it starts with audio from before
+  /// (its delay line, `AEC3_LATENCY_SAMPLES`, and ~25 samples of band-split filter tail after it).
+  stale_frame: bool,
   erle_db: f32,
   /// Mic gain AEC3 was built for (dB, a multiple of `MIC_GAIN_STEP_DB`) and as a factor.
   mic_gain_db: f32,
@@ -180,6 +183,7 @@ impl EchoCanceller3 {
       render_out: [vec![0.0; FRAME], vec![0.0; FRAME]],
       out_queue: VecDeque::with_capacity(8192),
       buffered: false,
+      stale_frame: false,
       erle_db: 0.0,
       mic_gain_db: 0.0,
       mic_gain: 1.0,
@@ -286,11 +290,13 @@ impl EchoCanceller3 {
     }
   }
 
-  /// Drop buffered audio (partial input frame, queued output), keep the learned echo path.
+  /// Drop buffered audio (partial input frame, queued output, AEC3's own delay line), keep the
+  /// learned echo path.
   pub fn flush(&mut self) {
     self.in_len = 0;
     self.out_queue.clear();
     self.buffered = false;
+    self.stale_frame = true;
     self.free_frames = MIC_GAIN_FREE_FRAMES;
   }
 
@@ -346,6 +352,10 @@ impl EchoCanceller3 {
     let from_last = if failed { 0 } else { AEC3_LATENCY_SAMPLES };
     for (i, s) in self.out_frame.iter_mut().enumerate() {
       *s /= if i < from_last { self.last_frame_gain } else { gain };
+    }
+    // A passed-through frame holds nothing from before.
+    if std::mem::take(&mut self.stale_frame) && !failed {
+      self.out_frame.fill(0.0);
     }
     self.last_frame_gain = gain;
     self.free_frames = self.free_frames.saturating_sub(1);
