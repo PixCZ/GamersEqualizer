@@ -3,22 +3,19 @@ use crate::shm_mapping::open_or_create_shm;
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
-use gamersequalizer_common::profile::{ParametricProfile, VadType, collapse_slopes, slots_used};
+use gamersequalizer_common::profile::{ParametricProfile, VadType};
 use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout};
 use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::UnmapViewOfFile;
 
-mod mic_presets;
 mod mic_status;
 
-use mic_presets::*;
 pub use mic_status::*;
 
 /// AEC history kept for the plots (~60 s at 10 updates/s).
@@ -130,7 +127,7 @@ impl AppState {
     let audio_settings_saved = shm.map(super::audio_settings::AudioSettings::from_header).unwrap_or_default();
     let selected_mic_endpoint_id = shm.and_then(|h| h.get_selected_mic_id());
 
-    let mic_profile = load_mic_profile(&storage).unwrap_or(mic_profile);
+    let mic_profile = super::mic_presets::load_mic_profile(&storage).unwrap_or(mic_profile);
     crate::output_eq::game_presets::seed_builtin_game_presets(&storage);
     // Before the game EQ loads its profiles (window and service): presets a GG update added.
     crate::sonar_importer::sync_new_sonar_profiles(&storage);
@@ -290,7 +287,7 @@ impl AppState {
   pub fn apply_mic_eq(&mut self) {
     self.mic_profile.bands.truncate(MAX_EQ_BANDS);
     self.sync_mic_eq_to_shm();
-    save_mic_profile(&self.storage, &self.mic_profile);
+    super::mic_presets::save_mic_profile(&self.storage, &self.mic_profile);
   }
 
   /// Make `profile` the mic EQ (no unsaved edits left).

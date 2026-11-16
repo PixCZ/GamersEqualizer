@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 use crate::output_eq::same_profile_slot;
 use crate::sonar_importer::ProfileStorage;
-use gamersequalizer_common::profile::{BiquadBand, FilterType, ParametricProfile, VadType, collapse_slopes};
+use gamersequalizer_common::biquad::MAX_EQ_BANDS;
+use gamersequalizer_common::profile::{
+  BiquadBand, FilterType, ParametricProfile, VadType, collapse_slopes, slots_used,
+};
 
 use crate::i18n::tk;
 
@@ -19,6 +22,8 @@ const LOW_CUT_SLOPE_DB: u8 = 48;
 const HIGH_CUT_SLOPE_DB: u8 = 24;
 /// The user's own presets, next to the Sonar imports (`profiles/mic`), never mixed with them.
 const USER_DIR: &str = "mic_user";
+/// File holding the microphone EQ the user is currently editing.
+const MIC_EQ_FILE: &str = "mic_active.json";
 
 /// The default when no saved mic EQ exists: cut what is not voice, change nothing else.
 pub const DEFAULT_PRESET: &str = tk("Clean voice (cut rumble & hiss)");
@@ -141,6 +146,46 @@ pub fn builtin_mic_presets() -> Vec<ParametricProfile> {
     preset(tk("Walkie-talkie (effect)"), [steep_hp(400.0), vec![pk(1500.0, 5.0, 1.0)], steep_lp(3000.0)].concat()),
     preset(tk("Flat (no EQ)"), Vec::new()),
   ]
+}
+
+/// Missing/corrupt file -> None (defaults are used), logged.
+pub(super) fn load_mic_profile(storage: &ProfileStorage) -> Option<ParametricProfile> {
+  let path = mic_profile_path(storage);
+  let text = std::fs::read_to_string(&path).ok()?;
+  match serde_json::from_str::<ParametricProfile>(&text) {
+    Ok(mut p) => {
+      // Saved before cuts had a steepness: two stacked rows become one.
+      p.bands = collapse_slopes(&p.bands);
+      p.bands.iter_mut().for_each(|b| b.clamp_parameters());
+      while slots_used(&p.bands) > MAX_EQ_BANDS {
+        p.bands.pop();
+      }
+      Some(p)
+    }
+    Err(e) => {
+      log::warn!("[MicEQ] {} is corrupt ({}), using defaults", path.display(), e);
+      crate::output_eq::settings::keep_corrupt(&path);
+      None
+    }
+  }
+}
+
+pub(super) fn save_mic_profile(storage: &ProfileStorage, profile: &ParametricProfile) {
+  let path = mic_profile_path(storage);
+  let result = (|| -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+      std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(profile).map_err(std::io::Error::other)?;
+    crate::output_eq::settings::write_atomic(&path, &json)
+  })();
+  if let Err(e) = result {
+    log::warn!("[MicEQ] could not save {}: {}", path.display(), e);
+  }
+}
+
+fn mic_profile_path(storage: &ProfileStorage) -> PathBuf {
+  storage.base_dir().join(MIC_EQ_FILE)
 }
 
 fn user_dir(storage: &ProfileStorage) -> PathBuf {
