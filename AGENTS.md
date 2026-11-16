@@ -188,8 +188,8 @@ run it unasked; updates the user picks go into their own commit.
   releases. An update takes the new tag's SHA and comment; never switch to a bare tag.
 - **Rust crates** (whole workspace, `Cargo.lock`): `cargo update --dry-run --verbose` lists
   semver-compatible updates (`Updating`) and newer major versions (`Unchanged ... (available: ...)`); it
-  works on the Mac too. Known vulnerabilities: `cargo audit`, if installed (installing it needs the user's
-  okay, see Ground rules). Report what would change, which major bumps need code changes, and any
+  works on the Mac too. Known vulnerabilities: `cargo audit` (installed on the dev PC; the `Audit` workflow
+  runs it weekly and on every lockfile change, also over the vendor lockfiles). Report what would change, which major bumps need code changes, and any
   advisories. After applying, build, test and clippy (`dev-rebuild` agent).
 - **Rust toolchain** (`rust-toolchain.toml`, used by the dev PC and both workflows): compare the pinned
   version with the current stable (`rustup check`). A bump goes into its own commit and passes the

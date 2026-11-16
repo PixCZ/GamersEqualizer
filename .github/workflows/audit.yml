@@ -1,0 +1,47 @@
+# Known vulnerabilities (RustSec advisory database) in the locked dependencies: the workspace and the
+# vendor forks, which have their own lockfiles. Weekly, because a new advisory can hit an unchanged
+# lockfile, and on every push that changes a lockfile. No secrets, read-only; only reads the lockfiles.
+name: Audit
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  push:
+    branches: ['**']
+    paths:
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    # Reads lockfiles only, no Windows build: the faster Linux runner is enough.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      # Pinned and --locked, so a new release of the tool or its dependencies cannot change this job.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.23.0 --locked
+
+      - name: Workspace
+        run: cargo audit
+
+      - name: rnnoise2
+        if: ${{ !cancelled() }}
+        run: cargo audit --file crates/vendor/rnnoise2/Cargo.lock
+
+      - name: silero_vad
+        if: ${{ !cancelled() }}
+        run: cargo audit --file crates/vendor/silero_vad/Cargo.lock
