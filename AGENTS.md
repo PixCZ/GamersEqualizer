@@ -49,12 +49,15 @@ Inside `crates/gamersequalizer-daemon/src/`:
 
 | Path              | Purpose                                                                         |
 | ----------------- | ------------------------------------------------------------------------------- |
-| `main.rs`         | Argument dispatch, the service loop, starting the window                        |
+| `main.rs`         | Argument dispatch, starting the window                                          |
+| `daemon.rs`       | The service loop (`--daemon`)                                                   |
+| `lifecycle.rs`    | Handover to the installed copy, import after the window closes, service mutex   |
+| `shm_mapping.rs`  | The window <-> service shared-memory mapping                                    |
 | `win_audio/`      | Windows audio (WASAPI, COM), APO install and link, mixer, routing, sidetone     |
 | `output_eq/`      | Headphone / game / chat / media EQ layers, game and genre detection, AutoEQ     |
 | `sonar_importer/` | Import of SteelSeries Sonar profiles                                            |
 | `ui/`             | The egui window: one file per tab, shared widgets, theme                        |
-| `health.rs`       | Checks behind the warnings and the `[ApoCheck]` / `[ApoNote]` log lines         |
+| `health/`         | Checks behind the warnings and the `[ApoCheck]` / `[ApoNote]` log lines         |
 | `i18n*.rs`        | UI texts: the English text is the key, `i18n_cs.rs` is the Czech table          |
 
 ## Working mode: Ponytail (write less code)

@@ -24,7 +24,7 @@ logged, shown, retried, never unwound.
     telemetry out of it (`win_audio/apo_link.rs`); the window opens it too.
   - JSON files in `%APPDATA%\GamersEqualizer`, written by both the window and the service.
   - The APO's notes in the Windows Application log, which the service copies into the app log as
-    `[ApoNote]` (`health.rs`).
+    `[ApoNote]` (`health/apo_diag.rs`).
 - One process is the owner: it publishes settings and bumps `owner_beat`. When the beat stops for
   `OWNER_TIMEOUT`, the APO passes audio through untouched.
 
