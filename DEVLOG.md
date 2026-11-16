@@ -2952,6 +2952,20 @@ refactoring, then a review of every step and its fixes. No new features.
   uninstall close the window instead of `process::exit`.
 - Sonar import moves a profile the user changed to `_deleted` instead of replacing it.
 
+**Performance before and after** (this PC, both on 1.100.0, `3547694` against the branch, two
+alternating runs each): the same within run-to-run noise, and the same output.
+
+| Measure                                      | Before          | After           |
+| -------------------------------------------- | --------------- | --------------- |
+| `eq_bench` output EQ stereo, 20 biquads      | 8.05-8.13 us    | 8.05-8.38 us    |
+| `eq_bench` stream EQ stereo, 64 biquads      | 27.9-28.0 us    | 28.0 us         |
+| `dfn3_reference` CPU (0.75 / 1.0)            | 1.90-1.99 %     | 1.96-2.49 %     |
+| `dfn3_reference` model load                  | 68-76 ms        | 72-81 ms        |
+| `scenario_report` DFN3 / DPDFNet / RNNoise   | 2.9-3.1 / 10.2-10.8 / 0.3 % | 3.0 / 10.9-11.0 / 0.3 % |
+
+DFN3's output is bit-identical (max diff 0); the scenario report's 189 lines of levels and gate
+shares do not differ.
+
 **Not confirmed, left as it is**
 
 - `profiles/aux` looked dead but holds imported Sonar presets: kept.
