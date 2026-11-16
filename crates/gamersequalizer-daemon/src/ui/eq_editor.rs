@@ -88,6 +88,8 @@ pub fn profile_picker(
     .selected_text(super::truncate_chars(selected.map_or(none_label, tr), 34))
     .width(width)
     .height(320.0)
+    // The default closes on any click, also into the filter field: close only on a pick or outside.
+    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
     .show_ui(ui, |ui| {
       ui.add(egui::TextEdit::singleline(filter).hint_text(tr("Filter...")).desired_width(width));
       if ui.selectable_label(selected.is_none(), none_label).clicked() {
@@ -98,6 +100,9 @@ pub fn profile_picker(
         if ui.selectable_label(selected == Some(name), tr(name)).clicked() {
           picked = Some(Some(name.to_string()));
         }
+      }
+      if picked.is_some() {
+        ui.close();
       }
     });
   picked
