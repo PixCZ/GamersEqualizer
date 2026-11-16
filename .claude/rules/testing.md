@@ -4,9 +4,10 @@
 
 - The workspace builds only on Windows (the `windows` crate, the APO). The gate is `scripts/check.ps1`:
   `cargo fmt -- --check`, clippy with `-D warnings` (workspace, and the APO with `debug-capture`),
-  `cargo test --workspace`, the installer self-check and the vendor crates' tests. CI runs it on every
-  push; `scripts/dev-rebuild.ps1 -Test` runs it after the build. Claude Code: delegate that to the
-  `dev-rebuild` subagent. A step is done only when the gate passes.
+  `cargo test --workspace`, the installer self-check (PowerShell 7 and Windows PowerShell 5.1) and the
+  vendor crates' tests. CI runs it on every push; `scripts/dev-rebuild.ps1 -Test` runs it after the
+  build. Claude Code: delegate that to the `dev-rebuild` subagent. A step is done only when the gate
+  passes.
 - For a quick compile check prefer `cargo check` over a full build.
 - The vendor forks are outside the workspace and have their own manifests:
   `cargo test --release --manifest-path crates/vendor/<name>/Cargo.toml`.

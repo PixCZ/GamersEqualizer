@@ -8,8 +8,19 @@ $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-T
   'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated',
   'Remove-OurEffects', 'Restore-InstallStart', 'Get-RollbackTarget'
 $variables = '$FxGuid', '$NullGuid', '$DefaultProcessingMode', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
+$parsed = @{}
+# A script that does not parse would fail first on a user's PC, elevated. The uninstaller has no
+# pieces under test here, so it is at least parsed. Windows PowerShell 5.1 runs them there: the
+# gate runs this file under it too (scripts\check.ps1), so its parser has the last word.
+foreach ($script in @($scripts) + (Join-Path (Split-Path $PSScriptRoot) 'apo-uninstall.ps1')) {
+  $parseErrors = $null
+  $parsed[$script] = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$parseErrors)
+  if ($parseErrors) {
+    throw "$script does not parse: $($parseErrors[0].Message) (line $($parseErrors[0].Extent.StartLineNumber))"
+  }
+}
 $pieces = @(foreach ($script in $scripts) {
-    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
+    $ast = $parsed[$script]
     $ast.FindAll({
         param($n)
         ($n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $functions) -or

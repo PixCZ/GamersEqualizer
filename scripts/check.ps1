@@ -38,6 +38,13 @@ Gate 'clippy apo (debug-capture)' { cargo clippy -p gamersequalizer-apo --all-ta
 Gate 'test --workspace' { cargo test --workspace }
 # Throws when a check fails.
 Gate 'installer self-check' { & (Join-Path $PSScriptRoot 'tests\apo-install.tests.ps1') }
+# The installer runs under Windows PowerShell 5.1 on users' PCs; PowerShell 7 (CI) accepts syntax
+# it does not have. Under 5.1 already, the gate above was that run.
+if ($PSVersionTable.PSEdition -eq 'Core') {
+  Gate 'installer self-check (Windows PowerShell 5.1)' {
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'tests\apo-install.tests.ps1')
+  }
+}
 # Vendor forks are outside the workspace. rnnoise2: its AVX2-vs-scalar kernel test and the upstream
 # reference test need x86_64. silero_vad: the port against onnxruntime's output.
 Gate 'test rnnoise2 (release)' { cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml }
