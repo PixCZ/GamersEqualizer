@@ -10,16 +10,9 @@ pub(super) struct StreamProcessor {
   pub(super) slot: Option<(usize, u64)>,
   sample_rate: f32,
   /// Shared coefficients with per-channel filter state, for the bus/version in `built`.
-  cascade: BiquadCascade,
-  preamp_gain: f32,
+  pub(super) eq: EqFade,
   /// (bus, stream EQ version) the cascade holds; None = nothing built (pass-through).
   built: Option<(StreamBus, u32)>,
-  /// Share of the processed signal in the output, 0..1, moved by `fade_step` per frame.
-  pub(super) wet: f32,
-  fade_step: f32,
-  /// Processed copy while crossfading. Grows (allocates) only if the engine sends a
-  /// larger buffer than before.
-  scratch: Vec<f32>,
   /// No live owner (see `OwnerWatch`): treated like the master switch, the EQ fades out.
   owner: OwnerWatch,
   pub(super) failed: bool,
@@ -37,12 +30,8 @@ impl StreamProcessor {
         shm,
         slot,
         sample_rate,
-        cascade: BiquadCascade::default(),
-        preamp_gain: 1.0,
+        eq: EqFade::new(BiquadCascade::default(), sample_rate, 4096),
         built: None,
-        wet: 0.0,
-        fade_step: 1.0 / (STREAM_FADE_SECONDS * sample_rate.max(1.0)),
-        scratch: Vec::with_capacity(4096),
         owner: OwnerWatch::default(),
         failed: false,
       }
@@ -86,35 +75,19 @@ impl StreamProcessor {
       // Same channel, edited EQ: new coefficients, filter state kept.
       (Some((old_bus, _)), Some((new_bus, _))) if old_bus == new_bus => self.build(target, channels, false),
       // Channel change: fade the old EQ out first, then start the new one from silence.
-      _ if self.wet <= 0.0 => self.build(target, channels, true),
+      _ if self.eq.wet <= 0.0 => self.build(target, channels, true),
       _ => {}
     }
     let goal = if self.built.is_some() && self.built == target { 1.0 } else { 0.0 };
-    if self.built.is_none() || (self.wet <= 0.0 && goal <= 0.0) {
-      self.wet = 0.0;
+    if self.built.is_none() || (self.eq.wet <= 0.0 && goal <= 0.0) {
+      self.eq.wet = 0.0;
       return;
     }
-    if self.wet >= 1.0 && goal >= 1.0 {
-      self.run_eq_in_place(buf, channels);
+    if self.eq.wet >= 1.0 && goal >= 1.0 {
+      self.eq.run(buf, channels);
       return;
     }
-    // Crossfade: dry + wet * (processed - dry), wet ramping per frame.
-    if self.scratch.len() < buf.len() {
-      self.scratch.resize(buf.len(), 0.0);
-    }
-    let mut scratch = std::mem::take(&mut self.scratch);
-    if let Some(wet_buf) = scratch.get_mut(..buf.len()) {
-      wet_buf.copy_from_slice(buf);
-      self.run_eq_in_place(wet_buf, channels);
-      for (dry_frame, wet_frame) in buf.chunks_exact_mut(channels).zip(wet_buf.chunks_exact(channels)) {
-        self.wet =
-          if goal > self.wet { (self.wet + self.fade_step).min(1.0) } else { (self.wet - self.fade_step).max(0.0) };
-        for (d, w) in dry_frame.iter_mut().zip(wet_frame) {
-          *d += self.wet * (w - *d);
-        }
-      }
-    }
-    self.scratch = scratch;
+    self.eq.crossfade(buf, channels, goal, |_| {});
   }
 
   /// Load the bands of `target` (allocates; only when its version changed).
@@ -122,24 +95,17 @@ impl StreamProcessor {
     self.built = target;
     let Some(eq) = target.and_then(|(bus, _)| bus.eq_index()).and_then(|i| self.shm.layout().header.stream_eq.get(i))
     else {
-      self.cascade.clear();
-      self.preamp_gain = 1.0;
+      self.eq.cascade.clear();
+      self.eq.preamp_gain = 1.0;
       return;
     };
     let (bands, preamp_db) = eq.read();
     if fresh {
-      self.cascade.reset_state();
+      self.eq.cascade.reset_state();
     }
-    self.cascade.set_channels(channels);
-    self.cascade.set_bands(bands, self.sample_rate);
-    self.preamp_gain = 10f32.powf(preamp_db / 20.0);
-  }
-
-  fn run_eq_in_place(&mut self, buf: &mut [f32], channels: usize) {
-    if self.preamp_gain != 1.0 {
-      buf.iter_mut().for_each(|s| *s *= self.preamp_gain);
-    }
-    self.cascade.process_interleaved(buf, channels);
+    self.eq.cascade.set_channels(channels);
+    self.eq.cascade.set_bands(bands, self.sample_rate);
+    self.eq.set_preamp_db(preamp_db);
   }
 }
 

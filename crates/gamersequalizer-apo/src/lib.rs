@@ -45,6 +45,7 @@
 mod clock;
 mod com;
 mod entry;
+mod eq_fade;
 mod event_log;
 mod init_block;
 mod mic;
@@ -66,6 +67,7 @@ use std::time::Instant;
 use clock::*;
 use com::*;
 use entry::*;
+use eq_fade::EqFade;
 use gamersequalizer_common::biquad::BiquadCascade;
 use gamersequalizer_common::limiter::{PeakLimiter, soft_limit};
 use gamersequalizer_common::shm::{APO_SHM_NAME, OwnerWatch, REF_SAMPLE_RATE, ShmHeader, ShmLayout};

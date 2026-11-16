@@ -138,13 +138,29 @@ fn stream_eq_fades_in_on_pairing_and_out_on_master_switch() {
   h.stream_eq[0].write(&[BiquadBand { gain_db: -12.0, ..BiquadBand::default() }], 0.0);
   table.slots[index].bus.store(StreamBus::Chat.to_u32(), Ordering::Relaxed);
   let (_, first) = block(&mut p);
-  assert!(peak(&first[..20]) > 0.0 && p.wet < 1.0, "still fading");
+  assert!(peak(&first[..20]) > 0.0 && p.eq.wet < 1.0, "still fading");
   for _ in 0..5 {
     block(&mut p);
   }
   let (_, settled) = block(&mut p);
   let gain_db = 20.0 * (peak(&settled) / 0.1).log10();
   assert!((gain_db + 12.0).abs() < 0.5, "expected ~-12 dB, got {gain_db}");
+
+  // Moved to media (+6 dB): the chat EQ fades out, then the media EQ fades in from silence.
+  h.stream_eq[1].write(&[BiquadBand { gain_db: 6.0, ..BiquadBand::default() }], 0.0);
+  table.slots[index].bus.store(StreamBus::Media.to_u32(), Ordering::Relaxed);
+  let (_, first) = block(&mut p);
+  let gain_db = 20.0 * (peak(&first[..20]) / 0.1).log10();
+  assert!(gain_db < -6.0 && p.eq.wet < 1.0, "still the chat EQ, fading out: {gain_db} dB");
+  let mut saw_dry = false;
+  for _ in 0..6 {
+    block(&mut p);
+    saw_dry |= p.eq.wet <= 0.0;
+  }
+  assert!(saw_dry, "the old EQ is gone before the new one starts");
+  let (_, settled) = block(&mut p);
+  let gain_db = 20.0 * (peak(&settled) / 0.1).log10();
+  assert!((gain_db - 6.0).abs() < 0.5, "expected ~+6 dB, got {gain_db}");
 
   // Master switch off: fades back to the untouched signal.
   h.master_bypass.store(true, Ordering::Relaxed);
