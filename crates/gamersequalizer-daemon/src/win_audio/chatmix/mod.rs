@@ -655,6 +655,23 @@ pub fn physical_endpoint_id(devices: &[AudioEndpointInfo], default_id: Option<&s
     .or_else(|| default_id.map(|s| s.to_string()))
 }
 
+/// `physical_endpoint_id` after a device came or went while the Windows default stayed. Behind
+/// a virtual default any physical device would do, so the one in use (`current`) stays while it
+/// is connected: a monitor or USB device that only comes earlier in the list must not take the
+/// Master channel and the echo reference from the headset.
+pub fn master_endpoint_id(
+  devices: &[AudioEndpointInfo],
+  default_id: Option<&str>,
+  current: Option<&str>,
+) -> Option<String> {
+  let picked = physical_endpoint_id(devices, default_id);
+  let connected = |id: &str| devices.iter().any(|d| d.id == id && !is_virtual_endpoint(&d.name.to_lowercase()));
+  match current {
+    Some(id) if picked.as_deref() != default_id && connected(id) => Some(id.to_string()),
+    _ => picked,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -721,6 +738,19 @@ mod tests {
       "virtual default: first physical"
     );
     assert_eq!(physical_endpoint_id(&devices, None), None);
+  }
+
+  #[test]
+  fn master_stays_on_its_device_when_another_one_is_plugged_in() {
+    let dev = |id: &str, name: &str| AudioEndpointInfo { id: id.into(), name: name.into(), is_default: false };
+    let devices =
+      [dev("cable", "CABLE Input (VB-Audio Virtual Cable)"), dev("monitor", "LG Monitor"), dev("phones", "Headphones")];
+    let master = |default, current| master_endpoint_id(&devices, Some(default), current);
+    assert_eq!(master("cable", Some("phones")).as_deref(), Some("phones"), "not the monitor that comes first");
+    assert_eq!(master("cable", Some("gone")).as_deref(), Some("monitor"), "unplugged: the first physical one");
+    assert_eq!(master("cable", Some("cable")).as_deref(), Some("monitor"), "never a virtual one");
+    assert_eq!(master("cable", None).as_deref(), Some("monitor"));
+    assert_eq!(master("monitor", Some("phones")).as_deref(), Some("monitor"), "a physical default wins");
   }
 
   /// Tester report: laptop mic first in the list, USB headset as the default. The headset wins.
