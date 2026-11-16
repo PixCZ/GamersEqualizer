@@ -45,7 +45,7 @@ impl OutputEq {
       }
       return;
     }
-    let facts = self.facts_for(&event.full_path);
+    let facts = self.facts_for(&event.full_path, owner);
     let matched = game_match::resolve(&self.settings, &self.game_profiles, &facts);
     // Its sound goes to Game only when it is a game; anything else is Media (`bus_for_exe`).
     crate::win_audio::app_channels::set_detected_game(&exe, matched.is_some());
@@ -128,19 +128,23 @@ impl OutputEq {
     self.set_active_game(None, shm);
   }
 
-  /// Launcher facts and genre of an exe, gathered once per path (cleared by `reload`).
-  fn facts_for(&mut self, full_path: &str) -> GameFacts {
+  /// Launcher facts and genre of an exe, gathered once per path (cleared by `reload`). Not the
+  /// `owner`: the genre only from the owner's cache, and not kept, so a later event picks up
+  /// what the owner has looked up since.
+  fn facts_for(&mut self, full_path: &str, owner: bool) -> GameFacts {
     if let Some(f) = self.facts_cache.get(full_path) {
       return f.clone();
     }
     let mut facts = launchers::gather_facts(full_path);
     // Always looked up: it also tells Steam tools from games, whatever the genre switch says.
-    let found = self.genres.lookup(full_path, &facts);
+    let found = if owner { self.genres.lookup(full_path, &facts) } else { self.genres.cached(full_path, &facts) };
     facts.not_a_game = found.not_a_game;
     if self.settings.detect_genres {
       facts.genre = found.genre;
     }
-    self.facts_cache.insert(full_path.to_string(), facts.clone());
+    if owner {
+      self.facts_cache.insert(full_path.to_string(), facts.clone());
+    }
     facts
   }
 
@@ -149,7 +153,7 @@ impl OutputEq {
     let Some((_, path)) = self.tracked.clone().filter(|_| self.is_owner) else {
       return;
     };
-    let facts = self.facts_for(&path);
+    let facts = self.facts_for(&path, true);
     match game_match::resolve(&self.settings, &self.game_profiles, &facts) {
       Some(m) => {
         let game = ActiveGame { profile: m.profile.unwrap_or_default(), label: m.label };

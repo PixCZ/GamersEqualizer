@@ -181,6 +181,15 @@ pub struct GenreLookup {
   cache: Option<CacheFile>,
 }
 
+/// The built-in list, or nothing for a game no launcher installed: no launcher data needed.
+fn without_launcher_data(facts: &GameFacts) -> Option<Lookup> {
+  if let Some(&(_, g)) = KNOWN_EXES.iter().find(|(exe, _)| *exe == facts.exe_name) {
+    return Some(Lookup { genre: Some((g, "built-in list".into())), not_a_game: None });
+  }
+  // Only launcher games are looked up in launcher data.
+  (!facts.from_launcher).then(Lookup::default)
+}
+
 impl Genre {
   /// The built-in game profile of this genre (`game_presets`).
   pub const fn preset_name(self) -> &'static str {
@@ -210,13 +219,24 @@ impl GenreLookup {
     Self { path: profiles_dir.join(CACHE_FILE), cache: None }
   }
 
+  /// `lookup` for the window while the service owns detection: only what the service already
+  /// looked up (the cache file it writes), never Steam's `appinfo.vdf` (often over 100 MB) or
+  /// the Galaxy database on the window's thread.
+  pub fn cached(&self, full_path: &str, facts: &GameFacts) -> Lookup {
+    if let Some(found) = without_launcher_data(facts) {
+      return found;
+    }
+    let cache = load_cache(&self.path);
+    let Some(hit) = cache.games.get(&full_path.to_lowercase()) else {
+      return Lookup::default();
+    };
+    Lookup { genre: hit.genre.map(|g| (g, hit.source.clone())), not_a_game: not_a_game(hit.steam_type.as_deref()) }
+  }
+
   /// Genre of the game `facts` describes (exe at `full_path`) and where it came from.
   pub fn lookup(&mut self, full_path: &str, facts: &GameFacts) -> Lookup {
-    if let Some(&(_, g)) = KNOWN_EXES.iter().find(|(exe, _)| *exe == facts.exe_name) {
-      return Lookup { genre: Some((g, "built-in list".into())), not_a_game: None };
-    }
-    if !facts.from_launcher {
-      return Lookup::default(); // only launcher games are looked up in launcher data
+    if let Some(found) = without_launcher_data(facts) {
+      return found;
     }
     let galaxy_modified = modified(Path::new(GALAXY_DB));
     let appinfo = steam_appinfo_path();
@@ -618,6 +638,23 @@ mod tests {
     for g in [Genre::Shooter, Genre::Competitive, Genre::Moba, Genre::OpenWorld, Genre::Story] {
       assert!(names.iter().any(|n| n == g.preset_name()), "{g:?}");
     }
+  }
+
+  #[test]
+  fn the_window_reads_only_what_the_owner_cached() {
+    let dir = std::env::temp_dir().join(format!("ge_genre_cached_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lookup = GenreLookup::new(&dir);
+    let facts = GameFacts { exe_name: "game.exe".into(), from_launcher: true, ..GameFacts::default() };
+    assert_eq!(lookup.cached(r"C:\Games\Game.exe", &facts), Lookup::default(), "not looked up yet");
+
+    let mut cache = CacheFile::default();
+    let hit = CachedGenre { genre: Some(Genre::Shooter), source: "Steam tags".into(), steam_type: None };
+    cache.games.insert(r"c:\games\game.exe".into(), hit);
+    std::fs::write(dir.join(CACHE_FILE), serde_json::to_string(&cache).unwrap()).unwrap();
+    let found = lookup.cached(r"C:\Games\Game.exe", &facts);
+    assert_eq!(found.genre, Some((Genre::Shooter, "Steam tags".into())));
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]
