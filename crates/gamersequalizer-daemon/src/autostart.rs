@@ -39,6 +39,13 @@ pub fn is_autostart_enabled() -> bool {
 
 /// Enable or disable starting in background with Windows
 pub fn set_autostart(enable: bool) -> Result<(), String> {
+  // Before the key is open: an early return there skipped `RegCloseKey`.
+  // The installed copy once there is one: the unzipped folder may be deleted.
+  let exe_path = if enable {
+    Some(crate::win_audio::apo_install::autostart_exe().ok_or("the app's exe path is unknown")?)
+  } else {
+    None
+  };
   // SAFETY: static NUL-terminated names; the value bytes view `wide_cmd`, which outlives the call; the key is
   // closed once before returning.
   unsafe {
@@ -48,9 +55,7 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
       return Err(format!("Failed to open Run registry key: {:?}", status));
     }
 
-    let result = if enable {
-      // The installed copy once there is one: the unzipped folder may be deleted.
-      let exe_path = crate::win_audio::apo_install::autostart_exe().ok_or("the app's exe path is unknown")?;
+    let result = if let Some(exe_path) = exe_path {
       // Launch headless daemon on login
       let cmd_str = format!("\"{}\" --daemon", exe_path.to_string_lossy());
       let wide_cmd: Vec<u16> = cmd_str.encode_utf16().chain(std::iter::once(0)).collect();
