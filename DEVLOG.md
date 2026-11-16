@@ -2889,3 +2889,92 @@ Branch `genre-presets`. Planned as release 0.2.0 "profile edition".
 - Apps that play sound in a shared helper (`msedgewebview2.exe` in new Teams) and unknown AI browsers
   (Atlas, Neon, Genspark, Norton Neo, DuckDuckGo: exe not found) need a drag in the mixer.
 - A game is on Media until it first comes to the foreground.
+
+## Milestone 62: Audit and refactoring: one gate, edition 2024, files by job (2026-11-15 .. 2026-11-16)
+
+Branch `refactoring-plan`. A code audit (20 findings and a list of minor ones), a step-by-step
+refactoring, then a review of every step and its fixes. No new features.
+
+**Gate**
+
+- Toolchain pinned in `rust-toolchain.toml` (1.100.0), rustfmt over the workspace, clippy at zero
+  warnings with `indexing_slicing` and `undocumented_unsafe_blocks` denied, `#[expect(.., reason)]`
+  instead of `#[allow]`, edition 2024.
+- `scripts/check.ps1` is the one gate; `dev-rebuild.ps1 -Test` and CI (`ci.yml`, every push) run it.
+  The installer self-check fails on a script that does not parse (the uninstaller too) and also runs
+  under Windows PowerShell 5.1, which runs the installer on users' PCs.
+
+**Structure**
+
+- Crate `gamersequalizer-mic-vst` is `gamersequalizer-mic-chain` (`MicChain`, `chain.rs`); `dsp_apo` is
+  gone (`auto_preamp` lives in `output_eq`). About 1 500 lines of earlier designs deleted.
+- Files split by job, moves only: `common/shm/`, `common/sidetone/`, the APO's `lib.rs` (COM, entry,
+  mic, output, stream), `ai_denoiser/`, `chain/`, `aec3/echo_meter.rs`, the daemon's `daemon.rs`,
+  `lifecycle.rs`, `shm_mapping.rs`, `health/`, `win_audio/apo_install/`, `win_audio/chatmix/`,
+  `ui/state/`, `output_eq/{profiles,detection,publish}.rs`. Tests over 300 lines sit in `tests.rs`.
+- Copies merged: one mixer `Channel` (five before), one save and delete for the four EQ layers,
+  `EqFade` for the output and stream crossfade, `theme::percent_volume` / `level_text`,
+  `win_audio/mmdevice.rs` for device enumeration, `win_audio/worker.rs` (retry and "same error once")
+  for the worker threads, `apo-common.ps1` for what both installer scripts share (spliced in at
+  `# @common` before the scripts are hashed).
+- The service builds only the shared-memory mapping and `OutputEq`, not the window's `AppState`.
+
+**Shared memory v22**
+
+- One number: `shm_version!` gives `SHM_VERSION` and both mapping names; the size is asserted at
+  compile time and the version checked on open. `Default` is a zeroed header plus `init_defaults`.
+- Dropped, read by no one: `aec_double_talk`, `aec_impulse`, `aec_filter_taps`, `read_frame_index`,
+  `sample_rate`, `channels`, `capacity_frames`. Debug capture mapping v5, `vars.tsv` 55 columns
+  (readers look columns up by name, old captures load).
+- EQ bands are read lazily, without an allocation on the audio thread.
+
+**Behavior that changed**
+
+- The mic bridge (a copy of the processed mic into VB-Cable / "Sonar - Microphone") is gone; the
+  service starts the loopback (echo reference, APO link) itself.
+- A new stream is processed from its first block (was up to ~100 ms of pass-through: every
+  `OwnerWatch` started blind). A stream APO whose slot another instance took passes through.
+- AEC3 silences its first frame after a pause (430 samples from before it sat in its delay line). The
+  denoiser has one clear for the sleep state and the click rescue; settings are read once per block
+  (`MicSettings`); COM entry points that build something are guarded by `catch_unwind` too.
+- Installer: a failed update leaves the endpoint's effects in; a rollback after the self-test takes
+  ours out on an update too, and a key an earlier install made goes with it; an endpoint is active by
+  its `DEVICE_STATE` bits; `Add-Type` compiles in a folder only administrators can write.
+- Stored data: `FilterType::Unknown(String)`, unknown fields kept (`extra`) in profiles, settings, UI
+  prefs and `sidetone.json`; a profile file this version cannot read is never overwritten, and a save
+  over a readable one keeps its unknown fields (`for_overwrite`).
+- Detection: "(none)" for the detected game binds it as a game without a profile (`<no profile>`;
+  was "not a game", then a no-op); a window that follows the service takes genres from the service's
+  cache, and only the owner records what is a game; "Reset" reaches the service.
+- Devices: Master follows an unplugged device, and behind a virtual default stays on its device when
+  another one is plugged in; id healing never moves settings onto an id the files already use.
+- Window: one `save_pending` for every unsaved edit, also on exit; "Stop service and exit" and the
+  uninstall close the window instead of `process::exit`.
+- Sonar import moves a profile the user changed to `_deleted` instead of replacing it.
+
+**Not confirmed, left as it is**
+
+- `profiles/aux` looked dead but holds imported Sonar presets: kept.
+- EQ bands half old for one block (~10 ms) while a new set is written: each band is valid, a second
+  version read adds nothing.
+- Window off screen at 150 % scaling: not found in the code (the position is loaded before winit
+  makes the process DPI aware, both sides in points).
+- Deferred: output telemetry is one set of fields, so the last device to write wins; per-device
+  counters need new shared-memory fields. `VadType` and `BiquadBand` keep nothing unknown (a profile
+  with an unknown `VadType` is skipped on load and protected from being overwritten).
+- Two devices of the same name: after one is unplugged its settings move to the other and do not
+  move back. After an update's rollback the Default processing mode we added to a driver's own key
+  stays (without effects in the slot it does nothing).
+
+**Open: to check by hand on Windows**
+
+- The review's fixes were written on a Mac: type-checked and clippy-clean for the Windows target, the
+  installer self-check run under `pwsh`; the Rust tests of the daemon, the APO and the mic chain run
+  first in CI.
+- Installer as administrator: an update that fails, and an update whose self-test rolls back.
+- "(none)" for a detected game in the window; Master behind Sonar when a monitor is plugged in; the
+  window on a second monitor at 150 % that is then unplugged.
+- A `-DebugCapture` recording of the mic chain against one from before (pause, model switch, output
+  switch); `sidetone_probe` with nothing else playing (the output APO only zeroes a block flagged
+  silent, so the sidetone may not be mixed in).
+- A Release workflow run with the pinned toolchain; the branch rule on GitHub that requires CI.

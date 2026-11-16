@@ -1,6 +1,38 @@
+## More reliable
+
+**An update that fails leaves your sound as it was.** If an update could not finish, the installer
+used to take GamersEqualizer off your devices; now they keep the version that worked. When a device
+does not open after an update, GamersEqualizer comes off that device, and the installer says so.
+
+**No old sound after a pause.** After the microphone had been idle, the first moment of sound could
+be a fragment from before the pause. That first fragment is now silent. A new sound stream is also
+processed from its very start instead of after a short unprocessed moment.
+
+**Your edits survive.** Importing from Sonar no longer replaces a Sonar profile you changed: your
+version moves to `profiles\_deleted`, from where it can be restored. Edits you made just before
+**Stop service and exit** or the uninstall are saved, like on a normal close. The AutoEQ wizard tells
+you when a profile could not be saved instead of saying "Done".
+
+**"(none)" for a detected game takes its profile away.** The game stays a game (its sound stays on
+the Game channel) and plays with the profile for "no game runs". The list of recent apps offers the
+same as **Game, no profile**; **Automatic** there gives the choice back to detection.
+
+**Devices that come and go.** When the headset behind a virtual output such as Sonar is unplugged,
+the Master volume and the echo canceller move to the device that is left, and they stay on your
+headset when a monitor or another device is plugged in. Two devices of the same name no longer lose
+one's settings. The output EQ warning names the output it is about.
+
+**Ready for newer versions.** Profiles and settings written by a newer GamersEqualizer keep the
+settings this version does not know, also when you save over them, and a profile this version cannot
+read at all is never overwritten.
+
 ### Removed
 
 **No more copy of the microphone to a virtual cable.** Earlier versions also sent the processed
 microphone to a VB-Cable or "Sonar - Microphone" device when one was installed. The microphone effect
 now does all the processing on your real microphone, and apps record it straight from there. If an app
 still records from such a virtual cable, pick your real microphone in that app instead.
+
+### Updating
+
+Unpack the ZIP, start `gamersequalizer.exe` and click **Update**. Your settings and profiles stay.
