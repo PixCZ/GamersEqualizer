@@ -86,6 +86,13 @@ const TAKEOVER_FADE_SAMPLES: usize = 240;
 /// RNNoise runs this long next to the heavy model before it stands in: its state is from the
 /// last pause, and stale it rated the room as speech and woke the model right away.
 const STAND_IN_WARMUP_SAMPLES: usize = 48 * 300;
+/// No voice on the raw-input detectors (`in_net`, Silero) for this long stops the click rescue
+/// and its two RNNoise passes; a voice starts them again, and the rescue waits
+/// `STAND_IN_WARMUP_SAMPLES` for RNNoise to warm up (the first 300 ms after a long pause go
+/// without it). Typing alone at -30 dBFS: RNNoise ran in 14 % of the blocks, DFN3 awake
+/// 3.8 -> 3.4 % of a core. Quality reports unchanged (`click_report`: frames under hammered
+/// clicks lost > 6 dB 12.6 -> 13.3 %, the rest equal; 2026-11-16).
+const RESCUE_IDLE_SAMPLES: usize = 48_000 * 2;
 /// Input this far over the room's noise floor counts as activity: it keeps the heavy model
 /// awake / wakes it. The voice detector misses whisper and a quiet voice (mic set low), which
 /// RNNoise standing in then lost by 14-20 dB (`leveler_report`); sleeping only in a quiet room
@@ -230,6 +237,11 @@ pub struct AiVoiceIsolator {
   /// Heavy-model output samples still to silence after a `flush`: its recurrent state and
   /// lookahead frames hold the audio from before (one model latency of it).
   mute_left: usize,
+  /// Samples since the raw-input detectors last heard a voice (`RESCUE_IDLE_SAMPLES`).
+  no_voice_samples: usize,
+  /// RNNoise ran in the last block; the rescue starting it again waits `rescue_warm_left`.
+  rnnoise_ran: bool,
+  rescue_warm_left: usize,
 }
 
 impl Default for AiVoiceIsolator {
@@ -282,6 +294,9 @@ impl AiVoiceIsolator {
       heard_voice: false,
       loading: None,
       mute_left: 0,
+      no_voice_samples: 0,
+      rnnoise_ran: false,
+      rescue_warm_left: 0,
     }
   }
 
@@ -490,8 +505,19 @@ impl AiVoiceIsolator {
     let rescue_off = self.no_rescue;
     #[cfg(not(test))]
     let rescue_off = false;
-    let rescue_on = heavy_on && takeover.is_none() && active == DenoiseModel::DeepFilterNet && !rescue_off;
+    let rescue_on = heavy_on
+      && takeover.is_none()
+      && active == DenoiseModel::DeepFilterNet
+      && !rescue_off
+      && self.no_voice_samples < RESCUE_IDLE_SAMPLES;
     let rnnoise_on = !heavy_on || takeover.is_some() || rescue_on;
+    if rescue_on && !self.rnnoise_ran {
+      // RNNoise's buffers and the delay hold audio from before the pause, its state is stale.
+      self.rnnoise.restart();
+      self.sleep.delay.clear();
+      self.rescue_warm_left = STAND_IN_WARMUP_SAMPLES;
+    }
+    self.rnnoise_ran = rnnoise_on;
     if rescue_on {
       // No-op unless the length changed (model switch): aligns RNNoise with DFN3's output.
       self.sleep.delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
@@ -521,6 +547,8 @@ impl AiVoiceIsolator {
       out_prob,
       rescue_prob,
       soft_prob,
+      no_voice_samples,
+      rescue_warm_left,
       ..
     } = self;
     let (mut voice, mut voice_out, mut voice_soft) = (false, false, false);
@@ -545,6 +573,7 @@ impl AiVoiceIsolator {
         voice |= vad.frame_at(p, open, keep);
       });
     }
+    *no_voice_samples = if voice || voice_soft { 0 } else { no_voice_samples.saturating_add(n) };
     // During a takeover RNNoise works on a copy, the heavy model in place.
     let stand_in = match spare.get_mut(..n) {
       Some(copy) if heavy_on && rnnoise_on => {
@@ -587,7 +616,9 @@ impl AiVoiceIsolator {
       }
     }
     if let (true, Some(stand)) = (rescue_on, spare.get(..n)) {
-      *rescue_prob = rescue.process(samples, stand, soft_voice_now);
+      let warm = *rescue_warm_left == 0;
+      *rescue_warm_left = rescue_warm_left.saturating_sub(n);
+      *rescue_prob = rescue.process(samples, stand, soft_voice_now && warm);
     } else {
       rescue.reset();
     }
@@ -641,6 +672,7 @@ impl AiVoiceIsolator {
   /// `reset` for the real-time thread (the host paused the chain): drops all audio buffered from
   /// before, keeps the loaded models and their network states, allocates nothing.
   pub fn flush(&mut self) {
+    self.rnnoise_ran = false;
     self.sleep.clear();
     self.rescue.reset();
     self.rnnoise.flush();
@@ -668,6 +700,7 @@ impl AiVoiceIsolator {
     self.vad_out = VoiceHysteresis::new_output();
     self.delay.clear();
     self.bypassed = false;
+    self.no_voice_samples = 0;
   }
 
   /// Tracks the raw input's noise floor; true while the input has been over it by
@@ -800,6 +833,7 @@ impl AiVoiceIsolator {
   /// engine's, or from before a bypass), nothing left to silence, RNNoise's network state new, the
   /// heavy models' buffers emptied.
   fn reset_engines(&mut self) {
+    self.rnnoise_ran = false;
     self.sleep.clear();
     self.rescue.reset();
     self.mute_left = 0;

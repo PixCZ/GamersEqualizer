@@ -5,6 +5,9 @@ Pracovní dokument: po zapracování smazat a podstatná čísla přenést do `D
 
 ## Závěr
 
+> Ověřeno 2026-11-16 na vývojovém PC, viz kapitola 7. Platí body 1, 3 (zapracováno), 4 a 6 jen pro DFN3.
+> Bod 2 neprošel zprávami kvality, bod 5 neplatí pro AVX-512, ale platí pro studenou cache.
+
 1. **Režie knihovny v DFN3 není.** 95 % času jednoho rámce jsou vrstvy modelu, z toho většina násobení
    matic a GRU. Fork tractu ani ruční přepis inference proto nic podstatného nepřinese.
 2. **Největší úspora je práci nedělat:** v rámcích bez hlasu vynechat dekodér hlubokého filtrování DFN3
@@ -246,6 +249,212 @@ jedna funkce a nese ji test `matches_the_step_by_step_recurrence`.
 
 Odkazy na kód (čísla řádků, názvy zpráv a konstant) jsou ověřené proti větvi `fix/pause-hiss` ve stavu
 `4005f0f`. Měření běželo nad forkem `deep_filter` a modely, které jsou v obou větvích stejné.
+
+## 7. Ověřeno na vývojovém PC (Ryzen 7 9800X3D, 2026-11-16)
+
+Kroky 1, 2, 3, 5–8 postupu a měření na notebooku se Zenem 3. Krok 4 (log od testera) zbývá. Čísla jsou v % jednoho jádra,
+`cpu_breakdown_report` (přibyly v něm `COLD_CACHE=1` a řádky „keys only“), opakovaný běh se liší o ±3–5 %.
+
+### Kroky 1 a 2: AVX-512 téměř nic, studená cache ano
+
+`TRACT_CPU_ISA=-avx512f,-avx512fp16` funguje i na x86: tract pak volí `fma_mmm_f32_64x1` místo
+`avx512_mmm_f32_128x1` (ověřeno přes `MmmDispatch::native().pick`).
+
+| Část                       | AVX-512, teplá | AVX2, teplá | AVX-512, studená | AVX2, studená |
+| -------------------------- | -------------- | ----------- | ---------------- | ------------- |
+| DFN3 samotný               | 1,88           | 2,02        | 3,77             | 4,55          |
+| DPDFNet samotný            | 9,57           | 10,11       | 12,74            | 14,00         |
+| Celý odšumovač, DFN3       | 3,54           | 3,65        | 6,30             | 6,69          |
+| Celý odšumovač, DPDFNet    | 11,06          | 11,36       | 14,96            | 15,58         |
+
+- Bez AVX-512 je DFN3 pomalejší jen o 5–7 %. I bez AVX2 a FMA (jen AVX) vyjde stejně: násobení matice
+  jedním sloupcem čeká na váhy z paměti, šířka instrukcí nerozhoduje. Bod 5 závěru tu neplatí.
+- Studená cache: DFN3 2,0×, DPDFNet 1,33× (Mac 1,9–2,2× a 1,25×). S AVX2 2,4× a 1,46×, jejich poměr
+  1,65 sedí na rozdíl u testera (1,66). Zbylý asi trojnásobek je u obou modelů stejný: takt a jádro
+  notebooku (hypotéza z kapitoly 2), potvrdí až krok 4.
+
+### Pauza mezi bloky stojí skoro jako studená cache
+
+`PACED=1`: jádro po každém bloku 8 ms čeká, jako při živém zvuku. Stejný běh, AVX-512:
+
+| Část                           | Teplá, bez pauz | S pauzou 8 ms | Studená cache |
+| ------------------------------ | --------------- | ------------- | ------------- |
+| DFN3 samotný                   | 1,90            | 3,50          | 3,85          |
+| DPDFNet samotný                | 9,58            | 13,26         | 12,87         |
+| Celý odšumovač, DFN3, řeč      | 3,53            | 5,76          | 6,28          |
+| Celý odšumovač, DFN3, klávesy  | 3,15            | 5,07          | 5,82          |
+
+I na 9800X3D tedy živý provoz stojí asi 1,8× víc než benchmark bez pauz: během 8 ms čekání
+jádro zpomalí nebo usne a cache vychladne. Teplá čísla jsou spodní mez, pauza bližší skutečnosti.
+
+### Notebook: Ryzen 5 7530U (Zen 3, 2026-11-16)
+
+Balíček z `scripts/cpu-bench-package.ps1`, notebook v zásuvce, plán Rovnováha. Tract jede na AVX2
+(`avx512f: false`). V závorce poměr k vývojovému PC ve stejném režimu (teplá a studená s AVX2, pauza
+s AVX-512, které na pauzu vliv nemá).
+
+| Část                           | Teplá         | Studená       | S pauzou 8 ms |
+| ------------------------------ | ------------- | ------------- | ------------- |
+| DFN3 samotný                   | 3,63 (1,8×)   | 9,98 (2,2×)   | 12,10 (3,5×)  |
+| DPDFNet samotný                | 20,77 (2,1×)  | 28,05 (2,0×)  | 35,63 (2,7×)  |
+| RNNoise 0.2 (`in_net`)         | 0,87          | 3,32          | 2,70          |
+| Celý odšumovač, DFN3, řeč      | 7,84          | 18,52         | 15,40 (2,7×)  |
+| Celý odšumovač, DPDFNet, řeč   | 24,40         | 36,18         | 32,41         |
+
+- **Pauza je na notebooku hlavní příčina.** DFN3 s pauzou stojí 3,3× víc než bez ní (vývojové PC 1,8×),
+  DPDFNet 1,7×. DFN3 pracuje 0,36 ms z 10, jádro mezi rámci zpomalí a cache vychladne; delší práce
+  DPDFNetu ho drží výš. To vysvětluje, proč u testera vychází DFN3 hůř než DPDFNet, i bez AVX-512.
+- Měřič počítá čas na hodinách při taktu, který jádro zrovna má. Při hře je jádro výš, procenta tak
+  mohou být nižší než v klidu; se hrou, která vytlačuje cache, zase vyšší (režim `COLD_CACHE+PACED`
+  přibyl do balíčku dodatečně).
+- Tester (6800H, živě v aplikaci) měl 27 % s DFN3 a 47 % s DPDFNetem, tady s pauzou 15,4 a 32,4 %. Zbytek
+  dělá nejspíš hra, která sdílí L3, a režie aplikace; krok 4 to rozliší.
+
+ONNX Runtime na notebooku: kodér 154, dekodér ERB 173, dekodér hlubokého filtrování 147 µs (dohromady
+473 µs, tract celý DFN3 i se STFT 363 µs, tract o 23 % rychlejší); DPDFNet 1896 µs proti 2077 µs tractu
+(ORT o 9 % rychlejší). Na Zenu 3 tedy totéž co na vývojovém PC.
+
+### Krok 3: ONNX Runtime proti tractu na x86
+
+ONNX Runtime 1.32.0, jedno vlákno, skript z přílohy. Tract: DFN3 s vynucenými prahy, DPDFNet z benche.
+
+| Model                    | tract AVX-512 | tract AVX2 | ONNX Runtime | Rozdíl                     |
+| ------------------------ | ------------- | ---------- | ------------ | -------------------------- |
+| DFN3 kodér (+ STFT)      | 75 µs         | 90 µs      | 98 µs        | tract lepší                |
+| DFN3 dekodér ERB         | 66–96 µs      | 67 µs      | 111 µs       | tract lepší                |
+| DFN3 dekodér hl. filtr.  | 70 µs         | 68 µs      | 94 µs        | tract lepší                |
+| DPDFNet                  | 970 µs        | 1010 µs    | 926 µs       | ORT o 5 % / 9 % lepší      |
+
+Na x86 vede ONNX Runtime u DPDFNetu jen o 5–9 % (Mac 25 %). Úprava `GruSeq` by dala nanejvýš pár procent
+DPDFNetu: téma uzavřené (kapitola 3, E).
+
+### Krok 5–7: A1, A2, B
+
+Pokus s přepínači ve forku (`skip_df`, `zero_mask` v `apply_stages`) a v `AiVoiceIsolator`, čítač „vstupní
+detektory (`in_net`, Silero) neslyšely hlas“. Úspora, jen klávesy -30 dBFS, DFN3 vzhůru:
+
+| Varianta | Teplá cache  | Studená, AVX2 | Kvalita                                                              |
+| -------- | ------------ | ------------- | -------------------------------------------------------------------- |
+| Dnes     | 3,80         | 7,25          | –                                                                    |
+| A1       | 3,08         | 5,93          | Neprošlo: pauzy o 5–27 dB hlasitější                                 |
+| A2       | 2,47         | 4,64          | Neprošlo: konce slov ztlumené o > 6 dB 21,3 → 36,6 %                 |
+| B        | 3,37         | 6,80          | Prošlo, zapracováno                                                  |
+| A2 + B   | 2,00         | 4,26          | Neprošlo (A2)                                                        |
+
+- **A1:** bez dekodéru hlubokého filtrování tlumí ERB maska klávesy v pauzách mnohem hůř. `click_report`:
+  pauzy 39,1 → 12,3 dB; `near_pause_report`: 21,3 → 16,2 dB; `pause_burst_report` 20261110-141254:
+  41 oken nad -80 dBFS místo 1; brána se na samotném psaní otevřela v 15,6 % času (test dovoluje 8 %).
+  Vedlejší zjištění: konce slov se zlepšily (ztracené > 6 dB 21,3 → 9,9 %), hluboké filtrování je dnes ořezává.
+- **A2:** pauzy výrazně tišší (`pause_burst` 20261109-210655: 5 → 0–1 oken, `click_report` pauzy +10–20 dB),
+  ale konce slov ztlumené o > 6 dB 21,3 → 36,6 %, řeč o > 15 dB 3,4 → 4,5 %. S čekáním 500 / 1000 ms místo
+  200 ms pořád 30,9 / 24,8 %. Detektory konce slov neslyší a nulová maska je smaže.
+- **B:** kvalita beze změny kromě rámců pod kliknutími -3 dBFS ztracených o > 6 dB (12,6 → 13,3 %).
+  Na samotném psaní běží RNNoise záchrany jen ve 14 % bloků (klávesy občas vzbudí vstupní detektory).
+  Zapracováno: `RESCUE_IDLE_SAMPLES` = 2 s, po návratu hlasu `rnnoise.restart()` a 300 ms zahřátí, test
+  `test_rescue_stops_without_voice_and_comes_back`.
+
+### Krok 8 (D): denormální čísla nic nezpomalí
+
+`digital_silence_report`: 2 s řeči, pak 10 s přesných nul. Průměr na nulách je u každé části stejný nebo
+nižší než na řeči, FTZ/DAZ (`FTZ_DAZ=1`) ho nemění, nejpomalejší bloky skáčou náhodně v obou bězích
+(plánovač). MXCSR nenastavovat.
+
+### Vedlejší nález: test probuzení
+
+`test_wake_without_voice_keeps_the_gate_closed` zpracovává vstup na místě, takže DPDFNet slyší výstup
+DFN3, ne místnost. Na surové místnosti s DPDFNetem první rámec `out_net` po probuzení (stav z doby před
+spánkem) dá 0,32 a brána se otevře na 21 bloků. Nechat `out_net` během probouzení poslouchat bez účinku to
+v testu spravilo, ale v `pause_burst_report` (20261110-141254, 15,96 s) otevřelo bránu ve 25 z 30 bloků
+místo 0: vráceno, otevřené.
+
+## 8. Zadání: pokus s vahami v f16
+
+### Cíl
+
+Zjistit, jestli váhy modelů uložené v f16 (počítání dál v f32) zlevní DFN3 a DPDFNet tam, kde dnes
+drahá je paměť: studená cache a pauza mezi bloky (kapitola 7, notebook 7530U: DFN3 3,63 % teplá,
+9,98 % studená, 12,10 % s pauzou). Výsledek je rozhodnutí přijmout / zamítnout s čísly, ne hotová funkce.
+
+### Proč to může fungovat
+
+- DFN3 čte každých 10 ms 8,6 MB vah, DPDFNet podobně. Násobení matice vektorem (n = 1) čeká na paměť,
+  šířka instrukcí nerozhoduje (AVX-512 dalo jen 5–7 %). Polovina bajtů je polovina přenosu.
+- Tract 0.23.10 už má kernel: `fma_mmm_f32_32x1` v `tract-linalg/src/x86_64/mmm.rs` bere balení
+  `f16f32` (váhy f16, vstup f32, výpočet a akumulace f32), vyžaduje AVX + FMA + F16C, takže běží i na Zenu 3.
+  Výběr kernelu podle typů vstupů dělá `tract-core/src/ops/einsum/kernel_selection.rs` (`query` čte
+  `datum_type` obou vstupů).
+- f16 má 11bitovou mantisu, pro váhy obvykle bez slyšitelného rozdílu. Ověří to zprávy kvality.
+
+### Kde to je
+
+| Model   | Načtení a optimalizace                                                     | Pozor na                         |
+| ------- | -------------------------------------------------------------------------- | -------------------------------- |
+| DFN3    | Fork `crates/vendor/deep_filter/src/tract.rs`: `init_encoder_impl`,        | Tři grafy, pulzování, GRU uvnitř |
+|         | `init_erb_decoder_impl`, dekodér hlubokého filtrování, `into_optimized`    | `Scan` (váhy v těle smyčky)      |
+| DPDFNet | `crates/gamersequalizer-mic-chain/src/dpdfnet.rs`, `model_for_proto_model` | Stav GRU jako vstup / výstup     |
+|         | ... `into_optimized()`                                                     |                                  |
+
+Fork je mimo workspace a jeho lints; testy forku: `cargo test --release --manifest-path
+crates/vendor/deep_filter/Cargo.toml`.
+
+### Postup
+
+0. **Proveditelnost (nejdřív, malé).** V testu vzít jeden graf DFN3 (kodér), před `into_optimized`
+   převést konstantní váhy vstupující do maticových násobení (`EinSum` / `MatMul`, v GRU i v těle `Scan`)
+   na f16 tak, aby aktivace zůstaly f32. Po `into_optimized` ověřit, že tract opravdu vybral
+   `fma_mmm_f32_32x1` s balením `f16f32`, a ne že váhy složil zpátky na f32 (konstantní `Cast` se při
+   optimalizaci skládá). Kontrola: výpis optimalizovaného modelu (`{:?}` uzlů, název kernelu a balení),
+   případně `MmmDispatch::native().pick` s typy vah. Možné cesty, od nejmenší:
+   - `FloatPrecisionTranslator` (`tract-core/src/floats.rs`, transformace `f32_to_f16`) s `with_filter`
+     jen na konstanty vah. Celý model na f16 (i aktivace) nechceme: prvkové operace v f16 na x86 nemají
+     rychlé kernely; změřit ho jen jako srovnání, když vyjde levně.
+   - Vlastní malá transformace ve forku podle `tract-core/src/ops/matmul/de_block_quant.rs`
+     (`BlockQuantTransform`): přepíše konstantní váhu `EinSumMatMul` na f16 tensor. Ta už větev pro f16
+     váhy má.
+   Když tract `f16f32` u některých násobení nevybere (např. GRU v `Scan`), zapsat kde a proč a pokračovat
+   s tím, co jde. Když nevybere nikde, pokus končí tady se zprávou.
+1. **Přepínač, ne náhrada.** Proměnná prostředí čtená jen při načtení modelu (např.
+   `GE_F16_WEIGHTS=1`, platí pro oba modely), výchozí stav dnešní f32. Bez F16C (CPU před Haswellem)
+   vždy f32: `is_x86_feature_detected!("f16c")`. Nic jiného se nemění: shared memory, nastavení, UI ne.
+2. **Numerická kontrola.** Na `speech_clean.wav` a `speech_over_keyboard` porovnat výstup f16 proti f32
+   (rozdíl v dB pod signálem, nejhorší blok). Jen jako informace a pojistka proti chybě v převodu
+   (rozdíl blízko 0 dB = rozbité).
+3. **CPU.** `cpu_breakdown_report` (DFN3 a DPDFNet samotné i celý odšumovač) ve čtyřech režimech: teplá,
+   `COLD_CACHE=1`, `PACED=1`, `COLD_CACHE=1` + `PACED=1`. Na vývojovém PC s `TRACT_CPU_ISA=-avx512f`
+   (AVX-512 kernely `f16f32` nemají, bez knoflíku by se měřil jiný kernel) a jednou bez něj (co dostanou
+   procesory s AVX-512). Doba načtení modelu před a po (běží na pomocném vlákně, ale nesmí výrazně
+   narůst). Pak balíček `scripts/cpu-bench-package.ps1` (přidat do `run.ps1` druhý průchod s
+   `GE_F16_WEIGHTS=1`) a běh na notebooku 7530U.
+4. **Kvalita.** `click_report`, `keyboard_call_report`, `near_pause_report`, `whisper_gate_report`,
+   `pause_burst_report`, `capture_replay_report`, f32 proti f16, pro DFN3 i DPDFNet. Pravidlo z `merge.md`:
+   jakékoli zhoršení nad rozptyl běhu znamená zamítnout (pro daný model zvlášť).
+5. **Brána** `scripts/check.ps1` (agent `dev-rebuild`) a testy forku.
+
+### Hotovo, když
+
+- Je zapsaná tabulka: model × režim × f32 / f16 (vývojové PC AVX2, vývojové PC AVX-512, notebook),
+  zprávy kvality f32 / f16, doba načtení, numerický rozdíl. Do kapitoly 7 tohoto dokumentu.
+- Je rozhodnuto pro každý model zvlášť:
+  - **Přijmout**, když kvalita beze změny a s pauzou nebo studenou cache na notebooku ušetří aspoň
+    10 % času modelu. Pak f16 zapnout napevno (bez proměnné), s F16C kontrolou a testem, že model
+    s f16 vahami dává výstup blízký f32.
+  - **Zamítnout** jinak: kód přepínače odstranit, výsledek a důvod zapsat sem.
+- Brána prošla.
+
+### Mimo rozsah
+
+- 4bitové váhy (`block_quant`, Q4_0): až když f16 nestačí, samostatný pokus.
+- ONNX Runtime, jiné knihovny, int8 kvantizace přes nástroje ONNX, změna modelu nebo trénink.
+- Režim „vytížená ostatní jádra“ (takt proti cache, bod 3 návrhu): samostatná úloha.
+- Úprava APO, shared memory, UI.
+
+### Rizika
+
+- Tract váhy při optimalizaci složí zpět na f32 nebo `f16f32` vybere jen pro část násobení: krok 0 to
+  odhalí dřív, než vznikne zbytek.
+- Na procesorech s AVX-512 může f16 cesta vyjít hůř než dnešní `avx512_mmm_f32_128x1` v teplé cache;
+  proto měření s i bez `TRACT_CPU_ISA` a rozhodnutí podle notebooku a studené cache.
+- Změny ve forku jsou mimo lints workspace: držet je malé, s komentářem a testem ve forku.
 
 ## Příloha: jak změřit části DFN3 a operace tractu
 

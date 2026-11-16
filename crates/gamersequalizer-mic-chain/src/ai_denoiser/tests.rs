@@ -193,6 +193,10 @@ fn test_wake_without_voice_keeps_the_gate_closed() {
     iso.set_model(model);
     iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
     let (mut woke, mut opened) = (false, 0);
+    // shortcut: processed in place, so DPDFNet hears DFN3's output, not the raw room. On the raw
+    // room `out_net`'s first frame after the wake (state from before the sleep) scores 0.32 and
+    // the gate opens for 21 blocks; letting it listen unheeded during the wake fixed that here
+    // but opened the gate on real captures (`pause_burst_report`, 2026-11-16). Open issue.
     for (i, block) in input.chunks_mut(480).enumerate() {
       let was = iso.asleep();
       iso.process_samples(block);
@@ -204,6 +208,33 @@ fn test_wake_without_voice_keeps_the_gate_closed() {
     assert!(woke, "{model:?}: the louder room must wake the model");
     assert_eq!(opened, 0, "{model:?}: gate opened in {opened} blocks without a voice");
   }
+}
+
+/// The click rescue stops after 2 s without a voice (typing alone: two RNNoise passes saved) and
+/// starts again with the next word: it fills in under hammered clicks once RNNoise warmed up.
+#[test]
+fn test_rescue_stops_without_voice_and_comes_back() {
+  let (_, _, mixed) = speech_with_clicks("speech_clean.wav", -3.0);
+  let keys = keyboard_only(-30.0);
+  let keys_len = 3 * 48_000;
+  let mut x: Vec<f32> = keys.iter().cycle().take(keys_len).copied().collect();
+  x.extend_from_slice(&mixed);
+  let mut iso = AiVoiceIsolator::new();
+  iso.set_model(DenoiseModel::DeepFilterNet);
+  iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+  iso.sleep_after = usize::MAX; // awake, as typing keeps it
+  let (mut ran_on_keys, mut rescued) = (0usize, 0usize);
+  for (i, block) in x.chunks_mut(480).enumerate() {
+    iso.process_samples(block);
+    if (200..keys_len / 480).contains(&i) {
+      ran_on_keys += iso.rnnoise_ran as usize;
+    } else if i >= keys_len / 480 {
+      rescued += (iso.debug_state().rescue_mix > 0.5) as usize;
+    }
+  }
+  let key_blocks = keys_len / 480 - 200;
+  assert!(ran_on_keys * 3 < key_blocks, "RNNoise ran in {ran_on_keys} of {key_blocks} key blocks");
+  assert!(rescued > 20, "rescue filled in only {rescued} blocks after the pause");
 }
 
 /// Regression (tester 2026-11-16, after the fix above: "after a long silence, hiss every ~2 s"):
@@ -797,7 +828,9 @@ fn measure(clean: &[f32], mixed: &[f32], out: &[f32], latency: usize) -> Quality
 /// WAV fixture as f32 (first channel, like the APO), linearly resampled to 48 kHz (good
 /// enough for test noise).
 pub(crate) fn read_wav_48k(name: &str) -> Vec<f32> {
-  let mut reader = hound::WavReader::open(format!("{FIXTURES}/{name}")).unwrap();
+  // `DENOISE_FIXTURES`: the fixtures elsewhere (the test binary run on another PC).
+  let dir = std::env::var("DENOISE_FIXTURES").unwrap_or(FIXTURES.into());
+  let mut reader = hound::WavReader::open(format!("{dir}/{name}")).unwrap();
   let spec = reader.spec();
   let channels = spec.channels.max(1) as usize;
   let samples: Vec<f32> = match spec.sample_format {
@@ -1690,18 +1723,41 @@ fn scenario_report() {
 /// CPU of each mic-chain part on 10 s of speech over keys, % of one core (time / audio length):
 /// what to cut when the meter reads high (tester 2026-11-16: 27 % with a heavy model). Run:
 /// `cargo test -p gamersequalizer-mic-chain --release cpu_breakdown_report -- --ignored --nocapture`
+/// `COLD_CACHE=1` overwrites 256 MB before each block and times only the block (live, other work
+/// runs on the core between blocks). `PACED=1` lets the core idle 8 ms after each block, as live
+/// (a notebook may not clock up for 1-3 ms of work in 10). `TRACT_CPU_ISA=-avx512f` times the
+/// AVX2 kernels a CPU without AVX-512 gets (Zen 3, most notebooks). `scripts/cpu-bench-package.ps1`
+/// packs it for another PC.
 #[test]
 #[ignore = "timing report"]
 fn cpu_breakdown_report() {
+  eprintln!(
+    "ISA tract uses: {:?}; CPU has avx512f: {}",
+    tract_onnx_23::tract_core::tract_linalg::isa::native(),
+    std::arch::is_x86_feature_detected!("avx512f")
+  );
   let (_, mixed) = speech_over_keyboard(-30.0, 0.0);
   let x: Vec<f32> = mixed.iter().cycle().take(10 * 48_000).copied().collect();
-  let secs = x.len() as f32 / 48_000.0;
-  let time = |name: &str, f: &mut dyn FnMut(&mut [f32])| {
-    let mut y = x.clone();
-    let t = Instant::now();
-    y.chunks_mut(480).for_each(&mut *f);
-    eprintln!("CPU {name:<34} {:6.2} % of a core", t.elapsed().as_secs_f32() / secs * 100.0);
+  let keys: Vec<f32> = keyboard_only(-30.0).iter().cycle().take(x.len()).copied().collect();
+  let mut flush = std::env::var_os("COLD_CACHE").map(|_| vec![0u8; 256 << 20]);
+  let paced = std::env::var_os("PACED").is_some();
+  let mut time_on = |name: &str, input: &[f32], f: &mut dyn FnMut(&mut [f32])| {
+    let mut y = input.to_vec();
+    let mut spent = std::time::Duration::ZERO;
+    for b in y.chunks_mut(480) {
+      if let Some(buf) = flush.as_mut() {
+        buf.iter_mut().step_by(64).for_each(|v| *v = v.wrapping_add(1));
+      }
+      if paced {
+        std::thread::sleep(std::time::Duration::from_millis(8));
+      }
+      let t = Instant::now();
+      f(b);
+      spent += t.elapsed();
+    }
+    eprintln!("CPU {name:<34} {:6.2} % of a core", spent.as_secs_f32() / (y.len() as f32 / 48_000.0) * 100.0);
   };
+  let mut time = |name: &str, f: &mut dyn FnMut(&mut [f32])| time_on(name, &x, f);
   let mut rnn = RnNoiseEngine::new();
   time("RNNoise 2017 denoiser + its VAD", &mut |b| rnn.process(b, 0.75, |_| {}));
   let mut in_net = VoiceNet::new_input();
@@ -1722,12 +1778,14 @@ fn cpu_breakdown_report() {
     aec.process_block_stereo(r, r, b);
     pos += b.len();
   });
-  for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
-    let mut iso = AiVoiceIsolator::new();
-    iso.set_model(model);
-    iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
-    iso.sleep_after = usize::MAX; // speech: awake
-    time(&format!("whole denoiser, {model:?}, awake"), &mut |b| iso.process_samples(b));
+  for (input, what) in [(&x, "speech"), (&keys, "keys only")] {
+    for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+      let mut iso = AiVoiceIsolator::new();
+      iso.set_model(model);
+      iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+      iso.sleep_after = usize::MAX; // awake, as typing keeps a model in a game
+      time_on(&format!("whole denoiser, {model:?}, {what}"), input, &mut |b| iso.process_samples(b));
+    }
   }
 }
 
@@ -2008,5 +2066,73 @@ fn gate_sweep() {
       eprint!("  no gate: {:4.1}/{:3.1} [{:4.1}]", q.soft_dropouts * 100.0, q.dropouts * 100.0, q.noise_suppression_db);
     }
     eprintln!();
+  }
+}
+
+/// Denormals after exact digital silence (a headset's mute switch sends zeros): 2 s of speech
+/// over keys, then 10 s of zeros, per part: mean time per 10 ms block on speech, on the zeros,
+/// and the slowest block on the zeros. `FTZ_DAZ=1` sets flush-to-zero and denormals-are-zero
+/// first, for comparison. Run:
+/// `cargo test -p gamersequalizer-mic-chain --release digital_silence_report -- --ignored --nocapture`
+#[test]
+#[ignore = "timing report"]
+fn digital_silence_report() {
+  #[cfg(target_arch = "x86_64")]
+  if std::env::var_os("FTZ_DAZ").is_some() {
+    // SAFETY: only sets this thread's FTZ (bit 15) and DAZ (bit 6) bits.
+    #[allow(deprecated)]
+    unsafe {
+      use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+      _mm_setcsr(_mm_getcsr() | 0x8040);
+    }
+  }
+  let (_, mixed) = speech_over_keyboard(-30.0, 0.0);
+  let speech_len = 2 * 48_000;
+  let mut x: Vec<f32> = mixed.iter().cycle().take(speech_len).copied().collect();
+  x.resize(speech_len + 10 * 48_000, 0.0);
+  let time = |name: &str, f: &mut dyn FnMut(&mut [f32])| {
+    let mut y = x.clone();
+    let mut t_block = Vec::new();
+    for b in y.chunks_mut(480) {
+      let t = Instant::now();
+      f(b);
+      t_block.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    let (sp, zero) = t_block.split_at(speech_len / 480);
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    eprintln!(
+      "{name:<34} speech {:7.1} us | zeros {:7.1} us, slowest {:7.1} us",
+      mean(sp),
+      mean(zero),
+      zero.iter().copied().fold(0.0, f64::max)
+    );
+  };
+  let mut rnn = RnNoiseEngine::new();
+  time("RNNoise 2017 denoiser", &mut |b| rnn.process(b, 0.75, |_| {}));
+  let mut in_net = VoiceNet::new_input();
+  time("in_net (RNNoise 0.2)", &mut |b| in_net.process(b, |_| {}));
+  let mut out_net = VoiceNet::new();
+  time("out_net (RNNoise 2017 VAD)", &mut |b| out_net.process(b, |_| {}));
+  let mut silero = Vad48k::new().unwrap();
+  time("Silero VAD", &mut |b| silero.process(b, |_| {}));
+  let mut df = DeepFilterEngine::load().unwrap();
+  time("DeepFilterNet 3 alone", &mut |b| df.process(b, 0.75, 1.0));
+  let mut dp = DpdfEngine::load().unwrap();
+  time("DPDFNet alone", &mut |b| dp.process(b, atten_lim(0.75)));
+  let mut aec = crate::aec3::EchoCanceller3::new();
+  let reference = x.clone();
+  let mut pos = 0;
+  time("AEC3 (reference goes silent too)", &mut |b| {
+    let r = &reference[pos..pos + b.len()];
+    aec.process_block_stereo(r, r, b);
+    pos += b.len();
+  });
+  let mut lv = crate::voice_leveler::VoiceLeveler::new();
+  time("voice leveler", &mut |b| lv.process(b, true, 0));
+  for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+    let mut iso = AiVoiceIsolator::new();
+    iso.set_model(model);
+    iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+    time(&format!("whole denoiser, {model:?}"), &mut |b| iso.process_samples(b));
   }
 }

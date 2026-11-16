@@ -30,7 +30,8 @@ const RESCUE_OUT_COEF: f32 = 1.0 / (48.0 * 30.0);
 /// output: the keys are gone there and the voice stays in most frames, so the hold covers the
 /// frames it cut. The raw-input detector would not do: loud keys alone scored two speech frames
 /// in a row there and pauses lost 28 dB of key suppression. Cost: two RNNoise passes (~0.5 % of a
-/// core); in rescued frames the click comes through as RNNoise leaves it (voice over keys).
+/// core), only while the raw input had a voice in the last 2 s (`RESCUE_IDLE_SAMPLES`); in
+/// rescued frames the click comes through as RNNoise leaves it (voice over keys).
 pub(super) struct ClickRescue {
   /// Voice detector on DFN3's output (before the rescue).
   net: VoiceNet,
