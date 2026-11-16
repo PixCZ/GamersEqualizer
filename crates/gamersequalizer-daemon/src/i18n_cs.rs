@@ -333,6 +333,10 @@ pub static CS: &[(&str, &str)] = &[
   ("{} filters, name: {}", "{} filtrů, název: {}"),
   ("Saved as \"{}\".", "Uloženo jako „{}“."),
   ("Could not save \"{}\": {}", "„{}“ nelze uložit: {}"),
+  (
+    "{} kB is far too big for an EQ file; pick the ParametricEQ.txt",
+    "{} kB je na soubor EQ příliš mnoho; vyberte ParametricEQ.txt",
+  ),
   ("{} (mine)", "{} (moje)"),
   ("{} lines were not understood and are skipped.", "{} řádků nebylo rozpoznáno a přeskakují se."),
   (

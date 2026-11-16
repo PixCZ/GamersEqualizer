@@ -195,7 +195,7 @@ mod tests {
       enabled: true,
       slope_db: 12,
     }];
-    eq.add_headphone_profile(hp, None);
+    eq.add_layer_profile(OutputLayer::Headphone, hp, None).unwrap();
     (eq, dir)
   }
 

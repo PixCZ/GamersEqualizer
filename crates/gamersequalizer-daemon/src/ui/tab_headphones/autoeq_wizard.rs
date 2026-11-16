@@ -7,6 +7,8 @@ const AUTOEQ_WEB_URL: &str = "https://autoeq.app";
 
 /// The wizard looks for the downloaded file this often (one directory listing).
 const DOWNLOADS_RECHECK: Duration = Duration::from_secs(2);
+/// A ParametricEQ.txt is about 1 kB; a picked file far larger is not one and is not read.
+const MAX_EQ_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Steps of the "add headphones" wizard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -302,10 +304,20 @@ fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     profile.bands = parsed.bands;
     profile.preamp_db = parsed.preamp_db;
     profile.is_custom = false;
-    state.output_eq_do(|eq, shm| eq.add_headphone_profile(profile, shm));
-    state.headphones_ui.saved_name = Some(name);
-    go(state, Step::Done);
-    return;
+    match state.output_eq_do(|eq, shm| eq.add_layer_profile(OutputLayer::Headphone, profile, shm)) {
+      Ok(()) => {
+        state.headphones_ui.saved_name = Some(name);
+        go(state, Step::Done);
+        return;
+      }
+      // Stays on this step with the reason; a warning, so another name can be tried.
+      Err(e) => {
+        log::warn!("[OutputEq] could not add headphone profile {name}: {e}");
+        let text = trf("Could not save \"{}\": {}", &[&name, &e]);
+        candidate.checks.retain(|c| c.text != text);
+        candidate.checks.push(Check { level: CheckLevel::Warning, text });
+      }
+    }
   }
   state.headphones_ui.candidate = Some(candidate);
 }
@@ -410,7 +422,12 @@ fn review_file(state: &mut AppState, path: &Path, name: Option<&str>, back: Step
   let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
   let default_name =
     file_name.trim_end_matches(".txt").trim_end_matches(" ParametricEQ").trim_end_matches(" FixedBandEQ").to_string();
-  match std::fs::read_to_string(path) {
+  let too_big = std::fs::metadata(path).map(|m| m.len()).ok().filter(|&len| len > MAX_EQ_FILE_BYTES);
+  let read = match too_big {
+    Some(len) => Err(trf("{} kB is far too big for an EQ file; pick the ParametricEQ.txt", &[&(len / 1024)])),
+    None => std::fs::read_to_string(path).map_err(|e| e.to_string()),
+  };
+  match read {
     Ok(text) => review_text(state, &text, name.unwrap_or(&default_name), &path.display().to_string(), &file_name, back),
     Err(e) => {
       let checks = vec![Check { level: CheckLevel::Error, text: trf("Could not read the file: {}", &[&e]) }];

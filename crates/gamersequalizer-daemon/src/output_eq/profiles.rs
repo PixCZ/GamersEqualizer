@@ -234,13 +234,6 @@ impl OutputEq {
     Ok(())
   }
 
-  /// Add or replace a headphone profile (AutoEQ import) and use it on the current output.
-  pub fn add_headphone_profile(&mut self, profile: ParametricProfile, shm: Option<&ShmHeader>) {
-    if let Err(e) = self.add_layer_profile(OutputLayer::Headphone, profile, shm) {
-      warn!("[OutputEq] could not add headphone profile: {e}");
-    }
-  }
-
   pub fn select_headphone(&mut self, name: Option<String>, shm: Option<&ShmHeader>) {
     let Some(device) = self.output_device.clone() else {
       warn!("[OutputEq] no output device: headphone profile not assigned");
