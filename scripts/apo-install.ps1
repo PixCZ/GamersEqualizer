@@ -23,8 +23,8 @@
 
 .DESCRIPTION
   - Takes a snapshot of each endpoint's FxProperties values before changing anything: in memory for
-    the self-test rollback, and the first one per endpoint also as JSON in
-    %ProgramFiles%\GamersEqualizer\apo-backup (never overwritten), which apo-uninstall.ps1 restores.
+    the self-test rollback, and as JSON in %ProgramFiles%\GamersEqualizer\apo-backup, which
+    apo-uninstall.ps1 restores (rewritten only while the endpoint holds none of our effects).
   - Copies target\apo\gamersequalizer_apo.dll to %ProgramFiles%\GamersEqualizer\apo.
   - Registers the COM classes and the APOs. Settings come from the running app (shared memory).
   - Promotes any legacy single-CLSID values (,1 / ,5 / ,6 / ,7) into composite lists (,13 / ,14 / ,15)
@@ -699,8 +699,8 @@ if ($AppOnly) {
 $jobs = @()
 $skipped = @()
 if ($Endpoint) {
-  # `powershell -File ... -Endpoint a,b` (how the app starts this) passes ONE string "a,b";
-  # only `-Command` or a call from PowerShell makes it an array. Split either way.
+  # The app passes ONE quoted string 'a,b' (elevated_bootstrap); `-Endpoint a,b` typed in
+  # PowerShell makes it an array. Split either way.
   foreach ($spec in ($Endpoint -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
     $flowName, $id, $specSlot = $spec -split ':', 3
     if ($DeviceWords.Keys -notcontains $flowName -or -not $id) { throw "Bad -Endpoint '$spec' (expected Capture:{guid} or Render:{guid})." }

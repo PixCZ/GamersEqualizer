@@ -111,8 +111,10 @@ After large refactors run `npm run graph:sync`; first time run `npm run graph:in
   tested on Windows 11; Windows 10 only lightly tested, no guarantee there (fewer audio capabilities).
 - Devices: the setup card installs on the microphone and output in use; other connected devices are
   opt-in checkboxes. A device whose install the installer rolled back is not offered again until "Try
-  again". Before changing an endpoint the installer saves its original effect lists once to
-  `%ProgramFiles%\GamersEqualizer\apo-backup\`; the uninstaller restores them, then removes our effects.
+  again". Before changing an endpoint the installer saves its effect lists to
+  `%ProgramFiles%\GamersEqualizer\apo-backup\`: again on each install while the endpoint holds none of
+  our effects (a driver update or a rollback may have changed them), kept while ours are in. The
+  uninstaller restores them, then removes our effects.
   It moves the driver's legacy effect values into composite lists only in the slots ours go into (a
   legacy value shadows only its own slot). A device that does not open during the self-test is opened
   once more without our effects: if it opens then, ours stay out; if not (exclusive use, privacy), ours
