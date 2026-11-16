@@ -142,12 +142,17 @@ impl DpdfEngine {
     let init_state: Vec<f32> =
       erb.iter().chain(&spec).copied().chain(std::iter::repeat_n(0.0, size - erb.len() - spec.len())).collect();
 
-    let plan = onnx
+    let mut model = onnx
       .model_for_proto_model(&proto)?
       .with_input_fact(0, f32::fact([1, 1, BINS, 2]).into())?
       .with_input_fact(1, f32::fact([size]).into())?
-      .into_optimized()?
-      .into_runnable()?;
+      .into_typed()?
+      .into_decluttered()?;
+    if df::f16_weights::wanted() {
+      let saved = df::f16_weights::convert(&mut model)?;
+      log::info!("[DPDFNet] weights as f16, {saved} bytes saved");
+    }
+    let plan = model.into_optimized()?.into_runnable()?;
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(WIN);

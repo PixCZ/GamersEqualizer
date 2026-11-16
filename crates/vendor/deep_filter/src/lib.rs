@@ -18,6 +18,8 @@ pub mod transforms;
 pub mod logging;
 #[cfg(feature = "tract")]
 pub mod tract;
+#[cfg(feature = "tract")]
+pub mod f16_weights;
 
 pub(crate) fn freq2erb(freq_hz: f32) -> f32 {
     9.265 * (freq_hz / (24.7 * 9.265)).ln_1p()

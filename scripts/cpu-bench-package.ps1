@@ -67,15 +67,19 @@ if ($ov.ActiveOverlayAcPowerScheme) { Log "Power mode overlay (AC): $($ov.Active
 $env:DENOISE_FIXTURES = Join-Path $here 'denoise'
 $test = 'ai_denoiser::tests::cpu_breakdown_report'
 # COLD_CACHE+PACED: live audio while a game churns the cache.
-foreach ($mode in @('warm', 'COLD_CACHE', 'PACED', 'COLD_CACHE+PACED')) {
-  Remove-Item Env:COLD_CACHE, Env:PACED -ErrorAction SilentlyContinue
-  if ($mode -ne 'warm') { $mode -split '\+' | ForEach-Object { Set-Item "Env:$_" '1' } }
-  Log ''
-  Log "== tract, $mode"
-  cmd /c "`"$here\mic_chain_tests.exe`" $test --exact --ignored --nocapture --test-threads=1 2>&1" |
-    Where-Object { $_ -match 'ISA tract|^CPU |panicked|error' } | ForEach-Object { Log $_ }
+# Second pass: model weights stored as f16 (experiment, docs/mic-cpu-analysis.md chapter 8).
+foreach ($weights in @('f32', 'f16')) {
+  if ($weights -eq 'f16') { $env:GE_F16_WEIGHTS = '1' } else { Remove-Item Env:GE_F16_WEIGHTS -ErrorAction SilentlyContinue }
+  foreach ($mode in @('warm', 'COLD_CACHE', 'PACED', 'COLD_CACHE+PACED')) {
+    Remove-Item Env:COLD_CACHE, Env:PACED -ErrorAction SilentlyContinue
+    if ($mode -ne 'warm') { $mode -split '\+' | ForEach-Object { Set-Item "Env:$_" '1' } }
+    Log ''
+    Log "== tract, weights $weights, $mode"
+    cmd /c "`"$here\mic_chain_tests.exe`" $test --exact --ignored --nocapture --test-threads=1 2>&1" |
+      Where-Object { $_ -match 'ISA tract|^CPU |panicked|error' } | ForEach-Object { Log $_ }
+  }
 }
-Remove-Item Env:COLD_CACHE, Env:PACED -ErrorAction SilentlyContinue
+Remove-Item Env:COLD_CACHE, Env:PACED, Env:GE_F16_WEIGHTS -ErrorAction SilentlyContinue
 
 Log ''
 Log '== ONNX Runtime 1.32.0 (optional, needs Python 3 and internet for pip)'

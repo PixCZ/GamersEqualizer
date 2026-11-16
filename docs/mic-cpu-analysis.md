@@ -456,6 +456,33 @@ crates/vendor/deep_filter/Cargo.toml`.
   proto měření s i bez `TRACT_CPU_ISA` a rozhodnutí podle notebooku a studené cache.
 - Změny ve forku jsou mimo lints workspace: držet je malé, s komentářem a testem ve forku.
 
+### Kroky 0–2: hotovo na Macu (2026-11-16)
+
+Převod je `df::f16_weights::convert` ve forku: f32 konstanta, kterou čtou jen `EinSum` v f32, se před
+`into_optimized` uloží jako f16. Volá se ve třech grafech DFN3 (`RuntimeParams::f16_weights`, výchozí
+z `GE_F16_WEIGHTS`) a v `DpdfEngine::try_load` (nově `into_typed` + `into_decluttered` před převodem).
+Na x86 bez F16C nebo FMA zůstává f32.
+
+- **Tract váhy zpátky nesložil.** Na ARM (M4 Pro, stejný mechanismus `f16f32` jako `fma_mmm_f32_32x1` na
+  x86) běží s balením `PackedF16` 22 z 27 násobení DFN3 a 87 z 92 u DPDFNetu, žádný `Cast`. Zbylá
+  násobení jsou konvoluce s váhami pod 10 kB. Na x86 to zbývá ověřit (krok 3, výpis v testu níže).
+- **Kolik bajtů:** DFN3 4,55 → 2,28 MB, ale rekurentní váhy GRU (5 × 768 × 256, asi 3,9 MB) zůstávají
+  f32: `GruSeq` si je balí sám (`pack_r`, dotaz napevno na f32). Celkem tedy jen asi −27 % bajtů DFN3.
+  DPDFNet 9,43 → 4,72 MB, `GruSeq` jen 0,8 MB, celkem asi −46 %. Převést i rekurentní váhy by znamenalo
+  upravit `gru_seq.rs` v tract-core (patch / fork tractu): až když se f16 ukáže jako přínos.
+- **Numericky:** syntetický signál (tón + šum), výstup f16 proti f32: DFN3 47,7 dB, DPDFNet 55,0 dB pod
+  signálem. Převod tedy proběhl a přesnost drží.
+- **Čas na M4 (teplá cache, jen orientačně):** DFN3 všechny tři grafy 207–215 → 198–200 µs (−4 až −8 %),
+  DPDFNet 1256 → 1261 µs (beze změny). Mac má velkou cache, rozhodne studená cache a pauza na x86.
+
+Test ve forku: `cargo test --release --features tract,default-model --manifest-path
+crates/vendor/deep_filter/Cargo.toml f16_weights -- --nocapture` (vypíše kernel a balení každého
+násobení, na Windows tím je hotová kontrola kroku 0 pro x86).
+
+Další na Windows: krok 3 (`cpu_breakdown_report` s `GE_F16_WEIGHTS=1`, balíček
+`scripts/cpu-bench-package.ps1` už má druhý průchod), krok 4 (zprávy kvality s `GE_F16_WEIGHTS=1`
+proti bez), krok 5. V živé aplikaci se proměnná do audiodg nedostane: APO zůstává na f32.
+
 ## Příloha: jak změřit části DFN3 a operace tractu
 
 Tract umí spustit plán s vlastní funkcí pro každý uzel. Stačí dočasně nahradit tři volání

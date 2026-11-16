@@ -1732,9 +1732,10 @@ fn scenario_report() {
 #[ignore = "timing report"]
 fn cpu_breakdown_report() {
   eprintln!(
-    "ISA tract uses: {:?}; CPU has avx512f: {}",
+    "ISA tract uses: {:?}; CPU has avx512f: {}; weights as f16: {}",
     tract_onnx_23::tract_core::tract_linalg::isa::native(),
-    std::arch::is_x86_feature_detected!("avx512f")
+    std::arch::is_x86_feature_detected!("avx512f"),
+    df::f16_weights::wanted()
   );
   let (_, mixed) = speech_over_keyboard(-30.0, 0.0);
   let x: Vec<f32> = mixed.iter().cycle().take(10 * 48_000).copied().collect();
