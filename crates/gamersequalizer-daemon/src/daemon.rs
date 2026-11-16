@@ -104,8 +104,20 @@ pub(super) fn run_background_daemon() {
     header.mic_muted.store(win_audio.chatmix.mic_muted, Ordering::Relaxed);
   }
 
-  let mut app_state = AppState::init(storage);
-  app_state.apply_output_eq();
+  // Of the window's state the service needs the output EQ, the mic EQ and the saved audio
+  // settings; `AppState` would also load the window's parts and map the shared memory again.
+  i18n::set_language(ui::prefs::UiPrefs::load_or_default(storage.base_dir()).language);
+  let mut output_eq = ui::state::load_output_eq(&storage);
+  let mut audio_settings_saved = ui::audio_settings::AudioSettings::default();
+  if let Some(ptr) = shm_ptr {
+    // SAFETY: the mapping stays mapped until the service exits (unmapped after the loop); atomics only.
+    let header = unsafe { &ptr.as_ref().header };
+    audio_settings_saved = ui::audio_settings::AudioSettings::from_header(header);
+    let mic_presets = ui::mic_presets::all_mic_presets(&storage);
+    header.write_mic_eq(&ui::mic_presets::startup_mic_profile(&storage, &mic_presets).bands);
+  }
+  // SAFETY: as above.
+  output_eq.apply(shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header }));
 
   // Speaker reference for the echo canceller, plus the link to the microphone APO. The echo
   // reference = the physical output (Master), what actually reaches the speakers.
@@ -125,7 +137,7 @@ pub(super) fn run_background_daemon() {
   // Notification-area icon: the window "hides to tray" by closing, the service keeps the icon.
   let mut tray_host = tray::TrayHost::new();
   // Setup problems (default output / spatial sound lost, mic processing) for the tray badge.
-  let mut health = health::HealthMonitor::new(app_state.storage.base_dir());
+  let mut health = health::HealthMonitor::new(storage.base_dir());
 
   info!("[GamersEqualizer] Background service running smoothly. Entering audio monitoring loop...");
 
@@ -148,7 +160,7 @@ pub(super) fn run_background_daemon() {
     // change when it was not the default) or plugged back in, maybe on another USB port.
     let devices_changed = win_audio.endpoint_lock.poll_device_changed();
     if devices_changed {
-      heal_device_ids(&win_audio, app_state.storage.base_dir(), shm_ptr);
+      heal_device_ids(&win_audio, storage.base_dir(), shm_ptr);
     }
     // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop);
     // the header is only read through atomics.
@@ -259,7 +271,8 @@ pub(super) fn run_background_daemon() {
         let mic_id =
           win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
         if mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref()) {
-          app_state.save_audio_settings_if_changed(false);
+          audio_settings_saved
+            .save_if_changed(ui::audio_settings::AudioSettings::from_header(header), storage.base_dir());
         }
         leveler_log.tick(header);
         chain_log.tick(header, || {
@@ -293,14 +306,15 @@ pub(super) fn run_background_daemon() {
       win_audio.chatmix.apply_session_mix();
     }
 
+    // SAFETY: still mapped, atomics only (as above).
+    let header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
     // Game detection: the daemon is the owner (decides and publishes the active game).
     if let Some(ref detector) = win_audio.game_detector {
       while let Some(event) = detector.poll_event() {
-        app_state.output_eq_do(|eq, shm| eq.on_foreground(&event, true, shm));
+        output_eq.on_foreground(&event, true, header);
       }
     }
-    let output = win_audio.chatmix.master_device_id.clone();
-    app_state.output_eq_do(|eq, shm| eq.tick(true, output, shm));
+    output_eq.tick(true, win_audio.chatmix.master_device_id.clone(), header);
 
     std::thread::sleep(Duration::from_millis(50));
   }
@@ -311,7 +325,7 @@ pub(super) fn run_background_daemon() {
   }
   if let Some(ptr) = shm_ptr {
     // SAFETY: the view from `open_or_create_shm`, unmapped once here; nothing uses `shm_ptr` after the loop
-    // (the threads and `AppState` have mappings of their own).
+    // (the threads have mappings of their own).
     unsafe {
       let _ =
         UnmapViewOfFile(windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS { Value: ptr.as_ptr() as *mut _ });

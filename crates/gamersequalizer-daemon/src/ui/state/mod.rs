@@ -3,7 +3,7 @@ use crate::shm_mapping::open_or_create_shm;
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
-use gamersequalizer_common::profile::{ParametricProfile, VadType};
+use gamersequalizer_common::profile::ParametricProfile;
 use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout};
 use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
@@ -115,11 +115,6 @@ pub struct AppState {
 impl AppState {
   pub fn init(storage: ProfileStorage) -> Self {
     let available_mic_profiles = super::mic_presets::all_mic_presets(&storage);
-    let mic_profile = available_mic_profiles
-      .iter()
-      .find(|p| p.profile.name == super::mic_presets::DEFAULT_PRESET)
-      .map(|p| p.profile.clone())
-      .unwrap_or_else(|| ParametricProfile::new(super::mic_presets::DEFAULT_PRESET, VadType::Mic));
 
     let (shm_handle, shm_ptr) = open_or_create_shm(storage.base_dir());
     // SAFETY: as in `shm_header`; the mapping is unmapped only in Drop.
@@ -127,11 +122,8 @@ impl AppState {
     let audio_settings_saved = shm.map(super::audio_settings::AudioSettings::from_header).unwrap_or_default();
     let selected_mic_endpoint_id = shm.and_then(|h| h.get_selected_mic_id());
 
-    let mic_profile = super::mic_presets::load_mic_profile(&storage).unwrap_or(mic_profile);
-    crate::output_eq::game_presets::seed_builtin_game_presets(&storage);
-    // Before the game EQ loads its profiles (window and service): presets a GG update added.
-    crate::sonar_importer::sync_new_sonar_profiles(&storage);
-    let output_eq = OutputEq::new(storage.clone());
+    let mic_profile = super::mic_presets::startup_mic_profile(&storage, &available_mic_profiles);
+    let output_eq = load_output_eq(&storage);
     let autostart_enabled = crate::autostart::is_autostart_enabled();
     let prefs = super::prefs::UiPrefs::load_or_default(storage.base_dir());
     crate::i18n::set_language(prefs.language);
@@ -320,10 +312,7 @@ impl AppState {
     let Some(now) = self.shm_header().map(super::audio_settings::AudioSettings::from_header) else {
       return;
     };
-    if now != self.audio_settings_saved {
-      now.save(self.storage.base_dir());
-      self.audio_settings_saved = now;
-    }
+    self.audio_settings_saved.save_if_changed(now, self.storage.base_dir());
   }
 
   pub fn denoise_models(&self) -> (DenoiseModel, DenoiseModel) {
@@ -368,4 +357,12 @@ impl Drop for AppState {
       }
     }
   }
+}
+
+/// The output EQ engine as the window and the service start it: first the presets a GG update
+/// added and the built-in game presets, then the profiles are loaded.
+pub(crate) fn load_output_eq(storage: &ProfileStorage) -> OutputEq {
+  crate::output_eq::game_presets::seed_builtin_game_presets(storage);
+  crate::sonar_importer::sync_new_sonar_profiles(storage);
+  OutputEq::new(storage.clone())
 }

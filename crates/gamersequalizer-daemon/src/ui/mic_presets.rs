@@ -148,8 +148,19 @@ pub fn builtin_mic_presets() -> Vec<ParametricProfile> {
   ]
 }
 
+/// The mic EQ at start (window and service): the one edited last, else the default preset.
+pub fn startup_mic_profile(storage: &ProfileStorage, presets: &[MicPreset]) -> ParametricProfile {
+  load_mic_profile(storage).unwrap_or_else(|| {
+    presets
+      .iter()
+      .find(|p| p.profile.name == DEFAULT_PRESET)
+      .map(|p| p.profile.clone())
+      .unwrap_or_else(|| ParametricProfile::new(DEFAULT_PRESET, VadType::Mic))
+  })
+}
+
 /// Missing/corrupt file -> None (defaults are used), logged.
-pub(super) fn load_mic_profile(storage: &ProfileStorage) -> Option<ParametricProfile> {
+fn load_mic_profile(storage: &ProfileStorage) -> Option<ParametricProfile> {
   let path = mic_profile_path(storage);
   let text = std::fs::read_to_string(&path).ok()?;
   match serde_json::from_str::<ParametricProfile>(&text) {

@@ -74,6 +74,14 @@ impl AudioSettings {
     }
   }
 
+  /// `self` is what was saved last: saves `now` and keeps it when it differs.
+  pub fn save_if_changed(&mut self, now: Self, dir: &Path) {
+    if now != *self {
+      now.save(dir);
+      *self = now;
+    }
+  }
+
   /// What the user has set right now (the window keeps shared memory current every frame).
   pub fn from_header(h: &ShmHeader) -> Self {
     let r = Ordering::Relaxed;
