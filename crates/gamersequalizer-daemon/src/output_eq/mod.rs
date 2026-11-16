@@ -338,6 +338,13 @@ mod tests {
     follower.tick(false, Some("dev-1".into()), Some(&h));
     assert_eq!(follower.game_profile_name(), Some("The Division 2"));
 
+    // "Reset" in the window reaches the owner, whose EQ the sound follows.
+    follower.clear_active_game(Some(&h));
+    owner.tick(true, Some("dev-1".into()), Some(&h));
+    assert_eq!(owner.active_game, None);
+    owner.on_foreground(&event, true, Some(&h));
+    assert_eq!(owner.game_profile_name(), Some("The Division 2"), "back once in the foreground");
+
     owner.settings.game_enabled = false;
     owner.save_settings(Some(&h));
     follower.tick(false, Some("dev-1".into()), Some(&h));

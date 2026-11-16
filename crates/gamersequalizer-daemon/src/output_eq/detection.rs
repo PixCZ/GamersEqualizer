@@ -98,6 +98,13 @@ impl OutputEq {
           self.active_game = published;
           dirty = true;
         }
+      } else if self.active_game.is_some() && h.read_active_game().is_none() {
+        // Only the owner publishes a game, so a cleared one is the window's "Reset": without
+        // taking it over, the window showed no game while the sound kept the game's EQ.
+        info!("[Game] active game reset in the window");
+        self.tracked = None;
+        self.active_game = None;
+        dirty = true;
       }
     }
     if owner && self.tracked.is_some() && self.last_alive_check.elapsed() >= ALIVE_CHECK_INTERVAL {
@@ -114,9 +121,8 @@ impl OutputEq {
     }
   }
 
-  /// Forget a manual / detected game (e.g. "reset").
-  /// Forget the active game; on a follower this asks nothing of the owner, so it only lasts
-  /// until the owner publishes again.
+  /// Forget the active game ("Reset"); the owner takes a follower's reset over in `tick`. The
+  /// game comes back when it is in the foreground again.
   pub fn clear_active_game(&mut self, shm: Option<&ShmHeader>) {
     self.tracked = None;
     self.set_active_game(None, shm);
