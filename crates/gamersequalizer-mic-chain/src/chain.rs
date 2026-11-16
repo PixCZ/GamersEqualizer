@@ -424,6 +424,10 @@ impl MicChain {
       self.leveler_seed_blocked = true;
     }
     self.leveler_reset_seen = Some(s.leveler_reset_seq);
+    // The daemon cleared the stale level: what it saves next was learned since.
+    if s.leveler_saved_x10 == 0 {
+      self.leveler_seed_blocked = false;
+    }
     // A setting before the leveler moved (volume, denoiser, EQ, ...): relearn fast, gain held.
     let inputs = LevelerInputs {
       aec_enabled: s.aec_enabled,
@@ -1198,6 +1202,27 @@ mod tests {
     for (second, (got, want)) in energy.iter().zip(EXPECTED).enumerate() {
       assert!((got - want).abs() <= 1e-3 * want.abs().max(1e-6), "second {second}: {got} vs {want}");
     }
+  }
+
+  /// "Learn again" blocks the saved level until the daemon clears it; a level it saves after that
+  /// is the mic's again and seeds the leveler (regression: blocked for the rest of the stream).
+  #[test]
+  fn test_saved_level_seeds_again_once_the_daemon_cleared_it() {
+    let mut p = chain_with_reference("seed", &noise(4_800, 4));
+    let silence = [0.0f32; FRAME_480];
+    let mut out = [0.0f32; FRAME_480];
+    let mut block = |p: &mut MicChain, saved_x10: i32| {
+      p.shm_header().expect("mapping").mic_leveler_saved_level_db_x10.store(saved_x10, Ordering::Relaxed);
+      p.process_timed(&[&silence], &mut [&mut out], None);
+      p.leveler.level_db().map(|db| db.round())
+    };
+    assert_eq!(block(&mut p, -200), Some(-20.0), "seeded");
+    p.shm_header().expect("mapping").mic_leveler_reset_seq.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(block(&mut p, -200), None, "the stale level is not taken back");
+    p.shm_header().expect("mapping").mic_leveler_enabled.store(false, Ordering::Relaxed);
+    assert_eq!(block(&mut p, 0), None, "cleared by the daemon");
+    p.shm_header().expect("mapping").mic_leveler_enabled.store(true, Ordering::Relaxed);
+    assert_eq!(block(&mut p, -150), Some(-15.0), "a level saved since seeds again");
   }
 
   const FRAME_480: usize = 480;
