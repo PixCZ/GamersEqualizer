@@ -67,7 +67,7 @@ pub(super) fn run_background_daemon() {
   }
 
   // Open or create shared memory for IPC
-  let (shm_handle, shm_ptr) = ui::state::open_or_create_shm(storage.base_dir());
+  let (shm_handle, shm_ptr) = shm_mapping::open_or_create_shm(storage.base_dir());
   let mut last_mic_version = 0;
   let mut last_default_mic: Option<String> = None;
   let mut last_default_out: Option<String> = None;

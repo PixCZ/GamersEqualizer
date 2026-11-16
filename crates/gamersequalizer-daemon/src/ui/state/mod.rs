@@ -1,98 +1,28 @@
 pub use crate::output_eq::{OutputEq, OutputLayer};
+use crate::shm_mapping::open_or_create_shm;
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::{ParametricProfile, VadType, collapse_slopes, slots_used};
-use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, SHM_NAME, ShmHeader, ShmLayout};
+use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout};
 use gamersequalizer_common::sidetone::SidetonePair;
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::System::Memory::{
-  CreateFileMappingW, FILE_MAP_ALL_ACCESS, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
-};
-use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Memory::UnmapViewOfFile;
 
-/// File holding the microphone EQ the user is currently editing.
-const MIC_EQ_FILE: &str = "mic_active.json";
+mod mic_presets;
+mod mic_status;
+
+use mic_presets::*;
+pub use mic_status::*;
+
 /// AEC history kept for the plots (~60 s at 10 updates/s).
 const AEC_HISTORY_LEN: usize = 600;
-/// Mic DSP counts as running while its telemetry changed within this window (it publishes ~10x/s).
-const MIC_DSP_LIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
-/// Time a model switch (or stream start) may take before a mismatch counts as a failed load.
-const DENOISE_SWITCH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// One snapshot of the echo canceller's telemetry, read from shared memory.
-#[derive(Debug, Clone, Default)]
-pub struct AecTelemetry {
-  pub state: Option<AecState>,
-  pub delay_ms: Option<f32>,
-  pub raw_delay_ms: Option<f32>,
-  pub from_cache: bool,
-  pub confidence: f32,
-  pub estimate_count: u32,
-  pub erle_db: f32,
-  pub ref_db: f32,
-  pub mic_db: f32,
-  pub out_db: f32,
-  pub pre_delay_ms: f32,
-  pub corr_max_delay_ms: f32,
-  pub corr: Vec<f32>,
-  pub seq: u32,
-  /// A mic stream published telemetry recently. False = no app uses the mic, so the values
-  /// (including `state`) are left over from the last stream or still zero.
-  pub live: bool,
-}
-
-/// Noise suppression as the UI should present it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DenoiseStatus {
-  /// No app is using the microphone: nothing runs; this model starts with the next stream.
-  Idle(DenoiseModel),
-  Running(DenoiseModel),
-  /// Selection changed or stream started moments ago; this one still runs.
-  Switching(DenoiseModel),
-  /// The DSP reports why the selected model doesn't run (load failed / CPU too slow).
-  Limited {
-    limit: DenoiseLimit,
-    running: DenoiseModel,
-  },
-  /// Mismatch without a reason from the DSP (e.g. an older APO build).
-  Failed {
-    selected: DenoiseModel,
-    running: DenoiseModel,
-  },
-}
-
-/// Delay the mic chain adds, ms (see `mic_latency`).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MicLatency {
-  /// None until the DSP has heard enough speech to measure.
-  pub measured_ms: Option<f32>,
-  pub aec_ms: f32,
-  pub denoise_ms: f32,
-  pub lookahead_ms: f32,
-}
-
-/// Mic chain CPU time as a share of real time (1.0 = 100 %), last ~100 ms.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DspLoad {
-  pub avg: f32,
-  pub peak: f32,
-  /// Late blocks since the stream started.
-  pub late_blocks: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct AecHistoryPoint {
-  pub t: f64,
-  pub erle_db: f32,
-  pub delay_ms: Option<f32>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveTab {
@@ -422,108 +352,6 @@ impl AppState {
     }
     self.denoise_switched_at = Some(std::time::Instant::now());
   }
-
-  /// A mic DSP (APO or bridge) published telemetry within the last 2 s. Call once per frame
-  /// or more; repeated calls in one frame see the same seq and change nothing.
-  pub fn mic_dsp_live(&mut self) -> bool {
-    let seq = self.shm_header().map_or(0, |h| h.aec_telemetry_seq.load(Ordering::Acquire));
-    let now = std::time::Instant::now();
-    match self.mic_dsp_seen.0 {
-      None => self.mic_dsp_seen.0 = Some(seq),
-      Some(seen) if seen != seq => {
-        // First change after being idle = the stream just (re)started and loads its model.
-        if self.mic_dsp_seen.1.is_none_or(|t| now.duration_since(t) >= MIC_DSP_LIVE_WINDOW) {
-          self.denoise_switched_at = Some(now);
-        }
-        self.mic_dsp_seen = (Some(seq), Some(now));
-      }
-      Some(_) => {}
-    }
-    self.mic_dsp_seen.1.is_some_and(|t| now.duration_since(t) < MIC_DSP_LIVE_WINDOW)
-  }
-
-  /// What the noise suppression is really doing. `active` in shared memory is only updated
-  /// while a mic DSP (APO or bridge) processes audio, so without one it is stale.
-  pub fn denoise_status(&mut self) -> DenoiseStatus {
-    let (selected, active) = self.denoise_models();
-    let live = self.mic_dsp_live();
-    let now = std::time::Instant::now();
-    let settling = self.denoise_switched_at.is_some_and(|t| now.duration_since(t) < DENOISE_SWITCH_GRACE);
-    let limit =
-      self.shm_header().map_or(DenoiseLimit::None, |h| DenoiseLimit::from_u32(h.denoise_limit.load(Ordering::Relaxed)));
-    if live && limit != DenoiseLimit::None {
-      return DenoiseStatus::Limited { limit, running: active };
-    }
-    match (live, selected == active) {
-      (false, _) => DenoiseStatus::Idle(selected),
-      (true, true) => DenoiseStatus::Running(active),
-      (true, false) if settling => DenoiseStatus::Switching(active),
-      // The audio thread loads the model synchronously; still the old one after the grace period = load failed.
-      (true, false) => DenoiseStatus::Failed { selected, running: active },
-    }
-  }
-
-  /// Delay the mic chain adds: measured end to end in the DSP, and what each stage holds now.
-  pub fn mic_latency(&self) -> MicLatency {
-    self.shm_header().map_or(MicLatency::default(), |h| {
-      let ms = |us: u32| us as f32 / 1000.0;
-      let measured = h.mic_latency_measured_us.load(Ordering::Relaxed);
-      MicLatency {
-        measured_ms: (measured > 0).then(|| ms(measured)),
-        aec_ms: ms(h.mic_latency_aec_us.load(Ordering::Relaxed)),
-        denoise_ms: ms(h.mic_latency_denoise_us.load(Ordering::Relaxed)),
-        lookahead_ms: ms(h.mic_latency_lookahead_us.load(Ordering::Relaxed)),
-      }
-    })
-  }
-
-  pub fn mic_dsp_load(&self) -> DspLoad {
-    self.shm_header().map_or(DspLoad::default(), |h| DspLoad {
-      avg: h.mic_dsp_load_avg_permille.load(Ordering::Relaxed) as f32 / 1000.0,
-      peak: h.mic_dsp_load_peak_permille.load(Ordering::Relaxed) as f32 / 1000.0,
-      late_blocks: h.mic_dsp_overruns.load(Ordering::Relaxed),
-    })
-  }
-
-  /// Read AEC telemetry and append to the plot history when the DSP published new data.
-  pub fn poll_aec_telemetry(&mut self) -> AecTelemetry {
-    let Some(h) = self.shm_header() else {
-      return AecTelemetry::default();
-    };
-    let us_to_ms = |us: u32| us as f32 / 1000.0;
-    let delay_us = h.aec_delay_us.load(Ordering::Relaxed);
-    let raw_us = h.aec_raw_delay_us.load(Ordering::Relaxed);
-    let mut t = AecTelemetry {
-      state: Some(AecState::from_u32(h.aec_state.load(Ordering::Relaxed))),
-      delay_ms: (delay_us > 0).then(|| us_to_ms(delay_us)),
-      raw_delay_ms: (raw_us > 0).then(|| us_to_ms(raw_us)),
-      from_cache: h.aec_delay_from_cache.load(Ordering::Relaxed),
-      confidence: h.aec_confidence_permille.load(Ordering::Relaxed) as f32 / 1000.0,
-      estimate_count: h.aec_estimate_count.load(Ordering::Relaxed),
-      erle_db: h.erle_db_times_10.load(Ordering::Relaxed) as f32 / 10.0,
-      ref_db: h.aec_ref_level_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-      mic_db: h.aec_mic_level_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-      out_db: h.aec_out_level_db_x10.load(Ordering::Relaxed) as f32 / 10.0,
-      pre_delay_ms: us_to_ms(h.aec_pre_delay_us.load(Ordering::Relaxed)),
-      corr_max_delay_ms: us_to_ms(h.aec_corr_max_delay_us.load(Ordering::Relaxed)),
-      corr: h.read_aec_corr(),
-      seq: h.aec_telemetry_seq.load(Ordering::Acquire),
-      live: false,
-    };
-    t.live = self.mic_dsp_live();
-    if t.seq != self.aec_last_seq {
-      self.aec_last_seq = t.seq;
-      if self.aec_history.len() >= AEC_HISTORY_LEN {
-        self.aec_history.pop_front();
-      }
-      self.aec_history.push_back(AecHistoryPoint {
-        t: self.started_at.elapsed().as_secs_f64(),
-        erle_db: t.erle_db,
-        delay_ms: t.delay_ms,
-      });
-    }
-    t
-  }
 }
 
 impl Drop for AppState {
@@ -542,95 +370,5 @@ impl Drop for AppState {
         let _ = CloseHandle(h);
       }
     }
-  }
-}
-
-fn mic_profile_path(storage: &ProfileStorage) -> PathBuf {
-  storage.base_dir().join(MIC_EQ_FILE)
-}
-
-/// Missing/corrupt file -> None (defaults are used), logged.
-fn load_mic_profile(storage: &ProfileStorage) -> Option<ParametricProfile> {
-  let path = mic_profile_path(storage);
-  let text = std::fs::read_to_string(&path).ok()?;
-  match serde_json::from_str::<ParametricProfile>(&text) {
-    Ok(mut p) => {
-      // Saved before cuts had a steepness: two stacked rows become one.
-      p.bands = collapse_slopes(&p.bands);
-      p.bands.iter_mut().for_each(|b| b.clamp_parameters());
-      while slots_used(&p.bands) > MAX_EQ_BANDS {
-        p.bands.pop();
-      }
-      Some(p)
-    }
-    Err(e) => {
-      log::warn!("[MicEQ] {} is corrupt ({}), using defaults", path.display(), e);
-      crate::output_eq::settings::keep_corrupt(&path);
-      None
-    }
-  }
-}
-
-fn save_mic_profile(storage: &ProfileStorage, profile: &ParametricProfile) {
-  let path = mic_profile_path(storage);
-  let result = (|| -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-      std::fs::create_dir_all(dir)?;
-    }
-    let json = serde_json::to_string_pretty(profile).map_err(std::io::Error::other)?;
-    crate::output_eq::settings::write_atomic(&path, &json)
-  })();
-  if let Err(e) = result {
-    log::warn!("[MicEQ] could not save {}: {}", path.display(), e);
-  }
-}
-
-/// Open the daemon <-> window mapping; a new one (nothing else runs) gets the defaults, the
-/// Windows volumes and then the user's saved choices from `settings_dir`.
-pub(crate) fn open_or_create_shm(settings_dir: &Path) -> (Option<HANDLE>, Option<NonNull<ShmLayout>>) {
-  // SAFETY: the name is NUL-terminated and outlives the calls; the view is the layout's size or null (checked, the
-  // handle is then closed, as for a mapping of another layout). Defaults are written only into a mapping no one set up
-  // yet (magic not set), before the pointer is handed out.
-  unsafe {
-    let wide_name: Vec<u16> = SHM_NAME.encode_utf16().chain(std::iter::once(0)).collect();
-    let size_bytes = ShmLayout::total_size_bytes() as u32;
-
-    let handle =
-      match CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, size_bytes, PCWSTR(wide_name.as_ptr())) {
-        Ok(h) => h,
-        Err(_) => return (None, None),
-      };
-
-    let map_ptr = MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, size_bytes as usize);
-    if map_ptr.Value.is_null() {
-      let _ = CloseHandle(handle);
-      return (None, None);
-    }
-
-    let ptr = NonNull::new(map_ptr.Value as *mut ShmLayout);
-    if let Some(p) = ptr {
-      let header = &mut (*p.as_ptr()).header;
-      if header.magic == gamersequalizer_common::shm::SHM_MAGIC
-        && let Some(e) = header.layout_mismatch()
-      {
-        log::warn!("[MicEQ] {SHM_NAME} has {e}: running without it");
-        let _ = UnmapViewOfFile(map_ptr);
-        let _ = CloseHandle(handle);
-        return (None, None);
-      }
-      if header.magic != gamersequalizer_common::shm::SHM_MAGIC {
-        header.init_defaults();
-        if let Some((vol, mute)) = crate::win_audio::chatmix::get_system_master_volume() {
-          header.master_volume_permille.store((vol * 1000.0).round() as u32, Ordering::Relaxed);
-          header.master_muted.store(mute, Ordering::Relaxed);
-        }
-        if let Some((vol, mute)) = crate::win_audio::chatmix::get_system_mic_volume() {
-          header.mic_volume_permille.store((vol * 1000.0).round() as u32, Ordering::Relaxed);
-          header.mic_muted.store(mute, Ordering::Relaxed);
-        }
-        super::audio_settings::AudioSettings::load_or_default(settings_dir).apply_to_header(header);
-      }
-    }
-    (Some(handle), ptr)
   }
 }

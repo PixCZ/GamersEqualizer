@@ -12,6 +12,7 @@ pub mod notify;
 pub mod output_eq;
 pub mod settings_transfer;
 pub mod setup_cli;
+pub mod shm_mapping;
 pub mod sonar_importer;
 pub mod takeover;
 pub mod tray;
