@@ -28,18 +28,20 @@ impl SharedMemoryClient {
   /// e.g. so audiodg (LOCAL SERVICE) and the logged-on user share a Global mapping.
   /// A fresh mapping gets default settings.
   pub fn create_named(name: &str, sddl: Option<&str>) -> Result<Self, String> {
-    // SAFETY: the handle is a fresh file mapping of the layout's size.
-    unsafe {
+    // SAFETY: the handle is a file mapping of the layout's size, new or one that was there.
+    let mut client = unsafe {
       let handle = create_mapping(name, sddl, ShmLayout::total_size_bytes())?;
-      let mut client = Self::map(handle)?;
-      let header = &mut client.layout_mut().header;
-      if header.magic != SHM_MAGIC {
-        header.init_defaults();
-      } else if let Some(e) = header.layout_mismatch() {
-        return Err(format!("{name} has {e}"));
-      }
-      Ok(client)
+      Self::map(handle)?
+    };
+    // One that was there is in use by other processes: read through a shared reference, and
+    // written (`layout_mut`) only while its magic is not set. Nothing locks that across
+    // processes: two that make the mapping at the same instant both write the same defaults.
+    if client.layout().header.magic != SHM_MAGIC {
+      client.layout_mut().header.init_defaults();
+    } else if let Some(e) = client.layout().header.layout_mismatch() {
+      return Err(format!("{name} has {e}"));
     }
+    Ok(client)
   }
 
   /// Open an existing mapping only (no create rights needed, e.g. a Global one from a user process).
@@ -75,7 +77,8 @@ impl SharedMemoryClient {
   }
 
   fn layout_mut(&mut self) -> &mut ShmLayout {
-    // SAFETY: as `ring_buffer`; used only to set defaults in a mapping this call just created.
+    // SAFETY: as `ring_buffer`; used only to set defaults while the mapping's magic is not set
+    // (`create_named` says what that does not rule out).
     unsafe { self.mapped_ptr.as_mut() }
   }
 

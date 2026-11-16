@@ -76,7 +76,7 @@ pub struct AecHistoryPoint {
 }
 
 impl AppState {
-  /// A mic DSP (APO or bridge) published telemetry within the last 2 s. Call once per frame
+  /// A mic DSP (the APO) published telemetry within the last 2 s. Call once per frame
   /// or more; repeated calls in one frame see the same seq and change nothing.
   pub fn mic_dsp_live(&mut self) -> bool {
     let seq = self.shm_header().map_or(0, |h| h.aec_telemetry_seq.load(Ordering::Acquire));
@@ -96,7 +96,7 @@ impl AppState {
   }
 
   /// What the noise suppression is really doing. `active` in shared memory is only updated
-  /// while a mic DSP (APO or bridge) processes audio, so without one it is stale.
+  /// while a mic DSP (the APO) processes audio, so without one it is stale.
   pub fn denoise_status(&mut self) -> DenoiseStatus {
     let (selected, active) = self.denoise_models();
     let live = self.mic_dsp_live();

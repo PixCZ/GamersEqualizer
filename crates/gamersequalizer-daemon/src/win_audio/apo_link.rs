@@ -137,7 +137,7 @@ impl ApoLink {
     }
   }
 
-  /// Some app records through the mic filter (APO or bridge), so the echo canceller needs a reference.
+  /// Some app records through the mic filter (the APO), so the echo canceller needs a reference.
   pub fn mic_dsp_live(&self) -> bool {
     self.watch.is_live()
   }

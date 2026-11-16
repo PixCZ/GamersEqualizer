@@ -1,5 +1,5 @@
 //! Debug log of the voice leveler: one line per change of its gain or learned level (0.1 dB
-//! steps, as published), with why it moved. The DSP (APO or bridge) has no log of its own, so the
+//! steps, as published), with why it moved. The DSP (the APO) has no log of its own, so the
 //! daemon diffs the shared telemetry and the settings that feed the leveler.
 //!
 //! Shortcut: the reason is inferred from what the daemon sees, not reported by the DSP. Speech the

@@ -36,7 +36,7 @@ pub struct DspWatch {
 }
 
 impl DspWatch {
-  /// Mic processing (APO or bridge) produced telemetry within `IDLE_AFTER`.
+  /// Mic processing (the APO) produced telemetry within `IDLE_AFTER`.
   pub fn is_live(&self) -> bool {
     self.live
   }
