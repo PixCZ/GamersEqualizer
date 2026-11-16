@@ -581,7 +581,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] F4 společný začátek skriptů (jen doslova stejné kusy; `Say`, `Set-FxValue` a obnova se liší chováním, zůstávají)
 - [x] F5 dokumentace instalátoru (záloha: platí kód, přepíše se, dokud zařízení nenese náš efekt)
 - [x] G1 AEC3 po pauze (ztlumen celý první rámec po `flush`, ne jen 430 vzorků: za nimi je ~25 vzorků dozvuku filtrů dělení pásem)
-- [ ] G2 jedno čištění stavu
+- [x] G2 jedno čištění stavu (`Sleep::clear`; podlaha šumu místnosti mimo: nečistí ji nikdo a pauza místnost nemění; `reset_engines` nuluje `mute_left`)
 - [ ] G3 nastavení jednou
 - [ ] G4 drobnosti řetězce
 - [ ] G5 vstupní body COM

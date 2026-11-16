@@ -264,6 +264,7 @@ fn test_flush_drops_audio_from_before_and_keeps_the_model() {
       isolator.dpdfnet.as_deref().map(|e| e as *const DpdfEngine),
     );
     isolator.flush();
+    assert_eq!(isolator.rescue.hold_left, 0, "{model:?}: the click rescue still held speech from before");
     let mut silence = vec![0.0f32; 48_000];
     silence.chunks_mut(441).for_each(|b| isolator.process_samples(b));
     let peak = silence.iter().fold(0.0f32, |m, s| m.max(s.abs()));
@@ -275,6 +276,10 @@ fn test_flush_drops_audio_from_before_and_keeps_the_model() {
     assert_eq!(after, engine, "{model:?}: same engine, not reloaded");
     assert!(isolator.loading.is_none());
     assert_eq!(isolator.active_model(), model);
+    // A model switch right after a flush: the new engine's first output is not the old one's.
+    isolator.flush();
+    isolator.reset_engines();
+    assert_eq!(isolator.mute_left, 0, "{model:?}: a switch still silences the next model");
   }
 }
 

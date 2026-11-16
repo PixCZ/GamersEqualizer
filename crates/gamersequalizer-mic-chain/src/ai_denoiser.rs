@@ -250,16 +250,9 @@ pub struct AiVoiceIsolator {
   bypassed: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
   heard_voice: bool,
-  /// Heavy model asleep: no speech for `sleep_after` samples, so RNNoise (delayed to the heavy
-  /// model's latency) covers the pause and the heavy model stops (DFN3 ~3 %, DPDFNet ~10 % of a
-  /// core). Speech on RNNoise's own detector wakes it.
-  asleep: bool,
-  /// Both run while one takes over from the other (see `Takeover`).
-  takeover: Option<Takeover>,
+  sleep: Sleep,
   /// DeepFilterNet only: RNNoise runs next to it and fills in where DFN3 cut a voice (clicks).
   rescue: ClickRescue,
-  /// Input samples since the input detector last heard speech or saw activity.
-  quiet_samples: usize,
   /// Highest voice probability of the raw-input detector / `out_net` / the rescue's detector in
   /// the last block, -1 when none ran (debug capture only; a compare per 10 ms frame).
   in_prob: f32,
@@ -275,8 +268,6 @@ pub struct AiVoiceIsolator {
   /// Samples in a row over the floor + `ACTIVITY_OVER_FLOOR_DB`.
   active_run: usize,
   sleep_after: usize,
-  /// RNNoise output delayed to the heavy model's latency while it stands in.
-  sleep_delay: DelayLine,
   /// The second path's copy of the block during a handover.
   spare: Vec<f32>,
   /// Heavy model being loaded on the loader thread (one at a time).
@@ -284,6 +275,21 @@ pub struct AiVoiceIsolator {
   /// Heavy-model output samples still to silence after a `flush`: its recurrent state and
   /// lookahead frames hold the audio from before (one model latency of it).
   mute_left: usize,
+}
+
+/// The heavy model's sleep: what a pause, a model switch and a reset all start over (`clear`).
+/// The room's noise floor (`note_activity`) is not part of it: a pause doesn't change the room.
+struct Sleep {
+  /// Heavy model asleep: no speech for `sleep_after` samples, so RNNoise (delayed to the heavy
+  /// model's latency) covers the pause and the heavy model stops (DFN3 ~3 %, DPDFNet ~10 % of a
+  /// core). Speech on RNNoise's own detector wakes it.
+  asleep: bool,
+  /// Both run while one takes over from the other (see `Takeover`).
+  takeover: Option<Takeover>,
+  /// Input samples since the input detector last heard speech or saw activity.
+  quiet_samples: usize,
+  /// RNNoise output delayed to the heavy model's latency while it stands in.
+  delay: DelayLine,
 }
 
 /// The heavy model and the RNNoise stand-in hand over without a gap: from the start both get
@@ -434,10 +440,8 @@ impl AiVoiceIsolator {
       soft_net: Vad48k::new().map_err(|e| log::error!("[Denoise] Silero voice detector failed to load: {e}")).ok(),
       soft_voice_prob: SOFT_VOICE_PROB,
       soft_recent: [0.0; 2],
-      asleep: false,
-      takeover: None,
+      sleep: Sleep { asleep: false, takeover: None, quiet_samples: 0, delay: DelayLine::new() },
       rescue: ClickRescue::new(),
-      quiet_samples: 0,
       in_prob: -1.0,
       out_prob: -1.0,
       rescue_prob: -1.0,
@@ -448,7 +452,6 @@ impl AiVoiceIsolator {
       level_power: 0.0,
       active_run: 0,
       sleep_after: SLEEP_AFTER_SAMPLES,
-      sleep_delay: DelayLine::new(),
       spare: Vec::with_capacity(4096),
       lookahead: false,
       #[cfg(test)]
@@ -583,7 +586,7 @@ impl AiVoiceIsolator {
 
   /// The heavy model is stopped for a pause (RNNoise stands in).
   pub fn asleep(&self) -> bool {
-    self.asleep && self.takeover.is_none()
+    self.sleep.asleep && self.sleep.takeover.is_none()
   }
 
   /// Detector, gate and rescue state after the last block, for the debug capture.
@@ -604,8 +607,8 @@ impl AiVoiceIsolator {
       rescue_mix: self.rescue.mix,
       rescue_hold_left: self.rescue.hold_left,
       bypassed: self.bypassed,
-      quiet_samples: self.quiet_samples,
-      takeover: self.takeover.is_some(),
+      quiet_samples: self.sleep.quiet_samples,
+      takeover: self.sleep.takeover.is_some(),
     }
   }
 
@@ -652,18 +655,18 @@ impl AiVoiceIsolator {
     // Speech again while handing a pause to RNNoise, before RNNoise is heard at all: stay with
     // the heavy model (finishing the handover put the word's onset through RNNoise, and the
     // wake-up takeover after it cost another model latency).
-    if self.takeover.is_some_and(|t| t.to_sleep && t.done < t.fade_at) && (self.heard_voice || activity) {
-      self.takeover = None;
+    if self.sleep.takeover.is_some_and(|t| t.to_sleep && t.done < t.fade_at) && (self.heard_voice || activity) {
+      self.sleep.takeover = None;
     }
-    if heavy && self.takeover.is_none() {
-      if !self.asleep && self.quiet_samples >= self.sleep_after {
+    if heavy && self.sleep.takeover.is_none() {
+      if !self.sleep.asleep && self.sleep.quiet_samples >= self.sleep_after {
         self.start_takeover(true, latency);
-      } else if self.asleep && (self.heard_voice || activity) {
+      } else if self.sleep.asleep && (self.heard_voice || activity) {
         self.start_takeover(false, latency);
       }
     }
-    let takeover = self.takeover;
-    let heavy_on = heavy && (!self.asleep || takeover.is_some());
+    let takeover = self.sleep.takeover;
+    let heavy_on = heavy && (!self.sleep.asleep || takeover.is_some());
     #[cfg(test)]
     let rescue_off = self.no_rescue;
     #[cfg(not(test))]
@@ -672,7 +675,7 @@ impl AiVoiceIsolator {
     let rnnoise_on = !heavy_on || takeover.is_some() || rescue_on;
     if rescue_on {
       // No-op unless the length changed (model switch): aligns RNNoise with DFN3's output.
-      self.sleep_delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
+      self.sleep.delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
     }
     let n = samples.len();
     if heavy_on && rnnoise_on && self.spare.len() < n {
@@ -690,7 +693,7 @@ impl AiVoiceIsolator {
       rnnoise,
       deepfilter,
       dpdfnet,
-      sleep_delay,
+      sleep,
       spare,
       mute_left,
       rescue,
@@ -751,7 +754,7 @@ impl AiVoiceIsolator {
         }
       });
       if heavy {
-        sleep_delay.process(buf); // standing in: delayed to the heavy model's latency
+        sleep.delay.process(buf); // standing in: delayed to the heavy model's latency
       }
     }
     if let (Some(t), true, Some(copy)) = (takeover, heavy_on && rnnoise_on, spare.get(..n)) {
@@ -778,14 +781,14 @@ impl AiVoiceIsolator {
     }
     if let Some(mut t) = takeover {
       t.done += n;
-      self.takeover = if t.done >= t.fade_at + TAKEOVER_FADE_SAMPLES {
-        self.asleep = t.to_sleep;
+      self.sleep.takeover = if t.done >= t.fade_at + TAKEOVER_FADE_SAMPLES {
+        self.sleep.asleep = t.to_sleep;
         None
       } else {
         Some(t)
       };
     }
-    self.quiet_samples = if voice || activity { 0 } else { self.quiet_samples.saturating_add(n) };
+    self.sleep.quiet_samples = if voice || activity { 0 } else { self.sleep.quiet_samples.saturating_add(n) };
     self.heard_voice = voice;
     // Lookahead: the gated audio is older than what the detectors just heard, so the gate opens
     // that much before an onset; the hold covers the delay too, so word tails stay as long.
@@ -799,8 +802,8 @@ impl AiVoiceIsolator {
     self.gate.process(samples, hold);
   }
 
-  /// Cold start: fresh network states. Allocates: only on user actions (denoiser switched back
-  /// on, model change), never on a pause (`flush`).
+  /// Cold start: `reset_engines`, and fresh detector states. Allocates: only on user actions
+  /// (denoiser switched back on, model change), never on a pause (`flush`).
   pub fn reset(&mut self) {
     self.reset_engines();
     self.in_net.reset();
@@ -808,15 +811,14 @@ impl AiVoiceIsolator {
     if let Some(net) = self.soft_net.as_mut() {
       net.reset();
     }
-    self.mute_left = 0;
     self.reset_timing();
   }
 
   /// `reset` for the real-time thread (the host paused the chain): drops all audio buffered from
   /// before, keeps the loaded models and their network states, allocates nothing.
   pub fn flush(&mut self) {
-    (self.asleep, self.takeover, self.quiet_samples) = (false, None, 0);
-    self.sleep_delay.clear();
+    self.sleep.clear();
+    self.rescue.reset();
     self.rnnoise.flush();
     if let Some(df) = self.deepfilter.as_mut() {
       df.reset();
@@ -835,6 +837,7 @@ impl AiVoiceIsolator {
     self.reset_timing();
   }
 
+  /// What follows the output timing: gate, detector hysteresis, lookahead, bypass.
   fn reset_timing(&mut self) {
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceHysteresis::new();
@@ -873,12 +876,13 @@ impl AiVoiceIsolator {
     self.active_run >= ACTIVITY_MIN_SAMPLES
   }
 
-  /// Start handing a pause to RNNoise (`to_sleep`) or speech back to the heavy model.
+  /// Start handing a pause to RNNoise (`to_sleep`, its buffers emptied, the sleep delay set to the
+  /// heavy model's latency) or speech back to the heavy model (its buffers emptied).
   fn start_takeover(&mut self, to_sleep: bool, latency: usize) {
     if to_sleep {
       self.rnnoise.restart();
-      self.sleep_delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
-      self.sleep_delay.clear();
+      self.sleep.delay.set_len(latency.saturating_sub(RNNOISE_LATENCY_SAMPLES));
+      self.sleep.delay.clear();
     } else {
       // Its FIFOs hold audio from before the pause; the model's own state warms up again.
       if let Some(df) = self.deepfilter.as_mut() {
@@ -890,7 +894,7 @@ impl AiVoiceIsolator {
       self.in_net.fifo.clear();
     }
     let fade_at = if to_sleep { latency.max(STAND_IN_WARMUP_SAMPLES) } else { latency };
-    self.takeover = Some(Takeover { to_sleep, done: 0, fade_at });
+    self.sleep.takeover = Some(Takeover { to_sleep, done: 0, fade_at });
   }
 
   fn select(&mut self, model: DenoiseModel) {
@@ -969,9 +973,11 @@ impl AiVoiceIsolator {
     }
   }
 
+  /// Fresh engines for a model switch: sleep cleared, nothing left to silence, RNNoise's network
+  /// state new, the heavy models' buffers emptied.
   fn reset_engines(&mut self) {
-    (self.asleep, self.takeover, self.quiet_samples) = (false, None, 0);
-    self.sleep_delay.clear();
+    self.sleep.clear();
+    self.mute_left = 0;
     self.rnnoise.reset();
     if let Some(df) = self.deepfilter.as_mut() {
       df.reset();
@@ -1028,6 +1034,13 @@ fn atten_lim(strength: f32) -> Option<f32> {
   } else {
     let db = DF_MIN_ATTEN_DB + strength * (DF_MAX_ATTEN_DB - DF_MIN_ATTEN_DB);
     Some(10f32.powf(-db / 20.0))
+  }
+}
+
+impl Sleep {
+  fn clear(&mut self) {
+    (self.asleep, self.takeover, self.quiet_samples) = (false, None, 0);
+    self.delay.clear();
   }
 }
 
