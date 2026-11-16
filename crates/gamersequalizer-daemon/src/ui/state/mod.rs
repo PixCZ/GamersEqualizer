@@ -240,6 +240,7 @@ impl AppState {
   }
 
   pub fn signal_daemon_shutdown(&self) {
+    crate::SERVICE_STOP_ASKED.store(true, Ordering::Relaxed);
     if let Some(h) = self.shm_header() {
       h.shutdown_daemon_signal.store(true, Ordering::SeqCst);
     }

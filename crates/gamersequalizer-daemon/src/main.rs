@@ -53,6 +53,9 @@ const SERVICE_EXIT_WAIT: Duration = Duration::from_secs(5);
 /// Set by the window once the installer has put the app into Program Files: when the window
 /// has closed, `run_gui_mode` starts the installed app.
 static MOVE_TO_INSTALLED: AtomicBool = AtomicBool::new(false);
+/// The window asked the service to stop before it closed ("Stop service and exit", uninstall):
+/// the closing log line must not say the service runs on.
+static SERVICE_STOP_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// A settings file to import once the window has closed and the service has ended (nothing
 /// may write settings meanwhile); then the app starts again (`import_after_close`).
@@ -242,7 +245,11 @@ fn run_gui_mode() {
     }
     return;
   }
-  info!("[GamersEqualizer] UI Control Center closed. Background service continues running uninterrupted.");
+  if SERVICE_STOP_ASKED.load(Ordering::Relaxed) {
+    info!("[GamersEqualizer] UI Control Center closed. The background service was asked to stop.");
+  } else {
+    info!("[GamersEqualizer] UI Control Center closed. Background service continues running uninterrupted.");
+  }
 }
 
 /// Graphics backend for the window: DX12 when the machine has a DX12 GPU, else wgpu's usual
