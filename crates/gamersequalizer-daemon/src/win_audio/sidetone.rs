@@ -50,13 +50,8 @@ struct Store {
   version: u32,
 }
 
-static STORE: RwLock<Store> = RwLock::new(Store {
-  path: None,
-  modified: None,
-  last_check: None,
-  pairs: SidetonePairs { pairs: Vec::new() },
-  version: 0,
-});
+static STORE: RwLock<Store> =
+  RwLock::new(Store { path: None, modified: None, last_check: None, pairs: SidetonePairs::new(), version: 0 });
 
 /// Point the store at `<base_dir>/sidetone.json` and load it. Call once per process.
 pub fn init(base_dir: &Path) {
@@ -108,13 +103,13 @@ impl Store {
       Ok(text) => SidetonePairs::from_json(&text).unwrap_or_else(|e| {
         log::warn!("[Sidetone] {} is corrupt ({e}), ignoring it", path.display());
         crate::output_eq::settings::keep_corrupt(&path);
-        SidetonePairs { pairs: Vec::new() }
+        SidetonePairs::new()
       }),
       Err(e) => {
         if e.kind() != std::io::ErrorKind::NotFound {
           log::warn!("[Sidetone] reading {} failed ({e}), no pairs until it can be read", path.display());
         }
-        SidetonePairs { pairs: Vec::new() }
+        SidetonePairs::new()
       }
     };
     self.version = self.version.wrapping_add(1);
@@ -533,7 +528,7 @@ mod tests {
   fn test_sidetone_store_save_and_corrupt() {
     let dir = std::env::temp_dir().join(format!("ge_sidetone_test_{}", std::process::id()));
     init(&dir);
-    let mut p = SidetonePairs { pairs: Vec::new() };
+    let mut p = SidetonePairs::new();
     p.upsert(SidetonePair::new("mic1", "out1", "Mic 1", "Out 1"));
     p.upsert(SidetonePair::new("mic2", "out2", "Mic 2", "Out 2"));
     save(p);

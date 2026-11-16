@@ -100,9 +100,9 @@ pub fn save_user_preset(storage: &ProfileStorage, profile: &ParametricProfile) -
   let mut p = profile.clone();
   p.vad_type = VadType::Mic;
   p.is_custom = true;
-  let json = serde_json::to_string_pretty(&p).map_err(io::Error::other)?;
   let path = user_file(storage, &p.name);
-  crate::sonar_importer::storage::refuse_unreadable(&path)?;
+  let p = crate::sonar_importer::storage::for_overwrite(&path, &p)?;
+  let json = serde_json::to_string_pretty(&p).map_err(io::Error::other)?;
   crate::output_eq::settings::write_atomic(&path, &json)
 }
 

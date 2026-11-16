@@ -1,9 +1,10 @@
 //! The saved "microphone + output" pairs (`profiles/sidetone.json`); the daemon owns the file.
 
 use super::*;
+use std::collections::BTreeMap;
 
 const DEFAULT_LOW_CUT_HZ: f32 = 200.0;
-/// One saved pair. Unknown JSON fields are ignored, missing ones take the defaults.
+/// One saved pair. Unknown JSON fields are kept (`extra`), missing ones take the defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidetonePair {
@@ -30,6 +31,10 @@ pub struct SidetonePair {
 #[serde(default)]
 pub struct SidetonePairs {
   pub pairs: Vec<SidetonePair>,
+  /// Keys from a newer version of the app, kept so a save here does not drop them. A `BTreeMap`
+  /// (not `serde_json::Map`) so `new` is const: the daemon keeps the pairs in a static.
+  #[serde(flatten)]
+  pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for SidetonePair {
@@ -84,6 +89,10 @@ impl SidetonePair {
 }
 
 impl SidetonePairs {
+  pub const fn new() -> Self {
+    Self { pairs: Vec::new(), extra: BTreeMap::new() }
+  }
+
   pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
     serde_json::from_str(text)
   }

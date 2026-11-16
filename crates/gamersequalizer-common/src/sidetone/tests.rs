@@ -54,7 +54,7 @@ fn pairs_roundtrip_ignore_unknown_fields_and_reject_garbage() {
   assert_eq!(pairs.pairs.len(), 1);
 
   // A file from another build (newer, or the first sidetone build with `gain_db` and the
-  // cuts): unknown fields ignored, missing ones defaulted, unknown mode kept.
+  // cuts): unknown fields kept for the next save, missing ones defaulted, unknown mode kept.
   let other =
     r#"{"pairs":[{"mic_id":"m","output_id":"o","noise_mode":77,"gain_db":24.0,"low_cut_hz":90.0}],"extra":1}"#;
   let parsed = SidetonePairs::from_json(other).unwrap();
@@ -62,6 +62,8 @@ fn pairs_roundtrip_ignore_unknown_fields_and_reject_garbage() {
   assert_eq!((p.noise_mode, p.volume, p.enabled), (77, 1.0, false));
   assert_eq!(p.bands, default_bands());
   assert_eq!(p.settings().noise_mode, NoiseMode::Expander);
+  let saved: serde_json::Value = serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
+  assert_eq!((&saved["extra"], &saved["pairs"][0]["gain_db"]), (&1.into(), &24.0.into()));
   assert!(SidetonePairs::from_json("{ not json").is_err());
 }
 

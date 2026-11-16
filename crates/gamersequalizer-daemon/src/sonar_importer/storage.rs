@@ -128,8 +128,8 @@ impl ProfileStorage {
 
 fn write_profile(dir: &Path, profile: &ParametricProfile) -> io::Result<PathBuf> {
   let path = dir.join(format!("{}.json", ProfileStorage::sanitize_filename(&profile.name)));
-  refuse_unreadable(&path)?;
-  let json = serde_json::to_string_pretty(profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+  let profile = for_overwrite(&path, profile)?;
+  let json = serde_json::to_string_pretty(&profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
   // Not `File::create` + write: a power cut in between left a 0-byte file, and the profile
   // (and every binding to it) vanished from the UI. `write_atomic` also creates the folder.
   crate::output_eq::settings::write_atomic(&path, &json)?;
@@ -164,20 +164,29 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
   Ok(())
 }
 
-/// A profile file this version cannot read (most likely from a newer version) is skipped on load,
-/// so the user never sees it; saving a profile of the same name would destroy it. An empty file
-/// (a write cut short) holds nothing to lose.
-pub fn refuse_unreadable(path: &Path) -> io::Result<()> {
+/// `profile` as a save writes it over the file at `path`, every saver's last step.
+/// A file this version cannot read (most likely from a newer version) is skipped on load, so the
+/// user never sees it; saving a profile of the same name would destroy it: refused. An empty file
+/// (a write cut short) holds nothing to lose. Fields a newer version left in a readable file
+/// (`extra`) stay unless `profile` brings its own: "Save as" over it starts from a fresh profile.
+pub fn for_overwrite(path: &Path, profile: &ParametricProfile) -> io::Result<ParametricProfile> {
+  let mut profile = profile.clone();
   let Ok(bytes) = fs::read(path) else {
-    return Ok(());
+    return Ok(profile);
   };
-  if bytes.trim_ascii().is_empty() || serde_json::from_slice::<ParametricProfile>(&bytes).is_ok() {
-    return Ok(());
+  if bytes.trim_ascii().is_empty() {
+    return Ok(profile);
   }
-  Err(io::Error::new(
-    io::ErrorKind::AlreadyExists,
-    format!("{} exists but this version cannot read it (a newer version's?); choose another name", path.display()),
-  ))
+  let Ok(old) = serde_json::from_slice::<ParametricProfile>(&bytes) else {
+    return Err(io::Error::new(
+      io::ErrorKind::AlreadyExists,
+      format!("{} exists but this version cannot read it (a newer version's?); choose another name", path.display()),
+    ));
+  };
+  if profile.extra.is_empty() {
+    profile.extra = old.extra;
+  }
+  Ok(profile)
 }
 
 #[cfg(test)]
@@ -200,6 +209,21 @@ mod tests {
 
     fs::write(&path, "").unwrap();
     assert!(storage.save_layer_profile(OutputLayer::Game, &ParametricProfile::new("Future", VadType::Game)).is_ok());
+    let _ = fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn saving_over_a_newer_versions_profile_keeps_its_unknown_fields() {
+    let tmp = std::env::temp_dir().join(format!("ge_test_newer_fields_{}", std::process::id()));
+    let storage = ProfileStorage::new(&tmp);
+    let path = storage.layer_profile_path(OutputLayer::Game, "Future");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, r#"{"name": "Future", "vad_type": "game", "bands": [], "preamp_db": 0.0, "is_custom": true, "spatial": {"width": 3}}"#).unwrap();
+
+    // "Save as" under the same name: a fresh profile, without the field.
+    storage.save_layer_profile(OutputLayer::Game, &ParametricProfile::new("Future", VadType::Game)).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["spatial"]["width"], 3);
     let _ = fs::remove_dir_all(&tmp);
   }
 
