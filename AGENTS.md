@@ -22,7 +22,7 @@ Three places our code runs (details in `.claude/rules/architecture.md`):
 | `gamersequalizer.exe --daemon`     | Background service: devices, mixer, game detection, health, sidetone   |
 | `gamersequalizer.exe`              | The window (egui); closing it leaves the service running               |
 
-They talk through shared memory (`crates/gamersequalizer-common/src/shm.rs`) and JSON files in
+They talk through shared memory (`crates/gamersequalizer-common/src/shm/`) and JSON files in
 `%APPDATA%\GamersEqualizer`.
 
 Core properties: **the running app never crashes, and our DLL never takes Windows audio down**; the

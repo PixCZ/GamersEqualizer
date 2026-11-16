@@ -19,7 +19,7 @@ logged, shown, retried, never unwound.
   only check pointers and copy values. The exe aborts on panic, so there the only protection is
   not panicking.
 - How the processes share state:
-  - Shared memory (`gamersequalizer-common/src/shm.rs`): a `Local\` mapping between window and service,
+  - Shared memory (`gamersequalizer-common/src/shm/`): a `Local\` mapping between window and service,
     and a `Global\` mapping the APO creates inside audiodg. The service mirrors settings into it and
     telemetry out of it (`win_audio/apo_link.rs`); the window opens it too.
   - JSON files in `%APPDATA%\GamersEqualizer`, written by both the window and the service.
@@ -86,7 +86,7 @@ service (loopback, sidetone).
 ## Shared-memory layout
 
 - Two processes that may be different builds read it (an old DLL meets a new exe after an update).
-  Every layout change bumps `shm_version!` in `shm.rs`; `SHM_VERSION` and both mapping names follow it,
+  Every layout change bumps `shm_version!` in `shm/mod.rs`; `SHM_VERSION` and both mapping names follow it,
   and a size check fails the build until it is bumped. A mapping of another version counts as missing.
 - Fields are atomics. A value made of several fields is published with a version counter that the
   reader checks after reading.
