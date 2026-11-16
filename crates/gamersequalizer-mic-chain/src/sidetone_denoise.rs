@@ -14,6 +14,7 @@
 //!   at -50 / -40 dBFS; at -60 dBFS, or once it has heard a voice, it takes all of it).
 //!   WebRTC NS and RNNoise 0.2 do not need the voice first.
 
+use crate::frame_fifo::I16_SCALE;
 use gamersequalizer_common::sidetone::NoiseMode;
 use nnnoiseless::DenoiseState;
 use rnnoise2::DenoiseState as DenoiseState2;
@@ -24,8 +25,6 @@ use sonora::{AudioProcessing, Config, StreamConfig};
 pub const FRAME: usize = 480;
 /// The only sample rate the suppressors run at.
 pub const SAMPLE_RATE: u32 = 48_000;
-/// RNNoise is trained on i16-range samples, not [-1.0, 1.0].
-const I16_SCALE: f32 = 32768.0;
 /// Delay of the WebRTC suppressor inside `sonora` (band split + overlap), measured.
 const WEBRTC_NS_DELAY: usize = 333;
 /// Silent frames that push old audio out of a suppressor when its mode starts (RNNoise's

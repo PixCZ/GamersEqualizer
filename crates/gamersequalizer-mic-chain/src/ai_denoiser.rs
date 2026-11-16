@@ -7,6 +7,7 @@
 //! 2017 RNNoise network.
 
 use crate::dpdfnet::{self, DpdfEngine};
+use crate::frame_fifo::{FrameInput, FrameOutput, I16_SCALE};
 use df::tract::{DfParams, DfTract, RuntimeParams};
 use gamersequalizer_common::shm::{DenoiseLimit, DenoiseModel};
 use ndarray::Array2;
@@ -16,8 +17,6 @@ use silero_vad::Vad48k;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Instant;
 
-/// nnnoiseless (RNNoise) is trained on i16-range samples, not [-1.0, 1.0].
-const I16_SCALE: f32 = 32768.0;
 /// Attenuation limit of the heavy models at strength 0+ .. just below 1.0 (100 % = unlimited).
 const DF_MIN_ATTEN_DB: f32 = 6.0;
 const DF_MAX_ATTEN_DB: f32 = 60.0;
@@ -325,8 +324,8 @@ unsafe impl Send for HandOver {}
 
 struct RnNoiseEngine {
   denoiser: Box<DenoiseState<'static>>,
-  input_fifo: Vec<f32>,
-  output_fifo: Vec<f32>,
+  input: FrameInput,
+  output: FrameOutput,
   /// Previous dry frame: RNNoise output lags its input by one frame, so the dry
   /// signal for the strength blend must be delayed by the same amount (else comb filtering).
   prev_dry: [f32; FRAME_SIZE],
@@ -334,9 +333,8 @@ struct RnNoiseEngine {
 
 struct DeepFilterEngine {
   model: DfTract,
-  hop: usize,
-  input_fifo: Vec<f32>,
-  output_fifo: Vec<f32>,
+  input: FrameInput,
+  output: FrameOutput,
   in_frame: Array2<f32>,
   out_frame: Array2<f32>,
   error_logged: bool,
@@ -345,7 +343,7 @@ struct DeepFilterEngine {
 /// RNNoise run only for its voice probability (see `vad`, `in_net`, `out_net`).
 struct VoiceNet {
   state: VoiceModel,
-  fifo: Vec<f32>,
+  input: FrameInput,
   frame: [f32; FRAME_SIZE],
   scratch: [f32; FRAME_SIZE],
 }
@@ -829,8 +827,8 @@ impl AiVoiceIsolator {
     // DeepFilterNet's state lives in tract tensors inside the fork (clearing them allocates):
     // its first latency of output, all from before the pause, is silenced instead.
     self.mute_left = if self.active.is_heavy() { latency_samples(self.active) } else { 0 };
-    self.in_net.fifo.clear();
-    self.out_net.fifo.clear();
+    self.in_net.input.clear();
+    self.out_net.input.clear();
     if let Some(net) = self.soft_net.as_mut() {
       net.flush();
     }
@@ -891,7 +889,7 @@ impl AiVoiceIsolator {
       if let Some(dp) = self.dpdfnet.as_mut() {
         dp.restart();
       }
-      self.in_net.fifo.clear();
+      self.in_net.input.clear();
     }
     let fade_at = if to_sleep { latency.max(STAND_IN_WARMUP_SAMPLES) } else { latency };
     self.sleep.takeover = Some(Takeover { to_sleep, done: 0, fade_at });
@@ -1048,15 +1046,15 @@ impl RnNoiseEngine {
   fn new() -> Self {
     Self {
       denoiser: DenoiseState::new(),
-      input_fifo: Vec::with_capacity(FRAME_SIZE * 4),
-      output_fifo: primed_fifo(FRAME_SIZE),
+      input: FrameInput::new(FRAME_SIZE, FRAME_SIZE),
+      output: FrameOutput::new(FRAME_SIZE),
       prev_dry: [0.0; FRAME_SIZE],
     }
   }
 
   /// `on_prob`: RNNoise's voice probability of each input frame it completes.
   fn process(&mut self, samples: &mut [f32], strength: f32, mut on_prob: impl FnMut(f32)) {
-    self.input_fifo.extend_from_slice(samples);
+    self.input.push(samples);
 
     let mut temp_out = [0.0f32; FRAME_SIZE];
     let mut temp_in = [0.0f32; FRAME_SIZE];
@@ -1068,20 +1066,21 @@ impl RnNoiseEngine {
     // gate 18 % instead of 31 %) cost +0.3-0.4 points too and was dropped as well.
     let (wet_gain, dry_gain) = (strength, 1.0 - strength);
 
-    while self.input_fifo.len() >= FRAME_SIZE {
-      for (dst, src) in temp_in.iter_mut().zip(self.input_fifo.drain(..FRAME_SIZE)) {
+    while let Some(frame) = self.input.window() {
+      for (dst, src) in temp_in.iter_mut().zip(frame) {
         *dst = src * I16_SCALE;
       }
+      self.input.advance();
 
       on_prob(self.denoiser.process_frame(&mut temp_out, &temp_in));
 
       for (wet, dry) in temp_out.iter().zip(self.prev_dry.iter()) {
-        self.output_fifo.push((wet_gain * wet + dry_gain * dry) / I16_SCALE);
+        self.output.push((wet_gain * wet + dry_gain * dry) / I16_SCALE);
       }
       self.prev_dry = temp_in;
     }
 
-    drain_fifo(&mut self.output_fifo, samples);
+    self.output.drain_into(samples);
   }
 
   fn reset(&mut self) {
@@ -1103,8 +1102,8 @@ impl RnNoiseEngine {
   /// Fresh buffers, the network state kept: a cold RNNoise rates the first frames of typing as
   /// speech, so a fresh one at every pause woke the heavy model again (gate open 6-7 % on keys).
   fn restart(&mut self) {
-    self.input_fifo.clear();
-    reprime_fifo(&mut self.output_fifo, FRAME_SIZE);
+    self.input.clear();
+    self.output.clear();
     self.prev_dry = [0.0; FRAME_SIZE];
   }
 }
@@ -1120,9 +1119,8 @@ impl DeepFilterEngine {
     }
     Ok(Self {
       model,
-      hop,
-      input_fifo: Vec::with_capacity(hop * 4),
-      output_fifo: primed_fifo(hop),
+      input: FrameInput::new(hop, hop),
+      output: FrameOutput::new(hop),
       in_frame: Array2::zeros((1, hop)),
       out_frame: Array2::zeros((1, hop)),
       error_logged: false,
@@ -1134,29 +1132,30 @@ impl DeepFilterEngine {
     // is delayed by its look-ahead, a blend would comb-filter).
     self.model.atten_lim = atten_lim(strength);
 
-    self.input_fifo.extend(samples.iter().map(|s| s * pre_gain));
-    while self.input_fifo.len() >= self.hop {
-      for (dst, src) in self.in_frame.iter_mut().zip(self.input_fifo.drain(..self.hop)) {
-        *dst = src;
+    self.input.push_scaled(samples, pre_gain);
+    while let Some(frame) = self.input.window() {
+      for (dst, src) in self.in_frame.iter_mut().zip(frame) {
+        *dst = *src;
       }
+      self.input.advance();
       match self.model.process(self.in_frame.view(), self.out_frame.view_mut()) {
-        Ok(_) => self.output_fifo.extend(self.out_frame.iter().copied()),
+        Ok(_) => self.output.extend(self.out_frame.iter().copied()),
         Err(e) => {
           if !self.error_logged {
             log::error!("[Denoise] DeepFilterNet frame failed, passing audio through: {e:#}");
             self.error_logged = true;
           }
-          self.output_fifo.extend(self.in_frame.iter().copied());
+          self.output.extend(self.in_frame.iter().copied());
         }
       }
     }
-    drain_fifo(&mut self.output_fifo, samples);
+    self.output.drain_into(samples);
     samples.iter_mut().for_each(|s| *s /= pre_gain);
   }
 
   fn reset(&mut self) {
-    self.input_fifo.clear();
-    reprime_fifo(&mut self.output_fifo, self.hop);
+    self.input.clear();
+    self.output.clear();
   }
 }
 
@@ -1180,7 +1179,7 @@ impl VoiceNet {
   }
 
   fn with_model(state: VoiceModel) -> Self {
-    Self { state, fifo: Vec::with_capacity(FRAME_SIZE * 4), frame: [0.0; FRAME_SIZE], scratch: [0.0; FRAME_SIZE] }
+    Self { state, input: FrameInput::new(FRAME_SIZE, FRAME_SIZE), frame: [0.0; FRAME_SIZE], scratch: [0.0; FRAME_SIZE] }
   }
 
   /// Open / keep thresholds of the raw-input `vad` for this network's probability.
@@ -1194,11 +1193,12 @@ impl VoiceNet {
   /// Calls `on_prob` with the voice probability of each frame completed in this block
   /// (RNNoise 0.2: of the frame before it, see `in_net`).
   fn process(&mut self, samples: &[f32], mut on_prob: impl FnMut(f32)) {
-    self.fifo.extend_from_slice(samples);
-    while self.fifo.len() >= FRAME_SIZE {
-      for (dst, src) in self.frame.iter_mut().zip(self.fifo.drain(..FRAME_SIZE)) {
+    self.input.push(samples);
+    while let Some(frame) = self.input.window() {
+      for (dst, src) in self.frame.iter_mut().zip(frame) {
         *dst = src * I16_SCALE;
       }
+      self.input.advance();
       let prob = match &mut self.state {
         VoiceModel::Old(state) => state.process_frame(&mut self.scratch, &self.frame),
         VoiceModel::New(state) => state.voice_probability(&self.frame),
@@ -1214,7 +1214,7 @@ impl VoiceNet {
       VoiceModel::Old(state) => *state = DenoiseState::new(),
       VoiceModel::New(state) => state.reset(),
     }
-    self.fifo.clear();
+    self.input.clear();
   }
 }
 
@@ -1350,7 +1350,7 @@ impl ClickRescue {
   /// Idle again (rescue off: RNNoise standing in, another model). No allocation; the detector
   /// keeps its network state (like `flush`), only its buffered audio goes.
   fn reset(&mut self) {
-    self.net.fifo.clear();
+    self.net.input.clear();
     (self.hold_left, self.env_dfn, self.env_rnn, self.mix) = (0, 0.0, 0.0, 0.0);
   }
 }
@@ -1369,31 +1369,6 @@ fn latency_samples(model: DenoiseModel) -> usize {
     DenoiseModel::DeepFilterNet => DF_LATENCY_SAMPLES,
     DenoiseModel::DpdfNet => DPDF_LATENCY_SAMPLES,
     DenoiseModel::Unknown(_) => 0,
-  }
-}
-
-/// One frame of silence keeps output length == input length for any block size.
-pub(crate) fn primed_fifo(frame: usize) -> Vec<f32> {
-  let mut fifo = Vec::with_capacity(frame * 4);
-  fifo.resize(frame, 0.0);
-  fifo
-}
-
-/// `primed_fifo` again, reusing the allocation (for resets on the real-time thread).
-pub(crate) fn reprime_fifo(fifo: &mut Vec<f32>, frame: usize) {
-  fifo.clear();
-  fifo.resize(frame, 0.0);
-}
-
-/// Move processed samples out; the primed frame guarantees enough are available.
-pub(crate) fn drain_fifo(fifo: &mut Vec<f32>, samples: &mut [f32]) {
-  let drain_len = samples.len().min(fifo.len());
-  for (dst, src) in samples.iter_mut().zip(fifo.drain(..drain_len)) {
-    *dst = src;
-  }
-  // Only reachable if a caller block exceeds the priming; output silence, never raw input.
-  for s in samples.iter_mut().skip(drain_len) {
-    *s = 0.0;
   }
 }
 

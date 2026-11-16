@@ -9,6 +9,8 @@ use std::f32::consts::PI;
 use std::io::Cursor;
 use std::sync::Arc;
 
+use crate::frame_fifo::{FrameInput, FrameOutput};
+
 use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 use tract_onnx_23::prelude::*;
@@ -40,12 +42,12 @@ pub struct DpdfEngine {
   scratch: Vec<Complex32>,
   window: Vec<f32>,
   spec: Vec<Complex32>,
-  /// Sliding analysis window (needs WIN samples before a frame runs).
-  in_buf: Vec<f32>,
+  /// Sliding analysis window: WIN samples, one every HOP.
+  input: FrameInput,
   overlap: Vec<f32>,
   /// Input delayed by LOOKAHEAD_HOPS hops, aligned with the enhanced output.
   dry: VecDeque<f32>,
-  output_fifo: Vec<f32>,
+  output: FrameOutput,
   error_logged: bool,
 }
 
@@ -58,9 +60,9 @@ impl DpdfEngine {
   /// Process samples in place; `atten_lim` = share of the dry signal mixed back in (None = full
   /// suppression). Output length == input length (one primed hop absorbs any block size).
   pub fn process(&mut self, samples: &mut [f32], atten_lim: Option<f32>) {
-    self.in_buf.extend_from_slice(samples);
+    self.input.push(samples);
     let mut hop = [0.0f32; HOP];
-    while self.in_buf.len() >= WIN {
+    while self.input.window().is_some() {
       let ok = match self.run_frame(&mut hop) {
         Ok(()) => true,
         Err(e) => {
@@ -71,18 +73,18 @@ impl DpdfEngine {
           false
         }
       };
-      for (wet, x) in hop.iter().zip(self.in_buf.iter().take(HOP)) {
+      for (wet, x) in hop.iter().zip(self.input.window().unwrap_or_default().iter().take(HOP)) {
         self.dry.push_back(*x);
         let dry = self.dry.pop_front().unwrap_or(0.0);
-        self.output_fifo.push(match (ok, atten_lim) {
+        self.output.push(match (ok, atten_lim) {
           (false, _) => dry,
           (true, Some(lim)) => wet * (1.0 - lim) + dry * lim,
           (true, None) => *wet,
         });
       }
-      self.in_buf.drain(..HOP);
+      self.input.advance();
     }
-    crate::ai_denoiser::drain_fifo(&mut self.output_fifo, samples);
+    self.output.drain_into(samples);
   }
 
   /// Cold start: the recurrent state back to `init_state`, written into the current tensor (no
@@ -107,12 +109,11 @@ impl DpdfEngine {
   /// Fresh buffers, but the recurrent state kept: after a pause the model resumes warm (a cold
   /// state over-suppresses the first ~100 ms of speech).
   pub fn restart(&mut self) {
-    self.in_buf.clear();
-    self.in_buf.resize(WIN - HOP, 0.0);
+    self.input.clear();
     self.overlap.fill(0.0);
     self.dry.clear();
     self.dry.resize(LOOKAHEAD_HOPS * HOP, 0.0);
-    crate::ai_denoiser::reprime_fifo(&mut self.output_fifo, HOP);
+    self.output.clear();
   }
 
   fn try_load() -> TractResult<Self> {
@@ -168,19 +169,20 @@ impl DpdfEngine {
       scratch,
       window,
       spec: vec![Complex32::default(); WIN],
-      in_buf: Vec::with_capacity(WIN + HOP * 4),
+      input: FrameInput::new(WIN, HOP),
       overlap: vec![0.0; WIN],
       dry: VecDeque::new(),
-      output_fifo: Vec::new(),
+      output: FrameOutput::new(HOP),
       error_logged: false,
     };
     engine.reset();
     Ok(engine)
   }
 
-  /// One model step on `in_buf[..WIN]`; writes the next HOP finished samples.
+  /// One model step on the input's next window; writes the next HOP finished samples.
   fn run_frame(&mut self, hop: &mut [f32; HOP]) -> TractResult<()> {
-    for ((c, x), w) in self.spec.iter_mut().zip(&self.in_buf).zip(&self.window) {
+    let input = self.input.window().unwrap_or_default();
+    for ((c, x), w) in self.spec.iter_mut().zip(input).zip(&self.window) {
       *c = Complex32::new(x * w, 0.0);
     }
     self.fft.process_with_scratch(&mut self.spec, &mut self.scratch);

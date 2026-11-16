@@ -5,6 +5,7 @@ pub mod clip_detector;
 pub mod debug_capture;
 pub mod delay_estimator;
 mod dpdfnet;
+mod frame_fifo;
 pub mod latency_meter;
 pub mod shared_memory;
 pub mod sidetone_denoise;
