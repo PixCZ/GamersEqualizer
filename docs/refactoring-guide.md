@@ -585,7 +585,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] G3 nastavení jednou
 - [x] G4 drobnosti řetězce (`frame_fifo.rs` s `FrameInput`/`FrameOutput`, i pro DPDFNet s překryvem oken)
 - [x] G5 vstupní body COM (`guarded`; zbývá ruční nahrávka `-DebugCapture` před fází a po ní)
-- [ ] H dělení souborů (hotovo: `common/sidetone`, `apo/lib.rs`, `ai_denoiser/`, `chain/`, `aec3/echo_meter.rs`, `daemon/main.rs` (smyčka služby zůstala jedna funkce: rozdělit ji na `follow_mic` a spol. není přesun); `shm.rs` se nepovedlo: příkazy shellu odmítla automatická bezpečnostní kontrola, soubor zůstal celý; skript na rozdělení je připravený, udělat znovu)
+- [ ] H dělení souborů (hotovo: `common/sidetone`, `apo/lib.rs`, `ai_denoiser/`, `chain/`, `aec3/echo_meter.rs`, `health/`, `daemon/main.rs` (smyčka služby zůstala jedna funkce: rozdělit ji na `follow_mic` a spol. není přesun); `shm.rs` se nepovedlo: příkazy shellu odmítla automatická bezpečnostní kontrola, soubor zůstal celý; skript na rozdělení je připravený, udělat znovu)
 - [ ] I1 až I8
 - [ ] J menší nálezy
 - [ ] K úklid
