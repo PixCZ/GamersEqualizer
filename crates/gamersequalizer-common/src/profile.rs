@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported biquad filter types according to Equalizer APO and RBJ cookbook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterType {
   Peaking,
@@ -10,6 +10,10 @@ pub enum FilterType {
   LowPass,
   HighPass,
   Notch,
+  /// A type from a newer version of the app: kept as written so a save does not destroy it,
+  /// and passed through unchanged (it never reaches the audio engine).
+  #[serde(untagged)]
+  Unknown(String),
 }
 
 impl FilterType {
@@ -22,6 +26,7 @@ impl FilterType {
       FilterType::LowPass => "LP",
       FilterType::HighPass => "HP",
       FilterType::Notch => "NO",
+      FilterType::Unknown(_) => "",
     }
   }
 
@@ -34,8 +39,9 @@ impl FilterType {
     FilterType::Notch,
   ];
 
-  /// Stable id for shared memory. Never renumber.
-  pub fn to_u32(self) -> u32 {
+  /// Stable id for shared memory. Never renumber. An unknown type gets an id no reader knows,
+  /// so the engine skips that band.
+  pub fn to_u32(&self) -> u32 {
     match self {
       FilterType::Peaking => 0,
       FilterType::LowShelf => 1,
@@ -43,6 +49,7 @@ impl FilterType {
       FilterType::LowPass => 3,
       FilterType::HighPass => 4,
       FilterType::Notch => 5,
+      FilterType::Unknown(_) => u32::MAX,
     }
   }
 
@@ -51,7 +58,7 @@ impl FilterType {
   }
 
   /// True when the gain parameter affects this filter type.
-  pub fn uses_gain(self) -> bool {
+  pub fn uses_gain(&self) -> bool {
     matches!(self, FilterType::Peaking | FilterType::LowShelf | FilterType::HighShelf)
   }
 
@@ -64,6 +71,7 @@ impl FilterType {
       FilterType::LowPass => "Low Pass",
       FilterType::HighPass => "High Pass",
       FilterType::Notch => "Notch",
+      FilterType::Unknown(_) => "Newer filter (passes unchanged)",
     }
   }
 }
@@ -245,6 +253,9 @@ pub struct ParametricProfile {
   /// profiles can be matched by ear.
   #[serde(default)]
   pub gain_db: f32,
+  /// Fields from a newer version of the app, kept so a save here does not drop them.
+  #[serde(flatten)]
+  pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl ParametricProfile {
@@ -257,6 +268,7 @@ impl ParametricProfile {
       is_custom: true,
       game_ids: Vec::new(),
       gain_db: 0.0,
+      extra: serde_json::Map::new(),
     }
   }
 }
@@ -264,6 +276,28 @@ impl ParametricProfile {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_profile_from_a_newer_version_survives_load_and_save() {
+    let newer = r#"{
+      "name": "Future", "vad_type": "game", "preamp_db": -2.0, "is_custom": true, "spatial": {"room": 3},
+      "bands": [
+        {"enabled": true, "filter_type": "peaking", "frequency": 1000.0, "gain_db": 3.0, "q": 1.0},
+        {"enabled": true, "filter_type": "all_pass", "frequency": 500.0, "gain_db": 0.0, "q": 0.7}
+      ]
+    }"#;
+    let profile: ParametricProfile = serde_json::from_str(newer).unwrap();
+    let unknown = &profile.bands[1].filter_type;
+    assert_eq!(*unknown, FilterType::Unknown("all_pass".into()));
+    // The engine never gets it: the shared-memory id is one no reader knows.
+    assert_eq!(FilterType::from_u32(unknown.to_u32()), None);
+    assert!(!unknown.uses_gain());
+
+    let saved = serde_json::to_string(&profile).unwrap();
+    let reloaded: ParametricProfile = serde_json::from_str(&saved).unwrap();
+    assert_eq!(reloaded, profile);
+    assert!(saved.contains(r#""filter_type":"all_pass""#) && saved.contains(r#""spatial":{"room":3}"#), "{saved}");
+  }
 
   #[test]
   fn inverted_bands_cancel_peaks_and_shelves_exactly() {

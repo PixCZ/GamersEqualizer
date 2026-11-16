@@ -65,10 +65,22 @@ impl AudioSettings {
     }
   }
 
+  /// Keys a newer version wrote stay in the file: this struct is rebuilt from shared memory, so
+  /// it cannot carry them itself.
   pub fn save(&self, dir: &Path) {
     let path = dir.join(FILE);
-    let result =
-      serde_json::to_string_pretty(self).map_err(std::io::Error::other).and_then(|json| write_atomic(&path, &json));
+    let result = serde_json::to_value(self)
+      .and_then(|mut now| {
+        let old = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        if let (Some(now), Some(serde_json::Value::Object(old))) = (now.as_object_mut(), old) {
+          for (key, value) in old {
+            now.entry(key).or_insert(value);
+          }
+        }
+        serde_json::to_string_pretty(&now)
+      })
+      .map_err(std::io::Error::other)
+      .and_then(|json| write_atomic(&path, &json));
     if let Err(e) = result {
       log::warn!("[AudioSettings] could not save {}: {e}", path.display());
     }
@@ -185,6 +197,20 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_run
 mod tests {
   use super::*;
   use gamersequalizer_common::shm::DenoiseModel;
+
+  #[test]
+  fn a_key_from_a_newer_version_survives_a_save() {
+    let dir = std::env::temp_dir().join(format!("ge_audio_settings_newer_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(FILE), r#"{"aec_enabled": false, "voice_changer": {"pitch": 2}}"#).unwrap();
+    let mut h = ShmHeader::default();
+    AudioSettings::load_or_default(&dir).apply_to_header(&mut h);
+    AudioSettings::from_header(&h).save(&dir);
+    let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+    assert!(text.contains(r#""voice_changer""#), "{text}");
+    assert!(!AudioSettings::load_or_default(&dir).aec_enabled);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 
   #[test]
   fn saved_choices_survive_a_new_mapping() {

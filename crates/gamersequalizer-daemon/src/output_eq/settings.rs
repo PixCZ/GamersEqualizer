@@ -48,6 +48,9 @@ pub struct OutputEqSettings {
   /// The SteelSeries Sonar profiles were imported (offered on the first-start setup card, or the
   /// button on the Game tab). The offer is not shown again once they are in.
   pub imported_sonar: bool,
+  /// Fields from a newer version of the app, kept so a save here does not drop them.
+  #[serde(flatten)]
+  pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for OutputEqSettings {
@@ -71,6 +74,7 @@ impl Default for OutputEqSettings {
       media_profile: None,
       builtin_game_presets: 0,
       imported_sonar: false,
+      extra: serde_json::Map::new(),
     }
   }
 }
@@ -131,6 +135,20 @@ pub fn keep_corrupt(path: &Path) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_field_from_a_newer_version_survives_load_and_save() {
+    let dir = std::env::temp_dir().join(format!("ge_settings_newer_{}", std::process::id()));
+    let path = dir.join(SETTINGS_FILE);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, r#"{"enabled": false, "surround_mode": "7.1"}"#).unwrap();
+    let loaded = OutputEqSettings::load_or_default(&path);
+    assert!(!loaded.enabled);
+    loaded.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains(r#""surround_mode": "7.1""#), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 
   #[test]
   fn missing_or_corrupt_file_gives_defaults_and_roundtrip_works() {

@@ -35,6 +35,9 @@ pub struct UiPrefs {
   /// Time of the newest installer rollback line already taken into `rolled_back` (ISO UTC, as in
   /// the note), so a line still in the notes does not bring back a device the user retried.
   pub rolled_back_seen: String,
+  /// Fields from a newer version of the app, kept so a save here does not drop them.
+  #[serde(flatten)]
+  pub extra: serde_json::Map<String, serde_json::Value>,
   #[serde(skip)]
   path: PathBuf,
 }

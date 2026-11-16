@@ -169,6 +169,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Low shelf (bass)", "Dolní police (basy)"),
   ("High shelf (treble)", "Horní police (výšky)"),
   ("Notch (remove one tone)", "Zářez (odstraní jeden tón)"),
+  ("Newer filter (passes unchanged)", "Filtr z novější verze (zvuk projde beze změny)"),
   ("Boosts or cuts the area around the frequency.", "Zesílí nebo zeslabí oblast kolem frekvence."),
   (
     "Removes everything below the frequency (rumble, desk bumps, cable noise).",
@@ -178,6 +179,10 @@ pub static CS: &[(&str, &str)] = &[
   ("Raises or lowers everything below the frequency.", "Zesílí nebo zeslabí vše pod frekvencí."),
   ("Raises or lowers everything above the frequency.", "Zesílí nebo zeslabí vše nad frekvencí."),
   ("Removes one tone, e.g. 50 Hz mains hum.", "Odstraní jeden tón, např. brum sítě 50 Hz."),
+  (
+    "Made by a newer version of the app. This version passes the sound through it unchanged and keeps it as it is.",
+    "Vytvořila ho novější verze aplikace. Tato verze jím zvuk pouští beze změny a nechává ho, jak je.",
+  ),
   // --- top bar, navigation, device card ---
   ("Service running", "Služba běží"),
   (

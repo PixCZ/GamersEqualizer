@@ -163,6 +163,8 @@ impl BiquadCoefficients {
         let a2 = 1.0 - alpha;
         (b0, b1, b2, a0, a1, a2)
       }
+      // A filter from a newer version: audio passes unchanged.
+      FilterType::Unknown(_) => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
     };
 
     let c = Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a0: 1.0, a1: a1 / a0, a2: a2 / a0 };
@@ -482,11 +484,22 @@ mod tests {
   }
 
   #[test]
+  fn a_filter_from_a_newer_version_passes_audio_unchanged() {
+    let band =
+      BiquadBand { filter_type: FilterType::Unknown("all_pass".into()), gain_db: 12.0, ..BiquadBand::default() };
+    let mut cascade = BiquadCascade::with_channels(1);
+    cascade.set_bands([&band], 48_000.0);
+    let mut buf = [0.5f32, -0.25, 0.125, 1.0];
+    cascade.process(&mut buf);
+    assert_eq!(buf, [0.5, -0.25, 0.125, 1.0]);
+  }
+
+  #[test]
   fn bogus_rates_and_gains_give_finite_coefficients_without_panicking() {
     let types = [FilterType::Peaking, FilterType::LowShelf, FilterType::HighShelf, FilterType::LowPass];
     for rate in [0.0, f32::NAN, 22.0, -48_000.0, 48_000.0] {
       for gain_db in [f32::INFINITY, f32::NAN, f32::MAX, 800.0, -800.0, 6.0] {
-        for (filter_type, frequency) in types.iter().copied().zip([f32::NAN, 1e9, 0.0, 1000.0]) {
+        for (filter_type, frequency) in types.iter().cloned().zip([f32::NAN, 1e9, 0.0, 1000.0]) {
           let band = BiquadBand { enabled: true, filter_type, frequency, gain_db, q: f32::NAN, slope_db: 12 };
           let c = BiquadCoefficients::from_band(&band, rate);
           assert!([c.b0, c.b1, c.b2, c.a1, c.a2].iter().all(|v| v.is_finite()), "{band:?} @ {rate}");

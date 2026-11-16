@@ -28,7 +28,9 @@ pub fn to_share_text(profile: &ParametricProfile) -> String {
   for (i, b) in expand_slopes(&profile.bands).iter().filter(|b| b.enabled).enumerate() {
     let n = i + 1;
     let (f, q) = (b.frequency, b.q);
-    let line = match b.filter_type {
+    let line = match &b.filter_type {
+      // Plain Equalizer APO has no line for a filter from a newer version of this app.
+      FilterType::Unknown(_) => continue,
       FilterType::HighPass => format!("Filter {n}: ON HPQ Fc {f:.1} Hz Q {q:.3}"),
       FilterType::LowPass => format!("Filter {n}: ON LPQ Fc {f:.1} Hz Q {q:.3}"),
       FilterType::Notch => format!("Filter {n}: ON NO Fc {f:.1} Hz Q {q:.3}"),

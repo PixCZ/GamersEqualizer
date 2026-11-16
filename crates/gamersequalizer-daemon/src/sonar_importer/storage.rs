@@ -128,6 +128,7 @@ impl ProfileStorage {
 
 fn write_profile(dir: &Path, profile: &ParametricProfile) -> io::Result<PathBuf> {
   let path = dir.join(format!("{}.json", ProfileStorage::sanitize_filename(&profile.name)));
+  refuse_unreadable(&path)?;
   let json = serde_json::to_string_pretty(profile).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
   // Not `File::create` + write: a power cut in between left a 0-byte file, and the profile
   // (and every binding to it) vanished from the UI. `write_atomic` also creates the folder.
@@ -163,9 +164,44 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
   Ok(())
 }
 
+/// A profile file this version cannot read (most likely from a newer version) is skipped on load,
+/// so the user never sees it; saving a profile of the same name would destroy it. An empty file
+/// (a write cut short) holds nothing to lose.
+pub fn refuse_unreadable(path: &Path) -> io::Result<()> {
+  let Ok(bytes) = fs::read(path) else {
+    return Ok(());
+  };
+  if bytes.trim_ascii().is_empty() || serde_json::from_slice::<ParametricProfile>(&bytes).is_ok() {
+    return Ok(());
+  }
+  Err(io::Error::new(
+    io::ErrorKind::AlreadyExists,
+    format!("{} exists but this version cannot read it (a newer version's?); choose another name", path.display()),
+  ))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_profile_file_this_version_cannot_read_is_never_overwritten() {
+    let tmp = std::env::temp_dir().join(format!("ge_test_unreadable_{}", std::process::id()));
+    let storage = ProfileStorage::new(&tmp);
+    let path = storage.layer_profile_path(OutputLayer::Game, "Future");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let newer = r#"{"name": "Future", "vad_type": "hologram", "bands": []}"#;
+    fs::write(&path, newer).unwrap();
+
+    assert!(storage.load_layer_profiles(OutputLayer::Game).is_empty());
+    let err = storage.save_layer_profile(OutputLayer::Game, &ParametricProfile::new("Future", VadType::Game));
+    assert!(err.is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+
+    fs::write(&path, "").unwrap();
+    assert!(storage.save_layer_profile(OutputLayer::Game, &ParametricProfile::new("Future", VadType::Game)).is_ok());
+    let _ = fs::remove_dir_all(&tmp);
+  }
 
   #[test]
   fn test_save_and_load_profile() {

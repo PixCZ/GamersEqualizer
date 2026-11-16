@@ -20,6 +20,9 @@ pub struct SidetonePair {
   pub gate_range_db: f32,
   /// Parametric EQ of the sidetone, the same bands as the voice EQ (`write_sidetone_eq`).
   pub bands: Vec<BiquadBand>,
+  /// Fields from a newer version of the app, kept so a save here does not drop them.
+  #[serde(flatten)]
+  pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The saved matrix (`profiles/sidetone.json`).
@@ -50,6 +53,7 @@ impl SidetonePair {
       gate_margin_db: s.gate_margin_db,
       gate_range_db: s.gate_range_db,
       bands: default_bands(),
+      extra: serde_json::Map::new(),
     }
   }
 

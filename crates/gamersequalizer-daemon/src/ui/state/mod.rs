@@ -292,8 +292,6 @@ impl AppState {
     Ok(())
   }
 
-  /// Remember the mic chain and mixer across restarts. Call once per frame; writes only when
-  /// something changed and no slider is being dragged.
   /// Everything edited but not on disk yet: the output EQ layer, the mic EQ, the sidetone pair
   /// and the audio settings. Called from every frame, whatever tab is shown, once the pointer is
   /// released (not on every drag frame), and on exit.

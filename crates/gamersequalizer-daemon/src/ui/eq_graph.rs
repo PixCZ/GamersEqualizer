@@ -241,13 +241,13 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
     ui.horizontal_wrapped(|ui| {
       ui.label(theme::strong(format!("● {}", trf("Filter {}", &[&(i + 1)])), 14.0).color(c));
       egui::ComboBox::from_id_salt(format!("{id}_type"))
-        .selected_text(tr(friendly_name(band.filter_type)))
+        .selected_text(tr(friendly_name(&band.filter_type)))
         .width(170.0)
         .show_ui(ui, |ui| {
           for ft in FilterType::ALL {
             if ui
-              .selectable_label(band.filter_type == ft, tr(friendly_name(ft)))
-              .on_hover_text(tr(type_help(ft)))
+              .selectable_label(band.filter_type == ft, tr(friendly_name(&ft)))
+              .on_hover_text(tr(type_help(&ft)))
               .clicked()
               && band.filter_type != ft
             {
@@ -411,7 +411,7 @@ fn dot_color(i: usize, band: &BiquadBand) -> Color32 {
   DOT_COLORS.get(i % DOT_COLORS.len()).copied().unwrap_or(Color32::WHITE)
 }
 
-fn friendly_name(ft: FilterType) -> &'static str {
+fn friendly_name(ft: &FilterType) -> &'static str {
   match ft {
     FilterType::Peaking => tk("Bell (boost / cut)"),
     FilterType::HighPass => tk("Low cut"),
@@ -419,10 +419,11 @@ fn friendly_name(ft: FilterType) -> &'static str {
     FilterType::LowShelf => tk("Low shelf (bass)"),
     FilterType::HighShelf => tk("High shelf (treble)"),
     FilterType::Notch => tk("Notch (remove one tone)"),
+    FilterType::Unknown(_) => tk("Newer filter (passes unchanged)"),
   }
 }
 
-fn type_help(ft: FilterType) -> &'static str {
+fn type_help(ft: &FilterType) -> &'static str {
   match ft {
     FilterType::Peaking => tk("Boosts or cuts the area around the frequency."),
     FilterType::HighPass => tk("Removes everything below the frequency (rumble, desk bumps, cable noise)."),
@@ -430,6 +431,9 @@ fn type_help(ft: FilterType) -> &'static str {
     FilterType::LowShelf => tk("Raises or lowers everything below the frequency."),
     FilterType::HighShelf => tk("Raises or lowers everything above the frequency."),
     FilterType::Notch => tk("Removes one tone, e.g. 50 Hz mains hum."),
+    FilterType::Unknown(_) => tk(
+      "Made by a newer version of the app. This version passes the sound through it unchanged and keeps it as it is.",
+    ),
   }
 }
 
@@ -449,6 +453,7 @@ fn describe(band: &BiquadBand) -> String {
     FilterType::LowShelf => trf("Bass {} dB below {}", &[&gain, &f]),
     FilterType::HighShelf => trf("Treble {} dB above {}", &[&gain, &f]),
     FilterType::Peaking => trf("{} dB at {}", &[&gain, &f]),
+    FilterType::Unknown(_) => tr("Newer filter (passes unchanged)").to_owned(),
   };
   format!("{text}{off}")
 }
