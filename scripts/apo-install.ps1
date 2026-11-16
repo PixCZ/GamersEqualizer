@@ -281,6 +281,16 @@ function Remove-OurEffects($snapshot) {
   $copy
 }
 
+# The install failed half-way: every endpoint back to how this run found it. An update's endpoint
+# keeps the effects it had (not the rollback target: that would take them out of a working
+# endpoint); a key this run made goes.
+function Restore-InstallStart {
+  foreach ($snap in $script:FxSnapshots.Values) {
+    try { Restore-FxSnapshot $snap }
+    catch { Say "Restoring $($snap.Flow) $($snap.Id) failed: $_" Red }
+  }
+}
+
 # Exact value-only restore via SetValue + QueryValues (reg.exe import fails on TrustedInstaller subkeys).
 function Restore-FxSnapshot($snapshot) {
   $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\$($snapshot.Flow)\$($snapshot.Id)\FxProperties"
@@ -523,7 +533,7 @@ function Set-JobFx($snapshot) {
 }
 
 function Rollback-Job($job, [datetime]$sinceRestart) {
-  $snap = $script:FxSnapshots["$($job.Flow):$($job.Id)"]
+  $snap = $script:RollbackTargets["$($job.Flow):$($job.Id)"]
   if (-not $snap) {
     Say "  Rollback warning: snapshot not found for $($job.Name)." Yellow
     return $sinceRestart
@@ -541,7 +551,7 @@ function Rollback-Job($job, [datetime]$sinceRestart) {
 # for them (Migrated): nothing then shows that this device runs the moved effects. Returns when
 # audio last started.
 function Resolve-ProbeOpen($job, $res, [datetime]$sinceRestart) {
-  $snap = $script:FxSnapshots["$($job.Flow):$($job.Id)"]
+  $snap = $script:RollbackTargets["$($job.Flow):$($job.Id)"]
   $installed = $null
   if (-not $res.Crashed -and $res.Ran -ne $false -and -not $job.Migrated -and $snap) {
     try { $installed = Get-FxSnapshot $job.Flow $job.Id } catch { Say "  Reading the effect settings failed: $_" Yellow }
@@ -730,11 +740,13 @@ foreach ($job in $jobs) {
   Say "Target: $($job.Name) $($job.Id)`: $what"
 }
 
-# --- Snapshot: in memory for the rollback below (without ours), and on disk for apo-uninstall.ps1
+# --- Snapshot: in memory (as found, for a failed install; without ours, for the self-test's
+# rollback), and on disk for apo-uninstall.ps1
 # The disk copy is the driver's own effects without ours. It is refreshed while the endpoint holds
 # none of our effects (a driver update or a rollback since the last install changed them), and
 # kept while ours are in it: then it is the last state from before GamersEqualizer.
 $FxSnapshots = @{}
+$RollbackTargets = @{}
 New-Item -ItemType Directory -Force $BackupDir | Out-Null
 foreach ($job in @($jobs)) {
   $made = $false
@@ -768,7 +780,8 @@ foreach ($job in @($jobs)) {
     $made = Test-BackupCreated $backupFile
   }
   if ($made) { $snap | Add-Member -NotePropertyName Created -NotePropertyValue $true }
-  $FxSnapshots["$($job.Flow):$($job.Id)"] = Remove-OurEffects $snap
+  $FxSnapshots["$($job.Flow):$($job.Id)"] = $snap
+  $RollbackTargets["$($job.Flow):$($job.Id)"] = Remove-OurEffects $snap
   $json = ConvertTo-FxJson $snap
   $holdsOurs = @($Classes.Values | Where-Object { $json -match [regex]::Escape($_.Clsid) }).Count -gt 0
   if (-not $holdsOurs -or -not (Test-Path $backupFile)) {
@@ -862,12 +875,7 @@ try {
   $installComplete = $true
 }
 catch {
-  if (-not $installComplete -and $FxSnapshots) {
-    foreach ($snap in $FxSnapshots.Values) {
-      try { Restore-FxSnapshot $snap }
-      catch { Say "Restoring $($snap.Flow) $($snap.Id) failed: $_" Red }
-    }
-  }
+  if (-not $installComplete) { Restore-InstallStart }
   throw
 }
 finally {
@@ -896,7 +904,7 @@ if ($startupCrashes.Count -gt 0) {
   Stop-Audio
   try {
     foreach ($job in $jobs) {
-      $snap = $FxSnapshots["$($job.Flow):$($job.Id)"]
+      $snap = $RollbackTargets["$($job.Flow):$($job.Id)"]
       if ($snap) { Restore-FxSnapshot $snap }
     }
   }

@@ -6,7 +6,7 @@ $scripts = 'apo-common.ps1', 'apo-install.ps1' | ForEach-Object { Join-Path (Spl
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
   'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated',
-  'Remove-OurEffects'
+  'Remove-OurEffects', 'Restore-InstallStart'
 $variables = '$FxGuid', '$NullGuid', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
 $pieces = @(foreach ($script in $scripts) {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
@@ -163,6 +163,15 @@ function Remove-FxKey([string]$subKey) { $keyCalls.Add("remove $subKey") }
 Restore-FxSnapshot ([pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Records = @(); Created = $true })
 Check 'rollback of a made key deletes it' (($keyCalls -join '|') -eq 'remove SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\{id}\FxProperties') "got '$($keyCalls -join '|')'"
 
+# --- Restore-InstallStart: a failed install puts back what the run found ----------------------
+# Not the rollback target: an update that fails before it changes anything must leave ours in.
+$restored = New-Object System.Collections.Generic.List[object]
+function Restore-FxSnapshot($snapshot) { $restored.Add($snapshot) }
+$FxSnapshots = @{ 'Render:{id}' = $update }
+$RollbackTargets = @{ 'Render:{id}' = $target }
+Restore-InstallStart
+Check 'failed update: the endpoint keeps the effects it had' ($restored.Count -eq 1 -and [object]::ReferenceEquals($restored[0], $update)) "restored $($restored.Count)"
+
 # --- Test-BackupCreated: a key an earlier install made, read back from its backup -------------
 $backupDir = Join-Path ([IO.Path]::GetTempPath()) "ge-apo-tests-$PID"
 New-Item -ItemType Directory -Force $backupDir | Out-Null
@@ -225,8 +234,8 @@ foreach ($case in $openCases) {
   $restoreFails = [bool]$case.RestoreFails
   $baseline = [pscustomobject]@{ OpenOk = $case.Base -eq 'opens'; Crashed = $case.Base -eq 'crash' }
   if ($case.Base -eq 'notrun') { $baseline | Add-Member Ran $false }
-  $FxSnapshots = @{}
-  if ($case.Snap) { $FxSnapshots['Capture:{id}'] = [pscustomobject]@{ Tag = 'before' } }
+  $RollbackTargets = @{}
+  if ($case.Snap) { $RollbackTargets['Capture:{id}'] = [pscustomobject]@{ Tag = 'before' } }
   $job = [pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Word = 'microphone'; Migrated = $case.Migrated }
   $res = [pscustomobject]@{ OpenOk = $false; Crashed = [bool]$case.Crashed }
   if ($case.NotRun) { $res | Add-Member Ran $false }
