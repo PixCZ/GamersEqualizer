@@ -583,7 +583,7 @@ zkouška příkladem `sidetone_probe`, když nic jiného nehraje.
 - [x] G1 AEC3 po pauze (ztlumen celý první rámec po `flush`, ne jen 430 vzorků: za nimi je ~25 vzorků dozvuku filtrů dělení pásem)
 - [x] G2 jedno čištění stavu (`Sleep::clear`; podlaha šumu místnosti mimo: nečistí ji nikdo a pauza místnost nemění; `reset_engines` nuluje `mute_left`)
 - [x] G3 nastavení jednou
-- [ ] G4 drobnosti řetězce
+- [x] G4 drobnosti řetězce (`frame_fifo.rs` s `FrameInput`/`FrameOutput`, i pro DPDFNet s překryvem oken)
 - [ ] G5 vstupní body COM
 - [ ] H dělení souborů
 - [ ] I1 až I8

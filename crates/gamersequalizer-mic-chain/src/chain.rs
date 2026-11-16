@@ -650,12 +650,7 @@ impl MicChain {
     let conf_permille = (((conf - MIN_PEAK_RATIO) / span).clamp(0.0, 1.0) * 1000.0) as u32;
     h.aec_confidence_permille.store(conf_permille, Ordering::Relaxed);
 
-    // 0 = no echo strength yet: a measured one is negative (-0.1 dB at most), a bound positive.
-    let echo_x10 = self.aec.echo_strength_db().map_or(0, |(db, bound)| {
-      let x10 = ((db * 10.0).round() as i32).clamp(-1200, -1);
-      if bound { -x10 } else { x10 }
-    });
-    h.aec_echo_db_x10.store(echo_x10, Ordering::Relaxed);
+    h.aec_echo_db_x10.store(echo_db_x10(self.aec.echo_strength_db()), Ordering::Relaxed);
     h.aec_fallback_echo_db_x10.store((self.aec.fallback_echo_db() * 10.0).round() as i32, Ordering::Relaxed);
     h.aec_mic_gain_db_x10.store((self.aec.mic_gain_db() * 10.0).round() as i32, Ordering::Relaxed);
     let (fit, slope) = self.aec.echo_fit();
@@ -944,6 +939,15 @@ fn pre_high_pass() -> BiquadCascade {
   hp
 }
 
+/// Echo strength for the mapping: 0 = none yet, a measured one negative (-0.1 dB at most), a
+/// bound positive.
+fn echo_db_x10(strength: Option<(f32, bool)>) -> i32 {
+  strength.map_or(0, |(db, bound)| {
+    let x10 = ((db * 10.0).round() as i32).clamp(-1200, -1);
+    if bound { -x10 } else { x10 }
+  })
+}
+
 /// Delay the echo canceller adds right now (0 while it doesn't run, idle or switched off).
 fn aec_latency_samples(aec_idle: bool, aec_state: AecState, aec: &EchoCanceller3) -> usize {
   if !aec_idle && aec_state != AecState::Disabled { aec.latency_samples() } else { 0 }
@@ -1073,6 +1077,40 @@ mod tests {
     assert_eq!(db_x10(f32::INFINITY), -1200);
     assert_eq!(db_x10(f32::NAN), -1200);
     assert_eq!(db_x10(1e30), 200);
+  }
+
+  #[test]
+  fn test_echo_strength_sign_says_measured_or_bound() {
+    assert_eq!(echo_db_x10(None), 0);
+    assert_eq!(echo_db_x10(Some((-25.04, false))), -250);
+    assert_eq!(echo_db_x10(Some((-25.04, true))), 250);
+    assert_eq!(echo_db_x10(Some((-0.01, false))), -1, "a measured 0 dB is not \"none\"");
+    assert_eq!(echo_db_x10(Some((-0.01, true))), 1);
+    assert_eq!(echo_db_x10(Some((f32::NEG_INFINITY, true))), 1200);
+  }
+
+  /// Another speaker output (`aec_reference_seq`): the delay from the old one is dropped and the
+  /// new output's remembered delay is taken, which the daemon stored before the switch.
+  #[test]
+  fn test_other_speakers_start_from_their_remembered_delay() {
+    let mut p = chain_with_reference("reference_seq", &noise(120_000, 5));
+    let h = p.shm_header().expect("mapping");
+    h.aec_cached_delay_samples.store(960, Ordering::Relaxed);
+    let (mic, mut out) = (vec![0.0f32; BLOCK], vec![0.0f32; BLOCK]);
+    p.process_timed(&[&mic], &mut [&mut out], Some(block_hns(0)));
+    assert_eq!(p.delay_estimator.current_delay(), Some(960));
+    let h = p.shm_header().expect("mapping");
+    h.aec_cached_delay_samples.store(1_200, Ordering::Relaxed);
+    p.process_timed(&[&mic], &mut [&mut out], Some(block_hns(1)));
+    assert_eq!(p.delay_estimator.current_delay(), Some(960), "the same output keeps its delay");
+    p.shm_header().expect("mapping").aec_reference_seq.fetch_add(1, Ordering::Release);
+    for k in 2..12 {
+      p.process_timed(&[&mic], &mut [&mut out], Some(block_hns(k)));
+    }
+    assert_eq!(p.delay_estimator.current_delay(), Some(1_200));
+    assert!(p.delay_estimator.is_from_cache());
+    let seen = p.shm_header().expect("mapping").aec_reference_seq_seen.load(Ordering::Acquire);
+    assert_eq!(seen, 1, "published for the daemon");
   }
 
   #[test]
