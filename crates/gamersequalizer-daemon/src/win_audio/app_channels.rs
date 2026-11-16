@@ -16,7 +16,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use super::chatmix::{BROWSER_EXES, CHAT_EXES};
 use crate::output_eq::settings::write_atomic;
 
 // ---------------------------------------------------------------------------------------
@@ -26,6 +25,123 @@ use crate::output_eq::settings::write_atomic;
 pub const APP_CHANNELS_FILE: &str = "app_channels.json";
 pub const DETECTED_FILE: &str = "detected_apps.json";
 const RELOAD_CHECK: Duration = Duration::from_secs(1);
+
+/// Browsers stay on Media (`app_channels::channel_for`), even if game detection or a name match
+/// says otherwise: YouTube plays in full quality. Lowercase exe file names.
+pub const BROWSER_EXES: &[&str] = &[
+  "chrome.exe",
+  "chromium.exe",
+  "msedge.exe",
+  "firefox.exe",
+  "librewolf.exe",
+  "waterfox.exe",
+  "floorp.exe",
+  "zen.exe",
+  "brave.exe",
+  "opera.exe",
+  "vivaldi.exe",
+  "arc.exe",
+  "thorium.exe",
+  "iexplore.exe",
+  // Privacy / Firefox forks (Tor Browser runs as firefox.exe)
+  "mullvadbrowser.exe",
+  "palemoon.exe",
+  "basilisk.exe",
+  "seamonkey.exe",
+  "falkon.exe",
+  "midori.exe",
+  "k-meleon.exe",
+  "icedragon.exe",
+  "dooble.exe",
+  "otter-browser.exe",
+  // Chromium forks and bundled browsers (Opera GX / Air run as opera.exe)
+  "whale.exe",
+  "dragon.exe",
+  "iron.exe",
+  "slimjet.exe",
+  "maxthon.exe",
+  "avastbrowser.exe",
+  "avgbrowser.exe",
+  "ccleanerbrowser.exe",
+  "nortonbrowser.exe",
+  "sidekick.exe",
+  "wavebox.exe",
+  "360se.exe",
+  "360chrome.exe",
+  "qqbrowser.exe",
+  "sogouexplorer.exe",
+  "ucbrowser.exe",
+  "aloha.exe",
+  // Yandex Browser and Coc Coc: a generic name, but a wrong hit only keeps an app on Media (the default)
+  "browser.exe",
+  // AI browsers
+  "comet.exe",
+];
+
+/// Apps on the Chat channel (ChatMix volume, chat stream EQ). Lowercase exe file names; active
+/// desktop clients only. Anything missing stays on Media until the user drags it in the mixer
+/// (`app_channels`).
+pub const CHAT_EXES: &[&str] = &[
+  // Voice chat for gamers
+  "discord.exe",
+  "discordptb.exe",
+  "discordcanary.exe",
+  "vesktop.exe",
+  "ts3client_win64.exe",
+  "ts3client_win32.exe",
+  "teamspeak.exe",
+  "mumble.exe",
+  "guilded.exe",
+  "ventrilo.exe",
+  "teamtalk5.exe",
+  "revolt.exe",
+  // Messengers
+  "signal.exe",
+  "telegram.exe",
+  "whatsapp.exe",
+  "whatsapp.root.exe",
+  "viber.exe",
+  "element.exe",
+  "wire.exe",
+  "line.exe",
+  "wechat.exe",
+  "weixin.exe",
+  "threema.exe",
+  "qq.exe",
+  "kakaotalk.exe",
+  "pidgin.exe",
+  "trillian.exe",
+  "paltalk.exe",
+  "jami.exe",
+  "linphone.exe",
+  "whatsappdesktop.exe",
+  "zalo.exe",
+  "camfrog video chat.exe",
+  // Work / meetings
+  "teams.exe",
+  "ms-teams.exe",
+  "slack.exe",
+  "zoom.exe",
+  "webex.exe",
+  "ciscocollabhost.exe",
+  "atmgr.exe",
+  "mattermost.exe",
+  "rocket.chat.exe",
+  "ringcentral.exe",
+  "zulip.exe",
+  "lync.exe",
+  "ciscojabber.exe",
+  "webexhost.exe",
+  "g2mvideoconference.exe",
+  "ringcentralvideo.exe",
+  "jitsi meet.exe",
+  "g2mcomm.exe",
+  "goto.exe",
+  "bluejeans.exe",
+  "dingtalk.exe",
+  "vsee.exe",
+  "alfaview.exe",
+];
 
 // ---------------------------------------------------------------------------------------
 // Types
@@ -180,6 +296,7 @@ fn modified(path: &Path) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::collections::HashSet;
 
   #[test]
   fn browsers_stay_media_chat_from_the_list_games_from_detection() {
@@ -211,5 +328,14 @@ mod tests {
     set("spotify.exe", None);
     assert_eq!(get("Spotify.exe"), None);
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn app_lists_are_lowercase_exes_without_duplicates_or_overlap() {
+    let mut seen = HashSet::new();
+    for exe in CHAT_EXES.iter().chain(BROWSER_EXES) {
+      assert!(exe.ends_with(".exe") && *exe == exe.to_ascii_lowercase(), "{exe}: lookups are lowercase");
+      assert!(seen.insert(*exe), "{exe} is listed twice (or on both channels)");
+    }
   }
 }
