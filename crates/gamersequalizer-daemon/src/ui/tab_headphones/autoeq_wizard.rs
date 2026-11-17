@@ -213,7 +213,7 @@ fn step_zip_folder(ui: &mut Ui, state: &mut AppState) {
     }
   });
   if let Some(msg) = state.headphones_ui.message.as_deref() {
-    ui.label(RichText::new(msg).small());
+    ui.label(theme::caption(msg));
   }
   let next = (!state.headphones_ui.entries.is_empty()).then_some((tr("Next: find your model"), Step::Pick));
   nav(ui, state, Step::ZipDownload, next);
@@ -250,7 +250,7 @@ fn step_pick(ui: &mut Ui, state: &mut AppState) {
           if ui.button(tr("Use")).clicked() {
             chosen = Some(entry.clone());
           }
-          ui.label(RichText::new(&entry.name).strong());
+          ui.label(theme::strong(&entry.name, 14.0));
           ui.label(theme::caption(&entry.source));
         });
       }

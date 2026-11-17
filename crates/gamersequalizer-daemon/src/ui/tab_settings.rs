@@ -181,7 +181,7 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
 
     if let Some(parts) = &mut t.export {
       ui.add_space(4.0);
-      ui.label(RichText::new(tr("What goes into the file:")).strong());
+      ui.label(theme::strong(tr("What goes into the file:"), 14.0));
       part_checkboxes(ui, parts);
       ui.label(theme::caption(tr(
         "Sharing profiles with a friend? Keep only the profiles: their devices and microphone settings stay as they are.",
@@ -209,13 +209,14 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
     let mut import = None;
     if let Some((s, parts)) = &mut t.pending {
       ui.add_space(4.0);
-      ui.label(
-        RichText::new(trf("{}: {} profiles, exported {}", &[&s.path.display(), &s.profiles, &s.exported_at])).strong(),
-      );
+      ui.label(theme::strong(
+        trf("{}: {} profiles, exported {}", &[&s.path.display(), &s.profiles, &s.exported_at]),
+        14.0,
+      ));
       if !s.devices.is_empty() {
         ui.label(theme::caption(trf("Devices in the file: {}", &[&s.devices.join(", ")])));
       }
-      ui.label(RichText::new(tr("What to import:")).strong());
+      ui.label(theme::strong(tr("What to import:"), 14.0));
       part_checkboxes(ui, parts);
       theme::status_line(
         ui,

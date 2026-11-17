@@ -83,7 +83,6 @@ pub fn render_top_bar(ui: &mut Ui, state: &mut AppState) {
 
 /// Left navigation pane with the window/service actions at the bottom.
 pub fn render_nav(ui: &mut Ui, state: &mut AppState) {
-  ui.add_space(4.0);
   ui.spacing_mut().item_spacing.y = 2.0;
   for row in &NAV {
     match row {
@@ -112,7 +111,7 @@ pub fn render_device_card(ui: &mut Ui, state: &mut AppState, win_audio: &mut Win
   theme::card(ui, |ui| {
     ui.horizontal_wrapped(|ui| {
       let c = theme::palette(ui).text;
-      theme::icon_label(ui, icons::SPEAKERS, 16.0, c, theme::strong(tr("Output device"), 14.0));
+      theme::icon_label(ui, icons::SPEAKERS, 16.0, c, theme::strong(tr("Output device"), 15.0));
       if let Some(id) = output_combo(ui, state, "output_device_combo", 340.0, 44) {
         select_output(state, win_audio, id);
       }

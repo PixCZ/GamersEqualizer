@@ -870,10 +870,8 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Limited ({}), running: {}", "Omezeno ({}), běží: {}"),
   ("{} could not be loaded by the audio engine, still on {}.", "Zvukové jádro nedokázalo načíst {}, stále běží {}."),
-  (
-    "{} % of one core (peak {} %), about {} % of the whole CPU",
-    "{} % jednoho jádra (špička {} %), asi {} % celého procesoru",
-  ),
+  ("{} % of one core", "{} % jednoho jádra"),
+  ("Peak {} %, about {} % of the whole CPU.", "Špička {} %, asi {} % celého procesoru."),
   ("late blocks: {}", "opožděné bloky: {}"),
   (
     "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing sometimes gets through (most often with RNNoise, which removes the least).",

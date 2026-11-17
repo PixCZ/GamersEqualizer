@@ -349,7 +349,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
   // ChatMix balance card
   theme::card(ui, |ui| {
     ui.horizontal(|ui| {
-      ui.label(theme::strong(tr("ChatMix"), 16.0));
+      ui.label(theme::strong(tr("ChatMix"), 15.0));
       ui.add_space(12.0);
       let game = theme::adapt(ui, GAME_COLOR);
       theme::icon_label(ui, icons::GAME, 16.0, game, RichText::new(tr("Game")).color(game));
@@ -640,7 +640,7 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
         pos + Vec2::new(12.0, 4.0),
         egui::Align2::LEFT_TOP,
         &app.exe,
-        egui::FontId::proportional(13.0),
+        egui::FontId::proportional(14.0),
         theme::palette(ui).text,
       );
     }

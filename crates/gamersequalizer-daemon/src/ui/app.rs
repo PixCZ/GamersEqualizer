@@ -126,7 +126,7 @@ impl eframe::App for GamersEqualizerApp {
     let chrome = egui::Frame::NONE.fill(bg);
     egui::Panel::top("top_bar")
       .show_separator_line(false)
-      .frame(chrome.inner_margin(egui::Margin::symmetric(8, 10)))
+      .frame(chrome.inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 0 }))
       .show(ui, |ui| {
         render_top_bar(ui, &mut self.state);
       });
@@ -157,7 +157,7 @@ impl eframe::App for GamersEqualizerApp {
       .resizable(false)
       .exact_size(NAV_WIDTH)
       .show_separator_line(false)
-      .frame(chrome.inner_margin(egui::Margin { left: 8, right: 8, top: 4, bottom: 8 }))
+      .frame(chrome.inner_margin(egui::Margin { left: 8, right: 8, top: 0, bottom: 8 }))
       .show(ui, |ui| {
         render_nav(ui, &mut self.state);
       });

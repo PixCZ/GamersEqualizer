@@ -175,7 +175,7 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
             state.output_eq_do(|eq, shm| eq.bind_exe(&exe, Some(binding), shm));
           }
         } else {
-          ui.label(RichText::new(current.map_or(tr("none"), tr)).strong());
+          ui.label(theme::strong(current.map_or(tr("none"), tr), 14.0));
         }
         if ui
           .button(tr("Reset"))
@@ -226,7 +226,7 @@ fn recent_apps(ui: &mut Ui, state: &mut AppState) {
   let mut filter = std::mem::take(&mut state.headphones_ui.filter);
   egui::Grid::new("recent_apps").num_columns(3).spacing([16.0, 8.0]).show(ui, |ui| {
     for (i, app) in apps.iter().enumerate() {
-      ui.label(RichText::new(&app.label).strong());
+      ui.label(theme::strong(&app.label, 14.0));
       let how = match app.matched.as_ref().map(|m| (m.method, m.profile.as_deref())) {
         Some((MatchMethod::Binding, Some(p))) => trf("assigned: {}", &[&tr(p)]),
         Some((MatchMethod::LauncherId, Some(p))) => trf("launcher id: {}", &[&tr(p)]),

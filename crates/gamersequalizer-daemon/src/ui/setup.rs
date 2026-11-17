@@ -209,7 +209,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
     }
     if !extras.is_empty() {
       ui.add_space(4.0);
-      ui.label(theme::strong(tr("Other connected devices"), 14.0));
+      ui.label(theme::strong(tr("Other connected devices"), 15.0));
       ui.label(theme::caption(tr(
         "Not in use right now. Tick a device to set it up as well; each one is checked after the install, which \
          restarts the sound once more if it fails there. Needs administrator rights.",
@@ -248,7 +248,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
       ui.add_space(4.0);
       theme::inset_frame(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(theme::strong(tr("Why does this need administrator rights?"), 14.0));
+        ui.label(theme::strong(tr("Why does this need administrator rights?"), 15.0));
         ui.label(tr(
           "The effects run inside Windows audio itself, so every app (Discord, games, the browser) gets them \
            without any setup in that app, and no virtual sound card is needed. They are installed for the whole \

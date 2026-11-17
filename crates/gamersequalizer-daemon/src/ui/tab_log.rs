@@ -176,7 +176,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     }
   });
   if let Some(saved) = view.saved.as_deref() {
-    ui.label(RichText::new(saved).small());
+    ui.label(theme::caption(saved));
   }
   if let Some(e) = view.error.as_deref() {
     ui.label(RichText::new(trf("Log file not readable yet: {}", &[&e])).color(theme::palette(ui).warn));

@@ -185,9 +185,8 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       };
       ui.add_space(8.0);
       ui.label(
-        RichText::new(trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]))
-          .color(col)
-          .strong(),
+        theme::strong(trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]), 14.0)
+          .color(col),
       );
       let mic_rate = h.sidetone_mic_rate.load(r).max(1);
       let mic_block_frames = h.sidetone_mic_block_frames.load(r);
@@ -199,7 +198,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
           "Microphone {} ms, output {} ms",
           &[&format!("{:.1}", mic_period_ms), &format!("{:.1}", out_period_ms)],
         )));
-        ui.label(theme::caption("·"));
+        ui.separator();
         ui.label(theme::caption(trf("Dropouts: {}", &[&underruns.to_string()])));
       });
     }

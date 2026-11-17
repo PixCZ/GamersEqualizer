@@ -11,7 +11,7 @@ use crate::i18n::{tr, trf};
 use crate::output_eq::autoeq::{self, AutoEqEntry, Check, CheckLevel, DownloadsScan, ParsedEq};
 use crate::win_audio::apo_install::{self, ApoStatus, Flow};
 use crate::win_audio::{WinAudioSystem, shell};
-use egui::{Color32, RichText, Ui};
+use egui::{Color32, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::profile::{ParametricProfile, VadType};
 use std::path::{Path, PathBuf};

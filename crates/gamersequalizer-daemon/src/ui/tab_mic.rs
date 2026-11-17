@@ -361,7 +361,7 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
 fn aec_column(ui: &mut Ui, width: f32, title: &str, rows: impl FnOnce(&mut Ui)) {
   ui.vertical(|ui| {
     ui.set_width(width);
-    ui.label(theme::strong(title, 14.0));
+    ui.label(theme::strong(title, 15.0));
     egui::Grid::new(("aec_grid", title))
       .num_columns(2)
       .min_col_width(AEC_LABEL_WIDTH)
@@ -581,13 +581,15 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
     if let Some((note, severity)) = note {
       theme::status_line(ui, severity, &note);
     }
-    if !matches!(status, DenoiseStatus::Idle(_)) {
-      dsp_load_row(ui, state.mic_dsp_load());
-    }
+    // Nothing runs while no app uses the microphone: no load to show.
+    let load = (!matches!(status, DenoiseStatus::Idle(_))).then(|| state.mic_dsp_load());
 
     let (aec_enabled, mut ai_strength, gate_db) = mic_controls(state);
     let mut changed = false;
     egui::Grid::new("denoise_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+      if let Some(load) = load {
+        dsp_load_row(ui, load);
+      }
       ui.label(tr("Suppression strength:"));
       ui.spacing_mut().slider_width = BAR_WIDTH;
       let slider = egui::Slider::new(&mut ai_strength, 0.0..=1.0)
@@ -662,7 +664,8 @@ fn latency_line(ui: &mut Ui, state: &mut AppState) {
   theme::status_line(ui, Severity::Info, &text).on_hover_text(breakdown);
 }
 
-/// CPU time of the whole mic chain against the real-time budget of each audio block.
+/// Grid row: CPU time of the whole mic chain against the real-time budget of each audio block.
+/// The meter text stays short; peak, share of the whole CPU and the explanation are on hover.
 fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
   let p = theme::palette(ui);
   let color = if load.peak > 1.0 {
@@ -672,26 +675,31 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
   } else {
     p.ok
   };
+  // The chain runs on one audio thread: Task Manager spreads the same time over every logical
+  // processor. Read once, not per frame (paint path).
+  static THREADS: OnceLock<usize> = OnceLock::new();
+  let threads = *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+  ui.label(tr("CPU load:"));
   ui.horizontal(|ui| {
-    ui.label(theme::caption(tr("CPU load:")));
-    // The chain runs on one audio thread: Task Manager spreads the same time over every logical
-    // processor. Read once, not per frame (paint path).
-    static THREADS: OnceLock<usize> = OnceLock::new();
-    let threads = *THREADS.get_or_init(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let value = trf(
-      "{} % of one core (peak {} %), about {} % of the whole CPU",
-      &[
-        &format!("{:.0}", load.avg * 100.0),
-        &format!("{:.0}", load.peak * 100.0),
-        &format!("{:.1}", load.avg * 100.0 / threads as f32),
-      ],
+    let value = trf("{} % of one core", &[&format!("{:.0}", load.avg * 100.0)]);
+    let hover = trf(
+      "Peak {} %, about {} % of the whole CPU.",
+      &[&format!("{:.0}", load.peak * 100.0), &format!("{:.1}", load.avg * 100.0 / threads as f32)],
     );
-    theme::meter(ui, load.avg, 180.0, color, &value).on_hover_text(tr(
-      "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+    theme::meter(ui, load.avg, BAR_WIDTH, color, &value).on_hover_text(format!(
+      "{hover}
+
+{}",
+      tr(
+        "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+      )
     ));
-    let late = RichText::new(trf("late blocks: {}", &[&load.late_blocks])).small();
-    ui.label(if load.late_blocks > 0 { late.color(p.warn) } else { late.weak() });
+    // Only a problem is shown; zero late blocks needs no words.
+    if load.late_blocks > 0 {
+      ui.label(RichText::new(trf("late blocks: {}", &[&load.late_blocks])).color(p.warn));
+    }
   });
+  ui.end_row();
 }
 
 const RNNOISE_ABOUT: &str = tk(

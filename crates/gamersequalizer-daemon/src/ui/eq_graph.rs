@@ -185,7 +185,7 @@ fn graph(
     let outline =
       if is_sel { Stroke::new(2.0_f32, pal.text) } else { Stroke::new(1.0_f32, Color32::from_black_alpha(90)) };
     painter.circle(center, radius, c, outline);
-    painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(11.0), Color32::BLACK);
+    painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), Color32::BLACK);
   }
   if let Some(band) = hovered.and_then(|i| bands.get(i)) {
     let pos = axes.dot_pos(band) + Vec2::new(0.0, -DOT_RADIUS - 6.0);
@@ -346,7 +346,7 @@ impl Axes {
 fn draw_grid(painter: &egui::Painter, axes: &Axes, pal: &theme::Palette) {
   let grid = Stroke::new(1.0_f32, pal.grid);
   let label = pal.text_tertiary;
-  let font = FontId::proportional(11.0);
+  let font = FontId::proportional(12.0);
   let plot = axes.plot;
   for f in GRID_FREQS {
     let x = axes.x_of(f);
