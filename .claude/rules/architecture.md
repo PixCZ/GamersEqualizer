@@ -65,7 +65,7 @@ logged, shown, retried, never unwound.
   is replaced otherwise goes to the deleted folder (`move_to_deleted`).
 - **Locks**: never hold one across a call into Windows audio that can block. A poisoned lock is not a
   reason to panic.
-- **Diagnostics**: the app log alone must explain a failure (see "Dev loop" in `AGENTS.md`).
+- **Diagnostics**: the app log alone must explain a failure (see `installer.md`).
 
 ## Real-time audio threads
 
