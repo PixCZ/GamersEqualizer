@@ -189,7 +189,9 @@ fn run_gui_mode() {
   }
   let mut wgpu_setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
   wgpu_setup.instance_descriptor.backends = wgpu_backends();
-  wgpu_setup.power_preference = wgpu::PowerPreference::LowPower;
+  // No power preference: wgpu then takes the first adapter in DXGI's order, which follows the
+  // user's choice in Windows graphics settings or the NVIDIA panel (default: the integrated GPU).
+  wgpu_setup.power_preference = wgpu::PowerPreference::None;
   let wgpu_options =
     egui_wgpu::WgpuConfiguration { wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(wgpu_setup), ..Default::default() };
   let native_options = eframe::NativeOptions { viewport, wgpu_options, ..Default::default() };
@@ -200,6 +202,10 @@ fn run_gui_mode() {
     "GamersEqualizer",
     native_options,
     Box::new(|cc| {
+      if let Some(render_state) = &cc.wgpu_render_state {
+        let info = render_state.adapter.get_info();
+        debug!("[GamersEqualizer] graphics: rendering on {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+      }
       ui::theme::install(&cc.egui_ctx);
       cc.egui_ctx.set_theme(app.state.prefs.egui_theme());
       Ok(Box::new(app))
@@ -274,11 +280,11 @@ fn wgpu_backends() -> wgpu::Backends {
     };
   let has_dx12_gpu = adapters.iter().any(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
   if has_dx12_gpu {
-    // No adapter name: wgpu picks the adapter later (low-power preference), not this probe.
-    info!("[GamersEqualizer] graphics: DX12 (low power preference)");
+    // No adapter name: wgpu picks the adapter later, not this probe (logged once the window is up).
+    debug!("[GamersEqualizer] graphics: DX12");
     wgpu::Backends::DX12
   } else {
-    info!("[GamersEqualizer] graphics: no DX12 GPU, using Vulkan/GL");
+    debug!("[GamersEqualizer] graphics: no DX12 GPU, using Vulkan/GL");
     wgpu::Backends::PRIMARY | wgpu::Backends::GL
   }
 }
