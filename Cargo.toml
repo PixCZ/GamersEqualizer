@@ -121,3 +121,13 @@ clone_on_copy = "deny"
 needless_return = "deny"
 redundant_field_names = "deny"
 undocumented_unsafe_blocks = "deny"
+
+# tract 0.23.10 plus fixes not yet upstream: an AVX-512 kernel for f16 model weights, a kernel choice
+# that stops padding small matrix-vector products to 128 rows, and a 16x1 kernel fix (branch
+# gamersequalizer-0.23.10 of github.com/PixCZ/tract). Without it the mic models' f16 weights run
+# slower than f32 on AVX-512 CPUs. Drop it once a tract release carries them (pull requests for
+# sonos/tract: AGENTS.md, "Before a release"). tract-data comes from the same commit because
+# tract-linalg uses it by path there.
+[patch.crates-io]
+tract-linalg = { git = "https://github.com/PixCZ/tract", rev = "a5fe22538b3d442f23796568c35115964e3e2597" }
+tract-data = { git = "https://github.com/PixCZ/tract", rev = "a5fe22538b3d442f23796568c35115964e3e2597" }
