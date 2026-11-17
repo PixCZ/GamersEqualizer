@@ -272,12 +272,14 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
     let capture_endpoints = state.capture_endpoints.clone();
     let mut changed_mic_ep = None;
 
+    let mic_max = state.mic_volume_max();
+    win_audio.chatmix.mic.volume = win_audio.chatmix.mic.volume.min(mic_max);
     let strip = Strip {
       title: tr("Mic"),
       icon: icons::MIC,
       color: MIC_COLOR,
       preset: tr(&state.mic_profile.name),
-      max_vol: 3.0,
+      max_vol: mic_max,
       fader_h,
       list_h,
       footers: &footers,
