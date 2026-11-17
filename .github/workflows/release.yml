@@ -84,6 +84,13 @@ jobs:
         with:
           cache-targets: false
 
+      # Free memory before the two parallel fat-LTO builds (measured peak of their processes on a dev PC: 9 GB).
+      - name: Memory before the build
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          "Total $([math]::Round($os.TotalVisibleMemorySize / 1MB, 1)) GB, free $([math]::Round($os.FreePhysicalMemory / 1MB, 1)) GB, $([Environment]::ProcessorCount) logical processors"
+
       - name: Build and package (unsigned, no secrets)
         id: package
         shell: pwsh
