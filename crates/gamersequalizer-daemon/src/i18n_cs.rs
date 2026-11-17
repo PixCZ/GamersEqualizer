@@ -732,7 +732,7 @@ pub static CS: &[(&str, &str)] = &[
     "Chain (Windows effect on the microphone, so every app gets it): echo cancellation → AI noise suppression → voice EQ → voice leveler → boost/limiter.",
     "Řetězec (efekt Windows na mikrofonu, takže ho dostane každá aplikace): potlačení ozvěny → AI potlačení hluku → EQ hlasu → vyrovnání hlasitosti → zesílení/limiter.",
   ),
-  ("Stage 4: Voice leveler", "Fáze 4: Vyrovnání hlasitosti hlasu"),
+  ("Stage 4: Voice leveler", "Stupeň 4: Vyrovnání hlasitosti hlasu"),
   (
     "Brings your voice to the same loudness whether you talk softly or loudly, or the mic is set low. It learns your level only while it hears you speak: quickly in the first seconds, then ever slower, so one shout or cough changes nothing. Between words the gain stays put, it does not pump up the noise.",
     "Srovná hlas na stejnou hlasitost, ať mluvíte potichu, nahlas, nebo máte mikrofon nastavený nízko. Vaši úroveň se učí jen tehdy, když vás slyší mluvit: v prvních sekundách rychle, pak čím dál pomaleji, takže jeden výkřik nebo zakašlání nic nezmění. Mezi slovy zesílení drží, šum v pauzách nezesiluje.",
@@ -774,6 +774,10 @@ pub static CS: &[(&str, &str)] = &[
     "Discord, hry a další aplikace používají výchozí mikrofon Windows.",
   ),
   ("Live input level", "Aktuální úroveň vstupu"),
+  (
+    "No app is recording from the microphone. Windows shows its level only while one does.",
+    "Z mikrofonu teď nenahrává žádná aplikace. Windows ukazuje jeho úroveň, jen když nějaká nahrává.",
+  ),
   ("Sensitivity", "Citlivost"),
   ("Reset to 100 %", "Vrátit na 100 %"),
   (
@@ -785,7 +789,7 @@ pub static CS: &[(&str, &str)] = &[
     "0 % - 100 % moves the Windows input slider. 100 % - 300 % adds a soft-saturated digital boost up to +9.5 dB (3x amplitude).",
     "0 % – 100 % posouvá vstupní posuvník Windows. 100 % – 300 % přidává digitální zesílení s měkkou saturací až +9,5 dB (3× amplituda).",
   ),
-  ("Stage 1: Speaker echo cancellation (AEC)", "Fáze 1: Potlačení ozvěny z reproduktorů (AEC)"),
+  ("Stage 1: Speaker echo cancellation (AEC)", "Stupeň 1: Potlačení ozvěny z reproduktorů (AEC)"),
   (
     "Speaker output is captured (WASAPI loopback) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
     "Výstup reproduktorů se zachytává (WASAPI loopback) a odstraňuje ho z mikrofonu potlačovač ozvěny z WebRTC (AEC3): adaptivní filtr plus potlačení zbytku ozvěny. Zpoždění ozvěny se měří vzájemnou korelací (GCC-PHAT), pamatuje se pro každou dvojici zařízení a mění se až po opakovaném potvrzení.",
@@ -823,7 +827,7 @@ pub static CS: &[(&str, &str)] = &[
   ("locked delay", "ustálené zpoždění"),
   ("acceptance threshold", "práh přijetí"),
   ("delay ms", "zpoždění ms"),
-  ("Stage 2: AI noise suppression", "Fáze 2: AI potlačení hluku"),
+  ("Stage 2: AI noise suppression", "Stupeň 2: AI potlačení hluku"),
   ("Model:", "Model:"),
   ("Off", "Vypnuto"),
   ("No noise suppression and no noise gate.", "Bez potlačení hluku a bez šumové brány."),
@@ -833,10 +837,10 @@ pub static CS: &[(&str, &str)] = &[
   ("Auto", "Automaticky"),
   ("CPU load:", "Zatížení CPU:"),
   (
-    "Time the mic chain needs per audio block, as a share of the block's length. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
-    "Čas, který řetězec mikrofonu potřebuje na jeden zvukový blok, jako podíl délky bloku. Nad 100 % blok nestihne: praskání nebo výpadky. Trvalé přetížení přepne DeepFilterNet nebo DPDFNet na RNNoise (viz Protokol).",
+    "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+    "Čas, který řetězec mikrofonu potřebuje na jeden zvukový blok, jako podíl délky bloku. Řetězec běží na jednom jádru procesoru, takže jde o vytížení tohoto jednoho jádra; Správce úloh ukazuje stejnou práci rozpočítanou na všechna jádra. Nad 100 % blok nestihne: praskání nebo výpadky. Trvalé přetížení přepne DeepFilterNet nebo DPDFNet na RNNoise (viz Protokol).",
   ),
-  ("Stage 3: Voice parametric EQ", "Fáze 3: Parametrický EQ hlasu"),
+  ("Stage 3: Voice parametric EQ", "Stupeň 3: Parametrický EQ hlasu"),
   (
     "Applied after noise suppression, before the boost/limiter. Changes are live and kept across restarts; \"Save as…\" keeps them as a named preset.",
     "Použije se po potlačení hluku, před zesílením/limiterem. Změny platí hned a zůstávají i po restartu; „Uložit jako…“ je uloží jako pojmenovanou předvolbu.",
@@ -866,7 +870,10 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Limited ({}), running: {}", "Omezeno ({}), běží: {}"),
   ("{} could not be loaded by the audio engine, still on {}.", "Zvukové jádro nedokázalo načíst {}, stále běží {}."),
-  ("{} % (peak {} %)", "{} % (špička {} %)"),
+  (
+    "{} % of one core (peak {} %), about {} % of the whole CPU",
+    "{} % jednoho jádra (špička {} %), asi {} % celého procesoru",
+  ),
   ("late blocks: {}", "opožděné bloky: {}"),
   (
     "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing sometimes gets through (most often with RNNoise, which removes the least).",

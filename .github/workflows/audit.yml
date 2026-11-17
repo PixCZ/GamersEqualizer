@@ -45,3 +45,7 @@ jobs:
       - name: silero_vad
         if: ${{ !cancelled() }}
         run: cargo audit --file crates/vendor/silero_vad/Cargo.lock
+
+      - name: deep_filter
+        if: ${{ !cancelled() }}
+        run: cargo audit --file crates/vendor/deep_filter/Cargo.lock

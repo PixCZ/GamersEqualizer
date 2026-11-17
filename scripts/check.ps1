@@ -49,6 +49,9 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 # reference test need x86_64. silero_vad: the port against onnxruntime's output.
 Gate 'test rnnoise2 (release)' { cargo test --release --manifest-path crates/vendor/rnnoise2/Cargo.toml }
 Gate 'test silero_vad (release)' { cargo test --release --manifest-path crates/vendor/silero_vad/Cargo.toml }
+# deep_filter: the f16 weight conversion (kernels picked, output close to f32). Standalone it builds
+# against tract from crates.io, not the workspace's patched one; the conversion is the same.
+Gate 'test deep_filter (release)' { cargo test --release --manifest-path crates/vendor/deep_filter/Cargo.toml --features tract,default-model }
 # Fails only on an error: warnings in the forked code are not ours to fix.
 Gate 'clippy rnnoise2' { cargo clippy --manifest-path crates/vendor/rnnoise2/Cargo.toml --all-targets }
 

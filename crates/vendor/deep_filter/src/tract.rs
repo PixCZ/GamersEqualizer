@@ -115,6 +115,8 @@ pub struct RuntimeParams {
     pub max_db_erb_thresh: f32,
     pub max_db_df_thresh: f32,
     pub reduce_mask: ReduceMask,
+    /// Store matrix weights as f16 (`crate::f16_weights`).
+    pub f16_weights: bool,
 }
 impl RuntimeParams {
     pub fn new(
@@ -136,6 +138,7 @@ impl RuntimeParams {
             max_db_erb_thresh,
             max_db_df_thresh,
             reduce_mask,
+            f16_weights: crate::f16_weights::wanted(),
         }
     }
     pub fn with_post_filter(mut self, beta: f32) -> Self {
@@ -161,6 +164,10 @@ impl RuntimeParams {
         self.max_db_df_thresh = max_db_df_thresh;
         self
     }
+    pub fn with_f16_weights(mut self, on: bool) -> Self {
+        self.f16_weights = on;
+        self
+    }
     pub fn with_mask_reduce(mut self, red: ReduceMask) -> Self {
         self.reduce_mask = red;
         self
@@ -175,6 +182,7 @@ impl RuntimeParams {
             max_db_erb_thresh: 30.,
             max_db_df_thresh: 20.,
             reduce_mask: ReduceMask::MEAN,
+            f16_weights: crate::f16_weights::wanted(),
         }
     }
 }
@@ -239,16 +247,17 @@ impl DfTract {
         let df_cfg = config.section(Some("df")).unwrap();
         let ch = rp.n_ch;
 
-        let enc = init_encoder_from_read(&mut Cursor::new(dfp.enc), df_cfg, ch)?;
+        let enc = init_encoder_from_read(&mut Cursor::new(dfp.enc), df_cfg, ch, rp.f16_weights)?;
         let erb_dec = init_erb_decoder_from_read(
             &mut Cursor::new(dfp.erb_dec),
             model_cfg,
             df_cfg,
             ch,
             Some(rp.reduce_mask.clone()),
+            rp.f16_weights,
         )?;
         let df_dec =
-            init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch)?;
+            init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch, rp.f16_weights)?;
         let enc = enc.into_runnable()?.spawn()?;
         let erb_dec = erb_dec.into_runnable()?.spawn()?;
         let df_dec = df_dec.into_runnable()?.spawn()?;
@@ -760,6 +769,7 @@ fn init_encoder_impl(
     mut m: InferenceModel,
     df_cfg: &ini::Properties,
     n_ch: usize,
+    f16: bool,
 ) -> Result<TypedModel> {
     log::debug!("Start init encoder.");
     let s = m.symbols.sym("S");
@@ -786,21 +796,24 @@ fn init_encoder_impl(
     m.declutter()?;
     let pulsed = PulsedModel::new(&m, s, &1.to_dim())?;
     log::info!("Init encoder");
-    let m = pulsed.into_typed()?.into_optimized()?;
+    let mut m = pulsed.into_typed()?;
+    half_weights(&mut m, f16, "encoder")?;
+    let m = m.into_optimized()?;
     Ok(m)
 }
 fn init_encoder(m: &Path, df_cfg: &ini::Properties, n_ch: usize) -> Result<TypedModel> {
     let m = tract_onnx::onnx().with_ignore_output_shapes(true).model_for_path(m)?;
-    init_encoder_impl(m, df_cfg, n_ch)
+    init_encoder_impl(m, df_cfg, n_ch, false)
 }
 
 fn init_encoder_from_read(
     m: &mut dyn Read,
     df_cfg: &ini::Properties,
     n_ch: usize,
+    f16: bool,
 ) -> Result<TypedModel> {
     let m = tract_onnx::onnx().with_ignore_output_shapes(true).model_for_read(m)?;
-    init_encoder_impl(m, df_cfg, n_ch)
+    init_encoder_impl(m, df_cfg, n_ch, f16)
 }
 
 fn init_erb_decoder_impl(
@@ -809,6 +822,7 @@ fn init_erb_decoder_impl(
     df_cfg: &ini::Properties,
     n_ch: usize,
     mask_reduction: Option<ReduceMask>,
+    f16: bool,
 ) -> Result<TypedModel> {
     log::debug!("Start init ERB decoder.");
     let s = m.symbols.sym("S");
@@ -891,6 +905,7 @@ fn init_erb_decoder_impl(
         }
     }
     m = m.with_outputs_by_name([output_name])?;
+    half_weights(&mut m, f16, "ERB decoder")?;
 
     let m = m.into_optimized()?;
 
@@ -904,7 +919,7 @@ fn init_erb_decoder(
     mask_reduction: Option<ReduceMask>,
 ) -> Result<TypedModel> {
     let m = tract_onnx::onnx().with_ignore_output_shapes(true).model_for_path(m)?;
-    init_erb_decoder_impl(m, net_cfg, df_cfg, n_ch, mask_reduction)
+    init_erb_decoder_impl(m, net_cfg, df_cfg, n_ch, mask_reduction, false)
 }
 fn init_erb_decoder_from_read(
     m: &mut dyn Read,
@@ -912,9 +927,10 @@ fn init_erb_decoder_from_read(
     df_cfg: &ini::Properties,
     n_ch: usize,
     mask_reduction: Option<ReduceMask>,
+    f16: bool,
 ) -> Result<TypedModel> {
     let m = tract_onnx::onnx().with_ignore_output_shapes(true).model_for_read(m)?;
-    init_erb_decoder_impl(m, net_cfg, df_cfg, n_ch, mask_reduction)
+    init_erb_decoder_impl(m, net_cfg, df_cfg, n_ch, mask_reduction, f16)
 }
 
 fn init_df_decoder_impl(
@@ -922,6 +938,7 @@ fn init_df_decoder_impl(
     net_cfg: &ini::Properties,
     df_cfg: &ini::Properties,
     n_ch: usize,
+    f16: bool,
 ) -> Result<TypedModel> {
     log::debug!("Start init DF decoder.");
     let s = m.symbols.sym("S");
@@ -954,7 +971,9 @@ fn init_df_decoder_impl(
     m.declutter()?;
     let pulsed = PulsedModel::new(&m, s, &1.to_dim())?;
     log::info!("Init DF decoder");
-    let m = pulsed.into_typed()?.into_optimized()?;
+    let mut m = pulsed.into_typed()?;
+    half_weights(&mut m, f16, "DF decoder")?;
+    let m = m.into_optimized()?;
     Ok(m)
 }
 fn init_df_decoder(
@@ -964,16 +983,27 @@ fn init_df_decoder(
     n_ch: usize,
 ) -> Result<TypedModel> {
     let m = tract_onnx::onnx().with_ignore_output_shapes(true).model_for_path(m)?;
-    init_df_decoder_impl(m, net_cfg, df_cfg, n_ch)
+    init_df_decoder_impl(m, net_cfg, df_cfg, n_ch, false)
 }
 fn init_df_decoder_from_read(
     m: &mut dyn Read,
     net_cfg: &ini::Properties,
     df_cfg: &ini::Properties,
     n_ch: usize,
+    f16: bool,
 ) -> Result<TypedModel> {
     let m = tract_onnx::onnx().with_ignore_output_shapes(true).model_for_read(m)?;
-    init_df_decoder_impl(m, net_cfg, df_cfg, n_ch)
+    init_df_decoder_impl(m, net_cfg, df_cfg, n_ch, f16)
+}
+
+fn half_weights(m: &mut TypedModel, on: bool, graph: &str) -> Result<()> {
+    if on {
+        let saved = crate::f16_weights::convert(m)?;
+        log::info!("{graph}: weights as f16, {saved} bytes saved");
+        #[cfg(test)]
+        eprintln!("{graph}: {saved} bytes saved, {:?}", crate::f16_weights::weight_bytes_by_consumer(m));
+    }
+    Ok(())
 }
 
 fn calc_norm_alpha(sr: usize, hop_size: usize, tau: f32) -> f32 {
@@ -1054,5 +1084,162 @@ pub fn as_arrayview_mut_complex<'a>(
     unsafe {
         let ptr = buffer.as_ptr() as *mut Complex32;
         ArrayViewMutD::from_shape_ptr(shape, ptr)
+    }
+}
+
+#[cfg(test)]
+mod f16_weights_tests {
+    use std::f32::consts::PI;
+
+    use super::*;
+
+    /// Thresholds that run all three graphs on every frame.
+    fn run(f16: bool) -> (DfTract, Vec<f32>) {
+        let rp = RuntimeParams::default_with_ch(1)
+            .with_thresholds(-100., 100., 100.)
+            .with_f16_weights(f16);
+        let mut df = DfTract::new(DfParams::default(), &rp).unwrap();
+        let hop = df.hop_size;
+        let mut seed = 1u32;
+        let mut out = Vec::new();
+        for frame in 0..300 {
+            let noisy = Array2::from_shape_fn((1, hop), |(_, i)| {
+                let t = (frame * hop + i) as f32 / 48000.0;
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+                0.2 * (2.0 * PI * 220.0 * t).sin() * (2.0 * PI * 3.0 * t).sin().abs() + 0.05 * noise
+            });
+            let mut enh = Array2::zeros((1, hop));
+            df.process(noisy.view(), enh.view_mut()).unwrap();
+            out.extend(enh.iter());
+        }
+        (df, out)
+    }
+
+    /// Matrix products whose packed weights are f16, of all matrix products.
+    fn f16_matmuls(df: &DfTract) -> (usize, usize) {
+        let (mut half, mut all) = (0, 0);
+        for (graph, state) in [("enc", &df.enc), ("erb_dec", &df.erb_dec), ("df_dec", &df.df_dec)] {
+            for node in &state.model().nodes {
+                if node.op().name() != "OptMatMul" {
+                    continue;
+                }
+                let info = node.op().info().unwrap().join(" | ");
+                eprintln!("{graph} {}: {info}", node.name);
+                all += 1;
+                half += info.contains("PackedF16") as usize;
+            }
+        }
+        (half, all)
+    }
+
+    /// Time per op kind over `PROF_ITERS` runs of each graph, 3 rounds (`COLD_CACHE=1`: 256 MB
+    /// written before each run), f32 and f16 weights. Report, prints only.
+    #[test]
+    #[ignore]
+    fn f16_weights_op_profile_report() {
+        let cold = std::env::var_os("COLD_CACHE").is_some();
+        let mut junk = vec![0u8; if cold { 256 << 20 } else { 0 }];
+        let names = ["f32", "f16"];
+        let mut dfs = [run(false).0, run(true).0];
+        let mut by_op = [(); 2].map(|_| std::collections::BTreeMap::<String, f64>::new());
+        let mut total = [0.0; 2];
+        // f32 and f16 take turns, so drift (clock, other load) hits both alike.
+        for _round in 0..3 {
+            for (w, df) in dfs.iter_mut().enumerate() {
+                let (by_op, total) = (&mut by_op[w], &mut total[w]);
+                profile_graphs(df, cold, &mut junk, by_op, total);
+            }
+        }
+        for (w, name) in names.iter().enumerate() {
+            let mut rows: Vec<_> = by_op[w].iter().collect();
+            rows.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            let us = |s: f64| s / (3 * prof_iters()) as f64 * 1e6;
+            eprintln!("weights {name}: {:.1} us per frame (all three graphs)", us(total[w]));
+            for (op, s) in rows.iter().take(25) {
+                eprintln!("  {op:<70} {:>7.1} us", us(**s));
+            }
+        }
+        std::hint::black_box(&junk);
+    }
+
+    fn profile_graphs(
+        df: &mut DfTract,
+        cold: bool,
+        junk: &mut [u8],
+        by_op: &mut std::collections::BTreeMap<String, f64>,
+        total: &mut f64,
+    ) {
+        {
+            let mut keys = std::collections::HashMap::<(usize, usize), String>::new();
+            for (g, state) in [&mut df.enc, &mut df.erb_dec, &mut df.df_dec].into_iter().enumerate() {
+                let inputs: TVec<TValue> = state
+                    .model()
+                    .input_outlets()
+                    .unwrap()
+                    .iter()
+                    .map(|o| {
+                        let fact = state.model().outlet_fact(*o).unwrap();
+                        Tensor::zero_dt(fact.datum_type, fact.shape.as_concrete().unwrap()).unwrap().into()
+                    })
+                    .collect();
+                for i in 0..prof_iters() + 200 {
+                    if cold {
+                        junk.iter_mut().step_by(64).for_each(|b| *b = b.wrapping_add(1));
+                    }
+                    let t0 = std::time::Instant::now();
+                    state
+                        .run_plan_with_eval(inputs.clone(), |ctx, st, node, input| {
+                            let t = std::time::Instant::now();
+                            let r = tract_core::plan::eval(ctx, st, node, input);
+                            if i >= 200 {
+                                let key = keys.entry((g, node.id)).or_insert_with(|| op_key(node));
+                                *by_op.entry(key.clone()).or_default() += t.elapsed().as_secs_f64();
+                            }
+                            r
+                        })
+                        .unwrap();
+                    if i >= 200 {
+                        *total += t0.elapsed().as_secs_f64();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Timed runs per graph and round: `PROF_ITERS`, default 2000.
+    fn prof_iters() -> usize {
+        std::env::var("PROF_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+    }
+
+    /// Op name; matrix products also by shape and kernel ("OptMatMul m:768 k:256 n:1 [kernel] PackedF16").
+    fn op_key(node: &TypedNode) -> String {
+        let name = node.op().name().to_string();
+        if name != "OptMatMul" {
+            return name;
+        }
+        let info = node.op().info().unwrap().join(" ");
+        let mult = info.split("Mult: ").nth(1).and_then(|s| s.split(" with ").next()).unwrap_or("");
+        let kernel = info.split('[').nth(1).and_then(|s| s.split(']').next()).unwrap_or("");
+        let packed = if info.contains("PackedF16") { "f16" } else { "f32" };
+        format!("{name} {mult} {kernel} {packed}")
+    }
+
+    #[test]
+    fn f16_weights_pick_f16_kernels_and_stay_close_to_f32() {
+        let (df32, out32) = run(false);
+        let (df16, out16) = run(true);
+        assert_eq!(f16_matmuls(&df32).0, 0);
+        let (half, all) = f16_matmuls(&df16);
+        eprintln!("f16 matmuls: {half} of {all}");
+        assert!(half > 0, "tract folded the f16 weights back to f32");
+
+        let energy = |v: &mut dyn Iterator<Item = f32>| v.map(|x| x * x).sum::<f32>();
+        let signal = energy(&mut out32.iter().copied());
+        let diff = energy(&mut out32.iter().zip(&out16).map(|(a, b)| a - b));
+        let below_db = 10.0 * (signal / diff.max(1e-20)).log10();
+        eprintln!("f16 - f32 difference: {below_db:.1} dB below the signal");
+        assert!(diff > 0.0, "f16 run is bit-identical: weights were not converted");
+        assert!(below_db > 30.0, "f16 output too far from f32: {below_db:.1} dB");
     }
 }

@@ -54,7 +54,7 @@ pub struct DpdfEngine {
 impl DpdfEngine {
   /// Parses and optimises the embedded model (~120 ms).
   pub fn load() -> Result<Self, String> {
-    Self::try_load().map_err(|e| format!("{e:#}"))
+    Self::try_load(df::f16_weights::wanted()).map_err(|e| format!("{e:#}"))
   }
 
   /// Process samples in place; `atten_lim` = share of the dry signal mixed back in (None = full
@@ -116,7 +116,8 @@ impl DpdfEngine {
     self.output.clear();
   }
 
-  fn try_load() -> TractResult<Self> {
+  /// `f16`: store the matrix-vector weights as f16 (`df::f16_weights`).
+  fn try_load(f16: bool) -> TractResult<Self> {
     let onnx = tract_onnx_23::onnx();
     let proto = onnx.proto_model_for_read(&mut Cursor::new(MODEL_ONNX))?;
     let meta = |key: &str| proto.metadata_props.iter().find(|p| p.key == key).map(|p| p.value.as_str());
@@ -142,12 +143,17 @@ impl DpdfEngine {
     let init_state: Vec<f32> =
       erb.iter().chain(&spec).copied().chain(std::iter::repeat_n(0.0, size - erb.len() - spec.len())).collect();
 
-    let plan = onnx
+    let mut model = onnx
       .model_for_proto_model(&proto)?
       .with_input_fact(0, f32::fact([1, 1, BINS, 2]).into())?
       .with_input_fact(1, f32::fact([size]).into())?
-      .into_optimized()?
-      .into_runnable()?;
+      .into_typed()?
+      .into_decluttered()?;
+    if f16 {
+      let saved = df::f16_weights::convert(&mut model)?;
+      log::info!("[DPDFNet] weights as f16, {saved} bytes saved");
+    }
+    let plan = model.into_optimized()?.into_runnable()?;
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(WIN);
@@ -239,5 +245,33 @@ impl DpdfEngine {
       *o = 0.0;
     }
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// f16 weights reach the model and keep its output close to f32 (measured 55 dB below the
+  /// signal; a bit-identical output would mean the conversion did nothing).
+  #[test]
+  fn test_f16_weights_stay_close_to_f32() {
+    let mut reader =
+      hound::WavReader::open(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_data/denoise/speech_clean.wav")).unwrap();
+    let speech: Vec<f32> = reader.samples::<i16>().take(3 * 48_000).map(|s| s.unwrap() as f32 / 32768.0).collect();
+    let run = |f16: bool| {
+      let mut engine = DpdfEngine::try_load(f16).unwrap();
+      let mut x = speech.clone();
+      for block in x.chunks_mut(HOP) {
+        engine.process(block, None);
+      }
+      x
+    };
+    let (f32_out, f16_out) = (run(false), run(true));
+    let signal: f32 = f32_out.iter().map(|x| x * x).sum();
+    let diff: f32 = f32_out.iter().zip(&f16_out).map(|(a, b)| (a - b) * (a - b)).sum();
+    assert!(diff > 0.0, "f16 output is bit-identical: weights were not converted");
+    let below_db = 10.0 * (signal / diff).log10();
+    assert!(below_db > 30.0, "f16 output only {below_db:.1} dB below the signal");
   }
 }

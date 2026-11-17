@@ -1062,7 +1062,7 @@ frames above 0.7; 97.2 % measured, probability t+1 paired with clean frame t).
 **Open.** Written on macOS, where the mic crate does not build: Windows build, tests and clippy
 (`scripts/dev-rebuild.ps1 -Apo -Test`), the ignored reports (`keyboard_call_report`,
 `click_report`, `private_report`, `scenario_report`, `lookahead_sweep`), CPU on Windows and
-listening are pending (`docs/rnnoise-0.2-port.md`, chapter 8).
+listening are pending (`docs/rnnoise-0.2-port.md`, chapter 8; the file was removed later, see git history).
 
 ---
 
@@ -3003,3 +3003,123 @@ shares do not differ.
   silent) still mixes the sidetone in, ~100 blocks/s on the Realtek output: the engine hands the
   output effect valid blocks, so the early return on a silent block does not cost the sidetone.
 - A Release workflow run with the pinned toolchain; the branch rule on GitHub that requires CI.
+
+---
+
+## Milestone 63: Mic models with f16 weights, tract from our fork (2026-11-16 .. 2026-11-17)
+
+Branch `fix/pause-hiss`. The long analysis (tables, variants that lost) was a working document, removed
+after merge; it is in the git history of that branch (`docs/mic-cpu-analysis.md`).
+
+**What ships**
+
+- DeepFilterNet 3 and DPDFNet store their matrix-vector weights as f16 (computed in f32) on every
+  CPU with F16C + FMA, including the GRU weights inside DFN3's `Scan` bodies; lowered convolutions
+  keep f32 (small weights, the f16 kernels for them are slower). `GE_F16_WEIGHTS=0` keeps f32 for
+  comparing CPU load (`scripts/cpu-bench-package.ps1` runs both).
+- tract comes from github.com/PixCZ/tract (branch `gamersequalizer-0.23.10`): an AVX-512 kernel for
+  f16 weights (`avx512_mmm_f32_128x1`, packing `f16f32`), a kernel choice that no longer pads small
+  matrix-vector products to 128 rows (also faster for f32), and a fix for the 16x1 kernel, whose
+  partial sums leaked into a second product in the same call. Pull requests for sonos/tract are
+  prepared, not opened (AGENTS.md, "Before a release").
+- The deep_filter fork's tests (f16 conversion) are part of the gate; its lockfile is audited.
+
+**Measured on the dev PC (Ryzen 7 9800X3D), f32 -> f16, median of 3 interleaved runs**
+
+- DeepFilterNet 3 alone: 1.89 -> 1.59 % of a core warm (-16 %), 3.62 -> 3.17 % with a cold cache
+  (-12 %); the whole denoiser with it -8 / -9 %. Without AVX-512 (simulated) -11 / -19 %.
+- DPDFNet: 0 to -5 %; its time goes into `GruSeq`, which is compute bound, not weight bytes.
+- Output: the quality reports move by 0.1 dB at most.
+- Before: f16 weights with stock tract were 25 % slower than f32 on AVX-512 (FMA fallback kernel,
+  128-row padding of small matrices).
+
+**Measured on the notebook (Ryzen 5 7530U, Zen 3, no AVX-512, on AC, Balanced), 2026-11-17**
+
+`scripts/cpu-bench-package.ps1`, one run, f32 -> f16 in % of a core (the first f32 pass was noisy: the
+whole-denoiser warm value 9.6 against 7.8 on 2026-11-16, so its -39 % is not to be trusted):
+
+| Part                   | Warm      | Cold cache | Paced | Cold + paced |
+| ---------------------- | --------- | ---------- | ----- | ------------ |
+| DFN3 alone             | -20 %     | -28 %      | -20 % | -16 %        |
+| DPDFNet alone          | -11 %     | -11 %      | -8 %  | -3 %         |
+| Whole, DFN3, speech    | -39 % (?) | -19 %      | -12 % | -9 %         |
+| Whole, DPDFNet, speech | -8 %      | -7 %       | -3 %  | -5 %         |
+
+- Meets the bar set in the analysis (cold cache: DFN3 -28 %, DPDFNet -11 %).
+  With pauses between blocks the gain shrinks (DFN3 whole -9 to -12 %, DPDFNet -3 to -5 %): there the
+  core clock after idle is the limit, not memory.
+- Absolute numbers are not comparable with 2026-11-16: ONNX Runtime, which our changes do not touch, ran
+  about 20 % faster (DPDFNet 1.51 ms against 1.90 ms). Only the f32 -> f16 ratio inside one run counts.
+- `run.ps1` in the CPU package now appends to one `report.txt` (header per run) instead of deleting it.
+- The raw report is kept as `test_data/private/cpu-7530U-20261117.txt`.
+
+**Reports on the private recordings against the log, same day (dev PC)**
+
+All 22 ignored mic-chain reports pass. Quality metrics match the latest entries (same or within
+0.5 percentage points / 0.3 dB), CPU the same or lower. Not matching: `chain_report`, DFN3 only, against
+milestone 29: pauses at 0 dB -113.4 -> -106.9 dBFS, rumble room -119.9 -> -115.6, +20 dB clipped voice
+-23.7 -> -16.7 dBFS (leveler -5.6 dB instead of -12). Later changes to the leveler and the DFN3 input
+(milestones 22, 23, 36) are the likely cause; not yet confirmed. `rnnoise2` `report_vs_upstream_c` fails
+because it needs the upstream C demo output made by hand (`.claude/tmp/rnnoise2/`, git-ignored); the
+other rnnoise2 reports pass.
+
+**Open**
+
+- Why `chain_report` DFN3 moved since milestone 29 (a stale number or a real change in the leveler).
+- The pull requests for sonos/tract, once the build has run in the app for a while.
+
+---
+
+## Milestone 64: Leveler learns from its own strict detector (2026-11-17)
+
+A friend on a new build was far too loud and had to be turned down. `chain_report` showed the same on
+the dev PC: with DeepFilterNet 3 the voice came out 6-7 dB over the -24 dBFS target even at a normal
+input (0 dB: -16.0 / -17.4 dBFS, leveler +13.4 dB instead of +7.4), and with +20 dB clipped the
+leveler cut only -5.6 dB instead of -12. RNNoise was exact. The analysis was a working document, removed
+after merge (git history of `fix/pause-hiss`).
+
+**Cause.** `d4b83bd` (milestone 35) swapped the raw-input detector for RNNoise 0.2 (`in_net`), which
+unlike the 2017 network hears whispers. Milestone 40 had kept the leveler on it "so a whisper is not
+learned as the speech level"; that stopped being true. Behind DFN3 / DPDFNet the leveler learned 3-3.7 s
+of whisper before the voice, and a loud frame moves a full memory (n = 2000) by only 0.65 dB per second,
+so the gain stayed high for a minute (`leveler_report`, input 0 dB, gain at 84 s: DFN3 +13.6 dB,
+DPDFNet +18.5 dB, RNNoise +7.1 dB; voice 45-49 s: DFN3 -13.6, DPDFNet -10.0 dBFS).
+
+**Change.** The leveler and the automatic input gain get their own key (`heard_level_voice()`) from the
+probability `in_net` already computes: speech only after 6 frames (60 ms) in a row above 0.95
+(`level_key`, `LEVEL_PROB`, `LEVEL_MIN_FRAMES`). No second network, no CPU. With RNNoise as the model its
+own probability is already the key. The gate, the model's sleep and the click rescue stay on `in_net` at
+0.7 / 0.2: they should hear whispers. A first version ran the 2017 network a second time (commit
+`d364b18`, ~0.26 % of a core); `leveler_key_report` showed a rule over `in_net` separates as well, so it
+was replaced. Share of 10 ms frames flagged, private scenario: whisper 28.8 % (gate rule) / 2.2 % (2017
+net) / 1.2 % (this rule), voice 90-95 / 77 / 72-74 %. Other recordings, whole file, 2017 net -> this rule:
+`speech.wav` 42.5 -> 38.0 %, `scenario.wav` 32.7 -> 25.8, `keyboard_call.wav` 48.0 -> 35.7, `keys.wav` 0 -> 0.
+Tuned on one whisper recording (the only one in the set): a new whisper take is the check.
+
+**Measured** (dev PC, private whisper scenario), voice as 45-49 s / 53-57 s in dBFS:
+
+| `chain_report`, DFN3    | Before        | After         | Milestone 29      |
+| ----------------------- | ------------- | ------------- | ----------------- |
+| 0 dB: voice             | -16.0 / -17.4 | -22.0 / -24.4 | (RNNoise -21.5 / -24.2) |
+| 0 dB: leveler           | +13.4 dB      | +7.3 dB       | (RNNoise +7.4 dB) |
+| +20 dB clipped: voice   | -15.4 / -16.7 | -19.5 / -23.5 | -20.6 / -23.7     |
+| +20 dB clipped: leveler | -5.6 dB       | -11.7 dB      | -12 dB            |
+| 0 dB + rumble: leveler  | (+7.4 dB)     | +9.3 dB       | (RNNoise +8.1 dB) |
+| 0 dB: pauses            | -106.9        | -110.5        | -113.4            |
+
+`leveler_report`, input 0 dB, DFN3 / DPDFNet: learned before 44 s 740 ms (was 3.7 / 3.0 s), gain at 84 s
++7.1 / +7.7 dB (was +13.6 / +18.5; RNNoise +7.1), voice 53-57 s -24.4 / -24.2 dBFS. DPDFNet's voice at
+45-49 s is still -18.4 dBFS (the gain falls from +24 to +9 dB during those seconds; RNNoise -21.8, DFN3
+-21.9). Quiet inputs (the strict key must not starve the leveler): input -12 dB, DFN3 / DPDFNet / RNNoise
+gain at 84 s +19.5 / +21.0 / +19.1 dB, learned before 44 s 670 ms for the heavy models; input -24 dB all
+three sit on the +24 dB cap. RNNoise unchanged. Gate green (`check.ps1`); tests
+`test_level_key_needs_a_sure_run_and_a_dip_restarts_it` and
+`test_leveler_detector_hears_speech_behind_every_model`.
+
+**Open**
+
+- Not heard live; the friend's PC and a hot start (first run, new mic, "Learn again") are the check.
+- Pauses with DFN3 at 0 dB are 2.9 dB short of milestone 29 (-110.5 against -113.4): not looked into.
+- DFN3 with the added 45 Hz rumble: leveler +9.3 dB against +8.1 for RNNoise, voice about 2 dB over
+  the target in the second section: not looked into.
+- `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.

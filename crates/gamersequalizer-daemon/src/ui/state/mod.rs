@@ -224,6 +224,12 @@ impl AppState {
     self.shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header })
   }
 
+  /// Highest mic volume the sliders offer: the leveler's target sets the loudness, so a boost
+  /// above 100 % would only duplicate it (the chain cuts it too).
+  pub fn mic_volume_max(&self) -> f32 {
+    if self.shm_header().is_some_and(|h| h.mic_leveler_enabled.load(Ordering::Relaxed)) { 1.0 } else { 3.0 }
+  }
+
   pub fn shm_header_mut(&mut self) -> Option<&mut ShmHeader> {
     // SAFETY: as `shm_header`; `&mut self` keeps this process's references to the header exclusive.
     self.shm_ptr.map(|mut ptr| unsafe { &mut ptr.as_mut().header })
