@@ -93,6 +93,15 @@ const STAND_IN_WARMUP_SAMPLES: usize = 48 * 300;
 /// 3.8 -> 3.4 % of a core. Quality reports unchanged (`click_report`: frames under hammered
 /// clicks lost > 6 dB 12.6 -> 13.3 %, the rest equal; 2026-11-16).
 const RESCUE_IDLE_SAMPLES: usize = 48_000 * 2;
+/// The leveler learns the speech level only from frames `in_net` rates above this for
+/// `LEVEL_MIN_FRAMES` in a row (60 ms). `in_net` at the gate's thresholds (0.7 / 0.2) hears
+/// 29 % of a whisper's frames; the leveler took it for the speech level, learned it for seconds
+/// before the voice and then followed it up only 0.65 dB per second of voice: DFN3 +13.6 dB, DPDFNet
+/// +18.5 dB at 84 s against +7.1 for RNNoise, the voice 6-14 dB over the target (`leveler_report`).
+/// `leveler_key_report` on the private scenario: whisper 1.2 % (the 2017 network 2.2 %), voice 73 %
+/// (2017: 77 %), at no cost: the probability is there already.
+const LEVEL_PROB: f32 = 0.95;
+const LEVEL_MIN_FRAMES: u32 = 6;
 /// Input this far over the room's noise floor counts as activity: it keeps the heavy model
 /// awake / wakes it. The voice detector misses whisper and a quiet voice (mic set low), which
 /// RNNoise standing in then lost by 14-20 dB (`leveler_report`); sleeping only in a quiet room
@@ -212,13 +221,10 @@ pub struct AiVoiceIsolator {
   bypassed: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
   heard_voice: bool,
-  /// The leveler's own detector: the 2017 network on the raw input, strict (it hears a full voice,
-  /// not a whisper or mumbling). `in_net` hears more, which is what the gate wants; fed to the
-  /// leveler it learned whispers as the speech level and left the voice 6-14 dB over the target
-  /// with DFN3 / DPDFNet (`leveler_report`). Runs only behind a heavy model or with the denoiser
-  /// off; RNNoise as the model already scores the 2017 network in `vad`.
-  level_net: VoiceNet,
-  level_vad: VoiceHysteresis,
+  /// Frames in a row `in_net` rated above `LEVEL_PROB` (the leveler's key, see `level_key`).
+  level_run: u32,
+  /// A full voice, not a whisper, was heard in the last block: what the leveler and the automatic
+  /// input gain learn from. With RNNoise as the model it is `heard_voice` (its own probability).
   heard_level_voice: bool,
   sleep: Sleep,
   /// DeepFilterNet only: RNNoise runs next to it and fills in where DFN3 cut a voice (clicks).
@@ -300,8 +306,7 @@ impl AiVoiceIsolator {
       delay: DelayLine::new(),
       bypassed: false,
       heard_voice: false,
-      level_net: VoiceNet::new(),
-      level_vad: VoiceHysteresis::new(),
+      level_run: 0,
       heard_level_voice: false,
       loading: None,
       mute_left: 0,
@@ -485,15 +490,15 @@ impl AiVoiceIsolator {
       // Audio passes untouched, but a detector (`in_net`, ~2.8 % of a core) keeps running:
       // the leveler and the automatic input gain learn only from speech it hears.
       self.bypassed = true;
-      let (vad, in_prob, mut voice) = (&mut self.vad, &mut self.in_prob, false);
+      let (vad, in_prob, level_run) = (&mut self.vad, &mut self.in_prob, &mut self.level_run);
+      let (mut voice, mut level_voice) = (false, false);
       let (open, keep) = self.in_net.thresholds();
       self.in_net.process(samples, |p| {
         *in_prob = in_prob.max(p);
         voice |= vad.frame_at(p, open, keep);
+        level_voice |= level_key(level_run, p);
       });
       self.heard_voice = voice;
-      let (level_vad, mut level_voice) = (&mut self.level_vad, false);
-      self.level_net.process(samples, |p| level_voice |= level_vad.frame(p));
       self.heard_level_voice = level_voice;
       return;
     }
@@ -551,8 +556,7 @@ impl AiVoiceIsolator {
       vad,
       vad_out,
       in_net,
-      level_net,
-      level_vad,
+      level_run,
       out_net,
       soft_net,
       soft_voice_prob,
@@ -593,8 +597,8 @@ impl AiVoiceIsolator {
       in_net.process(samples, |p| {
         *in_prob = in_prob.max(p);
         voice |= vad.frame_at(p, open, keep);
+        level_voice |= level_key(level_run, p);
       });
-      level_net.process(samples, |p| level_voice |= level_vad.frame(p));
     }
     *no_voice_samples = if voice || voice_soft { 0 } else { no_voice_samples.saturating_add(n) };
     // During a takeover RNNoise works on a copy, the heavy model in place.
@@ -686,7 +690,6 @@ impl AiVoiceIsolator {
   pub fn reset(&mut self) {
     self.reset_engines();
     self.in_net.reset();
-    self.level_net.reset();
     self.out_net = VoiceNet::new();
     if let Some(net) = self.soft_net.as_mut() {
       net.reset();
@@ -711,7 +714,6 @@ impl AiVoiceIsolator {
     // its first latency of output, all from before the pause, is silenced instead.
     self.mute_left = if self.active.is_heavy() { latency_samples(self.active) } else { 0 };
     self.in_net.input.clear();
-    self.level_net.input.clear();
     self.out_net.input.clear();
     if let Some(net) = self.soft_net.as_mut() {
       net.flush();
@@ -723,7 +725,7 @@ impl AiVoiceIsolator {
   fn reset_timing(&mut self) {
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceHysteresis::new();
-    self.level_vad = VoiceHysteresis::new();
+    self.level_run = 0;
     self.vad_out = VoiceHysteresis::new_output();
     self.delay.clear();
     self.bypassed = false;
@@ -890,6 +892,12 @@ fn lookahead_samples(model: DenoiseModel) -> usize {
     DenoiseModel::DeepFilterNet => DF_LOOKAHEAD_SAMPLES,
     DenoiseModel::DpdfNet => DPDF_LOOKAHEAD_SAMPLES,
   }
+}
+
+/// One `in_net` frame into the leveler's key: true once `LEVEL_MIN_FRAMES` frames in a row are sure.
+fn level_key(run: &mut u32, prob: f32) -> bool {
+  *run = if prob > LEVEL_PROB { run.saturating_add(1) } else { 0 };
+  *run >= LEVEL_MIN_FRAMES
 }
 
 fn latency_samples(model: DenoiseModel) -> usize {

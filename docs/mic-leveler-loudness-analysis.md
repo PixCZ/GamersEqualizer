@@ -5,10 +5,11 @@ Vstup: měření `chain_report` na čtyřech commitech (Windows, 2026-11-17), DE
 Psáno na Macu, kde není `test_data/private/`: **mechanismus je odvozený z kódu a ze starších čísel
 v DEVLOGu, na nahrávce ho potvrdí až jeden běh reportu** (kapitola 5).
 
-**Stav (2026-11-17, později): potvrzeno na Windows a opraveno** (oprava A z kapitoly 6, DEVLOG milník 64).
+**Stav (2026-11-17, později): potvrzeno na Windows a opraveno** (DEVLOG milník 64).
 `leveler_report` ukázal u DFN3 a DPDFNet 3-3,7 s učení před hlasem a zisk +13,6 / +18,5 dB v 84 s;
-s detektorem z roku 2017 je to 710 ms a +6,9 / +7,4 dB. Po opravě dává `chain_report` u DFN3 při 0 dB
-hlas -22,5 / -24,4 dBFS a leveler +7,2 dB.
+s detektorem z roku 2017 je to 710 ms a +6,9 / +7,4 dB. Nasazená je varianta **B** (kapitola 6), ne A:
+leveler bere řeč až po 6 rámcích v řadě nad 0,95 z `in_net`, bez druhé sítě. `chain_report` u DFN3
+při 0 dB: hlas -22,0 / -24,4 dBFS, leveler +7,3 dB.
 
 Značení: **Naměřeno** = číslo z měření nebo z DEVLOGu. **Z kódu** = ověřeno čtením zdrojáku.
 **Hypotéza** = vyplývá z kódu, potřebuje měření.

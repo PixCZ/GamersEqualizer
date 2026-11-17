@@ -1998,6 +1998,79 @@ fn leveler_report() {
   }
 }
 
+/// Which rule over `in_net`'s probability keeps whisper out of the leveler but hears the voice:
+/// share of 10 ms frames flagged as speech per section of `whisper_scenario.wav` (half-second
+/// indices as in `leveler_report`: whisper 40-48, room 2-36, voice 90-98 and 107-115, alternate
+/// 150-164), for "p > t for n frames in a row" and for the shipped and the 2017 detectors.
+/// `cargo test -p gamersequalizer-mic-chain --release leveler_key_report -- --ignored --nocapture`
+#[test]
+#[ignore = "needs private recordings"]
+fn leveler_key_report() {
+  const HALF: usize = 50; // frames per half second
+  let path = "../private/whisper_scenario.wav";
+  if !std::path::Path::new(FIXTURES).join(path).exists() {
+    return eprintln!("skipped: put whisper_scenario.wav into test_data/private/");
+  }
+  let input = read_wav_48k(path);
+  let sections =
+    [("whisper", 40, 48), ("room", 2, 36), ("voice A", 90, 98), ("voice B", 107, 115), ("alternate", 150, 164)];
+  let share = |flags: &[bool]| -> Vec<String> {
+    sections
+      .iter()
+      .map(|&(_, a, b)| {
+        let s = flags.get(a * HALF..b * HALF).unwrap_or_default();
+        format!("{:5.1}", s.iter().filter(|&&f| f).count() as f32 * 100.0 / s.len().max(1) as f32)
+      })
+      .collect()
+  };
+  let mut net = VoiceNet::new_input();
+  let (open, keep) = net.thresholds();
+  let (mut probs, mut shipped, mut vad) = (Vec::new(), Vec::new(), VoiceHysteresis::new());
+  net.process(&input, |p| {
+    probs.push(p);
+    shipped.push(vad.frame_at(p, open, keep));
+  });
+  let (mut old_net, mut old_vad, mut old) = (VoiceNet::new(), VoiceHysteresis::new(), Vec::new());
+  old_net.process(&input, |p| old.push(old_vad.frame(p)));
+  eprintln!("{:<22} {}", "rule", sections.map(|s| format!("{:>9}", s.0)).join(" "));
+  eprintln!("{:<22} {}", "in_net shipped", share(&shipped).join("     "));
+  eprintln!("{:<22} {}", "2017 net (level key)", share(&old).join("     "));
+  for t in [0.7f32, 0.8, 0.9, 0.95, 0.98] {
+    for n in [1usize, 3, 6, 12] {
+      let flags: Vec<bool> = (0..probs.len())
+        .map(|i| i + 1 >= n && probs.get(i + 1 - n..=i).is_some_and(|w| w.iter().all(|&p| p > t)))
+        .collect();
+      eprintln!("{:<22} {}", format!("p > {t} for {n} frames"), share(&flags).join("     "));
+    }
+  }
+  // The chosen rule on the other private recordings (whole file, % of 10 ms frames): the voice
+  // must not be starved, keys alone must stay at 0.
+  for file in ["speech.wav", "scenario.wav", "keyboard_call.wav", "keys.wav"] {
+    let rel = format!("../private/{file}");
+    if !std::path::Path::new(FIXTURES).join(&rel).exists() {
+      continue;
+    }
+    let (mut net, mut vad, mut run) = (VoiceNet::new_input(), VoiceHysteresis::new(), 0);
+    let (mut old_net, mut old_vad) = (VoiceNet::new(), VoiceHysteresis::new());
+    let (mut n, mut gate, mut key, mut old) = (0usize, 0usize, 0usize, 0usize);
+    let x = read_wav_48k(&rel);
+    let (open, keep) = net.thresholds();
+    net.process(&x, |p| {
+      n += 1;
+      gate += usize::from(vad.frame_at(p, open, keep));
+      key += usize::from(level_key(&mut run, p));
+    });
+    old_net.process(&x, |p| old += usize::from(old_vad.frame(p)));
+    let pct = |c: usize| c as f32 * 100.0 / n.max(1) as f32;
+    eprintln!(
+      "{file:<20} in_net shipped {:5.1} | 2017 net {:5.1} | level key (p > {LEVEL_PROB} x {LEVEL_MIN_FRAMES}) {:5.1}",
+      pct(gate),
+      pct(old),
+      pct(key)
+    );
+  }
+}
+
 /// Per 0.5 s of a private recording: level, raw RNNoise voice share (> 0.5) and clicky 10 ms
 /// frames (peak 20 dB over RMS: keys). For finding section bounds. Run (file in test_data/private/):
 /// `$env:WAV="x.wav"; cargo test -p gamersequalizer-mic-chain --release vad_timeline -- --ignored --nocapture`

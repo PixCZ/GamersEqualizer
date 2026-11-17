@@ -3085,28 +3085,38 @@ of whisper before the voice, and a loud frame moves a full memory (n = 2000) by 
 so the gain stayed high for a minute (`leveler_report`, input 0 dB, gain at 84 s: DFN3 +13.6 dB,
 DPDFNet +18.5 dB, RNNoise +7.1 dB; voice 45-49 s: DFN3 -13.6, DPDFNet -10.0 dBFS).
 
-**Change.** `AiVoiceIsolator` has a second raw-input detector for the leveler and the automatic input
-gain: the 2017 network with its own hysteresis (`level_net`, `level_vad`, `heard_level_voice()`), running
-only behind a heavy model or with the denoiser off (~0.26 % of a core); with RNNoise as the model its own
-probability is already that detector. The gate, the model's sleep and the click rescue stay on `in_net`:
-they should hear whispers.
+**Change.** The leveler and the automatic input gain get their own key (`heard_level_voice()`) from the
+probability `in_net` already computes: speech only after 6 frames (60 ms) in a row above 0.95
+(`level_key`, `LEVEL_PROB`, `LEVEL_MIN_FRAMES`). No second network, no CPU. With RNNoise as the model its
+own probability is already the key. The gate, the model's sleep and the click rescue stay on `in_net` at
+0.7 / 0.2: they should hear whispers. A first version ran the 2017 network a second time (commit
+`d364b18`, ~0.26 % of a core); `leveler_key_report` showed a rule over `in_net` separates as well, so it
+was replaced. Share of 10 ms frames flagged, private scenario: whisper 28.8 % (gate rule) / 2.2 % (2017
+net) / 1.2 % (this rule), voice 90-95 / 77 / 72-74 %. Other recordings, whole file, 2017 net -> this rule:
+`speech.wav` 42.5 -> 38.0 %, `scenario.wav` 32.7 -> 25.8, `keyboard_call.wav` 48.0 -> 35.7, `keys.wav` 0 -> 0.
+Tuned on one whisper recording (the only one in the set): a new whisper take is the check.
 
 **Measured** (dev PC, private whisper scenario), voice as 45-49 s / 53-57 s in dBFS:
 
-| `chain_report`, DFN3    | Before                | After                 | Milestone 29      |
-| ----------------------- | --------------------- | --------------------- | ----------------- |
-| 0 dB: voice             | -16.0 / -17.4         | -22.5 / -24.4         | (RNNoise -21.5 / -24.2) |
-| 0 dB: leveler           | +13.4 dB              | +7.2 dB               | (RNNoise +7.4 dB) |
-| +20 dB clipped: voice   | -15.4 / -16.7         | -21.1 / -23.8         | -20.6 / -23.7     |
-| +20 dB clipped: leveler | -5.6 dB               | -12.0 dB              | -12 dB            |
-| 0 dB: pauses            | -106.9                | -110.9                | -113.4            |
+| `chain_report`, DFN3    | Before        | After         | Milestone 29      |
+| ----------------------- | ------------- | ------------- | ----------------- |
+| 0 dB: voice             | -16.0 / -17.4 | -22.0 / -24.4 | (RNNoise -21.5 / -24.2) |
+| 0 dB: leveler           | +13.4 dB      | +7.3 dB       | (RNNoise +7.4 dB) |
+| +20 dB clipped: voice   | -15.4 / -16.7 | -19.5 / -23.5 | -20.6 / -23.7     |
+| +20 dB clipped: leveler | -5.6 dB       | -11.7 dB      | -12 dB            |
+| 0 dB + rumble: leveler  | (+7.4 dB)     | +9.3 dB       | (RNNoise +8.1 dB) |
+| 0 dB: pauses            | -106.9        | -110.5        | -113.4            |
 
-`leveler_report`: DFN3 and DPDFNet now give the same rows as a stand-alone 2017 detector, learned before
-44 s 710 ms (was 3.0-3.7 s); DPDFNet at 0 dB: gain +7.4 dB at 84 s, voice -20.2 / -24.3 dBFS. RNNoise
-unchanged. Gate green (`check.ps1`); new test `test_leveler_detector_hears_speech_behind_every_model`.
+`leveler_report`, input 0 dB, DFN3 / DPDFNet: learned before 44 s 740 ms (was 3.7 / 3.0 s), gain at 84 s
++7.1 / +7.7 dB (was +13.6 / +18.5; RNNoise +7.1), voice 53-57 s -24.4 / -24.2 dBFS. DPDFNet's voice at
+45-49 s is still -18.4 dBFS (the gain falls from +24 to +9 dB during those seconds; RNNoise -21.8, DFN3
+-21.9). RNNoise unchanged. Gate green (`check.ps1`); new test
+`test_leveler_detector_hears_speech_behind_every_model`.
 
 **Open**
 
 - Not heard live; the friend's PC and a hot start (first run, new mic, "Learn again") are the check.
-- Pauses with DFN3 at 0 dB are 2.5 dB short of milestone 29 (-110.9 against -113.4): not looked into.
+- Pauses with DFN3 at 0 dB are 2.9 dB short of milestone 29 (-110.5 against -113.4): not looked into.
+- DFN3 with the added 45 Hz rumble: leveler +9.3 dB against +8.1 for RNNoise, voice about 2 dB over
+  the target in the second section: not looked into.
 - `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.
