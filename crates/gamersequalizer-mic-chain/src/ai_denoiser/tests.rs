@@ -1903,9 +1903,11 @@ fn echo_gate_report() {
   }
 }
 
-/// The learning voice leveler on the private recordings: denoiser (RNNoise, default gate) +
-/// leveler, the input at its own level and 12 dB / 24 dB lower (a mic set low). Prints the gain
-/// over time and the output level of voice and room sections. Run:
+/// The learning voice leveler on the private recordings: denoiser (default gate) + leveler, the
+/// input at its own level and 12 dB / 24 dB lower (a mic set low). Prints the gain over time, the
+/// speech learned before the first normal voice (44 s: only whisper until then) and the output
+/// level of voice and room sections. "2017 key": the leveler keyed by the 2017 detector on the raw
+/// input instead of `heard_voice`, as the heavy models had it before milestone 35. Run:
 /// `cargo test -p gamersequalizer-mic-chain --release leveler_report -- --ignored --nocapture`
 #[test]
 #[ignore = "needs private recordings"]
@@ -1921,28 +1923,44 @@ fn leveler_report() {
     let s = x.get(a * HALF_SEC..b * HALF_SEC).unwrap_or_default();
     10.0 * (s.iter().map(|v| v * v).sum::<f32>() / s.len().max(1) as f32).max(1e-12).log10()
   };
-  for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet] {
+  let cases = [
+    (DenoiseModel::RnNoise, false),
+    (DenoiseModel::DeepFilterNet, false),
+    (DenoiseModel::DeepFilterNet, true),
+    (DenoiseModel::DpdfNet, false),
+    (DenoiseModel::DpdfNet, true),
+  ];
+  for (model, old_key) in cases {
     for att_db in [0.0f32, -12.0, -24.0] {
       let g = 10f32.powf(att_db / 20.0);
       let mut x: Vec<f32> = input.iter().map(|s| s * g).collect();
       let mut iso = AiVoiceIsolator::new();
       iso.set_model(model);
       iso.set_gate_threshold_db(GATE_AUTO_LOOKAHEAD);
+      let (mut old_net, mut old_vad) = (VoiceNet::new(), VoiceHysteresis::new());
       let mut lv = VoiceLeveler::new();
       let mut gains = Vec::new();
+      let mut early_ms = 0;
       for (i, b) in x.chunks_mut(480).enumerate() {
+        let mut old_voice = false;
+        old_net.process(b, |p| old_voice |= old_vad.frame(p));
         iso.process_samples(b);
-        lv.process(b, iso.heard_voice(), iso.output_lead_samples());
+        lv.process(b, if old_key { old_voice } else { iso.heard_voice() }, iso.output_lead_samples());
         if i % 50 == 49 {
           gains.push(lv.gain_db());
+        }
+        if i == 4_400 {
+          early_ms = lv.speech_ms();
         }
       }
       let lead = latency_samples(model) + lookahead_samples(model);
       let out = x.get(lead..).unwrap_or_default();
       let at = |s: f32| gains.get((s * 2.0) as usize).copied().unwrap_or(f32::NAN);
       eprintln!(
-        "{model:<13?} input {att_db:+3} dB | gain at 20 s {:+5.1}, 46 s {:+5.1}, 47 s {:+5.1}, 50 s {:+5.1}, 60 s {:+5.1}, 84 s {:+5.1} | out: voice 45-49 {:6.1} voice 53-57 {:6.1} alternate {:6.1} room {:6.1} whisper {:6.1} dBFS",
+        "{model:<13?} {:<8} input {att_db:+3} dB | learned before 44 s {early_ms:5} ms | gain at 20 s {:+5.1}, 44 s {:+5.1}, 46 s {:+5.1}, 47 s {:+5.1}, 50 s {:+5.1}, 60 s {:+5.1}, 84 s {:+5.1} | out: voice 45-49 {:6.1} voice 53-57 {:6.1} alternate {:6.1} room {:6.1} whisper {:6.1} dBFS",
+        if old_key { "2017 key" } else { "" },
         at(20.0),
+        at(43.5),
         at(46.0),
         at(47.0),
         at(50.0),
