@@ -212,6 +212,14 @@ pub struct AiVoiceIsolator {
   bypassed: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
   heard_voice: bool,
+  /// The leveler's own detector: the 2017 network on the raw input, strict (it hears a full voice,
+  /// not a whisper or mumbling). `in_net` hears more, which is what the gate wants; fed to the
+  /// leveler it learned whispers as the speech level and left the voice 6-14 dB over the target
+  /// with DFN3 / DPDFNet (`leveler_report`). Runs only behind a heavy model or with the denoiser
+  /// off; RNNoise as the model already scores the 2017 network in `vad`.
+  level_net: VoiceNet,
+  level_vad: VoiceHysteresis,
+  heard_level_voice: bool,
   sleep: Sleep,
   /// DeepFilterNet only: RNNoise runs next to it and fills in where DFN3 cut a voice (clicks).
   rescue: ClickRescue,
@@ -292,6 +300,9 @@ impl AiVoiceIsolator {
       delay: DelayLine::new(),
       bypassed: false,
       heard_voice: false,
+      level_net: VoiceNet::new(),
+      level_vad: VoiceHysteresis::new(),
+      heard_level_voice: false,
       loading: None,
       mute_left: 0,
       no_voice_samples: 0,
@@ -399,6 +410,12 @@ impl AiVoiceIsolator {
     self.heard_voice
   }
 
+  /// A full voice (not a whisper) was heard in the block just processed: what the leveler and the
+  /// automatic input gain learn from. Same timing as `heard_voice`.
+  pub fn heard_level_voice(&self) -> bool {
+    self.heard_level_voice
+  }
+
   /// Model latency + gate lookahead (0 while bypassed). The same while a heavy model sleeps.
   pub fn output_lead_samples(&self) -> usize {
     if self.bypassed { 0 } else { latency_samples(self.active) + self.delay.len() }
@@ -475,6 +492,9 @@ impl AiVoiceIsolator {
         voice |= vad.frame_at(p, open, keep);
       });
       self.heard_voice = voice;
+      let (level_vad, mut level_voice) = (&mut self.level_vad, false);
+      self.level_net.process(samples, |p| level_voice |= level_vad.frame(p));
+      self.heard_level_voice = level_voice;
       return;
     }
     if self.bypassed {
@@ -531,6 +551,8 @@ impl AiVoiceIsolator {
       vad,
       vad_out,
       in_net,
+      level_net,
+      level_vad,
       out_net,
       soft_net,
       soft_voice_prob,
@@ -551,7 +573,7 @@ impl AiVoiceIsolator {
       rescue_warm_left,
       ..
     } = self;
-    let (mut voice, mut voice_out, mut voice_soft) = (false, false, false);
+    let (mut voice, mut voice_out, mut voice_soft, mut level_voice) = (false, false, false, false);
     if let (true, Some(net)) = (gate_on || rescue_on, soft_net.as_mut()) {
       net.process(samples, |p| {
         *soft_prob = soft_prob.max(p);
@@ -572,6 +594,7 @@ impl AiVoiceIsolator {
         *in_prob = in_prob.max(p);
         voice |= vad.frame_at(p, open, keep);
       });
+      level_net.process(samples, |p| level_voice |= level_vad.frame(p));
     }
     *no_voice_samples = if voice || voice_soft { 0 } else { no_voice_samples.saturating_add(n) };
     // During a takeover RNNoise works on a copy, the heavy model in place.
@@ -645,6 +668,7 @@ impl AiVoiceIsolator {
     }
     self.sleep.quiet_samples = if voice || activity { 0 } else { self.sleep.quiet_samples.saturating_add(n) };
     self.heard_voice = voice;
+    self.heard_level_voice = if heavy { level_voice } else { voice };
     // Lookahead: the gated audio is older than what the detectors just heard, so the gate opens
     // that much before an onset; the hold covers the delay too, so word tails stay as long.
     self.delay.set_len(if gate_on && self.lookahead { self.lookahead_len() } else { 0 });
@@ -662,6 +686,7 @@ impl AiVoiceIsolator {
   pub fn reset(&mut self) {
     self.reset_engines();
     self.in_net.reset();
+    self.level_net.reset();
     self.out_net = VoiceNet::new();
     if let Some(net) = self.soft_net.as_mut() {
       net.reset();
@@ -686,6 +711,7 @@ impl AiVoiceIsolator {
     // its first latency of output, all from before the pause, is silenced instead.
     self.mute_left = if self.active.is_heavy() { latency_samples(self.active) } else { 0 };
     self.in_net.input.clear();
+    self.level_net.input.clear();
     self.out_net.input.clear();
     if let Some(net) = self.soft_net.as_mut() {
       net.flush();
@@ -697,6 +723,7 @@ impl AiVoiceIsolator {
   fn reset_timing(&mut self) {
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceHysteresis::new();
+    self.level_vad = VoiceHysteresis::new();
     self.vad_out = VoiceHysteresis::new_output();
     self.delay.clear();
     self.bypassed = false;

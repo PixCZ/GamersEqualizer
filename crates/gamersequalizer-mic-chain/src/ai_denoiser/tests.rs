@@ -51,11 +51,31 @@ fn test_bypass_still_hears_speech_for_the_leveler() {
   let (mut speech_blocks, mut x) = (0, clean.clone());
   for b in x.chunks_mut(480) {
     isolator.process_samples(b);
-    speech_blocks += usize::from(isolator.heard_voice());
+    speech_blocks += usize::from(isolator.heard_level_voice());
   }
   assert_eq!(x, clean, "bypass leaves the audio untouched");
   assert_eq!(isolator.output_lead_samples(), 0);
   assert!(speech_blocks > clean.len() / 480 / 10, "heard speech in {speech_blocks} blocks");
+}
+
+#[test]
+fn test_leveler_detector_hears_speech_behind_every_model() {
+  // The leveler's detector is its own (2017 network, strict): behind a heavy model it must still
+  // hear a clean voice, and with RNNoise as the model it is the one the gate already uses.
+  let (clean, _) = speech_over_keyboard(-30.0, 0.0);
+  for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
+    let mut isolator = AiVoiceIsolator::new();
+    isolator.set_model(model);
+    let (mut level_blocks, mut x) = (0, clean.clone());
+    for b in x.chunks_mut(480) {
+      isolator.process_samples(b);
+      level_blocks += usize::from(isolator.heard_level_voice());
+      if model == DenoiseModel::RnNoise {
+        assert_eq!(isolator.heard_level_voice(), isolator.heard_voice());
+      }
+    }
+    assert!(level_blocks > clean.len() / 480 / 10, "{model:?}: heard speech in {level_blocks} blocks");
+  }
 }
 
 #[test]
@@ -1945,7 +1965,9 @@ fn leveler_report() {
         let mut old_voice = false;
         old_net.process(b, |p| old_voice |= old_vad.frame(p));
         iso.process_samples(b);
-        lv.process(b, if old_key { old_voice } else { iso.heard_voice() }, iso.output_lead_samples());
+        // `old_key`: a stand-alone 2017 detector, which the chain's own level detector must match
+        // (before it existed the leveler used the gate's `heard_voice`: DFN3 +13.6 dB at 84 s).
+        lv.process(b, if old_key { old_voice } else { iso.heard_level_voice() }, iso.output_lead_samples());
         if i % 50 == 49 {
           gains.push(lv.gain_db());
         }

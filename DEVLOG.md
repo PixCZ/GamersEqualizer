@@ -3067,3 +3067,46 @@ other rnnoise2 reports pass.
 
 - Why `chain_report` DFN3 moved since milestone 29 (a stale number or a real change in the leveler).
 - The pull requests for sonos/tract, once the build has run in the app for a while.
+
+---
+
+## Milestone 64: Leveler learns from its own strict detector (2026-11-17)
+
+A friend on a new build was far too loud and had to be turned down. `chain_report` showed the same on
+the dev PC: with DeepFilterNet 3 the voice came out 6-7 dB over the -24 dBFS target even at a normal
+input (0 dB: -16.0 / -17.4 dBFS, leveler +13.4 dB instead of +7.4), and with +20 dB clipped the
+leveler cut only -5.6 dB instead of -12. RNNoise was exact. Analysis:
+`docs/mic-leveler-loudness-analysis.md`.
+
+**Cause.** `d4b83bd` (milestone 35) swapped the raw-input detector for RNNoise 0.2 (`in_net`), which
+unlike the 2017 network hears whispers. Milestone 40 had kept the leveler on it "so a whisper is not
+learned as the speech level"; that stopped being true. Behind DFN3 / DPDFNet the leveler learned 3-3.7 s
+of whisper before the voice, and a loud frame moves a full memory (n = 2000) by only 0.65 dB per second,
+so the gain stayed high for a minute (`leveler_report`, input 0 dB, gain at 84 s: DFN3 +13.6 dB,
+DPDFNet +18.5 dB, RNNoise +7.1 dB; voice 45-49 s: DFN3 -13.6, DPDFNet -10.0 dBFS).
+
+**Change.** `AiVoiceIsolator` has a second raw-input detector for the leveler and the automatic input
+gain: the 2017 network with its own hysteresis (`level_net`, `level_vad`, `heard_level_voice()`), running
+only behind a heavy model or with the denoiser off (~0.26 % of a core); with RNNoise as the model its own
+probability is already that detector. The gate, the model's sleep and the click rescue stay on `in_net`:
+they should hear whispers.
+
+**Measured** (dev PC, private whisper scenario), voice as 45-49 s / 53-57 s in dBFS:
+
+| `chain_report`, DFN3    | Before                | After                 | Milestone 29      |
+| ----------------------- | --------------------- | --------------------- | ----------------- |
+| 0 dB: voice             | -16.0 / -17.4         | -22.5 / -24.4         | (RNNoise -21.5 / -24.2) |
+| 0 dB: leveler           | +13.4 dB              | +7.2 dB               | (RNNoise +7.4 dB) |
+| +20 dB clipped: voice   | -15.4 / -16.7         | -21.1 / -23.8         | -20.6 / -23.7     |
+| +20 dB clipped: leveler | -5.6 dB               | -12.0 dB              | -12 dB            |
+| 0 dB: pauses            | -106.9                | -110.9                | -113.4            |
+
+`leveler_report`: DFN3 and DPDFNet now give the same rows as a stand-alone 2017 detector, learned before
+44 s 710 ms (was 3.0-3.7 s); DPDFNet at 0 dB: gain +7.4 dB at 84 s, voice -20.2 / -24.3 dBFS. RNNoise
+unchanged. Gate green (`check.ps1`); new test `test_leveler_detector_hears_speech_behind_every_model`.
+
+**Open**
+
+- Not heard live; the friend's PC and a hot start (first run, new mic, "Learn again") are the check.
+- Pauses with DFN3 at 0 dB are 2.5 dB short of milestone 29 (-110.9 against -113.4): not looked into.
+- `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.

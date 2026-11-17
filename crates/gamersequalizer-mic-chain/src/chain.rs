@@ -391,7 +391,7 @@ impl MicChain {
       if s.leveler_saved_x10 != 0 && !self.leveler_seed_blocked {
         self.leveler.seed(s.leveler_saved_x10 as f32 / 10.0);
       }
-      self.leveler.process(mic, self.ai_denoiser.heard_voice(), self.ai_denoiser.output_lead_samples());
+      self.leveler.process(mic, self.ai_denoiser.heard_level_voice(), self.ai_denoiser.output_lead_samples());
     } else {
       self.leveler.reset();
     }

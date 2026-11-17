@@ -10,6 +10,8 @@ stay clean. Your voice sounds the same as before.
   for your voice.
 - **Pauses stay silent.** With DeepFilterNet or DPDFNet, long pauses no longer carry a short burst of
   hiss every few seconds.
+- **Your voice stays at the right loudness.** With DeepFilterNet or DPDFNet the microphone no longer
+  learns its level from a whisper or mumbling at the start, so you are not too loud for a minute.
 - **The CPU number says what it means.** The Mic tab shows the load as a share of one core and of the
   whole processor, so it no longer looks several times higher than in Task Manager.
 
