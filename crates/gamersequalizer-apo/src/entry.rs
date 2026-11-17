@@ -216,12 +216,16 @@ pub(super) unsafe extern "system" fn rt_apo_process(
     // The mic chain lines its audio up with the reference by time; the output writes the reference.
     let capture_time =
       (st.kind == ApoKind::Mic).then(|| capture_time_hns(input, st.rate.load(Ordering::Relaxed))).flatten();
-    let render_time = (st.kind == ApoKind::Output).then(|| render_time_hns(input)).flatten();
     process_connection(&*input, &mut *output, channels, |buf| {
       // Never block the audio thread: if configuration holds the lock, pass this block through.
       if let Ok(mut guard) = st.processor.try_lock()
         && let Some(processor) = guard.as_mut()
       {
+        // The output's block time is read only while this endpoint is the reference output.
+        let render_time = match &*processor {
+          Processor::Output(p) if p.wants_block_time() => render_time_hns(input),
+          _ => None,
+        };
         processor.process(buf, channels, capture_time, render_time);
       }
     });
@@ -231,6 +235,7 @@ pub(super) unsafe extern "system" fn rt_apo_process(
       && let Ok(mut guard) = st.processor.try_lock()
       && let Some(Processor::Output(processor)) = guard.as_mut()
     {
+      let render_time = if processor.wants_block_time() { render_time_hns(input) } else { None };
       processor.process_silence((*input).u32ValidFrameCount as usize, channels, render_time);
     }
   }

@@ -55,6 +55,13 @@ impl OutputProcessor {
     .ok()
   }
 
+  /// True while the daemon names this endpoint as the reference output: only then is the block's
+  /// time used (a pre-check of `RefFeed::take_part`, one atomic load, so other blocks skip the clock).
+  pub(super) fn wants_block_time(&self) -> bool {
+    let target = self.shm.as_ref().map_or(0, |shm| shm.layout().header.aec_ref_output_hash.load(Ordering::Relaxed));
+    target != 0 && target == self.endpoint
+  }
+
   /// In place on interleaved `buf`: preamp, then each channel through its own cascade.
   /// `time`: raw play time of `buf[0]` and whether the engine gave it (`render_time_hns`).
   pub(super) fn process(&mut self, buf: &mut [f32], channels: usize, time: Option<(u64, bool)>) {

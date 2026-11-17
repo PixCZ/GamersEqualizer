@@ -32,6 +32,9 @@ const MIN_OUT_RMS: f32 = 0.0005;
 /// Two windows in a row within this (1 ms, 48 kHz samples) make a measurement: one window can
 /// peak on a stray correlation (speech tail into silence read 18 ms for an 79 ms chain).
 const AGREE_SAMPLES: f32 = 48.0;
+/// Once measured, only every 8th window (~4 s) is analysed again: the delay changes only when a stage
+/// does, which `invalidate` reports, so the two FFTs need not run every half second.
+const RECHECK_SKIP_WINDOWS: u32 = 7;
 
 pub struct LatencyMeter {
   fft: Arc<dyn Fft<f32>>,
@@ -50,6 +53,11 @@ pub struct LatencyMeter {
   measured: Option<f32>,
   /// Last window's estimate, waiting for the next one to agree.
   candidate: Option<f32>,
+  /// Windows still to pass without analysis (only while `measured`).
+  skip_windows: u32,
+  /// Windows analysed (FFT run), for the test of the re-check rhythm.
+  #[cfg(test)]
+  analysed: u32,
 }
 
 impl Default for LatencyMeter {
@@ -80,6 +88,9 @@ impl LatencyMeter {
       out_acc: (0.0, 0),
       measured: None,
       candidate: None,
+      skip_windows: 0,
+      #[cfg(test)]
+      analysed: 0,
     }
   }
 
@@ -105,7 +116,12 @@ impl LatencyMeter {
       }
     }
     if self.output.len() >= WINDOW {
-      self.measure();
+      if self.measured.is_some() && self.skip_windows > 0 {
+        self.skip_windows -= 1;
+      } else {
+        self.measure();
+        self.skip_windows = if self.measured.is_some() { RECHECK_SKIP_WINDOWS } else { 0 };
+      }
       self.output.clear();
     }
   }
@@ -134,6 +150,10 @@ impl LatencyMeter {
   }
 
   fn measure(&mut self) {
+    #[cfg(test)]
+    {
+      self.analysed += 1;
+    }
     // The input history must reach MAX_LAG before the window's first output sample.
     if self.in_filled < HISTORY {
       return;
@@ -223,6 +243,23 @@ mod tests {
     assert!((got - delay as f32).abs() <= DS as f32, "measured {got} vs {delay}");
     meter.reset();
     assert_eq!(meter.measured_samples(), Some(got));
+  }
+
+  /// Once measured, most windows are not analysed again, and the value stays right.
+  #[test]
+  fn test_measured_delay_is_rechecked_rarely() {
+    let x = speechy(20 * 48_000);
+    let delay = 2_117;
+    let mut meter = LatencyMeter::new();
+    for (n, block) in x.chunks(480).enumerate() {
+      let out: Vec<f32> = (0..block.len()).map(|i| delayed(&x, n * 480 + i, delay) * 0.3).collect();
+      meter.push_input(block);
+      meter.push_output(&out);
+    }
+    let got = meter.measured_samples().unwrap_or(f32::NAN);
+    assert!((got - delay as f32).abs() <= DS as f32, "measured {got} vs {delay}");
+    // 20 s = ~39 windows; analysing every one would be 38.
+    assert!(meter.analysed <= 14, "analysed {} windows", meter.analysed);
   }
 
   /// Silence measures nothing (no made-up number).

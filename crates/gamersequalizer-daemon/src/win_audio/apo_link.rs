@@ -35,6 +35,10 @@ const LEVEL_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const ECHO_SAVE_MIN_CHANGE_X10: i32 = 20;
 /// After "Learn again", the APO still reports the old level for a moment: don't save it back.
 const LEVEL_RESET_QUIET: Duration = Duration::from_secs(2);
+/// `reference_seq` a service starts at with the loopback as the source. The microphone APO outlives the
+/// service and keeps the sequence it last saw: a restart with the other source must differ from it, or the
+/// delay locked against the other source's timestamps stays (shortcut: goes away with the loopback, step 3).
+const LOOPBACK_SEQ_BASE: u32 = 1 << 16;
 
 pub struct ApoLink {
   shm: Option<SharedMemoryClient>,
@@ -90,7 +94,7 @@ impl ApoLink {
       echo_cache_path: aec_delay_cache::echo_path(),
       saved_echo: None,
       last_echo_save: None,
-      reference_seq: 0,
+      reference_seq: initial_reference_seq(source),
       reference_switch_pending: false,
       capture_id: None,
       level_cache_path: aec_delay_cache::leveler_path(),
@@ -307,5 +311,23 @@ impl ApoLink {
       aec_delay_cache::save(&self.cache_path, key, delay);
       self.saved_delay = Some(delay);
     }
+  }
+}
+
+fn initial_reference_seq(source: RefSource) -> u32 {
+  match source {
+    RefSource::OutputEffect => 0,
+    RefSource::Loopback => LOOPBACK_SEQ_BASE,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Regression: a service restarted with the other source kept the APO's delay lock from the first one.
+  #[test]
+  fn the_two_sources_start_at_different_reference_seqs() {
+    assert_ne!(initial_reference_seq(RefSource::OutputEffect), initial_reference_seq(RefSource::Loopback));
   }
 }
