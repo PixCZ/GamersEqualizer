@@ -1,7 +1,7 @@
-//! Link to the capture APO running inside audiodg (session 0). The APO creates the Global
-//! mapping `APO_SHM_NAME`; this side opens it when it appears and mirrors:
-//! speaker reference + GUI settings in, AEC/denoise telemetry back into the daemon's mapping
-//! (which the UI already reads). Driven from the loopback thread.
+//! Link to the APOs running inside audiodg (session 0). The APO creates the Global mapping
+//! `APO_SHM_NAME`; this side opens it when it appears and mirrors: GUI settings (and, with the
+//! loopback source, the speaker reference) in, AEC/denoise/output telemetry back into the
+//! daemon's mapping (which the UI already reads). Driven from the loopback thread.
 //!
 //! It also persists the echo delay for the APO path: the APO runs as LOCAL SERVICE and can't
 //! read `%APPDATA%`, so the cached delay of the (default mic, reference output) pair is handed
@@ -19,7 +19,7 @@ use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use super::aec_delay_cache;
 use super::console_owner::ConsoleOwner;
 use super::dsp_watch::DspWatch;
-use super::loopback::resolve_default_capture_id;
+use super::loopback::{RefSource, resolve_default_capture_id};
 
 /// How often to look for the APO's mapping while it doesn't exist (cheap OpenFileMapping).
 const OPEN_RETRY: Duration = Duration::from_secs(2);
@@ -44,6 +44,8 @@ pub struct ApoLink {
   last_sync: Instant,
   last_apo_seq: u32,
   render_id: Option<String>,
+  /// Where the reference comes from: part of the delay and echo-strength cache keys.
+  source: RefSource,
   cache_path: PathBuf,
   cache_key: Option<String>,
   last_key_check: Option<Instant>,
@@ -71,14 +73,8 @@ pub struct ApoLink {
   copied_eqs: CopiedEqVersions,
 }
 
-impl Default for ApoLink {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
 impl ApoLink {
-  pub fn new() -> Self {
+  pub fn new(source: RefSource) -> Self {
     Self {
       shm: None,
       last_open_try: None,
@@ -86,6 +82,7 @@ impl ApoLink {
       last_sync: Instant::now(),
       last_apo_seq: 0,
       render_id: None,
+      source,
       cache_path: aec_delay_cache::default_path(),
       cache_key: None,
       last_key_check: None,
@@ -249,7 +246,7 @@ impl ApoLink {
         self.capture_id = capture.clone();
       }
       let key = match (capture, self.render_id.as_deref()) {
-        (Some(capture), Some(render)) => Some(aec_delay_cache::key(&capture, render)),
+        (Some(capture), Some(render)) => Some(aec_delay_cache::key(&capture, render, self.source)),
         _ => None,
       };
       if key != self.cache_key {

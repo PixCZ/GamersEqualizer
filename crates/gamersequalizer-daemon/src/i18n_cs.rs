@@ -791,8 +791,8 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Stage 1: Speaker echo cancellation (AEC)", "Stupeň 1: Potlačení ozvěny z reproduktorů (AEC)"),
   (
-    "Speaker output is captured (WASAPI loopback) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
-    "Výstup reproduktorů se zachytává (WASAPI loopback) a odstraňuje ho z mikrofonu potlačovač ozvěny z WebRTC (AEC3): adaptivní filtr plus potlačení zbytku ozvěny. Zpoždění ozvěny se měří vzájemnou korelací (GCC-PHAT), pamatuje se pro každou dvojici zařízení a mění se až po opakovaném potvrzení.",
+    "What the speakers play is taken by GamersEqualizer's output EQ on that device (before your sidetone is mixed in) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
+    "Co hraje do reproduktorů, odebírá výstupní EQ GamersEqualizeru na tom zařízení (ještě před přimícháním vašeho příposlechu) a z mikrofonu to odstraňuje potlačovač ozvěny z WebRTC (AEC3): adaptivní filtr plus potlačení zbytku ozvěny. Zpoždění ozvěny se měří vzájemnou korelací (GCC-PHAT), pamatuje se pro každou dvojici zařízení a mění se až po opakovaném potvrzení.",
   ),
   ("Echo", "Ozvěna"),
   ("Details", "Podrobnosti"),
@@ -813,9 +813,25 @@ pub static CS: &[(&str, &str)] = &[
   ("Correlation vs. delay", "Korelace podle zpoždění"),
   ("History (60 s): ERLE dB / delay ms", "Historie (60 s): ERLE dB / zpoždění ms"),
   ("Disabled", "Vypnuto"),
+  ("the current output", "aktuální výstup"),
   (
-    "No speaker reference (loopback not running or no timestamps)",
-    "Chybí reference reproduktorů (loopback neběží nebo chybí časové značky)",
+    "No speaker reference: the output EQ is not installed on \"{}\". Install it there (Output & headphones) and the echo is cancelled.",
+    "Chybí reference reproduktorů: na „{}“ není nainstalovaný výstupní EQ. Nainstalujte ho tam (Výstup a sluchátka) a ozvěna se bude potlačovat.",
+  ),
+  (
+    "No speaker reference: the output EQ on \"{}\" is older than this app. Update it in Output & headphones.",
+    "Chybí reference reproduktorů: výstupní EQ na „{}“ je starší než tato aplikace. Aktualizujte ho na kartě Výstup a sluchátka.",
+  ),
+  (
+    "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. The app log ([ApoNote]) says more.",
+    "Chybí reference reproduktorů: Windows výstupnímu EQ na „{}“ neřekla, na kterém zařízení běží. Víc řekne log aplikace ([ApoNote]).",
+  ),
+  ("No speaker reference: no output device", "Chybí reference reproduktorů: žádné výstupní zařízení"),
+  ("No speaker reference (loopback capture not running)", "Chybí reference reproduktorů (zachytávání loopback neběží)"),
+  ("Looking for the speaker reference...", "Hledá se reference reproduktorů..."),
+  (
+    "No speaker reference (no timestamps from the microphone)",
+    "Chybí reference reproduktorů (mikrofon nedává časové značky)",
   ),
   ("Ready: nothing playing right now", "Připraveno: momentálně nic nehraje"),
   ("Waiting for speaker audio to measure the delay", "Čekám na zvuk z reproduktorů pro změření zpoždění"),
@@ -1038,8 +1054,8 @@ pub static CS: &[(&str, &str)] = &[
     "Discord, hry a další aplikace používají výchozí mikrofon, ne tento.",
   ),
   (
-    "A new sound device? Your headphone correction and EQ are not applied on it. Open GamersEqualizer to set it up.",
-    "Nové zvukové zařízení? Korekce sluchátek a EQ se na něm nepoužívají. Nastavíte to v GamersEqualizer.",
+    "A new sound device? Your headphone correction, EQ and the mic's echo cancellation do not work on it. Open GamersEqualizer to set it up.",
+    "Nové zvukové zařízení? Korekce sluchátek, EQ ani potlačení ozvěny v mikrofonu na něm nefungují. Nastavíte to v GamersEqualizer.",
   ),
   (
     "Nobody hears you. Fix it from the GamersEqualizer icon in the notification area.",

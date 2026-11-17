@@ -1,4 +1,5 @@
-//! The output EQ processor, which also mixes the sidetone in.
+//! The output EQ processor, which also mixes the sidetone in and feeds the echo canceller's
+//! speaker reference (`ref_feed.rs`).
 
 use super::*;
 
@@ -15,18 +16,26 @@ pub(super) struct OutputProcessor {
   active: bool,
   owner: OwnerWatch,
   failed: bool,
-  /// Sidetone: reader of the mic APO's ring, its mono block, and this endpoint's hash
-  /// (0 = unknown: never plays).
+  /// Sidetone: reader of the mic APO's ring and its mono block.
   sidetone: SidetoneReader,
   sidetone_buf: Vec<f32>,
-  pub(super) sidetone_endpoint: u32,
   /// Sidetone was mixed into the previous block.
   sidetone_playing: bool,
+  /// `device_hash` of this endpoint, 0 = unknown: then it neither plays sidetone nor writes the
+  /// reference (it cannot tell it is the right output).
+  pub(super) endpoint: u32,
+  /// Writer of the echo canceller's reference; the error says why this stream cannot feed it.
+  pub(super) ref_feed: std::result::Result<RefFeed, String>,
 }
 
 impl OutputProcessor {
   /// None (pass-through) only if building panicked. Without the mapping it passes through.
-  pub(super) fn create(shm: Option<SharedMemoryClient>, sample_rate: f32, channels: u32) -> Option<Self> {
+  pub(super) fn create(
+    shm: Option<SharedMemoryClient>,
+    sample_rate: f32,
+    channels: u32,
+    instance_id: u32,
+  ) -> Option<Self> {
     catch_unwind(AssertUnwindSafe(move || OutputProcessor {
       shm,
       sample_rate,
@@ -39,24 +48,57 @@ impl OutputProcessor {
       failed: false,
       sidetone: SidetoneReader::default(),
       sidetone_buf: Vec::with_capacity(4096),
-      sidetone_endpoint: 0,
       sidetone_playing: false,
+      endpoint: 0,
+      ref_feed: RefFeed::new(sample_rate as u32, instance_id),
     }))
     .ok()
   }
 
   /// In place on interleaved `buf`: preamp, then each channel through its own cascade.
-  pub(super) fn process(&mut self, buf: &mut [f32], channels: usize) {
+  /// `time`: raw play time of `buf[0]` and whether the engine gave it (`render_time_hns`).
+  pub(super) fn process(&mut self, buf: &mut [f32], channels: usize, time: Option<(u64, bool)>) {
     if self.failed || channels == 0 {
       return;
     }
-    let ran = catch_unwind(AssertUnwindSafe(|| self.process_inner(buf, channels)));
+    let ran = catch_unwind(AssertUnwindSafe(|| self.process_inner(buf, channels, time)));
     if ran.is_err() {
-      self.failed = true;
+      self.fail();
     }
   }
 
-  fn process_inner(&mut self, buf: &mut [f32], channels: usize) {
+  /// A block the engine marked silent (nothing is mixed): `process` does not run for it, but the
+  /// reference must hear the silence, or the next audio would be timed one block too early.
+  pub(super) fn process_silence(&mut self, frames: usize, channels: usize, time: Option<(u64, bool)>) {
+    if self.failed || channels == 0 {
+      return;
+    }
+    let ran = catch_unwind(AssertUnwindSafe(|| {
+      let Some(shm) = self.shm.as_ref() else {
+        return;
+      };
+      let h = &shm.layout().header;
+      let now = Instant::now();
+      let owner_live = self.owner.live(h, now);
+      if self.ref_feed.as_mut().is_ok_and(|feed| feed.take_part(h, owner_live, self.endpoint, now)) {
+        self.feed_reference(None, frames, channels, time);
+      }
+    }));
+    if ran.is_err() {
+      self.fail();
+    }
+  }
+
+  /// The Application-log note for the end of the stream about the reference, if there is one.
+  pub(super) fn reference_stop_note(&self) -> Option<(Level, String)> {
+    if self.failed {
+      let text = "processing panicked: passed audio through and fed no speaker reference until the stream stopped";
+      return Some((Level::Warning, text.to_string()));
+    }
+    self.ref_feed.as_ref().ok().and_then(RefFeed::stop_note)
+  }
+
+  fn process_inner(&mut self, buf: &mut [f32], channels: usize, time: Option<(u64, bool)>) {
     let Some(shm) = self.shm.as_ref() else {
       return;
     };
@@ -65,8 +107,10 @@ impl OutputProcessor {
     h.out_apo_blocks.fetch_add(1, Ordering::Relaxed);
     h.out_apo_sample_rate.store(self.sample_rate as u32, Ordering::Relaxed);
     h.out_apo_channels.store(channels as u32, Ordering::Relaxed);
+    let now = Instant::now();
+    let owner_live = self.owner.live(h, now);
     // Nobody's settings to apply (app not running for the user at the console): untouched.
-    let enabled = self.owner.live(h, Instant::now()) && !h.master_bypass.load(Ordering::Relaxed);
+    let enabled = owner_live && !h.master_bypass.load(Ordering::Relaxed);
     if enabled {
       let version = h.out_eq_version.load(Ordering::Acquire);
       if self.version != Some(version) {
@@ -78,17 +122,18 @@ impl OutputProcessor {
       }
     }
     let goal = if enabled && self.active { 1.0 } else { 0.0 };
+    let feed = self.ref_feed.as_mut().is_ok_and(|feed| feed.take_part(h, owner_live, self.endpoint, now));
+    let frames = buf.len() / channels;
     // The mono sidetone block for this buffer is in `sidetone_buf` when this is true.
-    let sidetone = read_sidetone(
-      &mut self.sidetone,
-      &mut self.sidetone_buf,
-      layout,
-      buf.len() / channels,
-      self.sample_rate,
-      self.sidetone_endpoint,
-    );
+    let sidetone =
+      read_sidetone(&mut self.sidetone, &mut self.sidetone_buf, layout, frames, self.sample_rate, self.endpoint);
     let sidetone_started = sidetone && !std::mem::replace(&mut self.sidetone_playing, sidetone);
+    // The reference is taken after the EQ and before the sidetone in each branch below: what
+    // the speakers play, without the user's own voice.
     if self.eq.wet <= 0.0 && goal <= 0.0 {
+      if feed {
+        self.feed_reference(Some(&*buf), frames, channels, time);
+      }
       if sidetone {
         if sidetone_started {
           // The limiter did not run while nothing was mixed in: its gain is from back then.
@@ -107,6 +152,9 @@ impl OutputProcessor {
     if self.eq.wet >= 1.0 && goal >= 1.0 {
       // After the EQ (the voice gets no game profile), before the limiter (it guards the sum).
       self.eq.run(buf, channels);
+      if feed {
+        self.feed_reference(Some(&*buf), frames, channels, time);
+      }
       if sidetone {
         add_sidetone(buf, channels, &self.sidetone_buf);
       }
@@ -115,10 +163,37 @@ impl OutputProcessor {
     }
     // Volume matching / user gain may let peaks pass 0 dBFS: turn them down instead of clipping.
     self.eq.crossfade(buf, channels, goal, |wet| self.limiter.process(wet, channels));
+    if feed {
+      self.feed_reference(Some(&*buf), frames, channels, time);
+    }
     if sidetone {
       // shortcut: during the 20 ms EQ fade the sum only gets the static safety curve.
       add_sidetone(buf, channels, &self.sidetone_buf);
       buf.iter_mut().for_each(|s| *s = soft_limit(*s));
+    }
+  }
+
+  /// After a panic: pass through from now on, and give the reference ring up, so another
+  /// instance can write it instead of the ring standing still.
+  fn fail(&mut self) {
+    self.failed = true;
+    if let (Some(shm), Ok(feed)) = (self.shm.as_ref(), self.ref_feed.as_ref()) {
+      feed.release(&shm.layout().header);
+    }
+  }
+
+  fn feed_reference(&mut self, samples: Option<&[f32]>, frames: usize, channels: usize, time: Option<(u64, bool)>) {
+    if let (Some(shm), Ok(feed)) = (self.shm.as_mut(), self.ref_feed.as_mut()) {
+      feed.write(&mut shm.ring_buffer(), samples, frames, channels, time);
+    }
+  }
+}
+
+impl Drop for OutputProcessor {
+  fn drop(&mut self) {
+    // A clean stop: the next instance on this output writes at once instead of waiting.
+    if let (Some(shm), Ok(feed)) = (self.shm.as_ref(), self.ref_feed.as_ref()) {
+      feed.release(&shm.layout().header);
     }
   }
 }

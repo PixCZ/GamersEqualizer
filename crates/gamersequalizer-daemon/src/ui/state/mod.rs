@@ -4,7 +4,9 @@ use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::ParametricProfile;
-use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout};
+use gamersequalizer_common::shm::{
+  APO_SHM_NAME, AecRefStatus, AecState, DenoiseLimit, DenoiseModel, ShmHeader, ShmLayout,
+};
 use gamersequalizer_common::sidetone::{SidetonePair, SidetonePairs};
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;

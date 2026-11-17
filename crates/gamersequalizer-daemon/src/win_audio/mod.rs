@@ -1,4 +1,5 @@
 pub mod aec_delay_cache;
+pub mod aec_reference;
 pub mod apo_install;
 pub mod apo_link;
 pub mod app_channels;

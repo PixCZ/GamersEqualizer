@@ -45,9 +45,9 @@ pub(super) struct ApoState {
 }
 
 enum Processor {
-  /// Boxed: the mic chain is kilobytes, the output EQ a few pointers.
+  /// Boxed: the mic chain is kilobytes, the output processor (with its reference feed) hundreds of bytes.
   Mic(Box<MicProcessor>),
-  Output(OutputProcessor),
+  Output(Box<OutputProcessor>),
   Stream(StreamProcessor),
 }
 
@@ -213,16 +213,26 @@ pub(super) unsafe extern "system" fn rt_apo_process(
     if input.is_null() || output.is_null() {
       return;
     }
-    // Only the mic chain lines its audio up with the reference by time.
-    let qpc_hns = (st.kind == ApoKind::Mic).then(|| capture_time_hns(input, st.rate.load(Ordering::Relaxed))).flatten();
+    // The mic chain lines its audio up with the reference by time; the output writes the reference.
+    let capture_time =
+      (st.kind == ApoKind::Mic).then(|| capture_time_hns(input, st.rate.load(Ordering::Relaxed))).flatten();
+    let render_time = (st.kind == ApoKind::Output).then(|| render_time_hns(input)).flatten();
     process_connection(&*input, &mut *output, channels, |buf| {
       // Never block the audio thread: if configuration holds the lock, pass this block through.
       if let Ok(mut guard) = st.processor.try_lock()
         && let Some(processor) = guard.as_mut()
       {
-        processor.process(buf, channels, qpc_hns);
+        processor.process(buf, channels, capture_time, render_time);
       }
     });
+    // A silent output block is not processed, but the reference must count it.
+    if st.kind == ApoKind::Output
+      && (*input).u32BufferFlags == BUFFER_SILENT
+      && let Ok(mut guard) = st.processor.try_lock()
+      && let Some(Processor::Output(processor)) = guard.as_mut()
+    {
+      processor.process_silence((*input).u32ValidFrameCount as usize, channels, render_time);
+    }
   }
 }
 
@@ -276,10 +286,11 @@ pub(super) unsafe extern "system" fn cfg_lock_for_process(
           p.sidetone.endpoint_hash = endpoint;
           Processor::Mic(p)
         }),
-        ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame).map(|mut p| {
-          p.sidetone_endpoint = endpoint;
-          Processor::Output(p)
-        }),
+        ApoKind::Output => OutputProcessor::create(shared_memory(st), rate, format.dwSamplesPerFrame, st.instance_id)
+          .map(|mut p| {
+            p.endpoint = endpoint;
+            Processor::Output(Box::new(p))
+          }),
         ApoKind::Stream => shared_memory(st)
           .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
           .map(Processor::Stream),
@@ -292,6 +303,16 @@ pub(super) unsafe extern "system" fn cfg_lock_for_process(
       };
       let msg = format!("stream {}, mode {:?}: {outcome}", describe_format(&format), GUID::from_u128(mode));
       note_for(st, level, msg);
+      if let Some(Processor::Output(p)) = &processor {
+        let no_reference = "this output never feeds the echo canceller's speaker reference";
+        if p.endpoint == 0 {
+          let why = "Windows did not say which device this output is: it plays no sidetone and";
+          note_for(st, Level::Warning, format!("{why} {no_reference}"));
+        }
+        if let Err(e) = &p.ref_feed {
+          note_for(st, Level::Warning, format!("{e}: {no_reference}"));
+        }
+      }
       if let Ok(mut slot) = st.processor.lock() {
         // Replacing drops a previous processor: keep a destructor panic inside this DLL.
         let old = std::mem::replace(&mut *slot, processor);
@@ -312,8 +333,14 @@ pub(super) unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -
       return APOERR_ALREADY_UNLOCKED;
     }
     if let Ok(mut slot) = st.processor.lock() {
-      if let Some(Processor::Mic(mic)) = slot.as_ref() {
-        mic.note_stop();
+      match slot.as_ref() {
+        Some(Processor::Mic(mic)) => mic.note_stop(),
+        Some(Processor::Output(out)) => {
+          if let Some((level, text)) = out.reference_stop_note() {
+            note_for(st, level, text);
+          }
+        }
+        _ => {}
       }
       // Dropping may run arbitrary DSP destructors: keep a panic inside this DLL.
       let old = slot.take();
@@ -402,10 +429,11 @@ impl ApoState {
 }
 
 impl Processor {
-  fn process(&mut self, buf: &mut [f32], channels: usize, qpc_hns: Option<u64>) {
+  /// `capture_time`: the mic block's recording time; `render_time`: the output block's play time.
+  fn process(&mut self, buf: &mut [f32], channels: usize, capture_time: Option<u64>, render_time: Option<(u64, bool)>) {
     match self {
-      Processor::Mic(p) => p.process(buf, channels, qpc_hns),
-      Processor::Output(p) => p.process(buf, channels),
+      Processor::Mic(p) => p.process(buf, channels, capture_time),
+      Processor::Output(p) => p.process(buf, channels, render_time),
       Processor::Stream(p) => p.process(buf, channels),
     }
   }

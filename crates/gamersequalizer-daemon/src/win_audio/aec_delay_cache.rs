@@ -4,6 +4,7 @@
 //! - the voice leveler's learned speech level per microphone (dB x 10),
 //! - the measured echo strength per (microphone, speaker output) pair (dB x 10 under the reference).
 
+use super::loopback::RefSource;
 use log::warn;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -31,8 +32,14 @@ pub fn echo_path() -> PathBuf {
   app_dir().join(ECHO_FILE_NAME)
 }
 
-pub fn key(capture_id: &str, render_id: &str) -> String {
-  format!("{capture_id}|{render_id}")
+/// Per microphone, output and reference source: the two sources differ by a few milliseconds, so
+/// a delay measured on one must not warm-start the other. The loopback keeps the key it always
+/// had (the delays saved so far were measured on it).
+pub fn key(capture_id: &str, render_id: &str, source: RefSource) -> String {
+  match source {
+    RefSource::Loopback => format!("{capture_id}|{render_id}"),
+    RefSource::OutputEffect => format!("{capture_id}|{render_id}|apo"),
+  }
 }
 
 /// Missing or corrupt file -> None (and a log line); never an error for the caller.
@@ -112,6 +119,14 @@ mod tests {
     save(&path, "a|b", 7);
     assert_eq!(load(&path, "a|b"), Some(7));
     let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn each_reference_source_has_its_own_key() {
+    let apo = key("{mic}", "{out}", RefSource::OutputEffect);
+    let loopback = key("{mic}", "{out}", RefSource::Loopback);
+    assert_ne!(apo, loopback);
+    assert_eq!(loopback, "{mic}|{out}", "delays saved before keep their key");
   }
 
   #[test]

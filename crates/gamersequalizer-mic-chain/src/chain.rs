@@ -501,8 +501,9 @@ impl MicChain {
       }
     }
 
+    // A source exists (`tap_active`) but has written nothing yet: nothing has played.
     let Some(idx) = ref_now else {
-      return AecState::NoReference;
+      return AecState::ReferenceSilent;
     };
     let Some(delay) = delay_estimator.current_delay() else {
       return if stale { AecState::ReferenceSilent } else { AecState::Measuring };

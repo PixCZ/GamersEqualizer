@@ -1,5 +1,7 @@
-//! Speaker reference for the echo canceller: WASAPI loopback capture of the output device,
-//! written with QPC timestamps into the shared-memory ring.
+//! The thread behind the echo canceller's speaker reference. By default our output effect on the
+//! reference output writes the ring itself (`aec_reference.rs`); this thread decides which output
+//! that is and drives the link to the APOs. `GAMERSEQUALIZER_AEC_REF=loopback` instead captures the
+//! output with WASAPI loopback and writes the ring from here, as before.
 
 use log::{info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,9 +20,10 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{PCWSTR, w};
 
-use gamersequalizer_common::shm::StereoFrame;
+use gamersequalizer_common::shm::{AecRefStatus, StereoFrame};
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
+use super::aec_reference::OutputReference;
 use super::apo_link::ApoLink;
 use super::{mmdevice, worker};
 
@@ -39,6 +42,17 @@ const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: windows::core::GUID =
 /// The echo canceller's reference runs at 48 kHz; WASAPI resamples to it.
 const DSP_SAMPLE_RATE: u32 = 48_000;
 const WAVE_FORMAT_IEEE_FLOAT_TAG: u16 = 3;
+/// Environment variable that picks the reference source (`loopback`); anything else = the APO.
+const SOURCE_VARIABLE: &str = "GAMERSEQUALIZER_AEC_REF";
+
+/// Where the echo canceller's speaker reference comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefSource {
+  /// Our output effect on the reference output writes the ring (the default).
+  OutputEffect,
+  /// WASAPI loopback capture in this process.
+  Loopback,
+}
 
 /// Format a client was actually initialized with.
 struct StreamFormat {
@@ -105,9 +119,25 @@ pub fn spawn(
       let Some(mut shm) = worker::open_shm("Loopback", || running.load(Ordering::SeqCst)) else {
         return;
       };
+      let source = RefSource::from_env();
       let mut seen = worker::RepeatFilter::default();
-      let mut apo = ApoLink::new();
-      info!("[Loopback] speaker reference thread started");
+      let mut apo = ApoLink::new(source);
+      info!(
+        "[Loopback] speaker reference thread started, source {source:?} (set {SOURCE_VARIABLE}=loopback to compare)"
+      );
+      if source == RefSource::OutputEffect {
+        let mut reference = OutputReference::default();
+        while running.load(Ordering::SeqCst) {
+          reference.tick(&shm, &mut apo, &reference_id);
+          std::thread::sleep(IDLE_POLL);
+        }
+      } else {
+        let h = &shm.layout().header;
+        h.aec_ref_status.store(AecRefStatus::Loopback.to_u32(), Ordering::Relaxed);
+        // The window keeps this mapping across a service restart: a hash left by a run with the
+        // APO source would make an output APO write the ring beside the loopback.
+        h.aec_ref_output_hash.store(0, Ordering::Relaxed);
+      }
       while running.load(Ordering::SeqCst) {
         // No app records through the mic filter: no reference capture, only the APO mirroring
         // (settings in, telemetry out), which also tells when the filter starts again.
@@ -130,11 +160,25 @@ pub fn spawn(
           std::thread::sleep(Duration::from_secs(1));
         }
       }
-      shm.layout().header.tap_active.store(false, Ordering::Relaxed);
+      let h = &shm.layout().header;
+      h.tap_active.store(false, Ordering::Relaxed);
+      h.aec_ref_output_hash.store(0, Ordering::Relaxed);
       apo.set_tap_active(false);
       info!("[Loopback] speaker reference thread stopped");
     })
     .ok()
+}
+
+impl RefSource {
+  /// Read once at service start.
+  /// shortcut: the switch only keeps the loopback for the comparison on Windows; it goes away
+  /// with the loopback once the measurement is in DEVLOG.
+  fn from_env() -> Self {
+    match std::env::var(SOURCE_VARIABLE) {
+      Ok(v) if v.eq_ignore_ascii_case("loopback") => RefSource::Loopback,
+      _ => RefSource::OutputEffect,
+    }
+  }
 }
 
 /// Id of the render device the reference is taken from: the explicit one, else the

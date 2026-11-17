@@ -24,12 +24,12 @@ pub use reference_ring::{ShmRingBuffer, StereoFrame};
 /// build keeps its own mapping instead of both reading each other's memory with different layouts.
 macro_rules! shm_version {
   () => {
-    22
+    23
   };
 }
 pub const SHM_VERSION: u32 = shm_version!();
 /// Size of `ShmLayout` at `SHM_VERSION`.
-const SHM_LAYOUT_SIZE: usize = 1_254_808;
+const SHM_LAYOUT_SIZE: usize = 1_254_832;
 const _: () = assert!(size_of::<ShmLayout>() == SHM_LAYOUT_SIZE, "layout changed: bump shm_version! and the size");
 pub const SHM_NAME: &str = concat!("Local\\GamersEqualizer_SpeakerRef_Buffer_v", shm_version!());
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
@@ -74,7 +74,7 @@ pub const MIC_CHAIN_STEREO_REF: u32 = 1 << 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AecState {
   Disabled,
-  /// No loopback reference is being captured at all.
+  /// No reference source exists (`tap_active` false); `AecRefStatus` says why.
   NoReference,
   /// Reference stream exists but nothing is playing.
   ReferenceSilent,
@@ -82,6 +82,27 @@ pub enum AecState {
   Measuring,
   /// Delay confirmed, filter running.
   Locked,
+  Unknown(u32),
+}
+
+/// Where the echo canceller's speaker reference comes from, or why there is none (daemon -> window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AecRefStatus {
+  /// The daemon has not decided yet.
+  NotChecked,
+  /// Our output effect on the reference output writes it.
+  OutputEffect,
+  /// No output device to take it from.
+  NoOutput,
+  /// Our output effect is not installed on the reference output.
+  EffectMissing,
+  /// Installed, but an older build than the app: it does not write the reference.
+  EffectOutdated,
+  /// The effect runs, but Windows did not say which device it is on, so it cannot tell it is
+  /// the reference output.
+  EndpointUnknown,
+  /// `GAMERSEQUALIZER_AEC_REF=loopback`: WASAPI loopback capture, kept for comparison.
+  Loopback,
   Unknown(u32),
 }
 
@@ -139,6 +160,34 @@ impl AecState {
       3 => AecState::Measuring,
       4 => AecState::Locked,
       other => AecState::Unknown(other),
+    }
+  }
+}
+
+impl AecRefStatus {
+  pub fn to_u32(self) -> u32 {
+    match self {
+      AecRefStatus::NotChecked => 0,
+      AecRefStatus::OutputEffect => 1,
+      AecRefStatus::NoOutput => 2,
+      AecRefStatus::EffectMissing => 3,
+      AecRefStatus::EffectOutdated => 4,
+      AecRefStatus::EndpointUnknown => 5,
+      AecRefStatus::Loopback => 6,
+      AecRefStatus::Unknown(v) => v,
+    }
+  }
+
+  pub fn from_u32(v: u32) -> Self {
+    match v {
+      0 => AecRefStatus::NotChecked,
+      1 => AecRefStatus::OutputEffect,
+      2 => AecRefStatus::NoOutput,
+      3 => AecRefStatus::EffectMissing,
+      4 => AecRefStatus::EffectOutdated,
+      5 => AecRefStatus::EndpointUnknown,
+      6 => AecRefStatus::Loopback,
+      other => AecRefStatus::Unknown(other),
     }
   }
 }

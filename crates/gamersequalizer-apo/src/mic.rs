@@ -41,7 +41,7 @@ pub(super) struct MicProcessor {
   pub(super) bridge: Option<RateBridge>,
   /// Set after a panic in the chain: pass audio through from then on.
   pub(super) failed: bool,
-  clock: MicClock,
+  clock: StreamClock,
   owner: OwnerWatch,
   /// Pass through unless a daemon owns the mapping. Only tests turn it off (no daemon there).
   pub(super) follow_owner: bool,
@@ -153,7 +153,7 @@ impl MicProcessor {
         mono_out: vec![0.0; 4096],
         bridge,
         failed: false,
-        clock: MicClock::new(rate),
+        clock: StreamClock::new(rate),
         owner: OwnerWatch::default(),
         follow_owner: true,
         was_live: false,

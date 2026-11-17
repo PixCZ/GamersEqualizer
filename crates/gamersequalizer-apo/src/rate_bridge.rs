@@ -26,7 +26,7 @@ const SINC_LEN: usize = 64;
 const OVERSAMPLING: usize = 128;
 const WINDOW: WindowFunction = WindowFunction::BlackmanHarris2;
 /// Covers an 85 ms engine period at 192 kHz without growing any buffer.
-const PREALLOC_FRAMES: usize = 16_384;
+pub(super) const PREALLOC_FRAMES: usize = 16_384;
 /// Rates the bridge accepts; outside it the APO passes audio through.
 const MIN_RATE: u32 = 8_000;
 const MAX_RATE: u32 = 384_000;
@@ -54,9 +54,11 @@ pub struct RateBridge {
   underruns: u64,
 }
 
-/// One resampler with its input FIFO and output scratch.
-struct Stage {
+/// One resampler with its input FIFO and output scratch, interleaved over `channels`.
+pub(super) struct Stage {
   resampler: Async<f32>,
+  channels: usize,
+  /// Frames per resampler call.
   chunk: usize,
   /// Output frames still to drop: the sinc filter's delay, once after a start or reset.
   /// (rubato < 1 withheld it itself; 5 puts it at the front of the output, which added up to
@@ -77,8 +79,8 @@ impl RateBridge {
   }
 
   pub fn new(device_rate: u32) -> Result<Self, ResamplerConstructionError> {
-    let up = Stage::new(device_rate, REF_SAMPLE_RATE)?;
-    let down = Stage::new(REF_SAMPLE_RATE, device_rate)?;
+    let up = Stage::new(device_rate, REF_SAMPLE_RATE, 1)?;
+    let down = Stage::new(REF_SAMPLE_RATE, device_rate, 1)?;
     // Worst case short of output: a device chunk stuck in `up`, a 48 kHz chunk stuck in
     // `down`, the frames each sinc filter withholds at start-up (its delay), plus rounding of
     // the fractional resampler positions. 48 kHz counts are converted to device frames.
@@ -102,11 +104,8 @@ impl RateBridge {
   /// Back to the state of `new` without allocating: after a pause the FIFOs hold audio from
   /// before it (~5 ms that would play first, out of place).
   pub fn reset(&mut self) {
-    for stage in [&mut self.up, &mut self.down] {
-      stage.resampler.reset();
-      stage.fifo.clear();
-      stage.skip = stage.resampler.output_delay();
-    }
+    self.up.reset();
+    self.down.reset();
     self.out_fifo.clear();
     self.out_fifo.resize(self.prime, 0.0);
   }
@@ -121,10 +120,9 @@ impl RateBridge {
     mut chain: impl FnMut(&[f32], &mut [f32], Option<u64>),
   ) -> Result<(), ResampleError> {
     // Frames already queued in `up` are older than `block[0]`; the first chunk starts there.
-    let queued_hns = self.up.fifo.len() as u64 * HNS_PER_SEC / self.device_rate as u64;
-    let chain_time = time_hns.map(|t| t.saturating_sub(queued_hns));
+    let chain_time = time_hns.map(|t| t.saturating_sub(self.up.queued_hns(self.device_rate)));
 
-    self.up.fifo.extend_from_slice(block);
+    self.up.push(block.iter().copied());
     self.chain_in.clear();
     self.up.drain_into(&mut self.chain_in)?;
 
@@ -132,7 +130,7 @@ impl RateBridge {
       self.chain_out.clear();
       self.chain_out.resize(self.chain_in.len(), 0.0);
       chain(&self.chain_in, &mut self.chain_out, chain_time);
-      self.down.fifo.extend_from_slice(&self.chain_out);
+      self.down.push(self.chain_out.iter().copied());
     }
     self.down.drain_into(&mut self.out_fifo)?;
 
@@ -156,7 +154,7 @@ impl RateBridge {
 }
 
 impl Stage {
-  fn new(rate_in: u32, rate_out: u32) -> Result<Self, ResamplerConstructionError> {
+  pub(super) fn new(rate_in: u32, rate_out: u32, channels: usize) -> Result<Self, ResamplerConstructionError> {
     let params = SincInterpolationParameters {
       sinc_len: SINC_LEN,
       f_cutoff: None, // rubato picks it from SINC_LEN and WINDOW (calculate_cutoff)
@@ -164,30 +162,52 @@ impl Stage {
       interpolation: SincInterpolationType::Linear,
       window: WINDOW,
     };
+    let channels = channels.max(1);
     let chunk = (rate_in / 1000 * CHUNK_MS).max(1) as usize;
-    let resampler = Async::new_sinc(rate_out as f64 / rate_in as f64, 1.0, &params, chunk, 1, FixedAsync::Input)?;
-    let scratch = vec![0.0; resampler.output_frames_max()];
+    let resampler =
+      Async::new_sinc(rate_out as f64 / rate_in as f64, 1.0, &params, chunk, channels, FixedAsync::Input)?;
+    let scratch = vec![0.0; resampler.output_frames_max() * channels];
     let skip = resampler.output_delay();
-    Ok(Self { resampler, chunk, skip, fifo: Vec::with_capacity(chunk + PREALLOC_FRAMES), scratch })
+    let fifo = Vec::with_capacity((chunk + PREALLOC_FRAMES) * channels);
+    Ok(Self { resampler, channels, chunk, skip, fifo, scratch })
   }
 
-  /// Resamples every full chunk in `fifo` and appends the result to `out`.
-  fn drain_into(&mut self, out: &mut Vec<f32>) -> Result<(), ResampleError> {
+  /// Back to the state of `new` without allocating.
+  pub(super) fn reset(&mut self) {
+    self.resampler.reset();
+    self.fifo.clear();
+    self.skip = self.resampler.output_delay();
+  }
+
+  /// Queues interleaved input samples (whole frames).
+  pub(super) fn push(&mut self, samples: impl IntoIterator<Item = f32>) {
+    self.fifo.extend(samples);
+  }
+
+  /// How long the queued input frames last at `rate_in`: they are older than the next pushed block.
+  pub(super) fn queued_hns(&self, rate_in: u32) -> u64 {
+    (self.fifo.len() / self.channels) as u64 * HNS_PER_SEC / u64::from(rate_in.max(1))
+  }
+
+  /// Resamples every full chunk in `fifo` and appends the result (interleaved) to `out`.
+  pub(super) fn drain_into(&mut self, out: &mut Vec<f32>) -> Result<(), ResampleError> {
+    let ch = self.channels;
+    let chunk_len = self.chunk * ch;
     let mut consumed = 0;
-    while let Some(chunk) = self.fifo.get(consumed..consumed + self.chunk) {
-      // Mono: interleaved = a plain slice. The sizes always fit (`chunk` is exactly `self.chunk`
-      // frames, scratch holds `output_frames_max`), so the adapters can't fail; if they did, stop.
-      let frames_out = self.scratch.len();
+    while let Some(chunk) = self.fifo.get(consumed..consumed + chunk_len) {
+      // The sizes always fit (`chunk` is exactly `self.chunk` frames, scratch holds
+      // `output_frames_max`), so the adapters can't fail; if they did, stop.
+      let frames_out = self.scratch.len() / ch;
       let (Ok(input), Ok(mut output)) =
-        (InterleavedSlice::new(chunk, 1, self.chunk), InterleavedSlice::new_mut(&mut self.scratch, 1, frames_out))
+        (InterleavedSlice::new(chunk, ch, self.chunk), InterleavedSlice::new_mut(&mut self.scratch, ch, frames_out))
       else {
         break;
       };
       let (_, produced) = self.resampler.process_into_buffer(&input, &mut output, None)?;
       let dropped = self.skip.min(produced);
       self.skip -= dropped;
-      out.extend_from_slice(self.scratch.get(dropped..produced).unwrap_or(&[]));
-      consumed += self.chunk;
+      out.extend_from_slice(self.scratch.get(dropped * ch..produced * ch).unwrap_or(&[]));
+      consumed += chunk_len;
     }
     self.fifo.drain(..consumed);
     Ok(())
@@ -262,6 +282,23 @@ mod tests {
     assert!(RateBridge::for_rate(4_000).is_none());
     assert!(RateBridge::for_rate(768_000).is_none());
     assert!(RateBridge::for_rate(16_000).unwrap().is_ok());
+  }
+
+  #[test]
+  fn stereo_stage_keeps_left_and_right_apart() {
+    // 44.1 kHz -> 48 kHz: a tone on the left only, silence on the right.
+    let mut stage = Stage::new(44_100, 48_000, 2).unwrap();
+    let left = tone(44_100, 0, 44_100);
+    let mut out = Vec::new();
+    for piece in left.chunks(441) {
+      stage.push(piece.iter().flat_map(|&l| [l, 0.0]));
+      stage.drain_into(&mut out).unwrap();
+    }
+    let (left_out, right_out): (Vec<f32>, Vec<f32>) = out.as_chunks::<2>().0.iter().map(|&[l, r]| (l, r)).unzip();
+    assert!((left_out.len() as i64 - 48_000).abs() < 200, "{} frames out", left_out.len());
+    let (amp, snr_db) = sine_fit(&left_out[4_800..], 48_000, 440.0);
+    assert!((amp - AMP as f64).abs() < 0.01 && snr_db > 60.0, "left: amplitude {amp:.3}, SNR {snr_db:.1} dB");
+    assert!(right_out.iter().all(|s| s.abs() < 1e-6), "the right channel stays silent");
   }
 
   /// Feeds 1 s of a 440 Hz tone in `block`-sized pieces; returns (input, output, underruns).

@@ -258,6 +258,22 @@ pub struct ShmHeader {
   pub sidetone_resyncs: AtomicU32,
   /// Output APO -> daemon: `device_hash` of the endpoint it sits on, 0 = it could not tell.
   pub sidetone_output_hash_seen: AtomicU32,
+
+  // --- v23: speaker reference written by the output APO (`reference_ring.rs`) ---
+  /// Daemon -> output APOs (mirrored with the controls): `device_hash` of the output whose APO
+  /// writes the reference ring; 0 = nobody writes (no app records through the mic chain, the
+  /// output has no effect, or the loopback is forced).
+  pub aec_ref_output_hash: AtomicU32,
+  /// Output APO -> daemon: bumped on every block the one writer puts into the ring.
+  pub aec_ref_writer_beat: AtomicU32,
+  /// Output APO -> daemon: bumped by an output instance that cannot tell its endpoint while a
+  /// reference is wanted; it never writes, and the window says why.
+  pub aec_ref_blind_beat: AtomicU32,
+  /// Daemon -> window: `AecRefStatus::to_u32`, where the reference comes from or why there is none.
+  pub aec_ref_status: AtomicU32,
+  /// Output APO instances: which one writes the ring (`process id << 32 | instance id`, 0 =
+  /// none), taken by compare-exchange; another takes over once the writer beat stood still.
+  pub aec_ref_writer_id: AtomicU64,
 }
 
 /// Game detected by the detection owner (daemon, or the GUI without a daemon).
@@ -332,6 +348,9 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(MIC_LEVELER_DEFAULT_TARGET_DB_X10, Ordering::Relaxed);
     // Off, with the default values: a pair's settings replace them when one is active.
     self.write_sidetone(&SidetoneSettings::default());
+    // Nobody writes the reference until the daemon names the output.
+    self.aec_ref_output_hash.store(0, Ordering::Relaxed);
+    self.aec_ref_status.store(AecRefStatus::NotChecked.to_u32(), Ordering::Relaxed);
   }
 
   pub fn write_active_game(&self, game: Option<&ActiveGame>) {

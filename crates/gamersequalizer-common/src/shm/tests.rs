@@ -66,6 +66,24 @@ fn test_timed_push_maps_time_to_index_and_fills_gaps() {
 }
 
 #[test]
+fn rounding_gaps_continue_the_ring_and_real_gaps_are_silence() {
+  let mut mem = new_layout();
+  let mut ring = ShmRingBuffer::new(&mut mem);
+  let one = [StereoFrame { left: 1.0, right: 1.0 }; 480];
+  let t0 = HNS_PER_SEC as u64;
+  ring.push_frames_timed(&one, t0);
+  // 10 ms later plus half a millisecond of clock rounding: written straight after.
+  ring.push_frames_timed(&one, t0 + 100_000 + 5_000);
+  assert_eq!(ring.header().write_frame_index.load(Ordering::Relaxed), 960);
+  let mut out = [0.0f32; 960];
+  ring.read_frames_from(0, &mut out);
+  assert!(out.iter().all(|&s| s == 1.0), "no silent samples between the packets");
+  // 2 ms of nothing: a real gap.
+  ring.push_frames_timed(&one, t0 + 200_000 + 5_000 + 20_000);
+  assert_eq!(ring.header().write_frame_index.load(Ordering::Relaxed), 960 + 96 + 480);
+}
+
+#[test]
 fn test_surround_frame_folds_down_to_stereo() {
   let mix = |frame: &[f32]| {
     let f = StereoFrame::from_channels(frame);
@@ -282,7 +300,37 @@ fn test_active_game_text_roundtrip() {
 }
 
 #[test]
+fn reference_source_fields_default_to_none_and_mirror() {
+  let (daemon, apo) = (ShmHeader::default(), ShmHeader::default());
+  assert_eq!(daemon.aec_ref_output_hash.load(Ordering::Relaxed), 0, "nobody writes until the daemon says");
+  assert_eq!(AecRefStatus::from_u32(daemon.aec_ref_status.load(Ordering::Relaxed)), AecRefStatus::NotChecked);
+  assert_eq!(apo.aec_ref_writer_id.load(Ordering::Relaxed), 0);
+
+  daemon.aec_ref_output_hash.store(0x1234, Ordering::Relaxed);
+  apo.copy_controls_from(&daemon, &mut CopiedEqVersions::default());
+  assert_eq!(apo.aec_ref_output_hash.load(Ordering::Relaxed), 0x1234);
+
+  apo.aec_ref_writer_beat.store(7, Ordering::Relaxed);
+  apo.aec_ref_blind_beat.store(3, Ordering::Relaxed);
+  daemon.copy_output_telemetry_from(&apo);
+  assert_eq!(daemon.aec_ref_writer_beat.load(Ordering::Relaxed), 7);
+  assert_eq!(daemon.aec_ref_blind_beat.load(Ordering::Relaxed), 3);
+}
+
+#[test]
 fn test_state_enums_roundtrip_and_unknown() {
+  for s in [
+    AecRefStatus::NotChecked,
+    AecRefStatus::OutputEffect,
+    AecRefStatus::NoOutput,
+    AecRefStatus::EffectMissing,
+    AecRefStatus::EffectOutdated,
+    AecRefStatus::EndpointUnknown,
+    AecRefStatus::Loopback,
+  ] {
+    assert_eq!(AecRefStatus::from_u32(s.to_u32()), s);
+  }
+  assert_eq!(AecRefStatus::from_u32(99), AecRefStatus::Unknown(99));
   for s in [AecState::Disabled, AecState::NoReference, AecState::ReferenceSilent, AecState::Measuring, AecState::Locked]
   {
     assert_eq!(AecState::from_u32(s.to_u32()), s);

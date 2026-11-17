@@ -124,7 +124,7 @@ impl Issue {
       }
       Issue::NotDefaultMic { .. } => tr("Discord, games and other apps use the default microphone, not this one."),
       Issue::OutputProcessing { .. } => tr(
-        "A new sound device? Your headphone correction and EQ are not applied on it. Open GamersEqualizer to set it up.",
+        "A new sound device? Your headphone correction, EQ and the mic's echo cancellation do not work on it. Open GamersEqualizer to set it up.",
       ),
       Issue::MicSilenced { .. } => {
         tr("Nobody hears you. Fix it from the GamersEqualizer icon in the notification area.")
