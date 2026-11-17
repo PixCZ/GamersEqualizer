@@ -13,5 +13,8 @@ target/
 # Local debug dumps
 probe.txt
 
+# Agent scratch (hand-made reference files for ignored reports)
+.claude/tmp/
+
 # Developer's own recordings (voice), never published
 test_data/private/

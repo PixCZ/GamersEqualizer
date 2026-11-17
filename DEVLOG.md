@@ -1062,7 +1062,7 @@ frames above 0.7; 97.2 % measured, probability t+1 paired with clean frame t).
 **Open.** Written on macOS, where the mic crate does not build: Windows build, tests and clippy
 (`scripts/dev-rebuild.ps1 -Apo -Test`), the ignored reports (`keyboard_call_report`,
 `click_report`, `private_report`, `scenario_report`, `lookahead_sweep`), CPU on Windows and
-listening are pending (`docs/rnnoise-0.2-port.md`, chapter 8).
+listening are pending (`docs/rnnoise-0.2-port.md`, chapter 8; the file was removed later, see git history).
 
 ---
 
@@ -3033,7 +3033,37 @@ chapter 8.
 - Before: f16 weights with stock tract were 25 % slower than f32 on AVX-512 (FMA fallback kernel,
   128-row padding of small matrices).
 
+**Measured on the notebook (Ryzen 5 7530U, Zen 3, no AVX-512, on AC, Balanced), 2026-11-17**
+
+`scripts/cpu-bench-package.ps1`, one run, f32 -> f16 in % of a core (the first f32 pass was noisy: the
+whole-denoiser warm value 9.6 against 7.8 on 2026-11-16, so its -39 % is not to be trusted):
+
+| Part                   | Warm      | Cold cache | Paced | Cold + paced |
+| ---------------------- | --------- | ---------- | ----- | ------------ |
+| DFN3 alone             | -20 %     | -28 %      | -20 % | -16 %        |
+| DPDFNet alone          | -11 %     | -11 %      | -8 %  | -3 %         |
+| Whole, DFN3, speech    | -39 % (?) | -19 %      | -12 % | -9 %         |
+| Whole, DPDFNet, speech | -8 %      | -7 %       | -3 %  | -5 %         |
+
+- Meets the bar from `docs/mic-cpu-analysis.md` chapter 8 (cold cache: DFN3 -28 %, DPDFNet -11 %).
+  With pauses between blocks the gain shrinks (DFN3 whole -9 to -12 %, DPDFNet -3 to -5 %): there the
+  core clock after idle is the limit, not memory.
+- Absolute numbers are not comparable with 2026-11-16: ONNX Runtime, which our changes do not touch, ran
+  about 20 % faster (DPDFNet 1.51 ms against 1.90 ms). Only the f32 -> f16 ratio inside one run counts.
+- `run.ps1` in the CPU package now appends to one `report.txt` (header per run) instead of deleting it.
+- The raw report is kept as `test_data/private/cpu-7530U-20261117.txt`.
+
+**Reports on the private recordings against the log, same day (dev PC)**
+
+All 22 ignored mic-chain reports pass. Quality metrics match the latest entries (same or within
+0.5 percentage points / 0.3 dB), CPU the same or lower. Not matching: `chain_report`, DFN3 only, against
+milestone 29: pauses at 0 dB -113.4 -> -106.9 dBFS, rumble room -119.9 -> -115.6, +20 dB clipped voice
+-23.7 -> -16.7 dBFS (leveler -5.6 dB instead of -12). Later changes to the leveler and the DFN3 input
+(milestones 22, 23, 36) are the likely cause; not yet confirmed. `rnnoise2` `report_vs_upstream_c` fails
+because it needs the upstream C demo output made by hand (`.claude/tmp/rnnoise2/`, git-ignored); the
+other rnnoise2 reports pass.
+
 **Open**
 
-- The notebook (Ryzen 5 7530U, no AVX-512) with this build: `scripts/cpu-bench-package.ps1`.
+- Why `chain_report` DFN3 moved since milestone 29 (a stale number or a real change in the leveler).
 - The pull requests for sonos/tract, once the build has run in the app for a while.

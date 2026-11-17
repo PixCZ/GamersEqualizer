@@ -53,7 +53,8 @@ $here = $PSScriptRoot
 $out = Join-Path $here 'report.txt'
 # Tee-Object in 5.1 writes UTF-16; Add-Content with an encoding keeps report.txt readable anywhere.
 function Log($text) { Write-Output $text; Add-Content -Path $out -Value $text -Encoding utf8 }
-if (Test-Path $out) { Remove-Item $out }
+# Runs append to one report.txt; each starts with its own "== System <time>" header.
+if (Test-Path $out) { Log ''; Log ('=' * 60) }
 
 Log "== System $(Get-Date -Format s)"
 Get-CimInstance Win32_Processor | ForEach-Object { Log "CPU: $($_.Name), $($_.NumberOfCores) cores / $($_.NumberOfLogicalProcessors) threads, max $($_.MaxClockSpeed) MHz" }

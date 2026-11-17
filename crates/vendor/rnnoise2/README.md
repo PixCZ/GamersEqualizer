@@ -2,8 +2,8 @@
 
 Pure-Rust port of RNNoise as of its 2024–2025 rewrite (the "0.2" network: conv1d + 3 GRU + skip
 connections, 32 bands) for the mic chain (`gamersequalizer-mic-vst`, `ai_denoiser.rs`). Forked
-from nnnoiseless 0.5.2, which implements the 2017 network. No C, no FFI. Spec:
-`docs/rnnoise-0.2-port.md`.
+from nnnoiseless 0.5.2, which implements the 2017 network. No C, no FFI. The spec
+(`docs/rnnoise-0.2-port.md`) was removed from the repo with the working reports; see git history.
 
 Status: the port (spec chapters 4–7) is done and matches the upstream C output within the spec 6.2
 thresholds for both models (see "Verification"). Wired into the mic chain as the raw-input voice
