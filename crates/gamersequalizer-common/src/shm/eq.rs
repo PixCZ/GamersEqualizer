@@ -66,6 +66,19 @@ fn write_bands(slots: &[ShmEqBand], bands: &[BiquadBand]) -> usize {
   count
 }
 
+/// Whether `slots` (with `count` in use) already hold what `write_bands` would store for `bands`.
+fn same_bands(slots: &[ShmEqBand], count: usize, bands: &[BiquadBand]) -> bool {
+  let bands = expand_slopes(bands);
+  bands.len().min(slots.len()) == count
+    && slots.iter().zip(bands.iter()).take(count).all(|(slot, band)| {
+      slot.enabled.load(Ordering::Relaxed) == band.enabled as u32
+        && slot.filter_type.load(Ordering::Relaxed) == band.filter_type.to_u32()
+        && slot.frequency_bits.load(Ordering::Relaxed) == band.frequency.to_bits()
+        && slot.gain_bits.load(Ordering::Relaxed) == band.gain_db.to_bits()
+        && slot.q_bits.load(Ordering::Relaxed) == band.q.to_bits()
+    })
+}
+
 /// Bands with an unknown filter type or non-finite values are skipped; the rest clamped.
 /// Lazy, so the APOs build their EQ from it on the audio thread without allocating.
 fn read_bands(slots: &[ShmEqBand], count: usize) -> impl Iterator<Item = BiquadBand> + '_ {
@@ -130,6 +143,12 @@ impl ShmHeader {
 
   /// Publish the microphone EQ. Readers pick it up when `mic_eq_version` changes.
   pub fn write_mic_eq(&self, bands: &[BiquadBand]) {
+    // The same bands again (the window publishes them on every start) keep the version: the mic
+    // chain counts a new one as a changed setting and the leveler would learn fast again.
+    let in_use = self.mic_eq_band_count.load(Ordering::Acquire) as usize;
+    if same_bands(&self.mic_eq_bands, in_use, bands) {
+      return;
+    }
     let count = write_bands(&self.mic_eq_bands, bands);
     self.mic_eq_band_count.store(count as u32, Ordering::Relaxed);
     self.mic_eq_version.fetch_add(1, Ordering::Release);

@@ -146,6 +146,21 @@ fn test_mic_eq_roundtrip() {
 }
 
 #[test]
+fn test_mic_eq_same_bands_keep_the_version() {
+  let header = ShmHeader::default();
+  let mut bands = vec![BiquadBand { filter_type: FilterType::HighPass, frequency: 80.0, ..BiquadBand::default() }];
+  header.write_mic_eq(&bands);
+  let v1 = header.mic_eq_version.load(Ordering::Relaxed);
+  header.write_mic_eq(&bands);
+  assert_eq!(header.mic_eq_version.load(Ordering::Relaxed), v1, "same bands: no new version");
+  bands[0].frequency = 90.0;
+  header.write_mic_eq(&bands);
+  assert_ne!(header.mic_eq_version.load(Ordering::Relaxed), v1);
+  header.write_mic_eq(&[]);
+  assert!(header.read_mic_eq().next().is_none(), "removing every band is a change");
+}
+
+#[test]
 fn test_out_eq_roundtrip_and_mirroring() {
   let src = ShmHeader::default();
   let bands: Vec<BiquadBand> = (0..20)
