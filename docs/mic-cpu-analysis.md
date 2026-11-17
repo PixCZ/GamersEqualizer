@@ -7,6 +7,7 @@ Pracovní dokument: po zapracování smazat a podstatná čísla přenést do `D
 
 > Ověřeno 2026-11-16 na vývojovém PC, viz kapitola 7. Platí body 1, 3 (zapracováno), 4 a 6 jen pro DFN3.
 > Bod 2 neprošel zprávami kvality, bod 5 neplatí pro AVX-512, ale platí pro studenou cache.
+> Bod 7 přibyl 2026-11-17 a je nasazený (kapitola 8); body 1 a 6 upřesňuje.
 
 1. **Režie knihovny v DFN3 není.** 95 % času jednoho rámce jsou vrstvy modelu, z toho většina násobení
    matic a GRU. Fork tractu ani ruční přepis inference proto nic podstatného nepřinese.
@@ -21,6 +22,10 @@ Pracovní dokument: po zapracování smazat a podstatná čísla přenést do `D
    nemá, a obří cache 9800X3D skrývá, že DFN3 se studenou cache trvá dvakrát déle.
 6. **ONNX Runtime už u DFN3 rychlejší není**, tract 0.23 ho dohnal. U DPDFNetu vede o 25 % a celý
    rozdíl je v jedné operaci tractu (`GruSeq`). To je jediné místo, kde má úprava tractu smysl.
+7. **Váhy modelů v f16 zlevní DFN3 o 12–16 %** (vývojové PC, teplá i studená cache; celý odšumovač
+   o 8–9 %), kvalita beze změny. Šetří se čtení vah, ne výpočet, proto DPDFNet (čas v `GruSeq`) jen
+   0–5 %. Na AVX-512 to chtělo vlastní kernel a opravu výběru kernelu ve forku tractu: režie knihovny
+   to není (bod 1 platí), chyběl jen kernel pro f16 váhy.
 
 ## 1. Naměřeno
 
@@ -458,6 +463,9 @@ crates/vendor/deep_filter/Cargo.toml`.
 
 ### Kroky 0–2: hotovo na Macu (2026-11-16)
 
+> První verze převodu (všechna násobení, bez `Scan`). Nasazený převod (jen násobení matice vektorem,
+> i v tělech `Scan`) je v části „Varianty kernelů a převodu“.
+
 Převod je `df::f16_weights::convert` ve forku: f32 konstanta, kterou čtou jen `EinSum` v f32, se před
 `into_optimized` uloží jako f16. Volá se ve třech grafech DFN3 (`RuntimeParams::f16_weights`, výchozí
 z `GE_F16_WEIGHTS`) a v `DpdfEngine::try_load` (nově `into_typed` + `into_decluttered` před převodem).
@@ -466,10 +474,9 @@ Na x86 bez F16C nebo FMA zůstává f32.
 - **Tract váhy zpátky nesložil.** Na ARM (M4 Pro, stejný mechanismus `f16f32` jako `fma_mmm_f32_32x1` na
   x86) běží s balením `PackedF16` 22 z 27 násobení DFN3 a 87 z 92 u DPDFNetu, žádný `Cast`. Zbylá
   násobení jsou konvoluce s váhami pod 10 kB. Na x86 to zbývá ověřit (krok 3, výpis v testu níže).
-- **Kolik bajtů:** DFN3 4,55 → 2,28 MB, ale rekurentní váhy GRU (5 × 768 × 256, asi 3,9 MB) zůstávají
-  f32: `GruSeq` si je balí sám (`pack_r`, dotaz napevno na f32). Celkem tedy jen asi −27 % bajtů DFN3.
-  DPDFNet 9,43 → 4,72 MB, `GruSeq` jen 0,8 MB, celkem asi −46 %. Převést i rekurentní váhy by znamenalo
-  upravit `gru_seq.rs` v tract-core (patch / fork tractu): až když se f16 ukáže jako přínos.
+- **Kolik bajtů:** DFN3 4,55 → 2,28 MB; rekurentní váhy GRU (asi 3,9 MB) jsou v DFN3 uvnitř těl `Scan`,
+  kam tato verze nesahala (nasazená ano). DPDFNet 9,43 → 4,72 MB; jeho `GruSeq` (0,8 MB) si rekurentní
+  váhy balí sám jako f32 (`pack_r`) a zůstávají f32 i dnes.
 - **Numericky:** syntetický signál (tón + šum), výstup f16 proti f32: DFN3 47,7 dB, DPDFNet 55,0 dB pod
   signálem. Převod tedy proběhl a přesnost drží.
 - **Čas na M4 (teplá cache, jen orientačně):** DFN3 všechny tři grafy 207–215 → 198–200 µs (−4 až −8 %),
@@ -484,6 +491,9 @@ Další na Windows: krok 3 (`cpu_breakdown_report` s `GE_F16_WEIGHTS=1`, balíč
 proti bez), krok 5. V živé aplikaci se proměnná do audiodg nedostane: APO zůstává na f32.
 
 ### Kroky 3–5 na Windows (9800X3D, 2026-11-16)
+
+> Překonáno částí „Varianty kernelů a převodu“: tam měřeno s připnutým vláknem a mediánem z více kol.
+> Ztráta s AVX-512 v teplé cache (+25 %) se tam neopakuje (−1,5 % se stejným převodem a tractem).
 
 **Kernely na x86:** test forku vypsal 22 z 27 násobení DFN3 s `PackedF16` v `fma_mmm_f32_32x1` / `32x3`,
 i na procesoru s AVX-512 (tract pro f16 váhy AVX-512 kernel nemá). Výstup 47,7 dB pod signálem, DPDFNet
@@ -513,7 +523,7 @@ i na procesoru s AVX-512 (tract pro f16 váhy AVX-512 kernel nemá). Výstup 47,
 - **S AVX-512 f16 prohrává v teplé cache** (DFN3 +25 %, DPDFNet +11 %), ve studené je vyrovnaný. f16
   ztratí AVX-512 kernel, a ten má ve studené cache náskok 10–21 % (kroky 1 a 2). Pauza tu kvůli
   kolísání nerozhoduje.
-- **Návrh:** f16 jen na procesorech bez AVX-512 (`wanted()` = F16C a FMA a ne `avx512f`), f32 s AVX-512.
+- **Návrh (nepoužit, viz „Varianty“):** f16 jen na procesorech bez AVX-512 (`wanted()` = F16C a FMA a ne `avx512f`), f32 s AVX-512.
   Kernel `f16f32` pro AVX-512 (větev v `avx512_mmm_f32_128x1`, `vcvtph2ps zmm` je AVX-512F) jako PR do
   tractu; po jeho vydání jedna cesta pro všechny.
 
@@ -540,8 +550,8 @@ konvoluce zůstávají ve FMA kernelu. Měření na 9800X3D (f32 → f16, jeden 
 
 Nerozhodné: s AVX-512 kernelem je f16 zhruba na úrovni f32, v rozptylu běhů (f32 DFN3 teplá 2,48 proti
 1,87 v minulém běhu). Další krok: opakované běhy (3×) a odstranit doplňování malých matic na 128 řádků
-(výběr kernelu podle m, nebo f16 cesta v `avx512_mmm_f32_16x1`), pak znovu změřit. Do té doby f16 jen
-bez AVX-512.
+(výběr kernelu podle m, nebo f16 cesta v `avx512_mmm_f32_16x1`), pak znovu změřit. (Hotovo
+v další části; f16 je nakonec zapnuté na všech CPU.)
 
 ### Varianty kernelů a převodu (9800X3D, 2026-11-17)
 
@@ -597,7 +607,7 @@ Kvalita s novým převodem: reporty jako v krocích 3–5, rozdíly ±0,1 dB (ko
 21,3 → 21,7 %).
 
 Závěr: f16 se vyplatí na všech měřených CPU i s nezměněným tractem 0.23.10; kernel s opravou výběru
-přidá na AVX-512 asi 5 bodů (teplá) a 2 body (studená) a samotná oprava výběru zrychlí i f32 o ~4 %.
+přidá na AVX-512 asi 5 bodů (teplá) a 2 body (studená).
 DPDFNet z f16 skoro nic nemá: čas tráví v `GruSeq` s malými vahami (0,8 MB), brzdí ho výpočet.
 
 Nasazeno (2026-11-17): f16 zapnuté na všech CPU s F16C + FMA (`GE_F16_WEIGHTS=0` vrací f32 pro
