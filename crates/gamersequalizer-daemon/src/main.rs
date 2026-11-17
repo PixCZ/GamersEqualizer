@@ -200,6 +200,7 @@ fn run_gui_mode() {
     "GamersEqualizer",
     native_options,
     Box::new(|cc| {
+      log_graphics_adapters(cc.wgpu_render_state.as_ref());
       ui::theme::install(&cc.egui_ctx);
       cc.egui_ctx.set_theme(app.state.prefs.egui_theme());
       Ok(Box::new(app))
@@ -281,4 +282,20 @@ fn wgpu_backends() -> wgpu::Backends {
     info!("[GamersEqualizer] graphics: no DX12 GPU, using Vulkan/GL");
     wgpu::Backends::PRIMARY | wgpu::Backends::GL
   }
+}
+
+/// Logs the GPU the window draws on and every adapter wgpu listed. On DX12 each listed adapter
+/// holds an open D3D12 device and egui-wgpu keeps the list while the window lives, so a vendor
+/// tool can show the app on a GPU it never draws on.
+fn log_graphics_adapters(render_state: Option<&egui_wgpu::RenderState>) {
+  let Some(render_state) = render_state else {
+    return;
+  };
+  let describe = |info: wgpu::AdapterInfo| format!("{} ({:?}, {:?})", info.name, info.device_type, info.backend);
+  let listed: Vec<String> = render_state.available_adapters.iter().map(|a| describe(a.get_info())).collect();
+  info!(
+    "[GamersEqualizer] graphics: drawing on {}; adapters listed: {}",
+    describe(render_state.adapter.get_info()),
+    listed.join(", ")
+  );
 }
