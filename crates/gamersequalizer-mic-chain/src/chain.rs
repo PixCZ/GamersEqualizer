@@ -401,9 +401,16 @@ impl MicChain {
     }
 
     // Stage 5: volume + peak limiter, always last so EQ boosts can't clip. With the leveler the
-    // mic volume (0..300 %) is how loud others hear you: 100 % = the target, 50 % = 6 dB under it
-    // (the leveler took the Windows volume out of the input). Without it: only the boost > 100 %.
-    let boost = if s.leveler_on || s.mic_permille > 1000 { s.mic_permille as f32 / 1000.0 } else { 1.0 };
+    // mic volume (0..100 %) is how loud others hear you: 100 % = the target, 50 % = 6 dB under it
+    // (the leveler took the Windows volume out of the input); a saved boost above 100 % is cut, the
+    // target does that job. Without it: only the boost > 100 % (up to 300 %).
+    let boost = if s.leveler_on {
+      s.mic_permille.min(1000) as f32 / 1000.0
+    } else if s.mic_permille > 1000 {
+      s.mic_permille as f32 / 1000.0
+    } else {
+      1.0
+    };
     for sample in mic.iter_mut() {
       *sample *= boost;
     }

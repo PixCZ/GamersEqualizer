@@ -216,7 +216,11 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
 
       // Sensitivity 0% .. 300%
       ui.label(tr("Sensitivity"));
-      theme::percent_volume(ui, &mut win_audio.chatmix.mic.volume, 3.0, BAR_WIDTH, EQ_COLOR);
+      // The leveler sets the loudness (its target), so a boost above 100 % would only duplicate it.
+      let leveler_on = state.shm_header().is_some_and(|h| h.mic_leveler_enabled.load(Ordering::Relaxed));
+      let max = if leveler_on { 1.0 } else { 3.0 };
+      win_audio.chatmix.mic.volume = win_audio.chatmix.mic.volume.min(max);
+      theme::percent_volume(ui, &mut win_audio.chatmix.mic.volume, max, BAR_WIDTH, EQ_COLOR);
       ui.end_row();
     });
 
