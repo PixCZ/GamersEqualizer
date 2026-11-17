@@ -353,13 +353,15 @@ pub fn volume_text(volume: f32) -> String {
   }
 }
 
-/// Horizontal volume slider 0 ..= `max` with its readout and "Reset to 100 %". True if changed.
+/// Horizontal volume slider 0 ..= `max` with its readout and "Reset to 100 %" (only when `max` is
+/// above 100 %). True if changed.
 pub fn percent_volume(ui: &mut Ui, volume: &mut f32, max: f32, width: f32, color: Color32) -> bool {
   ui.horizontal(|ui| {
     ui.spacing_mut().slider_width = width;
     let mut changed = ui.add(egui::Slider::new(volume, 0.0..=max).show_value(false)).changed();
     ui.label(strong(volume_text(*volume), 14.0).color(adapt(ui, color)));
-    if ui.button(crate::i18n::tr("Reset to 100 %")).clicked() {
+    // With 100 % as the top (mic with the leveler on) the slider's end says it already.
+    if max > 1.0 && ui.button(crate::i18n::tr("Reset to 100 %")).clicked() {
       *volume = 1.0;
       changed = true;
     }
@@ -373,7 +375,7 @@ pub fn level_text(peak: f32) -> String {
   if peak > 0.0001 {
     format!("{:.0} % ({:.1} dBFS)", (peak * 100.0).round(), 20.0 * peak.log10())
   } else {
-    "0 % (-inf dBFS)".to_string()
+    "0 %".to_string() // "-inf dBFS" means nothing to most people
   }
 }
 

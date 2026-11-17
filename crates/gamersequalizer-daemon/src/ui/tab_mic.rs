@@ -205,7 +205,13 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       // Live input meter
       ui.label(tr("Live input level"));
       let peak = win_audio.chatmix.mic_peak_level;
-      theme::meter(ui, peak, BAR_WIDTH * 1.6, theme::level_color(ui, peak), &theme::level_text(peak));
+      // Windows meters a mic only while some app records from it; without one, 0 % is no reading.
+      // Without the APO installed `mic_dsp_live` is false, but a recording app makes the peak > 0.
+      let meter = theme::meter(ui, peak, BAR_WIDTH * 1.6, theme::level_color(ui, peak), &theme::level_text(peak));
+      if peak <= 0.0001 && !state.mic_dsp_live() {
+        meter
+          .on_hover_text(tr("No app is recording from the microphone. Windows shows its level only while one does."));
+      }
       ui.end_row();
 
       if let Some(clips) = state.shm_header().map(|h| h.mic_input_clips.load(Ordering::Relaxed)) {
