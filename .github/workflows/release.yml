@@ -57,7 +57,10 @@ jobs:
 
   build:
     runs-on: windows-latest
-    # Two from-scratch fat-LTO builds on a 4-core runner; 60 minutes were not enough.
+    # Two from-scratch fat-LTO builds on a 4-core runner; 60 minutes were not enough one after the
+    # other. package.ps1 now runs them at once (about 6 min on a 16-thread PC, peak 9 GB of rustc and
+    # linker memory; the 16 GB runner is not measured), so 120 is a safety margin, lower it once a run
+    # shows the real time.
     timeout-minutes: 120
     env:
       # A tag build shows the tag's version everywhere (About, logs, exe/DLL details); any other

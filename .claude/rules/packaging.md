@@ -30,7 +30,7 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
   uninstaller removes both and moves its own locked exe to `%TEMP%` when run from it.
 - winget: draft manifests in `packaging/winget/PixCZ.GamersEqualizer/` (zip with nested exe,
   `elevatesSelf`); URL and SHA-256 are filled from the GitHub release at submission.
-- `scripts/package.ps1`: final build from scratch (`dist` + `apo-dist` profiles, fat LTO, minutes; verifies
+- `scripts/package.ps1`: final build from scratch (`dist` + `apo-dist` profiles, fat LTO, built at the same time, minutes; verifies
   the rustc flags in the verbose log). `-Fast` packages the `release` build instead (seconds);
   `scripts/dev-rebuild.ps1 -Package` does that after the dev build.
 - Output: `target/package/GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>[-dirty][-fast].zip`.

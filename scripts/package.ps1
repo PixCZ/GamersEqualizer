@@ -10,6 +10,7 @@
   2. cargo clean --profile dist / apo-dist: everything is compiled from scratch, no stale objects.
   3. cargo build --locked -v --profile dist     -p gamersequalizer      (exe, panic = abort)
      cargo build --locked -v --profile apo-dist -p gamersequalizer-apo  (DLL, panic = unwind)
+     Both at the same time: the single-threaded fat-LTO step of one overlaps the other.
      Both: opt-level 3, fat LTO, codegen-units 1, no incremental, stripped, static CRT.
   4. Reads the real rustc command lines from the verbose log and fails unless the exe and the
      DLL were linked with exactly those flags (and without the debug-capture feature).
@@ -58,20 +59,6 @@ $commonFlags = @('-C opt-level=3', '-C lto=fat', '-C codegen-units=1', '-C strip
 function Invoke-Cargo([string[]]$cargoArgs) {
   & cargo @cargoArgs
   if ($LASTEXITCODE -ne 0) { throw "cargo $($cargoArgs -join ' ') failed (exit $LASTEXITCODE)" }
-}
-
-# Full verbose output goes to the log; the console skips the long rustc command lines.
-function Invoke-CargoLogged([string[]]$cargoArgs, [string]$log) {
-  Add-Content -LiteralPath $log -Value "`n> cargo $($cargoArgs -join ' ')"
-  $ErrorActionPreference = 'Continue' # cargo writes progress to stderr; that is not an error
-  # No colours: CI sets CARGO_TERM_COLOR=always (dtolnay/rust-toolchain), and the ANSI codes
-  # would hide the "Running `rustc ...`" lines from the filter below and from Assert-RustcFlags.
-  & cargo @cargoArgs --color never 2>&1 | ForEach-Object {
-    $line = "$_"
-    Add-Content -LiteralPath $log -Value $line
-    if ($line -notmatch '^\s+Running `') { Write-Host $line }
-  }
-  if ($LASTEXITCODE -ne 0) { throw "cargo $($cargoArgs -join ' ') failed (exit $LASTEXITCODE), log: $log" }
 }
 
 # The one rustc call that produced $crate as $crateType, checked flag by flag.
@@ -136,8 +123,32 @@ if ($Fast) {
   Invoke-Cargo @('clean', '--profile', $apoProfile)
 
   # 3. --locked: exactly the versions in Cargo.lock. No --features: the APO without debug-capture.
-  Invoke-CargoLogged @('build', '--locked', '-v', '--profile', $appProfile, '-p', 'gamersequalizer') $log
-  Invoke-CargoLogged @('build', '--locked', '-v', '--profile', $apoProfile, '-p', 'gamersequalizer-apo') $log
+  # --color never: CI sets CARGO_TERM_COLOR=always, and the ANSI codes would hide the "Running `rustc ...`"
+  # lines from the console filter and from Assert-RustcFlags.
+  # Both run at once: the fat-LTO step of each is single-threaded, and the two use separate profile
+  # folders. Each writes its own log, appended to $log below in a fixed order.
+  $builds = foreach ($b in @(@($appProfile, 'gamersequalizer'), @($apoProfile, 'gamersequalizer-apo'))) {
+    $cargoArgs = @('build', '--locked', '-v', '--profile', $b[0], '-p', $b[1], '--color never')
+    $tmp = "$log.$($b[1])"
+    # cargo writes everything to stderr; stdout is redirected only because Start-Process requires a file per stream.
+    $proc = Start-Process cargo -ArgumentList $cargoArgs -NoNewWindow -PassThru `
+      -RedirectStandardError $tmp -RedirectStandardOutput "$tmp.out"
+    [pscustomobject]@{ Proc = $proc; Tmp = $tmp; Cmd = "cargo $($cargoArgs -join ' ')" }
+  }
+  $failed = @()
+  foreach ($b in $builds) {
+    $b.Proc.WaitForExit()
+    Add-Content -LiteralPath $log -Value "`n> $($b.Cmd)"
+    foreach ($f in $b.Tmp, "$($b.Tmp).out") {
+      foreach ($line in Get-Content -LiteralPath $f) {
+        Add-Content -LiteralPath $log -Value $line
+        if ($f -eq $b.Tmp -and $line -notmatch '^\s+Running `') { Write-Host $line }
+      }
+      Remove-Item -LiteralPath $f
+    }
+    if ($b.Proc.ExitCode -ne 0) { $failed += $b.Cmd }
+  }
+  if ($failed) { throw "build failed: $($failed -join '; '), log: $log" }
 
   # 4. What rustc was really told to do.
   $forbidden = @('-C incremental', 'debug-assertions=on', 'overflow-checks=on', 'feature="debug-capture"',
