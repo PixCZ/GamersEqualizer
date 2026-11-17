@@ -59,8 +59,26 @@ fn test_bypass_still_hears_speech_for_the_leveler() {
 }
 
 #[test]
+fn test_level_key_needs_a_sure_run_and_a_dip_restarts_it() {
+  // Regression: the leveler took `in_net`'s gate rule (0.7 open, held at 0.2), which hears a
+  // whisper's frames; the key wants LEVEL_MIN_FRAMES in a row above LEVEL_PROB.
+  let sure = LEVEL_PROB + 0.01;
+  let mut run = 0;
+  for _ in 0..LEVEL_MIN_FRAMES - 1 {
+    assert!(!level_key(&mut run, sure), "one frame short of a run");
+  }
+  assert!(level_key(&mut run, sure), "the last frame of the run");
+  assert!(level_key(&mut run, sure), "stays on while the voice goes on");
+  assert!(!level_key(&mut run, LEVEL_PROB), "a frame at the threshold is not sure; the run restarts");
+  assert!(!level_key(&mut run, sure), "a restarted run needs all its frames again");
+  // The gate's open probability (a whisper's frames) never builds a run.
+  let mut whisper = 0;
+  assert!((0..1000).all(|_| !level_key(&mut whisper, 0.9)));
+}
+
+#[test]
 fn test_leveler_detector_hears_speech_behind_every_model() {
-  // The leveler's detector is its own (2017 network, strict): behind a heavy model it must still
+  // The leveler's key is stricter than the gate's (`level_key`): behind a heavy model it must still
   // hear a clean voice, and with RNNoise as the model it is the one the gate already uses.
   let (clean, _) = speech_over_keyboard(-30.0, 0.0);
   for model in [DenoiseModel::RnNoise, DenoiseModel::DeepFilterNet, DenoiseModel::DpdfNet] {
@@ -1965,8 +1983,8 @@ fn leveler_report() {
         let mut old_voice = false;
         old_net.process(b, |p| old_voice |= old_vad.frame(p));
         iso.process_samples(b);
-        // `old_key`: a stand-alone 2017 detector, which the chain's own level detector must match
-        // (before it existed the leveler used the gate's `heard_voice`: DFN3 +13.6 dB at 84 s).
+        // `old_key`: a stand-alone 2017 detector, the reference for the chain's own key (`level_key`).
+        // The leveler used the gate's `heard_voice` before it (DFN3 +13.6 dB at 84 s).
         lv.process(b, if old_key { old_voice } else { iso.heard_level_voice() }, iso.output_lead_samples());
         if i % 50 == 49 {
           gains.push(lv.gain_db());
@@ -2034,7 +2052,7 @@ fn leveler_key_report() {
   old_net.process(&input, |p| old.push(old_vad.frame(p)));
   eprintln!("{:<22} {}", "rule", sections.map(|s| format!("{:>9}", s.0)).join(" "));
   eprintln!("{:<22} {}", "in_net shipped", share(&shipped).join("     "));
-  eprintln!("{:<22} {}", "2017 net (level key)", share(&old).join("     "));
+  eprintln!("{:<22} {}", "2017 net (reference)", share(&old).join("     "));
   for t in [0.7f32, 0.8, 0.9, 0.95, 0.98] {
     for n in [1usize, 3, 6, 12] {
       let flags: Vec<bool> = (0..probs.len())

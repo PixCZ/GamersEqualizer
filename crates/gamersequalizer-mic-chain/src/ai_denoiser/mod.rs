@@ -199,9 +199,10 @@ pub struct AiVoiceIsolator {
   in_net: VoiceNet,
   /// ...and on the denoised output, with the gate on.
   out_net: VoiceNet,
-  /// Silero VAD on the raw input, with the gate on: a second key for the gate only. The leveler,
-  /// the automatic input gain and the model's sleep keep to `vad` (`heard_voice`): a whisper it
-  /// hears must not be learned as the speech level. One probability per 32 ms, still ahead of
+  /// Silero VAD on the raw input, with the gate on: a second key for the gate only. The model's
+  /// sleep keeps to `vad` (`heard_voice`); the leveler and the automatic input gain to the
+  /// stricter `level_key` (`heard_level_voice`): a whisper Silero hears must not be learned as
+  /// the speech level. One probability per 32 ms, still ahead of
   /// the output by the model's latency + lookahead - 32 ms (RNNoise alone: 3 ms). None: its
   /// weights failed to load (a corrupt build), the gate runs without it.
   soft_net: Option<Vad48k>,

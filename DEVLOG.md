@@ -3110,7 +3110,10 @@ Tuned on one whisper recording (the only one in the set): a new whisper take is 
 `leveler_report`, input 0 dB, DFN3 / DPDFNet: learned before 44 s 740 ms (was 3.7 / 3.0 s), gain at 84 s
 +7.1 / +7.7 dB (was +13.6 / +18.5; RNNoise +7.1), voice 53-57 s -24.4 / -24.2 dBFS. DPDFNet's voice at
 45-49 s is still -18.4 dBFS (the gain falls from +24 to +9 dB during those seconds; RNNoise -21.8, DFN3
--21.9). RNNoise unchanged. Gate green (`check.ps1`); new test
+-21.9). Quiet inputs (the strict key must not starve the leveler): input -12 dB, DFN3 / DPDFNet / RNNoise
+gain at 84 s +19.5 / +21.0 / +19.1 dB, learned before 44 s 670 ms for the heavy models; input -24 dB all
+three sit on the +24 dB cap. RNNoise unchanged. Gate green (`check.ps1`); tests
+`test_level_key_needs_a_sure_run_and_a_dip_restarts_it` and
 `test_leveler_detector_hears_speech_behind_every_model`.
 
 **Open**
