@@ -1001,7 +1001,7 @@ fn half_weights(m: &mut TypedModel, on: bool, graph: &str) -> Result<()> {
         let saved = crate::f16_weights::convert(m)?;
         log::info!("{graph}: weights as f16, {saved} bytes saved");
         #[cfg(test)]
-        eprintln!("{graph}: {:?}", crate::f16_weights::weight_bytes_by_consumer(m));
+        eprintln!("{graph}: {saved} bytes saved, {:?}", crate::f16_weights::weight_bytes_by_consumer(m));
     }
     Ok(())
 }
@@ -1131,6 +1131,98 @@ mod f16_weights_tests {
             }
         }
         (half, all)
+    }
+
+    /// Time per op kind over `PROF_ITERS` runs of each graph, 3 rounds (`COLD_CACHE=1`: 256 MB
+    /// written before each run), f32 and f16 weights. Report, prints only.
+    #[test]
+    #[ignore]
+    fn f16_weights_op_profile_report() {
+        let cold = std::env::var_os("COLD_CACHE").is_some();
+        let mut junk = vec![0u8; if cold { 256 << 20 } else { 0 }];
+        let names = ["f32", "f16"];
+        let mut dfs = [run(false).0, run(true).0];
+        let mut by_op = [(); 2].map(|_| std::collections::BTreeMap::<String, f64>::new());
+        let mut total = [0.0; 2];
+        // f32 and f16 take turns, so drift (clock, other load) hits both alike.
+        for _round in 0..3 {
+            for (w, df) in dfs.iter_mut().enumerate() {
+                let (by_op, total) = (&mut by_op[w], &mut total[w]);
+                profile_graphs(df, cold, &mut junk, by_op, total);
+            }
+        }
+        for (w, name) in names.iter().enumerate() {
+            let mut rows: Vec<_> = by_op[w].iter().collect();
+            rows.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+            let us = |s: f64| s / (3 * prof_iters()) as f64 * 1e6;
+            eprintln!("weights {name}: {:.1} us per frame (all three graphs)", us(total[w]));
+            for (op, s) in rows.iter().take(25) {
+                eprintln!("  {op:<70} {:>7.1} us", us(**s));
+            }
+        }
+        std::hint::black_box(&junk);
+    }
+
+    fn profile_graphs(
+        df: &mut DfTract,
+        cold: bool,
+        junk: &mut [u8],
+        by_op: &mut std::collections::BTreeMap<String, f64>,
+        total: &mut f64,
+    ) {
+        {
+            let mut keys = std::collections::HashMap::<(usize, usize), String>::new();
+            for (g, state) in [&mut df.enc, &mut df.erb_dec, &mut df.df_dec].into_iter().enumerate() {
+                let inputs: TVec<TValue> = state
+                    .model()
+                    .input_outlets()
+                    .unwrap()
+                    .iter()
+                    .map(|o| {
+                        let fact = state.model().outlet_fact(*o).unwrap();
+                        Tensor::zero_dt(fact.datum_type, fact.shape.as_concrete().unwrap()).unwrap().into()
+                    })
+                    .collect();
+                for i in 0..prof_iters() + 200 {
+                    if cold {
+                        junk.iter_mut().step_by(64).for_each(|b| *b = b.wrapping_add(1));
+                    }
+                    let t0 = std::time::Instant::now();
+                    state
+                        .run_plan_with_eval(inputs.clone(), |ctx, st, node, input| {
+                            let t = std::time::Instant::now();
+                            let r = tract_core::plan::eval(ctx, st, node, input);
+                            if i >= 200 {
+                                let key = keys.entry((g, node.id)).or_insert_with(|| op_key(node));
+                                *by_op.entry(key.clone()).or_default() += t.elapsed().as_secs_f64();
+                            }
+                            r
+                        })
+                        .unwrap();
+                    if i >= 200 {
+                        *total += t0.elapsed().as_secs_f64();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Timed runs per graph and round: `PROF_ITERS`, default 2000.
+    fn prof_iters() -> usize {
+        std::env::var("PROF_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+    }
+
+    /// Op name; matrix products also by shape and kernel ("OptMatMul m:768 k:256 n:1 [kernel] PackedF16").
+    fn op_key(node: &TypedNode) -> String {
+        let name = node.op().name().to_string();
+        if name != "OptMatMul" {
+            return name;
+        }
+        let info = node.op().info().unwrap().join(" ");
+        let mult = info.split("Mult: ").nth(1).and_then(|s| s.split(" with ").next()).unwrap_or("");
+        let kernel = info.split('[').nth(1).and_then(|s| s.split(']').next()).unwrap_or("");
+        let packed = if info.contains("PackedF16") { "f16" } else { "f32" };
+        format!("{name} {mult} {kernel} {packed}")
     }
 
     #[test]

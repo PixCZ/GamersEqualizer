@@ -3003,3 +3003,37 @@ shares do not differ.
   silent) still mixes the sidetone in, ~100 blocks/s on the Realtek output: the engine hands the
   output effect valid blocks, so the early return on a silent block does not cost the sidetone.
 - A Release workflow run with the pinned toolchain; the branch rule on GitHub that requires CI.
+
+---
+
+## Milestone 63: Mic models with f16 weights, tract from our fork (2026-11-16 .. 2026-11-17)
+
+Branch `fix/pause-hiss`. Details, all tables and the variants that lost: `docs/mic-cpu-analysis.md`
+chapter 8.
+
+**What ships**
+
+- DeepFilterNet 3 and DPDFNet store their matrix-vector weights as f16 (computed in f32) on every
+  CPU with F16C + FMA, including the GRU weights inside DFN3's `Scan` bodies; lowered convolutions
+  keep f32 (small weights, the f16 kernels for them are slower). `GE_F16_WEIGHTS=0` keeps f32 for
+  comparing CPU load (`scripts/cpu-bench-package.ps1` runs both).
+- tract comes from github.com/PixCZ/tract (branch `gamersequalizer-0.23.10`): an AVX-512 kernel for
+  f16 weights (`avx512_mmm_f32_128x1`, packing `f16f32`), a kernel choice that no longer pads small
+  matrix-vector products to 128 rows (also faster for f32), and a fix for the 16x1 kernel, whose
+  partial sums leaked into a second product in the same call. Pull requests for sonos/tract are
+  prepared, not opened (AGENTS.md, "Before a release").
+- The deep_filter fork's tests (f16 conversion) are part of the gate; its lockfile is audited.
+
+**Measured on the dev PC (Ryzen 7 9800X3D), f32 -> f16, median of 3 interleaved runs**
+
+- DeepFilterNet 3 alone: 1.89 -> 1.59 % of a core warm (-16 %), 3.62 -> 3.17 % with a cold cache
+  (-12 %); the whole denoiser with it -8 / -9 %. Without AVX-512 (simulated) -11 / -19 %.
+- DPDFNet: 0 to -5 %; its time goes into `GruSeq`, which is compute bound, not weight bytes.
+- Output: the quality reports move by 0.1 dB at most.
+- Before: f16 weights with stock tract were 25 % slower than f32 on AVX-512 (FMA fallback kernel,
+  128-row padding of small matrices).
+
+**Open**
+
+- The notebook (Ryzen 5 7530U, no AVX-512) with this build: `scripts/cpu-bench-package.ps1`.
+- The pull requests for sonos/tract, once the build has run in the app for a while.

@@ -483,6 +483,127 @@ Další na Windows: krok 3 (`cpu_breakdown_report` s `GE_F16_WEIGHTS=1`, balíč
 `scripts/cpu-bench-package.ps1` už má druhý průchod), krok 4 (zprávy kvality s `GE_F16_WEIGHTS=1`
 proti bez), krok 5. V živé aplikaci se proměnná do audiodg nedostane: APO zůstává na f32.
 
+### Kroky 3–5 na Windows (9800X3D, 2026-11-16)
+
+**Kernely na x86:** test forku vypsal 22 z 27 násobení DFN3 s `PackedF16` v `fma_mmm_f32_32x1` / `32x3`,
+i na procesoru s AVX-512 (tract pro f16 váhy AVX-512 kernel nemá). Výstup 47,7 dB pod signálem, DPDFNet
+55,8 dB (dočasný test, odebrán).
+
+**Kvalita** (`GE_F16_WEIGHTS=1` proti bez, všech šest zpráv): beze změny. Rozdíly ±0,1 dB, jediný horší
+řádek je DFN3 bez záchrany kliknutí (diagnostický, aplikace ho nepoužívá): kliknutí −3 dBFS, > 15 dB
+16,3 → 16,7 %. U DPDFNetu shodné na desetinu dB.
+
+**CPU**, % jádra, f32 → f16 (změna). Režim s pauzou kolísá mezi běhy o ±25 % (f32 AVX-512 DFN3 2,78 /
+3,50 / 3,82 ve třech bězích), teplá a studená o ±3–5 %.
+
+| Část                         | ISA     | Teplá                 | Studená               | S pauzou              | Studená + pauza      |
+| ---------------------------- | ------- | --------------------- | --------------------- | --------------------- | -------------------- |
+| DFN3 samotný                 | AVX2    | 2,08 → 1,94 (−7 %)    | 4,57 → 3,65 (−20 %)   | 3,75 → 3,57 (−5 %)    | 5,36 → 4,83 (−10 %)  |
+| DPDFNet samotný              | AVX2    | 10,58 → 9,97 (−6 %)   | 13,67 → 11,89 (−13 %) | 16,31 → 16,27 (0 %)   | 17,40 → 16,50 (−5 %) |
+| Celý odšumovač, DFN3, řeč    | AVX2    | 3,87 → 3,59 (−7 %)    | 6,99 → 6,59 (−6 %)    | 6,32 → 5,93 (−6 %)    | 8,24 → 7,74 (−6 %)   |
+| Celý odšumovač, DPDFNet, řeč | AVX2    | 12,09 → 11,20 (−7 %)  | 16,00 → 15,01 (−6 %)  | 16,68 → 16,48 (−1 %)  | 20,43 → 18,69 (−9 %) |
+| DFN3 samotný                 | AVX-512 | 1,87 → 2,33 (+25 %)   | 3,86 → 3,91 (+1 %)    | 2,78 → 3,54 (+27 %)   | 4,64 → 4,50 (−3 %)   |
+| DPDFNet samotný              | AVX-512 | 10,18 → 11,34 (+11 %) | 12,94 → 13,07 (+1 %)  | 11,70 → 16,85 (+44 %) | 15,19 → 15,57 (+3 %) |
+| Celý odšumovač, DFN3, řeč    | AVX-512 | 3,57 → 3,64 (+2 %)    | 6,20 → 6,36 (+3 %)    | 4,69 → 5,82 (+24 %)   | 7,32 → 7,17 (−2 %)   |
+| Celý odšumovač, DPDFNet, řeč | AVX-512 | 11,42 → 12,72 (+11 %) | 14,91 → 15,50 (+4 %)  | 12,49 → 15,39 (+23 %) | 17,07 → 16,88 (−1 %) |
+
+- **Bez AVX-512 (notebooky, Zen 3, většina Intelů) je f16 rychlejší ve všech režimech:** model −5 až
+  −20 %, celý odšumovač −6 až −9 %. Splňuje hranici z „Hotovo, když“ (studená cache DFN3 −20 %, DPDFNet
+  −13 %); potvrdí notebook (balíček má druhý průchod s f16).
+- **S AVX-512 f16 prohrává v teplé cache** (DFN3 +25 %, DPDFNet +11 %), ve studené je vyrovnaný. f16
+  ztratí AVX-512 kernel, a ten má ve studené cache náskok 10–21 % (kroky 1 a 2). Pauza tu kvůli
+  kolísání nerozhoduje.
+- **Návrh:** f16 jen na procesorech bez AVX-512 (`wanted()` = F16C a FMA a ne `avx512f`), f32 s AVX-512.
+  Kernel `f16f32` pro AVX-512 (větev v `avx512_mmm_f32_128x1`, `vcvtph2ps zmm` je AVX-512F) jako PR do
+  tractu; po jeho vydání jedna cesta pro všechny.
+
+### Notebook 7530U s f16 (2026-11-16)
+
+f32 → f16, % jádra: DFN3 teplá 3,65 → 3,12 (−15 %), studená 9,50 → 8,52 (−10 %), s pauzou 14,38 → 14,57
+(+1 %), studená + pauza 15,80 → 14,54 (−8 %). DPDFNet 20,20 → 16,93 (−16 %), 30,49 → 25,19 (−17 %),
+34,76 → 35,68 (+3 %), 34,65 → 31,12 (−10 %). Celý odšumovač −8 až −16 % mimo pauzu. Bez AVX-512 tedy
+f16 přijmout. S pauzou nepomáhá: tam brzdí takt po nečinnosti, ne paměť. ORT v tomto běhu DPDFNet
+1530 µs proti tractu f32 2020 / f16 1693 µs (minule 1896 proti 2077): notebook kolísá mezi běhy.
+
+### AVX-512 kernel pro f16 váhy (tract větev `f16-avx512`, 691bdd5fa)
+
+`avx512_mmm_f32_128x1` dostal balení `f16f32`; testy tract-linalg prošly (4065), kontrola kódu bez
+nálezu. Všech 13 násobení s n = 1 v DFN3 běží v něm. Malé matice (m 16–60) se ale doplňují na 128 řádků,
+konvoluce zůstávají ve FMA kernelu. Měření na 9800X3D (f32 → f16, jeden běh, f32 a f16 střídavě):
+
+| Část                         | Teplá                | Studená               | S pauzou (2 běhy)             | Studená + pauza      |
+| ---------------------------- | -------------------- | --------------------- | ----------------------------- | -------------------- |
+| DFN3 samotný                 | 2,48 → 2,03 (−18 %)  | 4,17 → 4,19 (0 %)     | 3,59 → 3,05 / 2,90 → 2,96     | 4,55 → 4,87 (+7 %)   |
+| DPDFNet samotný              | 10,65 → 11,16 (+5 %) | 13,45 → 15,32 (+14 %) | 16,40 → 12,16 / 11,65 → 12,44 | 15,30 → 16,02 (+5 %) |
+| Celý odšumovač, DFN3, řeč    | 3,74 → 3,82 (+2 %)   | 6,90 → 6,63 (−4 %)    | 6,41 → 4,78 / 4,75 → 5,84     | 7,10 → 7,45 (+5 %)   |
+| Celý odšumovač, DPDFNet, řeč | 11,76 → 12,39 (+5 %) | 15,76 → 15,70 (0 %)   | 16,00 → 13,16 / 13,03 → 15,45 | 16,98 → 17,94 (+6 %) |
+
+Nerozhodné: s AVX-512 kernelem je f16 zhruba na úrovni f32, v rozptylu běhů (f32 DFN3 teplá 2,48 proti
+1,87 v minulém běhu). Další krok: opakované běhy (3×) a odstranit doplňování malých matic na 128 řádků
+(výběr kernelu podle m, nebo f16 cesta v `avx512_mmm_f32_16x1`), pak znovu změřit. Do té doby f16 jen
+bez AVX-512.
+
+### Varianty kernelů a převodu (9800X3D, 2026-11-17)
+
+Měřeno přesněji: vlákno připnuté na jedno jádro, varianty střídavě v náhodném pořadí, medián z 3–5 kol.
+
+**Mikrobenchmark kernelů** (`linalg/benches/f16_mat_vec.rs` v tractu, ns na jedno násobení matice
+vektorem; `l3` = 32 MB vah v rotaci, `dram` = 512 MB):
+
+| Matice, stav     | f32 128x1 | f16 FMA 32x1 | f16 128x1 (nový) | f32 16x1 |
+| ---------------- | --------- | ------------ | ---------------- | -------- |
+| 768×256, teplá   | 2767      | 5228         | 2485             | 3892     |
+| 768×256, L3      | 6178      | 5360         | 3340             | 6252     |
+| 768×256, RAM     | 12146     | 6780         | 7051             | 16042    |
+| 256×256, L3      | 2180      | 1882         | 1218             | 2212     |
+| 32×64, L3        | 548       | 166          | 485              | 204      |
+| 16×32, L3        | 549       | 193          | 520              | 141      |
+
+- Nový f16 kernel je u velkých matic o 40–46 % rychlejší než f32 (L3, RAM).
+- U malých matic (m ≤ 64) je kernel se 128 řádky špatná volba i pro f32: doplňuje řádky až osmkrát.
+  Tract ho přesto vybíral pro m = 32 a 60 (na AMD pravidlo „16x1 jen pod m = 31“; pro f16 váhy vždy
+  nejširší dlaždice). Oprava výběru (větev `f16-sel`): dlaždice s mr ≥ 2·m ustoupí užší.
+- Zahozeno, bez měřitelného přínosu: smyčka rozvinutá na 2 a 4 kroky, dvě sady akumulátorů (vše v
+  ±1–3 %), prefetch (o 10 % horší), f16 cesta v `16x1` (výběr ji nepoužije, FMA 32x1 je rychlejší),
+  f16 v konvolučních kernelech `16x12`/`16x8` (konvoluce s f16 vždy pomalejší než s f32).
+
+**Profil DFN3 po operacích** (test `f16_weights_op_profile_report` v `deep_filter`, teplá cache, µs na
+rámec): násobení matice vektorem f32 59,5 → f16 s opravou výběru 38,2; konvoluce f32 35,3, s f16 37–39;
+`Scan` (GRU) 41 µs, jeho rekurentní váhy byly f32. Proto se převod změnil: f16 jen pro váhy násobení
+matice vektorem (konvoluce zůstávají f32) a nově i uvnitř těl `Scan` (4,2 MB místo 2,3 MB v DFN3).
+
+Celý DFN3, změna proti f32 ve stejném běhu:
+
+| tract                            | Převod jako dosud | Jen n = 1 | Jen n = 1 + Scan |
+| -------------------------------- | ----------------- | --------- | ---------------- |
+| 0.23.10, teplá                   | −1,5 %            | −8,6 %    | −11,1 %          |
+| 0.23.10, studená                 | −6,4 %            | −6,4 %    | −11,4 %          |
+| 0.23.10 bez AVX-512, teplá       | −5,9 %            | −7,2 %    | −10,6 %          |
+| 0.23.10 bez AVX-512, studená     | −10,8 %           | −11,3 %   | −18,5 %          |
+| kernel + oprava výběru, teplá    | −10,6 %           | −11,6 %   | −16,1 %          |
+| kernel + oprava výběru, studená  | −6,3 %            | −7,7 %    | −13,3 %          |
+| jen kernel bez opravy, teplá     | −0,6 %            | −4,6 %    | −10,2 %          |
+
+Celý řetězec (`cpu_breakdown_report`, tract s kernelem a opravou výběru, % jádra, medián ze 3 kol):
+
+| Část                         | Teplá f32 → f16      | Studená f32 → f16    |
+| ---------------------------- | -------------------- | -------------------- |
+| DFN3 samotný                 | 1,89 → 1,59 (−16 %)  | 3,62 → 3,17 (−12 %)  |
+| Celý odšumovač, DFN3, řeč    | 3,57 → 3,30 (−8 %)   | 6,06 → 5,54 (−9 %)   |
+| DPDFNet samotný              | 10,04 → 10,10 (0 %)  | 12,96 → 12,55 (−3 %) |
+| Celý odšumovač, DPDFNet, řeč | 11,28 → 10,97 (−3 %) | 14,82 → 14,14 (−5 %) |
+
+Kvalita s novým převodem: reporty jako v krocích 3–5, rozdíly ±0,1 dB (konce slov ztracené o > 6 dB
+21,3 → 21,7 %).
+
+Závěr: f16 se vyplatí na všech měřených CPU i s nezměněným tractem 0.23.10; kernel s opravou výběru
+přidá na AVX-512 asi 5 bodů (teplá) a 2 body (studená) a samotná oprava výběru zrychlí i f32 o ~4 %.
+DPDFNet z f16 skoro nic nemá: čas tráví v `GruSeq` s malými vahami (0,8 MB), brzdí ho výpočet.
+
+Nasazeno (2026-11-17): f16 zapnuté na všech CPU s F16C + FMA (`GE_F16_WEIGHTS=0` vrací f32 pro
+srovnání), tract z forku github.com/PixCZ/tract, větev `gamersequalizer-0.23.10` (kořenový
+`Cargo.toml`). Pull requesty do sonos/tract jsou připravené ve forku, otevřou se později.
+
 ## Příloha: jak změřit části DFN3 a operace tractu
 
 Tract umí spustit plán s vlastní funkcí pro každý uzel. Stačí dočasně nahradit tři volání
