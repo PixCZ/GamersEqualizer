@@ -68,7 +68,7 @@ if ($ov.ActiveOverlayAcPowerScheme) { Log "Power mode overlay (AC): $($ov.Active
 $env:DENOISE_FIXTURES = Join-Path $here 'denoise'
 $test = 'ai_denoiser::tests::cpu_breakdown_report'
 # COLD_CACHE+PACED: live audio while a game churns the cache.
-# Model weights as f32 (GE_F16_WEIGHTS=0), then f16 as shipped (docs/mic-cpu-analysis.md chapter 8).
+# Model weights as f32 (GE_F16_WEIGHTS=0), then f16 as shipped (DEVLOG milestone 63).
 foreach ($weights in @('f32', 'f16')) {
   if ($weights -eq 'f32') { $env:GE_F16_WEIGHTS = '0' } else { Remove-Item Env:GE_F16_WEIGHTS -ErrorAction SilentlyContinue }
   foreach ($mode in @('warm', 'COLD_CACHE', 'PACED', 'COLD_CACHE+PACED')) {

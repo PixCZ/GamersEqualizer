@@ -3008,8 +3008,8 @@ shares do not differ.
 
 ## Milestone 63: Mic models with f16 weights, tract from our fork (2026-11-16 .. 2026-11-17)
 
-Branch `fix/pause-hiss`. Details, all tables and the variants that lost: `docs/mic-cpu-analysis.md`
-chapter 8.
+Branch `fix/pause-hiss`. The long analysis (tables, variants that lost) was a working document, removed
+after merge; it is in the git history of that branch (`docs/mic-cpu-analysis.md`).
 
 **What ships**
 
@@ -3045,7 +3045,7 @@ whole-denoiser warm value 9.6 against 7.8 on 2026-11-16, so its -39 % is not to 
 | Whole, DFN3, speech    | -39 % (?) | -19 %      | -12 % | -9 %         |
 | Whole, DPDFNet, speech | -8 %      | -7 %       | -3 %  | -5 %         |
 
-- Meets the bar from `docs/mic-cpu-analysis.md` chapter 8 (cold cache: DFN3 -28 %, DPDFNet -11 %).
+- Meets the bar set in the analysis (cold cache: DFN3 -28 %, DPDFNet -11 %).
   With pauses between blocks the gain shrinks (DFN3 whole -9 to -12 %, DPDFNet -3 to -5 %): there the
   core clock after idle is the limit, not memory.
 - Absolute numbers are not comparable with 2026-11-16: ONNX Runtime, which our changes do not touch, ran
@@ -3075,8 +3075,8 @@ other rnnoise2 reports pass.
 A friend on a new build was far too loud and had to be turned down. `chain_report` showed the same on
 the dev PC: with DeepFilterNet 3 the voice came out 6-7 dB over the -24 dBFS target even at a normal
 input (0 dB: -16.0 / -17.4 dBFS, leveler +13.4 dB instead of +7.4), and with +20 dB clipped the
-leveler cut only -5.6 dB instead of -12. RNNoise was exact. Analysis:
-`docs/mic-leveler-loudness-analysis.md`.
+leveler cut only -5.6 dB instead of -12. RNNoise was exact. The analysis was a working document, removed
+after merge (git history of `fix/pause-hiss`).
 
 **Cause.** `d4b83bd` (milestone 35) swapped the raw-input detector for RNNoise 0.2 (`in_net`), which
 unlike the 2017 network hears whispers. Milestone 40 had kept the leveler on it "so a whisper is not

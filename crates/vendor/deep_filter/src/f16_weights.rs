@@ -1,7 +1,7 @@
 //! Model weights stored as f16, computed in f32: half the bytes a matrix-vector product reads per
 //! frame, which is where the mic models spend most of their memory traffic. tract picks a kernel
 //! that takes f16 weights and f32 activations (`f16f32` packing; x86 needs AVX + FMA + F16C) from
-//! the input types alone. Measurements: `docs/mic-cpu-analysis.md` chapter 8 in the GamersEqualizer
+//! the input types alone. Measurements: DEVLOG milestone 63 in the GamersEqualizer
 //! repo (DeepFilterNet 3 10-18 % faster, the same output within 0.1 dB).
 use tract_core::internal::*;
 use tract_core::ops::einsum::EinSum;
