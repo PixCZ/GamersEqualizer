@@ -23,9 +23,6 @@ use std::sync::atomic::Ordering;
 // Constants
 // ---------------------------------------------------------------------------------------
 
-/// A chat block's envelope peak above this (-60 dBFS) is a sound: broadband and before the voice
-/// detector on purpose, so any chat sound holds the game's level, speech or not.
-const CHAT_SOUND_PEAK: f32 = 0.001;
 /// The held game level is a mean over the latest chat-free stretch: a running mean from its start
 /// (a short pause sees only the game of that pause), then over about this long (a long stretch
 /// averages a fight's bursts).
@@ -53,6 +50,8 @@ pub struct MixDucker {
   /// Seconds since the chat last sounded (the guard), and the current chat-free stretch, seconds.
   since_chat_s: f32,
   free_s: f32,
+  /// Seconds since the game was last measured.
+  unmeasured_s: f32,
   /// The game's band level, mean square, with this ducker's own lowering undone: the mean over the
   /// latest chat-free stretch, held while the chat sounds.
   game_ms: f32,
@@ -74,7 +73,10 @@ pub struct MixDucker {
 /// recorded by the stream APO) exceeded the sound threshold within the last `window_s` seconds.
 /// The envelope holds only the blocks a stream recorded, so a peak inside the window is fresh by
 /// itself: no separate freshness check, which (50 ms) would cut a window of a tick and a margin.
-pub fn chat_sounding(table: &StreamTable, now_hns: u64, window_s: f32) -> bool {
+/// `peak_db`: the sound threshold (`mix_chat_sound_db`); broadband and before the voice detector on
+/// purpose, so any chat sound above it holds the game's level, speech or not.
+pub fn chat_sounding(table: &StreamTable, now_hns: u64, window_s: f32, peak_db: f32) -> bool {
+  let threshold = 10f32.powf(peak_db / 20.0);
   let blocks = (f64::from(window_s.max(0.0)) * 1e7 / ENVELOPE_BLOCK_HNS as f64).ceil() as u64;
   let last = now_hns / ENVELOPE_BLOCK_HNS;
   let first = last.saturating_sub(blocks.clamp(1, ENVELOPE_LEN as u64) - 1);
@@ -83,7 +85,7 @@ pub fn chat_sounding(table: &StreamTable, now_hns: u64, window_s: f32) -> bool {
       && (first..=last).any(|block| {
         let mut peak = [0.0f32];
         slot.envelope(block, &mut peak);
-        peak[0] > CHAT_SOUND_PEAK
+        peak[0] > threshold
       })
   })
 }
@@ -118,6 +120,7 @@ impl MixDucker {
       gain: DuckGain::default(),
       since_chat_s: f32::INFINITY,
       free_s: 0.0,
+      unmeasured_s: 0.0,
       game_ms: 0.0,
       last_depth_db: 0.0,
       loud_seeded: false,
@@ -147,6 +150,7 @@ impl MixDucker {
       max_depth_db: tuning.max_depth_db.min(tuning.mix_max_depth_db),
       hold_s: tuning.mix_hold_s,
       max_margin_db: tuning.mix_max_margin_db,
+      release_db_per_s: tuning.mix_release_db_per_s,
       ..*tuning
     };
     if !dt.is_finite() || dt <= 0.0 {
@@ -165,7 +169,15 @@ impl MixDucker {
         // within one tick): undo that.
         let game_ms = mix_ms * 10f32.powf(self.last_depth_db / 10.0);
         self.free_s += dt;
-        let weight = if self.free_s < FREE_MEAN_S { dt / self.free_s } else { 1.0 - (-dt / FREE_MEAN_S).exp() };
+        // The fall counts the time since the last measurement too: the pauses that measure the game
+        // are short and far apart when someone talks a lot.
+        let weight = if game_ms < self.game_ms {
+          1.0 - (-(dt + self.unmeasured_s) / tuning.mix_game_fall_s).exp()
+        } else if self.free_s < FREE_MEAN_S {
+          dt / self.free_s
+        } else {
+          1.0 - (-dt / FREE_MEAN_S).exp()
+        };
         self.game_ms += (game_ms - self.game_ms) * weight;
         measured = true;
       }
@@ -173,6 +185,7 @@ impl MixDucker {
     if !chat_free {
       self.free_s = 0.0; // the next pause starts a new stretch
     }
+    self.unmeasured_s = if measured { 0.0 } else { self.unmeasured_s + dt };
     let speech_ms = if chat_speech_ms.is_finite() && chat_speech_ms > 0.0 { chat_speech_ms } else { 0.0 };
     let learn_loud = measured && self.last_depth_db <= LEARN_BELOW_DEPTH_DB;
     self.last_depth_db = self.gain.update(dt, speech_ms, self.game_ms, learn_loud, settings, &self.tuning);
@@ -213,7 +226,8 @@ impl MixDucker {
   pub fn reset(&mut self) {
     self.gain.restart();
     self.state = [[0.0; 2]; 2];
-    (self.since_chat_s, self.free_s, self.game_ms, self.last_depth_db) = (f32::INFINITY, 0.0, 0.0, 0.0);
+    (self.since_chat_s, self.free_s, self.unmeasured_s, self.game_ms, self.last_depth_db) =
+      (f32::INFINITY, 0.0, 0.0, 0.0, 0.0);
   }
 }
 

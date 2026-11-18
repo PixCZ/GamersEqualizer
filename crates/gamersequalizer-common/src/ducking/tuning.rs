@@ -143,6 +143,17 @@ duck_tuning! {
   /// The mix ducker's `max_margin_db`: the lowered game is the whole band and a loud game with a quiet
   /// podcast needed about 8.5 dB (live test), which half strength now gives.
   mix_max_margin_db = 17.0 in 0.0..=30.0,
+  /// A chat block's envelope peak above this (dBFS) is a sound that holds the game's level (see
+  /// `chat_sounding`). Raised from -60: a podcast's breaths and room never fell below that, so the game
+  /// was never measured and its stale level hid the need to duck (live test).
+  mix_chat_sound_db = -45.0 in -90.0..=-10.0,
+  /// The mix ducker's game level falls with this time constant (it rises at once): a game that is
+  /// quiet for a few seconds between fights must not let go of the duck while the talker goes on
+  /// (live test: the game came back up and went down again every few seconds).
+  mix_game_fall_s = 6.0 in 0.1..=60.0,
+  /// The mix ducker's `release_db_per_s`: the whole game comes back, so slower than the speech band
+  /// of a stream (live test: 12 dB/s brought 13 dB back in about a second, which sounded like a jump).
+  mix_release_db_per_s = 4.0 in 0.5..=200.0,
 }
 
 const _: () = assert!(PARAMS.len() <= DUCK_TUNE_SLOTS, "more tunables than shared-memory slots");
@@ -296,6 +307,9 @@ mod tests {
       "mix_max_depth_db",
       "mix_hold_s",
       "mix_max_margin_db",
+      "mix_chat_sound_db",
+      "mix_game_fall_s",
+      "mix_release_db_per_s",
     ];
     assert_eq!(names, pinned);
   }

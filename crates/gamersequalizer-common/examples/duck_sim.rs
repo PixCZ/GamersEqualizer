@@ -217,7 +217,7 @@ fn simulate(
         // As the service: the chat's speech level, and whether its envelope (recorded above per
         // 10 ms block) sounded during the tick, with a small margin.
         let (speech_ms, _) = chat_levels(&table, now);
-        let sounding = chat_sounding(&table, now, 0.06);
+        let sounding = chat_sounding(&table, now, 0.06, tuning.mix_chat_sound_db);
         let s = DuckSettings { enabled: settings.enabled && paired, ..*settings };
         mix_depth = mixer.process(&tick_mix, 0.05, speech_ms, sounding, &s, tuning);
         tick_mix.clear();

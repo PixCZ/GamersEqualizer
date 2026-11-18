@@ -255,7 +255,7 @@ impl MixRun {
         // One snapshot per `process`, passed as it is: whether the chat made sound over this step
         // (the game's level is measured only when not), and its speech level. The band level is
         // for the log only.
-        let sounding = chat_sounding(&l.streams, now_hns, dt + 0.02);
+        let sounding = chat_sounding(&l.streams, now_hns, dt + 0.02, tuning.mix_chat_sound_db);
         let (speech_ms, band_ms) = chat_levels(&l.streams, now_hns);
         self.depth_db = game.ducker.process(&self.frames, dt, speech_ms, sounding, settings, tuning).max(0.0);
         let mix_ms = self.frames.iter().map(|v| v * v).sum::<f32>() / self.frames.len().max(1) as f32;
@@ -270,7 +270,7 @@ impl MixRun {
           game.ducker.reset();
           game.paused = true;
         }
-        self.depth_db = (self.depth_db - tuning.release_db_per_s * dt).max(0.0);
+        self.depth_db = (self.depth_db - tuning.mix_release_db_per_s * dt).max(0.0);
       }
     }
     if self.depth_db == 0.0

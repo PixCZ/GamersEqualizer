@@ -64,7 +64,7 @@ impl MixRig {
       in_mix.iter().enumerate().flat_map(|(i, c)| [tone(1500.0, game, i) * gain + c * self.chat_in_mix; 2]).collect();
     self.phase += frames;
     // As the stream APO's envelope: the peak per block, at the stream.
-    let sounding = chat.iter().any(|s| s.abs() > CHAT_SOUND_PEAK);
+    let sounding = chat.iter().any(|s| s.abs() > 10f32.powf(DuckTuning::DEFAULT.mix_chat_sound_db / 20.0));
     let band_ms = self.chat_band.measure(&mut self.chat_state, &chat, 1);
     let speech_ms = if voice > 0.0 { band_ms } else { 0.0 };
     self.depth = self.ducker.process(&mix, TICK_S, speech_ms, sounding, &DEFAULT, &self.tuning);
@@ -120,19 +120,34 @@ fn a_game_going_calm_in_speech_is_followed_at_the_first_pause_longer_than_the_gu
   // Calm, but the talker does not pause: not noticed.
   let unnoticed = rig.run(10.0, 0.0, VOICE);
   assert!((rig.game_db() - game).abs() < 0.01 && unnoticed.iter().all(|d| *d == rig.tuning.mix_max_depth_db));
-  // A 0.4 s pause: longer than the guard, shorter than the hold (still one spurt).
-  rig.run(0.4, 0.0, 0.0);
-  let after = rig.run(15.0, 0.0, VOICE);
+  // 0.4 s pauses: longer than the guard, shorter than the hold (still one spurt); each one measures
+  // the calm game and the level falls slowly towards it.
+  let after: Vec<f32> = (0..12).flat_map(|_| [rig.run(0.4, 0.0, 0.0), rig.run(3.0, 0.0, VOICE)].concat()).collect();
+  let slowest = rig.tuning.mix_release_db_per_s * TICK_S + 1e-4;
+  assert!(after.windows(2).all(|w| w[0] - w[1] <= slowest), "the whole game comes back slowly");
   let released = after.iter().position(|d| *d == 0.0).expect("released while the talk goes on");
   assert!(released as f32 * TICK_S >= rig.tuning.latch_release_s, "{released}");
   assert!(rig.ducker.status().spurt_talk_s > 20.0, "one spurt throughout");
 }
 
 #[test]
+fn a_few_quiet_seconds_between_fights_do_not_let_go_of_the_duck_while_the_talk_goes_on() {
+  let mut rig = MixRig::new();
+  rig.run(20.0, FIGHT, 0.0);
+  rig.run(5.0, FIGHT, VOICE);
+  let ducked = *rig.run(1.0, FIGHT, VOICE).last().unwrap();
+  assert!(ducked > 5.0);
+  // The game goes quiet for 6 s; the talker's pauses (longer than the guard) measure it.
+  let quiet: Vec<f32> =
+    (0..3).flat_map(|_| [rig.run(1.5, QUIET_GAME, VOICE), rig.run(0.4, QUIET_GAME, 0.0)].concat()).collect();
+  assert!(quiet.iter().all(|d| *d >= ducked - 0.5), "{quiet:?}");
+}
+
+#[test]
 fn a_fight_starting_in_speech_is_picked_up_at_the_next_pause() {
   let mut rig = MixRig::new();
   rig.run(20.0, FIGHT, 0.0); // an earlier fight: the loud level is known
-  rig.run(10.0, 0.0, 0.0);
+  rig.run(40.0, 0.0, 0.0); // the level falls slowly: long enough to be gone
   rig.run(5.0, 0.0, VOICE);
   assert!(rig.run(5.0, FIGHT, VOICE).iter().all(|d| *d == 0.0), "not while the talk goes on");
   rig.run(0.4, FIGHT, 0.0);
@@ -245,7 +260,7 @@ fn chat_sounding_reads_the_fresh_chat_envelopes_within_the_window() {
     for (ago, peak) in records {
       slot.record(now - ago, *peak, 480);
     }
-    assert_eq!(chat_sounding(&table, now, 0.1), sounding, "{bus:?} {records:?}");
+    assert_eq!(chat_sounding(&table, now, 0.1, DuckTuning::DEFAULT.mix_chat_sound_db), sounding, "{bus:?} {records:?}");
   }
   // The peak 0.3 s ago counts in a 0.5 s window.
   let table = table();
@@ -253,7 +268,11 @@ fn chat_sounding_reads_the_fresh_chat_envelopes_within_the_window() {
   table.slots[index].bus.store(StreamBus::Chat.to_u32(), Ordering::Relaxed);
   table.slots[index].record(now - 3_000_000, 0.01, 480);
   table.slots[index].record(now, 0.0001, 480);
-  assert!(chat_sounding(&table, now, 0.5));
+  assert!(chat_sounding(&table, now, 0.5, DuckTuning::DEFAULT.mix_chat_sound_db));
+  // A breath at -50 dBFS (0.003) is no sound at the default threshold, but is at -60.
+  table.slots[index].record(now, 0.003, 480);
+  assert!(!chat_sounding(&table, now, 0.1, DuckTuning::DEFAULT.mix_chat_sound_db));
+  assert!(chat_sounding(&table, now, 0.1, -60.0));
 }
 
 #[test]
