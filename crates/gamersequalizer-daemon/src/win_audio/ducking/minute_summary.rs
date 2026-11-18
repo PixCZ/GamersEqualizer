@@ -144,7 +144,8 @@ impl MinuteSummary {
     if self.in_spurt || now.saturating_duration_since(started) < PERIOD {
       return None;
     }
-    let line = (self.spurts > 0 || self.chat_speech > 0 || self.chat_sound > 0).then(|| self.line(chat_gain_permille));
+    let line = (self.spurts > 0 || self.chat_speech > 0 || self.chat_sound > 0)
+      .then(|| self.line(chat_gain_permille, now.saturating_duration_since(started)));
     *self = Self { started: Some(now), last_tick: Some(now), ..Self::default() };
     line
   }
@@ -157,14 +158,16 @@ impl MinuteSummary {
     }
   }
 
-  fn line(&self, chat_gain_permille: u32) -> String {
+  /// `span` is what the line covers: longer than `PERIOD` when a spurt held the minute open.
+  fn line(&self, chat_gain_permille: u32, span: Duration) -> String {
+    let last = if span < PERIOD * 3 / 2 { "minute".to_string() } else { format!("{} s", span.as_secs()) };
     let prob = self.prob_max.map_or("no voice detector".to_string(), |p| format!("prob max {:.2}", p as f32 / 1000.0));
     if self.spurts == 0 && self.chat_speech == 0 {
       let sound = share(self.chat_sound, self.chat_samples);
-      return format!("last minute: chat sound without speech {sound} % of samples ({prob}), nothing lowered");
+      return format!("last {last}: chat sound without speech {sound} % of samples ({prob}), nothing lowered");
     }
     let mix = if self.mix { " (mix)" } else { "" };
-    let mut parts = vec![format!("last minute{mix}: {} spurts", self.spurts)];
+    let mut parts = vec![format!("last {last}{mix}: {} spurts", self.spurts)];
     if self.lowered_spurts > 0 {
       let (lo, hi) = self.peaks.unwrap_or_default();
       let game = if self.game_db_n == 0 {

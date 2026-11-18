@@ -133,6 +133,8 @@ if ($Fast) {
     # cargo writes everything to stderr; stdout is redirected only because Start-Process requires a file per stream.
     $proc = Start-Process cargo -ArgumentList $cargoArgs -NoNewWindow -PassThru `
       -RedirectStandardError $tmp -RedirectStandardOutput "$tmp.out"
+    # Reading Handle caches it: without it ExitCode of a Start-Process -PassThru process can be $null once it has exited.
+    $null = $proc.Handle
     [pscustomobject]@{ Proc = $proc; Tmp = $tmp; Cmd = "cargo $($cargoArgs -join ' ')" }
   }
   $failed = @()
@@ -146,7 +148,11 @@ if ($Fast) {
       }
       Remove-Item -LiteralPath $f
     }
-    if ($b.Proc.ExitCode -ne 0) { $failed += $b.Cmd }
+    if ($b.Proc.ExitCode -ne 0) {
+      # The exit code goes into the message: a build that logged "Finished" must not fail without saying why.
+      $code = if ($null -eq $b.Proc.ExitCode) { '$null' } else { $b.Proc.ExitCode }
+      $failed += "$($b.Cmd) (exit code $code)"
+    }
   }
   if ($failed) { throw "build failed: $($failed -join '; '), log: $log" }
 
@@ -169,7 +175,16 @@ if (-not $Fast) {
 
 # Scratch folder only (never the ZIPs next to it).
 $staging = Join-Path $out 'staging'
-if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
+if (Test-Path $staging) {
+  try { Remove-Item $staging -Recurse -Force -ErrorAction Stop }
+  catch {
+    # A tester copy started from an earlier staging folder keeps its exe locked: name it instead of the IOException.
+    $locking = @(Get-Process | Where-Object { $_.Path -and $_.Path -like "$staging*" } |
+        ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" })
+    $who = if ($locking) { $locking -join ', ' } else { 'none found (antivirus or an Explorer window?)' }
+    throw "cannot clear $staging, in use by: $who. Close it and run again. $($_.Exception.Message)"
+  }
+}
 $stage = Join-Path $staging $name
 New-Item -ItemType Directory -Force $stage | Out-Null
 

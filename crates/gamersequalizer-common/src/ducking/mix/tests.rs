@@ -219,7 +219,7 @@ fn stored_levels_give_the_locked_depth_from_the_first_sentence() {
   rig.ducker.seed(Some(-23.0), Some(-23.2));
   rig.run(3.0, QUIET_GAME, 0.0);
   let first = rig.sentence(3.0, QUIET_GAME).iter().fold(0.0f32, |m, d| m.max(*d));
-  let target = 0.2 + DEFAULT.strength * rig.tuning.max_margin_db;
+  let target = 0.2 + DEFAULT.strength * rig.tuning.mix_max_margin_db;
   assert!((first - target).abs() < 0.1, "{first} vs {target}");
   let st = rig.ducker.status();
   assert!(st.loud_seeded && st.quiet_seeded);

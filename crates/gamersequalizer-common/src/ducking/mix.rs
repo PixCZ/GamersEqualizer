@@ -143,7 +143,12 @@ impl MixDucker {
       self.band = BandPass::new(f64::from(self.sample_rate), tuning);
     }
     // This depth is full band: bounded by its own maximum.
-    self.tuning = DuckTuning { max_depth_db: tuning.max_depth_db.min(tuning.mix_max_depth_db), ..*tuning };
+    self.tuning = DuckTuning {
+      max_depth_db: tuning.max_depth_db.min(tuning.mix_max_depth_db),
+      hold_s: tuning.mix_hold_s,
+      max_margin_db: tuning.mix_max_margin_db,
+      ..*tuning
+    };
     if !dt.is_finite() || dt <= 0.0 {
       return self.last_depth_db;
     }

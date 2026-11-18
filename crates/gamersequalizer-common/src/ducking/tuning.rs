@@ -136,7 +136,13 @@ duck_tuning! {
   mix_chat_guard_s = 0.3 in 0.05..=5.0,
   /// The mix ducker lowers the game's whole band (its session volume), so it needs less than the
   /// band cut's `max_depth_db`.
-  mix_max_depth_db = 12.0 in 0.0..=40.0,
+  mix_max_depth_db = 18.0 in 0.0..=40.0,
+  /// The mix ducker's `hold_s`: longer, so a podcast's breath between sentences does not bring the game
+  /// back up (live test: at 0.5 s it did).
+  mix_hold_s = 3.0 in 0.05..=5.0,
+  /// The mix ducker's `max_margin_db`: the lowered game is the whole band and a loud game with a quiet
+  /// podcast needed about 8.5 dB (live test), which half strength now gives.
+  mix_max_margin_db = 17.0 in 0.0..=30.0,
 }
 
 const _: () = assert!(PARAMS.len() <= DUCK_TUNE_SLOTS, "more tunables than shared-memory slots");
@@ -288,6 +294,8 @@ mod tests {
       "latch_release_s",
       "mix_chat_guard_s",
       "mix_max_depth_db",
+      "mix_hold_s",
+      "mix_max_margin_db",
     ];
     assert_eq!(names, pinned);
   }

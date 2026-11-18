@@ -348,8 +348,27 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
   ui.label(theme::caption(tr("Drag an app to another channel to move it there; right-click it to undo.")));
   ui.add_space(theme::CARD_GAP);
 
-  // ChatMix balance card
+  // ChatMix card: the Automatic ChatMix switch on top; below it its strength while it is on, else the balance.
   theme::card(ui, |ui| {
+    let session_mode = win_audio.chatmix.game_device_id.is_none() && win_audio.chatmix.chat_device_id.is_none();
+    let auto_on = duck_row(ui, state, session_mode);
+    ui.add_space(4.0);
+    if let (true, Some(h)) = (auto_on, state.shm_header()) {
+      ui.horizontal(|ui| {
+        ui.label(theme::strong(tr("Strength:"), 15.0));
+        ui.add_space(12.0);
+        super::tab_headphones::strength_row(ui, h, 280.0);
+      });
+    } else {
+      balance_row(ui, win_audio);
+    }
+    // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
+  });
+}
+
+/// The game/chat balance slider with the resulting percentages.
+fn balance_row(ui: &mut Ui, win_audio: &mut WinAudioSystem) {
+  {
     ui.horizontal(|ui| {
       ui.label(theme::strong(tr("ChatMix"), 15.0));
       ui.add_space(12.0);
@@ -384,31 +403,30 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
         win_audio.chatmix.set_balance(0.0);
       }
     });
-    ui.add_space(4.0);
-    let session_mode = win_audio.chatmix.game_device_id.is_none() && win_audio.chatmix.chat_device_id.is_none();
-    duck_row(ui, state, session_mode);
-  });
-  // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
+  }
 }
 
-/// The Automatic ChatMix switch under the balance (the card on the output page has its strength),
-/// with what it does on hover and, while it works, how far the game is lowered now, or what it does
-/// about a game it cannot hear at its stream. Saved with the other audio settings (`save_pending`).
-fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
+/// The Automatic ChatMix switch (the card on the output page has its strength too), with what it does
+/// on hover and, while it works, how far the game is lowered now, or what it does about a game it
+/// cannot hear at its stream. Saved with the other audio settings (`save_pending`). Whether it is on.
+fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) -> bool {
   let unheard = state.ducking_unheard(session_mode).and_then(|(game, mode)| unheard_text(&game, mode));
-  let Some(h) = state.shm_header() else { return };
+  let Some(h) = state.shm_header() else { return false };
   let help = tr(
     "Lowers the game while someone in the chat is talking and the game is drowning them out. \
      Only in the range of speech, smoothly, and by about the same amount each time.",
   );
+  let mut on = h.duck_enabled.load(Ordering::Relaxed);
   ui.horizontal(|ui| {
-    let mut on = h.duck_enabled.load(Ordering::Relaxed);
     ui.label(tr("Automatic ChatMix")).on_hover_text(help);
     if ui.add(theme::Toggle(&mut on)).on_hover_text(help).changed() {
       h.duck_enabled.store(on, Ordering::Relaxed);
     }
-    // Last in the row and one line high, so what comes and goes there moves nothing else.
     let reduction = h.duck_reduction_permille.load(Ordering::Relaxed);
+    if on {
+      reduction_bar(ui, reduction.div_ceil(10).min(100));
+    }
+    // Last in the row and one line high, so what comes and goes there moves nothing else.
     if let Some((text, severity)) = unheard.filter(|_| on) {
       let (icon, color) = if severity == Severity::Warning {
         (icons::WARNING, theme::severity_color(ui, severity))
@@ -417,11 +435,31 @@ fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
       };
       ui.label(theme::icon(icon, 14.0).color(color));
       ui.add(egui::Label::new(RichText::new(&text).color(color)).truncate()).on_hover_text(&text);
-    } else if on && reduction > 0 {
-      let text = trf("Game lowered by {} %", &[&reduction.div_ceil(10)]);
-      ui.label(RichText::new(text).color(theme::palette(ui).text_secondary));
     }
   });
+  on
+}
+
+/// How far the game is lowered now: a fixed-size bar that fills with the cut, its percent inside,
+/// so it never moves what is next to it. The words are on hover.
+fn reduction_bar(ui: &mut Ui, percent: u32) {
+  let (rect, resp) = ui.allocate_exact_size(Vec2::new(96.0, 18.0), Sense::hover());
+  let (p, fill_color) = (theme::palette(ui), ui.visuals().selection.bg_fill);
+  let painter = ui.painter();
+  painter.rect_filled(rect, CornerRadius::same(4), p.inset);
+  if percent > 0 {
+    let mut fill = rect;
+    fill.set_width(rect.width() * percent as f32 / 100.0);
+    painter.rect_filled(fill, CornerRadius::same(4), fill_color);
+    painter.text(
+      rect.center(),
+      egui::Align2::CENTER_CENTER,
+      format!("-{percent} %"),
+      egui::FontId::proportional(12.0),
+      ui.visuals().text_color(),
+    );
+  }
+  resp.on_hover_text(trf("Game lowered by {} %", &[&percent]));
 }
 
 /// What Automatic ChatMix does about a `game` it cannot hear at its stream
@@ -431,10 +469,7 @@ pub(super) fn unheard_text(game: &str, mode: Mode) -> Option<(String, Severity)>
   let warning = |text: String| Some((text, Severity::Warning));
   match mode {
     Mode::Stream => None,
-    Mode::Mix => Some((
-      trf("With spatial sound on, {} is lowered as a whole, not only in the range of speech.", &[&game]),
-      Severity::Info,
-    )),
+    Mode::Mix => Some((tr("Spatial sound: the whole game is lowered").to_string(), Severity::Info)),
     Mode::ChannelOutputs => warning(trf(
       "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with \
        Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate \

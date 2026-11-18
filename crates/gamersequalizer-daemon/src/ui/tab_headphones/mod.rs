@@ -14,6 +14,7 @@ use crate::win_audio::{WinAudioSystem, shell};
 use egui::{Color32, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::profile::{ParametricProfile, VadType};
+use gamersequalizer_common::shm::ShmHeader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, channel};
@@ -163,24 +164,7 @@ fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
     ui.add_enabled_ui(on, |ui| {
       egui::Grid::new("ducking_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
         ui.label(tr("Strength:"));
-        ui.horizontal(|ui| {
-          let strength = h.duck_strength_permille.load(Ordering::Relaxed);
-          let mut percent = strength as f32 / 10.0;
-          ui.spacing_mut().slider_width = SLIDER_WIDTH;
-          let slider = egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %");
-          if ui
-            .add(slider)
-            .on_hover_text(tr(
-              "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
-            ))
-            .changed()
-          {
-            h.duck_strength_permille.store(((percent * 10.0).round() as u32).min(1000), Ordering::Relaxed);
-          }
-          if strength != DEFAULT_STRENGTH_PERMILLE && ui.small_button(tr("Default")).clicked() {
-            h.duck_strength_permille.store(DEFAULT_STRENGTH_PERMILLE, Ordering::Relaxed);
-          }
-        });
+        strength_row(ui, h, SLIDER_WIDTH);
         ui.end_row();
       });
     });
@@ -189,6 +173,28 @@ fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
        times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game \
        is part of the game's sound and cannot be told apart from it.",
     )));
+  });
+}
+
+/// Automatic ChatMix's strength slider and its "Default" button (here and on the mixer page).
+pub(super) fn strength_row(ui: &mut Ui, h: &ShmHeader, width: f32) {
+  ui.horizontal(|ui| {
+    let strength = h.duck_strength_permille.load(Ordering::Relaxed);
+    let mut percent = strength as f32 / 10.0;
+    ui.spacing_mut().slider_width = width;
+    let slider = egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %");
+    if ui
+      .add(slider)
+      .on_hover_text(tr(
+        "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
+      ))
+      .changed()
+    {
+      h.duck_strength_permille.store(((percent * 10.0).round() as u32).min(1000), Ordering::Relaxed);
+    }
+    if strength != DEFAULT_STRENGTH_PERMILLE && ui.small_button(tr("Default")).clicked() {
+      h.duck_strength_permille.store(DEFAULT_STRENGTH_PERMILLE, Ordering::Relaxed);
+    }
   });
 }
 

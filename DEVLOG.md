@@ -3306,11 +3306,21 @@ Brave (`brave.exe`, on the Chat channel) and The Division 2 (`thedivision2.exe`)
   above it or when the mixer sets it that pass; the entry goes when its sessions were checked and
   are over.
   Without session mode or the reference the warning stays and names the reason.
+- Mix mode heard (2026-11-18, build faa87a1 and later, The Division 2 on Dolby Atmos, a podcast in Brave on
+  the Chat channel): works. The game fader (seen in EarTrumpet) went down while the podcast talked and back
+  to the base when it stopped. Found and fixed on the way: the mode flipped mix / stream 9 times in 10
+  minutes (the game's stream sounded in a menu; now `UnheardWatch` needs 10 s of audio to end the verdict);
+  a minute held open by a long spurt was labelled "last minute" (now "last N s"); at 50 % the depth lagged
+  behind the need (6 dB margin was too little for a loud game over a quiet podcast), and the game rose at
+  every breath (hold 0.5 s). Mix mode now has its own `mix_hold_s` 3 s, `mix_max_margin_db` 17 dB (50 % =
+  8.5 dB) and `mix_max_depth_db` 18 dB; the stream ducker's values are unchanged (tests pin them).
+  The window shows the lowering as a bar next to the switch. Not run: the base after a killed app or a
+  restarted game (the crash-recovery file), the stream mode with Atmos on.
 
 **Open**
 
-- Measured live once (above), not yet heard: whether the lowering is audible is not known; every value
-  is an untuned starting point.
+- Heard in mix mode only (above) with one game and one podcast; every value is a starting point and the
+  stream mode has not been heard.
 - Silero's rejection of coughs and breathing on real chat audio is not measured.
 - Chat streams not at 48 kHz go by level only (`shortcut:` in the APO's `stream.rs`; upgrade: `RateBridge`).
 - Voice chat built into the game is the game's own stream and cannot be separated.
@@ -3321,13 +3331,13 @@ Brave (`brave.exe`, on the Chat channel) and The Division 2 (`thedivision2.exe`)
   1 dB per minute of talk. No "Learn again" button yet.
 - The record key is the exe file name alone: two games with the same generic exe name share one record.
 - The endpoint-mode gain the service reports is Windows' tapered scalar.
-- The mix path lowers the game's full band, not the speech band; nothing of it heard, only `duck_sim
-  --mix` on a synthetic pair. Every sound in the mix that is not chat counts as the game there (media,
+- The mix path lowers the game's full band, not the speech band (heard once, see above; also `duck_sim
+  --mix`). Every sound in the mix that is not chat counts as the game there (media,
   other apps). While someone talks the game's level is the one from before they started: a fight that
   starts or ends in the middle of speech is noticed at the next pause longer than the guard, and
   someone talking without any pause freezes it (accepted).
 - Games that render spatial objects under a spatial renderer are lowered only by mix mode (their
-  stream carries no audio and their session meter none); mix mode exists but is not heard yet.
+  stream carries no audio and their session meter none); mix mode is heard (see above).
 - Run 2 kept the game lowered for 35 s on one talk spurt (a podcast never pauses). The latch now
   releases after `latch_release_s`: in mix mode at once, at the stream only after the next APO build.
 - How smoothly Windows applies the session-volume steps of mix mode (0.2 dB, 25 a second) is not known.

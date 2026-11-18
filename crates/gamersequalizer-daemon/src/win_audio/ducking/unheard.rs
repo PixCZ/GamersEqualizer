@@ -34,6 +34,8 @@ pub struct Evidence<'a> {
 pub struct UnheardWatch {
   /// Since when the evidence holds.
   since: Option<Instant>,
+  /// Since when the game's stream sounds again, while it was unheard.
+  heard_since: Option<Instant>,
   unheard: bool,
 }
 
@@ -44,11 +46,22 @@ impl UnheardWatch {
     // A game stream plays, and every one that plays reads silence.
     let evidence = e.enabled && e.spatial_on && !e.game_bands.is_empty() && e.game_bands.iter().all(silent);
     if !evidence {
-      (self.since, self.unheard) = (None, false);
+      // The game's stream sounding in a pause or a menu does not mean it is heard again: while it
+      // plays, audio must last `HOLD` to end the verdict (else the mode flipped every minute or two).
+      let audible = e.enabled && e.spatial_on && e.game_bands.iter().any(|b| !silent(b) && *b != dbg::NA);
+      self.since = None;
+      if self.unheard && audible {
+        let heard_since = *self.heard_since.get_or_insert(now);
+        if now.saturating_duration_since(heard_since) < HOLD {
+          return true;
+        }
+      }
+      (self.heard_since, self.unheard) = (None, false);
       return false;
     }
+    self.heard_since = None;
     let since = *self.since.get_or_insert(now);
-    self.unheard = now.saturating_duration_since(since) >= HOLD;
+    self.unheard |= now.saturating_duration_since(since) >= HOLD;
     self.unheard
   }
 
@@ -89,8 +102,12 @@ mod tests {
     let silent = [-1200];
     assert!(!hold(&mut w, t, 9, &look(true, true, &silent)), "not before 10 s");
     assert!(w.observe(t + HOLD, &look(true, true, &silent)));
-    assert!(!w.observe(t + HOLD * 2, &look(true, true, &[-500])), "audio again");
-    assert!(!w.observe(t + HOLD * 3, &look(true, true, &silent)), "the 10 s start over");
+    let (a, b) = (t + HOLD * 2, t + HOLD * 3);
+    assert!(w.observe(a, &look(true, true, &[-500])), "a short sound in a pause does not end it");
+    assert!(w.observe(a + HOLD / 2, &look(true, true, &silent)), "silence again: still unheard");
+    assert!(w.observe(b, &look(true, true, &[-500])), "the sound restarts its count");
+    assert!(!w.observe(b + HOLD, &look(true, true, &[-500])), "audio for 10 s ends it");
+    assert!(!w.observe(b + HOLD * 2, &look(true, true, &silent)), "the 10 s start over");
   }
 
   #[test]
