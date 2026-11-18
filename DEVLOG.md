@@ -3123,3 +3123,159 @@ three sit on the +24 dB cap. RNNoise unchanged. Gate green (`check.ps1`); tests
 - DFN3 with the added 45 Hz rumble: leveler +9.3 dB against +8.1 for RNNoise, voice about 2 dB over
   the target in the second section: not looked into.
 - `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.
+
+---
+
+## Milestone 65: Automatic ChatMix: the game makes room for the voice chat (2026-11-18)
+
+Branch `feat/chat-ducking`. In a firefight the game drowns out the chat. With Automatic ChatMix on, the
+game is lowered only in the speech band, only during talk spurts the game actually masks, by one depth for
+the whole run of the game, and never with an audible step. Nobody talks, a loud talker above the game, or a
+calm game with a stray sound: nothing happens.
+
+**How it works** (`gamersequalizer_common::ducking`)
+
+- Where: every app stream has its own stream APO instance before the mix (`StreamDucker`). Each measures
+  its stream's speech-band level and publishes it in its `StreamSlot`; the service writes each slot's
+  channel (`StreamBus::Chat` / `Game`; unpaired streams are never lowered). A game stream reads the chat
+  streams' levels straight from the table, a few atomic loads per block: no daemon in the loop.
+- Speech, not sound: a chat stream's level counts only while Silero VAD (`Vad48k`, mono downmix) hears
+  speech at probability 0.5, so coughs, breathing and room noise should not lower the game. Silero's weights
+  are parsed once per process and shared (`OnceLock` in the vendored crate): a detector costs ~13 KB per
+  stream instead of 1.2 MB.
+- The cut: an RBJ band-pass (1.5 kHz, Q 0.5, about 500 Hz - 4.5 kHz) subtracted from the signal,
+  `x - (1 - g) * bp(x)`, is exactly a bell of gain `g` at the centre: bass and highs stay, `g` is ramped
+  per frame, and at depth 0 the buffer is not touched (bit-exact).
+- Whether, per talk spurt: a spurt is talk with pauses under 0.5 s; its level is a leaky mean (1 s) of its
+  talking blocks. It ducks once the current game level (0.4 s up / 1.5 s down) masks it, game - spurt +
+  margin > 2 dB, from 0.2 s of talk on, and stays ducked until it ends. A quiet talker answering a loud one
+  within the hold latches within about a second.
+- How much, once per run: depth = locked difference + volumes + margin, at most 20 dB. The difference is
+  the learned loud game level minus the learned quiet talker level:
+  - loud: an upper envelope of the game level, rising with 3 s (slower with the fight heard, at most 20 s,
+    so an explosion late in a session moves it ~2 dB), falling 0.5 dB per minute, never below the game;
+    "fight heard" = the game masks the quiet talker, so menus and travel before the first talk count nothing;
+  - quiet: the quietest of the people who normally talk. Spurts teach it from 1 s of talk on: a running mean
+    until 10 s of such talk (the first talkers average), then a lower envelope (falls with 2 s of talk,
+    at most 3 s, because the quiet talker usually says little and the level must get there within a few
+    of their sentences; one spurt counts at most 6 dB under it, so one whispered stretch of ~3 s moves the
+    depth by ~2.5 dB and it comes back only slowly; rises 1 dB per minute of talk, so a quiet talker who
+    left is forgotten);
+  - the lock follows the difference until both levels are settled (20 s of fight, 10 s of talk), then is a
+    backlash: the difference must move 0.5 dB up / 4 dB down before the depth follows, and then only by
+    the excess, without a step. Narrow upwards so the lock never stays short of the estimate while the
+    quiet talker level still falls.
+  A game's first run therefore learns over the first minute or two of conversation, the depth rising in
+  small steps between sentences; later runs start from the stored levels and are locked from the first
+  sentence.
+  The margin is the user's Strength: 0 % = the voice as loud as the game in the band, 50 % (default) =
+  6 dB, about twice, 100 % = 12 dB, about four times. Strength and the session volumes the service reports
+  (`duck_game_gain_permille`, `duck_chat_gain_permille`) apply live on top of raw levels.
+- The depth moves only at slew rates: 8 dB/s for the first 0.35 s of a spurt (one word dips ~3 dB at
+  most), then 40 dB/s, release 12 dB/s, frozen in pauses. Turning it off, losing the channel or a weaker
+  Strength releases at the same rate.
+- Per game: once settled, the two levels go to the slot (`duck_loud_db_x10`, `duck_quiet_db_x10`); the
+  service stores them per game exe and writes them back (`duck_saved_*`) when it pairs the next run's
+  stream. Adopted once, as 30 s of fight / 10 s of talk, so the next run is locked from its first sentence;
+  refused when the stream already settled on its own (service restart, late pairing).
+- Tuning: every value above is a starting point in `DuckTuning` (32 named values with sane ranges, 48 slots
+  in `ShmHeader::duck_tune`, positions pinned by a test). The service reads `duck_tuning.json` from
+  `%APPDATA%\GamersEqualizer` and publishes it; the APOs re-read it when `duck_tune_version` moves, so one APO
+  install lasts through all tuning. A band change while ducking reshapes the cut at once: make it between
+  sentences.
+- Telemetry: `StreamSlot::duck_dbg` (16 entries, `ducking::dbg`): band level, detector probability, game,
+  chat, spurt, need, depth, target, lock, flags (talking, latched, settled, seeded, detector, failed),
+  evidence; `NA` when there is none. A stream whose processing panicked passes audio through, zeroes its
+  level and reads `FLAG_FAILED`, and its APO notes it in the Application log when the stream stops.
+- Shared memory v24 (`SHM_LAYOUT_SIZE` 1_260_680): `duck_enabled`, `duck_strength_permille` (default 500),
+  the two gains, `duck_reduction_permille` (service -> window), `duck_tune`, `duck_tune_version`; per slot
+  `speech_ms`, `duck_permille`, the four level fields and `duck_dbg`.
+- `duck_sim` (common crate example) runs a game and a chat WAV (48 kHz) through this path, with the chat's
+  Silero, the detector's gap reset and a pairing delay, writes the ducked game and both mixes and prints
+  one line per spurt. Not modelled: the chat stream's EQ before the detector, more than one chat or game
+  stream.
+
+**Decided, and why**
+
+- Silero, not RNNoise, as the chat's speech key, from milestone 38: keyboard and clicks never pass 0.15
+  with Silero (max 0.08), RNNoise 0.2 fires on 0.2-0.5 % of frames at 0.7; speech is found equally.
+- One depth per run, sized for the quiet talker; the decision per spurt from who talks: a game is about
+  equally loud and its gunfire similar, but people talk at very different levels. The user wants the same
+  reduction in every fight; the mic leveler's stability (running mean, then a slow rate, a stored level as
+  a warm start) was the model.
+- An asymmetric backlash: a depth too shallow fails the voice, one too deep only quietens the game a bit.
+- Strength (the voice's margin) instead of a maximum reduction: people differ in how much the voice must
+  stand out; a cap says nothing about that.
+- Every tunable in shared memory and an offline simulator: a live test needs friends in a firefight and the
+  APO cannot be redeployed during it.
+- Tried and replaced: the depth following the momentary need (wandered every burst); a loud level falling
+  over 5 minutes towards whatever played, then over 30 s within 15 dB of it (calm play or travel unlearned
+  it); one learned voice level for everyone (loud talkers ducked, quiet ones under-ducked); the first spurt
+  setting the quiet level and settling after 3 s (an early quiet spurt pinned it); a spurt level that was
+  the mean since the spurt began (a quiet talker answering a loud one inherited the loud mean).
+
+Tests: `ducking/gain/tests.rs` (who ducks, the quiet and loud levels, the lock, seeding),
+`ducking/stream/tests.rs` (bit-exact idle, slew and per-sample smoothness, band limits, sample rates and
+block sizes, channels and NaN, releases, a run of fights, saved levels, tuning limits, telemetry, failure),
+tuning round trip and pinned slots, and a `duck_sim` self-check. `duck_sim` ran on a synthetic pair
+(`speech_clean.wav` at 0 and -10 dB over noise with bursts): Silero gated it and masked spurts were ducked;
+that says the tool works, nothing about how it sounds. The same pair looped to 190 s (talkers at about -39
+and -44 dB) showed the first-run learning: with the earlier defaults (fall 3 s / at most 30 s, backlash
+2 dB up) the depth was 5.6 dB at 40 s and crept to 6.7 dB by the end, quiet talker level -41.8 dB; with
+today's (2 s / 3 s, 0.5 dB up) 5.6 dB at 40 s, then 7.0 / 7.9 / 8.4 / 8.8 / 9.0 / 9.2 dB, quiet talker
+level -42.8 dB. A synthetic pair, so only the mechanics; nothing heard.
+
+**Open**
+
+- Nothing heard live or measured; every value is an untuned starting point.
+- Silero's rejection of coughs and breathing on real chat audio is not measured.
+- Chat streams not at 48 kHz go by level only (`shortcut:` in the APO's `stream.rs`; upgrade: `RateBridge`).
+- Voice chat built into the game is the game's own stream and cannot be separated.
+- A next run locks onto the stored levels' difference, up to the backlash (0.5 / 4 dB) away from the last
+  run's lock.
+- A stored loud level that is too high (e.g. after the in-game volume was lowered) comes down only at
+  0.5 dB per minute; a stored quiet level that is too low (a quiet person not on today's call) rises only
+  1 dB per minute of talk. No "Learn again" button yet.
+- The record key is the exe file name alone: two games with the same generic exe name share one record.
+- The endpoint-mode gain the service reports is Windows' tapered scalar.
+
+**Log**
+
+Every line starts with `[Ducking]`; levels and depths are dB with one decimal (`win_audio/ducking/`).
+
+- Info, always written:
+  - Status, only when one of its facts changes (the strength is printed, not compared). A missing
+    stream says `not paired (...)` with its likely causes (chat: not on the Chat channel, on another
+    output device, or silent so far; game: not recognised as a game, not playing, or no APO on the
+    output); the chat detector reads `yes`, `no (44100 Hz)`
+    or `?` before the APO reports it; `master switch off: nothing is processed`; `(debug lines off)`;
+    `off` when the switch is off:
+    `[Ducking] on, strength 50 %; chat Discord.exe, detector yes; game game.exe; master switch on (debug lines off)`
+  - Stored levels: `stream #n of game.exe was handed stored levels: loud level ..., quiet talker ...`
+    once per stream (what the service sent; the debug line's `stored` shows what the APO adopted),
+    and `learned for game.exe: ...` for a game's first record of a run, then on a 3 dB move. A
+    stream whose processing failed: `stream #n of exe: processing failed in the audio engine, it
+    passes audio through`, once per stream.
+  - Per minute in which someone talked, or the chat carried sound the detector never took as
+    speech (`last minute: chat sound without speech 41 % of samples (prob max 0.12), nothing
+    lowered`); nothing for a silent chat:
+    `[Ducking] last minute: 14 spurts, 9 lowered for 31 s, depth 11.5-12.0 dB, game -21.0 dB while lowered, loud level -20.5 dB, quiet talker -33.0 dB`
+    With none lowered it gives the reasons instead: `none lowered, chat speech 34 % of samples (prob
+    max 0.98), need max -3.0 dB` (negative need: the voice was already above the game), plus
+    `chat gain 0 %` when the chat is muted.
+  - Tuning: `tuning from duck_tuning.json: hold_s 0.6; ignored: ...`, `tuning: defaults` when the
+    file goes; a warning for a file that is not JSON (once per version, the previous tuning stays) or
+    cannot be read (retried at the next poll, warned once per error).
+- Debug, sampled every 100 ms, only with "Save debug to disk" on the Log page; like every line they go
+  to `%APPDATA%\GamersEqualizer\logs\gamersequalizer.log`:
+  - A start line with the settings, the tuning and every paired stream (rate, channels, the chat
+    detector or the game's stored levels), again when the streams or a detector change.
+  - Per 10 s window one line per game stream:
+    `[Ducking] 10 s game.exe: game -41.0/-27.3/-19.0 dB (now -22.0 dB), chat -80.0/-45.0/-24.0 dB, sound 52 %, speech 34 % (prob max 0.98) at -36.0/-30.0/-24.0 dB, spurts 5 (3 latched), talking 31 %, latched 22 %, need -2.0/9.0/14.0 dB, depth 0.0/6.1/12.0 dB (target 12.0 dB), loud level -20.5 dB (45 s, settled), quiet talker -33.0 dB (12 s, settled, stored), lock 12.5 dB`
+  - Written only when something happened: talk, chat sound above the talk threshold, lowering, a
+    rise of the loud level (not its slow fall) or a 1 dB move of the quiet talker or the lock, a
+    settled / stored change, or the stream's first window after its start line. An idle evening
+    writes nothing.
+- Tuning while everything runs: `%APPDATA%\GamersEqualizer\duck_tuning.json`, a flat object of
+  tuning name -> number, polled every 2 s by the service and applied to the running APO; the app
+  never writes or moves it.

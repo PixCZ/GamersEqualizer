@@ -1,4 +1,5 @@
 use crate::biquad::{MAX_EQ_BANDS, MAX_OUT_EQ_BANDS, MAX_STREAM_EQ_BANDS};
+use crate::ducking::DuckTuning;
 use crate::profile::{BiquadBand, FilterType, expand_slopes};
 use crate::sidetone::{NoiseMode, SidetoneRing, SidetoneSettings};
 use crate::streams::{STREAM_EQ_BUSES, StreamTable};
@@ -24,12 +25,12 @@ pub use reference_ring::{ShmRingBuffer, StereoFrame};
 /// build keeps its own mapping instead of both reading each other's memory with different layouts.
 macro_rules! shm_version {
   () => {
-    23
+    24
   };
 }
 pub const SHM_VERSION: u32 = shm_version!();
 /// Size of `ShmLayout` at `SHM_VERSION`.
-const SHM_LAYOUT_SIZE: usize = 1_254_832;
+const SHM_LAYOUT_SIZE: usize = 1_260_680;
 const _: () = assert!(size_of::<ShmLayout>() == SHM_LAYOUT_SIZE, "layout changed: bump shm_version! and the size");
 pub const SHM_NAME: &str = concat!("Local\\GamersEqualizer_SpeakerRef_Buffer_v", shm_version!());
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only
@@ -37,6 +38,9 @@ pub const SHM_NAME: &str = concat!("Local\\GamersEqualizer_SpeakerRef_Buffer_v",
 /// reference audio + settings in, telemetry out. Same layout as `SHM_NAME`.
 pub const APO_SHM_NAME: &str = concat!("Global\\GamersEqualizer_Apo_v", shm_version!());
 pub const SHM_MAGIC: u32 = 0x474D4551; // 'GMEQ'
+/// `ShmHeader::duck_tune` slots: more than `DuckTuning` has, so a later tunable needs no layout
+/// change (every layout change means a new APO install).
+pub const DUCK_TUNE_SLOTS: usize = 48;
 /// Voice leveler target (`mic_leveler_target_db_x10`) until the user changes it: -24 dBFS.
 pub const MIC_LEVELER_DEFAULT_TARGET_DB_X10: i32 = -240;
 /// 131072 frames = ~2.7 s at 48 kHz: covers the delay estimator's 1 s window + 400 ms search.

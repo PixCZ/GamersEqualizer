@@ -10,7 +10,7 @@
 //!
 //! All fields are atomics in zero-initialized shared memory: all-zero = free slot.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------------------
 // Constants
@@ -42,6 +42,8 @@ pub const SILENCE: f32 = 1e-6;
 /// Measured: the right session 93-100 %, others <= 6 % (Milestone 19).
 pub const PAIR_MIN_SCORE: f32 = 0.5;
 pub const PAIR_MIN_MARGIN: f32 = 0.3;
+/// `StreamSlot::duck_dbg` entries (`ducking::dbg` indices; spare ones on purpose).
+pub const DUCK_DBG_SLOTS: usize = 16;
 /// Chat and media have their own stream EQ.
 pub const STREAM_EQ_BUSES: usize = 2;
 
@@ -71,15 +73,35 @@ pub struct StreamSlot {
   pub env_block: [AtomicU32; ENVELOPE_LEN],
   /// Channel this stream belongs to (`StreamBus`), written by the daemon after pairing.
   pub bus: AtomicU32,
+  /// Automatic ChatMix (`ducking`), both only meaningful while `last_audio_hns` is fresh:
+  /// mean square of the last block in the speech band before any volume (f32 bits), and how
+  /// much this (game) stream's speech band is lowered now (0 = untouched, 750 = by 75 % of
+  /// amplitude).
+  pub speech_ms: AtomicU32,
+  pub duck_permille: AtomicU32,
+  /// Automatic ChatMix's learned levels, dB x 10 of the raw speech-band mean square, 0 = none.
+  /// APO -> daemon: what this (game) stream learned (the loud game level, the quiet talker level:
+  /// the quietest of the people who normally talk), each written only once it is settled.
+  pub duck_loud_db_x10: AtomicI32,
+  pub duck_quiet_db_x10: AtomicI32,
+  /// Daemon -> APO: the same two that an earlier run of this game learned, written when the
+  /// daemon pairs the slot with a Game app that has a record.
+  pub duck_saved_loud_db_x10: AtomicI32,
+  pub duck_saved_quiet_db_x10: AtomicI32,
+  /// Automatic ChatMix debug telemetry, APO -> daemon, indexed by `ducking::dbg`. `reset()`
+  /// fills it with `dbg::NA`, so a fresh slot never reads as real values.
+  pub duck_dbg: [AtomicI32; DUCK_DBG_SLOTS],
 }
 
 /// Channel of one app stream. Game (and anything unpaired) needs no stream EQ: the output EQ
-/// after the mix already carries headphone + game.
+/// after the mix already carries headphone + game. Game streams are the ones Automatic ChatMix
+/// lowers; `None` (unpaired, unknown app) is never lowered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamBus {
   None,
   Chat,
   Media,
+  Game,
   Unknown(u32),
 }
 
@@ -125,6 +147,7 @@ impl StreamBus {
       StreamBus::None => 0,
       StreamBus::Chat => 1,
       StreamBus::Media => 2,
+      StreamBus::Game => 3,
       StreamBus::Unknown(v) => v,
     }
   }
@@ -134,6 +157,7 @@ impl StreamBus {
       0 => StreamBus::None,
       1 => StreamBus::Chat,
       2 => StreamBus::Media,
+      3 => StreamBus::Game,
       other => StreamBus::Unknown(other),
     }
   }
@@ -217,6 +241,15 @@ impl StreamSlot {
     self.mode_hi.store((info.mode >> 64) as u64, Ordering::Relaxed);
     self.mode_lo.store(info.mode as u64, Ordering::Relaxed);
     self.bus.store(StreamBus::None.to_u32(), Ordering::Relaxed);
+    self.speech_ms.store(0, Ordering::Relaxed);
+    self.duck_permille.store(0, Ordering::Relaxed);
+    crate::ducking::dbg::clear(self);
+    // Never seed another app's stream with the previous owner's levels.
+    for level in
+      [&self.duck_loud_db_x10, &self.duck_quiet_db_x10, &self.duck_saved_loud_db_x10, &self.duck_saved_quiet_db_x10]
+    {
+      level.store(0, Ordering::Relaxed);
+    }
     // The previous owner's tags would otherwise show up as this stream's audio for 2.56 s.
     // Tag 0 is a real block number only once every ~497 days of uptime.
     self.env_block.iter().for_each(|t| t.store(0, Ordering::Relaxed));
@@ -410,11 +443,11 @@ mod tests {
 
   #[test]
   fn stream_bus_roundtrip_and_unknown() {
-    for bus in [StreamBus::None, StreamBus::Chat, StreamBus::Media] {
+    for bus in [StreamBus::None, StreamBus::Chat, StreamBus::Media, StreamBus::Game] {
       assert_eq!(StreamBus::from_u32(bus.to_u32()), bus);
     }
     assert_eq!(StreamBus::from_u32(9), StreamBus::Unknown(9));
-    assert_eq!(StreamBus::Unknown(9).eq_index(), None);
+    assert_eq!((StreamBus::Unknown(9).eq_index(), StreamBus::Game.eq_index()), (None, None));
     assert_eq!((StreamBus::Chat.eq_index(), StreamBus::Media.eq_index()), (Some(0), Some(1)));
   }
 

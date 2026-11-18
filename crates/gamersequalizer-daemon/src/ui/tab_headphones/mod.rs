@@ -15,6 +15,7 @@ use egui::{Color32, Ui};
 use gamersequalizer_common::biquad::MAX_LAYER_EQ_BANDS;
 use gamersequalizer_common::profile::{ParametricProfile, VadType};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,10 @@ use autoeq_wizard::*;
 
 const COLOR: Color32 = Color32::from_rgb(100, 150, 220);
 const APO_RECHECK: Duration = Duration::from_secs(3);
+/// Automatic ChatMix's strength out of the box (as `ShmHeader::init_defaults`), for "Default".
+const DEFAULT_STRENGTH_PERMILLE: u32 = 500;
+/// Slider width of the settings cards, as on the Microphone and Sidetone pages.
+const SLIDER_WIDTH: f32 = 280.0;
 
 /// UI-only state of the tab (not persisted, except the AutoEQ folder in the settings).
 #[derive(Default)]
@@ -125,6 +130,59 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
       state.apply_output_eq();
       state.out_eq_unsaved = Some(OutputLayer::Headphone);
     }
+  });
+
+  ducking_card(ui, state);
+}
+
+/// Automatic ChatMix, built like the voice leveler card: the switch (also on the mixer page) and how
+/// clearly the voice should stand out, which applies while the switch is on.
+fn ducking_card(ui: &mut Ui, state: &AppState) {
+  let Some(h) = state.shm_header() else { return };
+  let on = h.duck_enabled.load(Ordering::Relaxed);
+  theme::card(ui, |ui| {
+    ui.horizontal(|ui| {
+      theme::card_title(ui, Some((icons::CHAT, COLOR)), tr("Automatic ChatMix"));
+      ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
+        "Lowers the game while someone in the chat is talking and the game is drowning them out. \
+         Only in the range of speech, smoothly, and by about the same amount each time.",
+      ));
+      ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut new_on = on;
+        if ui.add(theme::Toggle(&mut new_on)).on_hover_text(tr("Enable Automatic ChatMix")).changed() {
+          h.duck_enabled.store(new_on, Ordering::Relaxed);
+        }
+      });
+    });
+    ui.add_enabled_ui(on, |ui| {
+      egui::Grid::new("ducking_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+        ui.label(tr("Strength:"));
+        ui.horizontal(|ui| {
+          let strength = h.duck_strength_permille.load(Ordering::Relaxed);
+          let mut percent = strength as f32 / 10.0;
+          ui.spacing_mut().slider_width = SLIDER_WIDTH;
+          let slider = egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %");
+          if ui
+            .add(slider)
+            .on_hover_text(tr(
+              "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
+            ))
+            .changed()
+          {
+            h.duck_strength_permille.store(((percent * 10.0).round() as u32).min(1000), Ordering::Relaxed);
+          }
+          if strength != DEFAULT_STRENGTH_PERMILLE && ui.small_button(tr("Default")).clicked() {
+            h.duck_strength_permille.store(DEFAULT_STRENGTH_PERMILLE, Ordering::Relaxed);
+          }
+        });
+        ui.end_row();
+      });
+    });
+    ui.label(theme::caption(tr(
+      "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about four \
+       times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game \
+       is part of the game's sound and cannot be told apart from it.",
+    )));
   });
 }
 

@@ -281,6 +281,8 @@ pub(super) fn run_background_daemon() {
       win_audio.chatmix.media.muted = med_mute;
 
       win_audio.chatmix.balance = bal;
+      // Atomics only: automatic ChatMix in the APO weighs game against chat as they are heard.
+      win_audio.chatmix.write_duck_gains(header);
 
       // Per-app session volumes: fallback mode only, throttled, never against the user's
       // own mixer changes (`apply_session_mix`).

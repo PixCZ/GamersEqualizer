@@ -104,6 +104,13 @@ admin or restart Windows audio are never delegated: a human runs them.
   `cargo run --release -p gamersequalizer-apo --example debug_capture -- [seconds]` records up to 60 s of
   every mic-chain stage (WAV) plus per-block variables (`vars.tsv`, `info.txt`) into
   `test_data/private/captures/` (git-ignored). Never ship an APO built with it.
+- Automatic ChatMix offline: `cargo run --release -p gamersequalizer-common --example duck_sim -- game.wav
+  chat.wav out_dir [duck_tuning.json] [--strength 0.5] [--pair-delay 3] [--seed <loud> <quiet>]` runs two
+  48 kHz recordings through the stream APOs' ducking path (Silero on the chat, pairing after a delay), writes
+  the ducked game and both mixes and prints one line per talk spurt. It does not model the chat stream's EQ
+  before the detector or more than one chat and one game stream. The service reads the same
+  `duck_tuning.json` from `%APPDATA%\GamersEqualizer` and hands it to the running APOs (names and ranges:
+  `ducking::DuckTuning`), so tuning never needs a new APO install.
 - The APO is installed via the app's banner or `scripts/apo-install.ps1`; both need admin and restart
   Windows audio, so a human runs them. When it is installed but does nothing, the app log alone must say
   why (`[ApoCheck]`, `[ApoNote]`, `[ApoLink]`); installer and diagnostics rules: `.claude/rules/installer.md`.

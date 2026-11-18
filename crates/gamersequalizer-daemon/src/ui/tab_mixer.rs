@@ -6,6 +6,7 @@ use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
 use egui::{Color32, CornerRadius, RichText, Sense, Ui, Vec2};
 use gamersequalizer_common::streams::StreamBus;
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// Smallest height of the app list in each channel strip; it grows (faders shrink) with more apps.
@@ -15,8 +16,8 @@ const APP_ROW_HEIGHT: f32 = 24.0;
 /// Vertical fader height range; it grows with the window.
 const FADER_MIN: f32 = 110.0;
 const FADER_MAX: f32 = 260.0;
-/// Everything on the page except the faders (header, strip parts, ChatMix).
-const PAGE_WITHOUT_FADERS: f32 = 480.0;
+/// Everything on the page except the faders (header, strip parts, ChatMix with its switch row).
+const PAGE_WITHOUT_FADERS: f32 = 510.0;
 const MASTER_COLOR: Color32 = Color32::from_rgb(78, 168, 222);
 const GAME_COLOR: Color32 = Color32::from_rgb(82, 183, 136);
 const CHAT_COLOR: Color32 = Color32::from_rgb(72, 202, 228);
@@ -382,8 +383,34 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
         win_audio.chatmix.set_balance(0.0);
       }
     });
+    ui.add_space(4.0);
+    duck_row(ui, state);
   });
   // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
+}
+
+/// The Automatic ChatMix switch under the balance (the card on the output page has its strength),
+/// with what it does on hover and, while it works, how far the game is lowered now. Saved with the
+/// other audio settings (`save_pending`).
+fn duck_row(ui: &mut Ui, state: &AppState) {
+  let Some(h) = state.shm_header() else { return };
+  let help = tr(
+    "Lowers the game while someone in the chat is talking and the game is drowning them out. \
+     Only in the range of speech, smoothly, and by about the same amount each time.",
+  );
+  ui.horizontal(|ui| {
+    let mut on = h.duck_enabled.load(Ordering::Relaxed);
+    ui.label(tr("Automatic ChatMix")).on_hover_text(help);
+    if ui.add(theme::Toggle(&mut on)).on_hover_text(help).changed() {
+      h.duck_enabled.store(on, Ordering::Relaxed);
+    }
+    // Last in the row, so the text coming and going moves nothing else.
+    let reduction = h.duck_reduction_permille.load(Ordering::Relaxed);
+    if on && reduction > 0 {
+      let text = trf("Game lowered by {} %", &[&reduction.div_ceil(10)]);
+      ui.label(RichText::new(text).color(theme::palette(ui).text_secondary));
+    }
+  });
 }
 
 fn render_strip(

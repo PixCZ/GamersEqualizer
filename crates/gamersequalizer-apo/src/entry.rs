@@ -45,10 +45,11 @@ pub(super) struct ApoState {
 }
 
 enum Processor {
-  /// Boxed: the mic chain is kilobytes, the output processor (with its reference feed) hundreds of bytes.
+  /// Boxed: the mic chain is kilobytes, the stream processor about 13 KB (its voice detector,
+  /// see `stream.rs`), the output processor hundreds of bytes.
   Mic(Box<MicProcessor>),
   Output(Box<OutputProcessor>),
-  Stream(StreamProcessor),
+  Stream(Box<StreamProcessor>),
 }
 
 pub(super) unsafe extern "system" fn apo_reset(_this: *mut c_void) -> HRESULT {
@@ -298,7 +299,7 @@ pub(super) unsafe extern "system" fn cfg_lock_for_process(
           }),
         ApoKind::Stream => shared_memory(st)
           .and_then(|shm| StreamProcessor::create(shm, rate, format.dwSamplesPerFrame, mode))
-          .map(Processor::Stream),
+          .map(|p| Processor::Stream(Box::new(p))),
       };
       let level = if processor.is_some() { Level::Info } else { Level::Warning };
       let outcome = match &processor {
@@ -344,6 +345,12 @@ pub(super) unsafe extern "system" fn cfg_unlock_for_process(this: *mut c_void) -
           if let Some((level, text)) = out.reference_stop_note() {
             note_for(st, level, text);
           }
+        }
+        // Off the audio thread, like the others: the failure itself only set a flag.
+        Some(Processor::Stream(stream)) if stream.failed => {
+          let text =
+            "processing panicked: passed audio through (no stream EQ, no Automatic ChatMix) until the stream stopped";
+          note_for(st, Level::Warning, text.to_string());
         }
         _ => {}
       }

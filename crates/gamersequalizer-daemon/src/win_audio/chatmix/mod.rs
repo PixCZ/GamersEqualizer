@@ -392,8 +392,40 @@ impl ChatMixController {
     (g, c)
   }
 
+  /// Automatic ChatMix: how loud the listener hears Game and Chat (linear, 1000 = unchanged),
+  /// relative to the app stream the stream APO sees, i.e. before the session volume.
+  pub fn write_duck_gains(&self, h: &ShmHeader) {
+    let (game, chat) = self.duck_gains();
+    h.duck_game_gain_permille.store((game * 1000.0).round() as u32, Ordering::Relaxed);
+    h.duck_chat_gain_permille.store((chat * 1000.0).round() as u32, Ordering::Relaxed);
+  }
+
   pub fn get_media_volume(&self) -> f32 {
     if self.media.muted || self.master.muted { 0.0 } else { self.media.volume.clamp(0.0, 1.0) }
+  }
+
+  /// (game, chat) gain for `write_duck_gains`, from where each channel's volume is applied.
+  /// Master scales both alike, so only its mute (in the session volumes) counts.
+  fn duck_gains(&self) -> (f32, f32) {
+    let sessions = self.game_device_id.is_none() && self.chat_device_id.is_none();
+    let (game, chat) = self.get_multipliers();
+    let gain = |channel: &Channel, device: &Option<String>, session: f32| match device {
+      // shortcut: Windows' endpoint scalar is audio-tapered, not linear amplitude (50 % is well
+      // under half); read `GetMasterVolumeLevel` (dB) if ducking on channel outputs (Sonar) ever
+      // matters. There the virtual device mixes the apps, so the stream APO rarely sees them apart.
+      Some(_) => {
+        if channel.muted {
+          0.0
+        } else {
+          channel.volume.clamp(0.0, 1.0)
+        }
+      }
+      // Per-app session volumes carry the channel level and the ChatMix balance.
+      None if sessions => session,
+      // The other channel has its own output, so no session volume is set (`apply_session_mix`).
+      None => 1.0,
+    };
+    (gain(&self.game, &self.game_device_id, game), gain(&self.chat, &self.chat_device_id, chat))
   }
 
   /// Apply calculated volumes to live Windows Audio System and Sessions
@@ -786,6 +818,19 @@ mod tests {
     // The guard returns before any session pass (which would stamp `last_session_pass`).
     mix.apply_session_mix();
     assert!(mix.last_session_pass.is_none());
+  }
+
+  #[test]
+  fn duck_gains_follow_where_each_channel_gets_its_volume() {
+    let mut mix = ChatMixController::new();
+    mix.master.muted = false;
+    (mix.game.volume, mix.chat.volume, mix.balance) = (0.8, 1.0, 0.5);
+    assert_eq!(mix.duck_gains(), (0.4, 1.0), "session volumes: channel level x balance");
+    mix.chat.muted = true;
+    assert_eq!(mix.duck_gains(), (0.4, 0.0));
+    // Game on its own output (Sonar): that endpoint's level, no balance; chat gets no volume of ours.
+    (mix.game_device_id, mix.chat.muted) = (Some("game".into()), false);
+    assert_eq!(mix.duck_gains(), (0.8, 1.0));
   }
 
   #[test]

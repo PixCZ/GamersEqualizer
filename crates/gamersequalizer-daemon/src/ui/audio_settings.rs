@@ -44,6 +44,9 @@ pub struct AudioSettings {
   pub mic_auto_gain_permille: u32,
   pub mic_auto_wish_permille: u32,
   pub sidetone_low_latency: bool,
+  /// Automatic ChatMix, and how far the voice should stand out from the game (1000 = about 4x).
+  pub duck_enabled: bool,
+  pub duck_strength_permille: u32,
 }
 
 impl Default for AudioSettings {
@@ -118,6 +121,8 @@ impl AudioSettings {
       mic_auto_gain_permille: h.mic_auto_gain_permille.load(r),
       mic_auto_wish_permille: if h.mic_auto_gain_permille.load(r) > 0 { h.mic_volume_permille.load(r) } else { 0 },
       sidetone_low_latency: h.sidetone_low_latency.load(r),
+      duck_enabled: h.duck_enabled.load(r),
+      duck_strength_permille: h.duck_strength_permille.load(r),
     }
   }
 
@@ -137,6 +142,8 @@ impl AudioSettings {
     h.media_muted.store(self.media_muted, r);
     h.chatmix_balance_permille.store(self.balance_permille.clamp(-1000, 1000), r);
     h.mic_leveler_enabled.store(self.mic_leveler_enabled, r);
+    h.duck_enabled.store(self.duck_enabled, r);
+    h.duck_strength_permille.store(self.duck_strength_permille.min(1000), r);
     h.mic_leveler_target_db_x10.store(self.mic_leveler_target_db_x10.clamp(-360, -120), r);
     // The boost only makes sense while Windows is still at 100 % (someone may have lowered it).
     if self.mic_boost_permille > 1000 && h.mic_volume_permille.load(r) as f32 / 1000.0 >= MIC_FULL {
@@ -225,6 +232,8 @@ mod tests {
     h.game_volume_permille.store(400, Ordering::Relaxed);
     h.mic_volume_permille.store(2000, Ordering::Relaxed);
     h.sidetone_low_latency.store(true, Ordering::Relaxed);
+    h.duck_enabled.store(true, Ordering::Relaxed);
+    h.duck_strength_permille.store(800, Ordering::Relaxed);
     let mut h = h;
     h.set_selected_mic_id("{mic-1}");
     AudioSettings::from_header(&h).save(&dir);
@@ -233,6 +242,8 @@ mod tests {
     let mut fresh = ShmHeader::default();
     AudioSettings::load_or_default(&dir).apply_to_header(&mut fresh);
     assert!(fresh.sidetone_low_latency.load(Ordering::Relaxed));
+    assert!(fresh.duck_enabled.load(Ordering::Relaxed));
+    assert_eq!(fresh.duck_strength_permille.load(Ordering::Relaxed), 800);
     assert_eq!(DenoiseModel::from_u32(fresh.denoise_model.load(Ordering::Relaxed)), DenoiseModel::DpdfNet);
     assert!(!fresh.aec_enabled.load(Ordering::Relaxed));
     assert!(!fresh.mic_leveler_enabled.load(Ordering::Relaxed));
@@ -252,6 +263,9 @@ mod tests {
     let mut old = ShmHeader::default();
     AudioSettings::load_or_default(&dir).apply_to_header(&mut old);
     assert_eq!(old.get_selected_mic_id(), None);
+    // Nor did it know automatic ChatMix: off, at the default strength.
+    assert!(!old.duck_enabled.load(Ordering::Relaxed));
+    assert_eq!(old.duck_strength_permille.load(Ordering::Relaxed), 500);
 
     std::fs::write(dir.join(FILE), "{ nope").unwrap();
     assert_eq!(AudioSettings::load_or_default(&dir), AudioSettings::default());

@@ -9,6 +9,7 @@ pub mod console_owner;
 pub mod device_ids;
 pub mod dolby_atmos;
 pub mod dsp_watch;
+pub mod ducking;
 pub mod endpoint_lock;
 pub mod game_detector;
 pub mod leveler_log;

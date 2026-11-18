@@ -534,6 +534,16 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Headphone EQ", "EQ sluchátek"),
   ("My headphones", "Moje sluchátka"),
+  ("Enable Automatic ChatMix", "Zapnout automatický ChatMix"),
+  ("Strength:", "Síla:"),
+  (
+    "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
+    "Jak zřetelně má hlas vyčnívat nad hru. Vyšší nastavení zeslabí hru dřív a víc.",
+  ),
+  (
+    "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about four times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game is part of the game's sound and cannot be told apart from it.",
+    "Při 50 % bude hlas v rozsahu řeči zhruba dvakrát hlasitější než hra, při 100 % zhruba čtyřikrát. Funguje s chatovacími aplikacemi v kanálu Chat (Discord, TeamSpeak ...); hlasový chat vestavěný ve hře je součástí zvuku hry a nedá se od něj oddělit.",
+  ),
   (
     "Click to switch. The choice is remembered for the current output device, so a USB headset and headphones on the jack switch by themselves when you change the output.",
     "Kliknutím přepnete. Volba se pamatuje pro aktuální výstupní zařízení, takže USB headset a sluchátka v jacku se při změně výstupu přepnou sama.",
@@ -955,6 +965,12 @@ pub static CS: &[(&str, &str)] = &[
   ("In: {}", "Vstup: {}"),
   ("Game +{}%", "Hra +{} %"),
   ("Chat +{}%", "Chat +{} %"),
+  ("Automatic ChatMix", "Automatický ChatMix"),
+  (
+    "Lowers the game while someone in the chat is talking and the game is drowning them out. Only in the range of speech, smoothly, and by about the same amount each time.",
+    "Zeslabí hru, když někdo v chatu mluví a hra ho přehlušuje. Jen v rozsahu řeči, plynule a pokaždé zhruba stejně.",
+  ),
+  ("Game lowered by {} %", "Hra zeslabena o {} %"),
   ("Click to customize EQ curves for {}", "Kliknutím upravíte křivky EQ pro {}"),
   (
     "{} - you put it on this channel. Drag to move, right-click to undo.",

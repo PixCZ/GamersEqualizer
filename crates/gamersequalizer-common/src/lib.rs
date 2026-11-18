@@ -1,5 +1,6 @@
 pub mod biquad;
 pub mod debug_capture;
+pub mod ducking;
 pub mod limiter;
 pub mod profile;
 pub mod shm;
