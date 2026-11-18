@@ -38,7 +38,7 @@ binary has **no network code**; latency of the microphone chain is measured and 
 | `crates/gamersequalizer-mic-chain/` | Microphone DSP chain (AEC, noise suppression, leveler), a plain library   |
 | `crates/gamersequalizer-apo/`       | The APO DLL: COM object, mic / output / stream processors; probe examples |
 | `crates/gamersequalizer-daemon/`    | `gamersequalizer.exe`: service loop and window (see below)                |
-| `crates/vendor/`                    | Third-party forks (DeepFilterNet, RNNoise, Silero VAD), outside our lints |
+| `crates/vendor/`                    | Forks: DeepFilterNet, RNNoise, Silero VAD, egui-wgpu; outside our lints   |
 | `crates/build-support/`             | Version info shared by the build scripts                                  |
 | `scripts/`                          | Dev rebuild, packaging, signing, APO install / uninstall and its tests    |
 | `test_data/`                        | Test fixtures; `test_data/private/` is git-ignored (own recordings)       |
@@ -111,8 +111,9 @@ admin or restart Windows audio are never delegated: a human runs them.
 
 ## Before a release or a push to main
 
-Offer the user the dependency check (GitHub Actions pins, crates and `cargo audit`, the tract fork,
-the toolchain) and write release notes as in `.claude/rules/release.md`. Offer it, don't run it unasked.
+Offer the user the dependency check (GitHub Actions pins, crates and `cargo audit`, the tract and
+egui-wgpu forks, the toolchain) and write release notes as in `.claude/rules/release.md`. Offer it,
+don't run it unasked.
 
 ## General
 

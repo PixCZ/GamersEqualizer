@@ -5,8 +5,8 @@ members = [
     "crates/gamersequalizer-mic-chain",
     "crates/gamersequalizer-apo",
 ]
-# Third-party forks, built only as the mic crate's dependencies (not linted as our code).
-exclude = ["crates/vendor/deep_filter", "crates/vendor/rnnoise2", "crates/vendor/silero_vad"]
+# Third-party forks, built only as dependencies of our crates (not linted as our code).
+exclude = ["crates/vendor/deep_filter", "crates/vendor/rnnoise2", "crates/vendor/silero_vad", "crates/vendor/egui-wgpu"]
 resolver = "2"
 
 [workspace.package]
@@ -131,3 +131,8 @@ undocumented_unsafe_blocks = "deny"
 [patch.crates-io]
 tract-linalg = { git = "https://github.com/PixCZ/tract", rev = "a5fe22538b3d442f23796568c35115964e3e2597" }
 tract-data = { git = "https://github.com/PixCZ/tract", rev = "a5fe22538b3d442f23796568c35115964e3e2597" }
+# egui-wgpu 0.37.0 with emilk/egui#8784 (fixes emilk/egui#8704): stock egui-wgpu keeps every
+# enumerated adapter alive, and on DX12 each holds a device, so the window kept the NVIDIA GPU of
+# hybrid laptops awake (and G-Helper / Armoury Crate end such apps in iGPU-only mode). Drop it once
+# an egui release carries the fix (AGENTS.md, "Before a release"). See crates/vendor/egui-wgpu/README.md.
+egui-wgpu = { path = "crates/vendor/egui-wgpu" }
