@@ -34,7 +34,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::core::Interface;
 
 use super::app_channels::{self, AppChannel};
-use super::chatmix::get_exe_name_from_pid;
+use super::chatmix::{exe_name_of, get_exe_path_from_pid};
 use super::console_owner::ConsoleOwner;
 
 // ---------------------------------------------------------------------------------------
@@ -60,6 +60,8 @@ const _: () = assert!(MATCH_BLOCKS + HOLD_PAD_BEFORE + HOLD_PAD_AFTER + 10 < ENV
 /// One audio session on the default output, with its recent meter peaks.
 struct Session {
   pid: u32,
+  /// The app's image path, and its file name (what the channel lists match).
+  path: String,
   exe: String,
   bus: StreamBus,
   meter: IAudioMeterInformation,
@@ -73,6 +75,8 @@ pub struct PairedStream {
   pub owner: u64,
   pub is_game: bool,
   pub exe: String,
+  /// The app's image path (which game, for the mixer).
+  pub path: String,
 }
 
 /// The chat and game streams as of the last evaluation. Automatic ChatMix runs on the reference
@@ -262,9 +266,10 @@ impl Router {
           continue;
         }
         let Ok(meter) = control.cast::<IAudioMeterInformation>() else { continue };
-        let exe = if pid == 0 { String::new() } else { get_exe_name_from_pid(pid).unwrap_or_default() };
+        let path = if pid == 0 { String::new() } else { get_exe_path_from_pid(pid).unwrap_or_default() };
+        let exe = exe_name_of(&path).to_string();
         let bus = bus_for_exe(&exe);
-        self.sessions.insert(key, Session { pid, exe, bus, meter, history: PeakHistory::default() });
+        self.sessions.insert(key, Session { pid, path, exe, bus, meter, history: PeakHistory::default() });
       }
       self.sessions.retain(|key, _| seen.contains(key));
     }
@@ -326,7 +331,12 @@ impl Router {
       .iter()
       .filter_map(|(owner, key)| self.sessions.get(key).map(|s| (*owner, s)))
       .filter(|(_, s)| matches!(s.bus, StreamBus::Chat | StreamBus::Game))
-      .map(|(owner, s)| PairedStream { owner, is_game: s.bus == StreamBus::Game, exe: s.exe.clone() })
+      .map(|(owner, s)| PairedStream {
+        owner,
+        is_game: s.bus == StreamBus::Game,
+        exe: s.exe.clone(),
+        path: s.path.clone(),
+      })
       .collect();
     if let Ok(mut p) = PAIRED.lock() {
       *p = paired;

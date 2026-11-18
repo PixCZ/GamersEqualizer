@@ -127,6 +127,16 @@ duck_tuning! {
   /// Safety bound of the depth, whatever the levels and the strength (20 dB: the game's speech
   /// band to one tenth of its amplitude).
   max_depth_db = 20.0 in 0.0..=40.0,
+  /// A ducked spurt lets go once the game has not masked the talker for this long in a row, and
+  /// may duck again later in the same spurt: a talker who never pauses (a podcast) is not ducked
+  /// for minutes by one loud moment. Gaps in a fight shorter than this do not pump.
+  latch_release_s = 3.0 in 0.5..=600.0,
+  /// The service's mix ducker (`MixDucker`) measures the game only this long after the chat last
+  /// made a sound: it covers the chat's way through the spatial renderer and the tail of a word.
+  mix_chat_guard_s = 0.3 in 0.05..=5.0,
+  /// The mix ducker lowers the game's whole band (its session volume), so it needs less than the
+  /// band cut's `max_depth_db`.
+  mix_max_depth_db = 12.0 in 0.0..=40.0,
 }
 
 const _: () = assert!(PARAMS.len() <= DUCK_TUNE_SLOTS, "more tunables than shared-memory slots");
@@ -238,7 +248,9 @@ mod tests {
   #[test]
   fn the_tuning_slots_are_pinned() {
     // The installed APO reads `ShmHeader::duck_tune` by position while the exe is rebuilt: changing
-    // this list (other than appending) means a new APO for everyone.
+    // this list (other than appending) means a new APO for everyone. Slots 32-34 were added after
+    // the APO the user has installed and no APO build reads them, so slot 33 (`mix_chat_factor`)
+    // became `mix_chat_guard_s` in place; from here on, only append.
     let names: Vec<&str> = PARAMS.iter().map(|p| p.0).collect();
     let pinned = [
       "band_center_hz",
@@ -273,6 +285,9 @@ mod tests {
       "on_threshold_db",
       "max_margin_db",
       "max_depth_db",
+      "latch_release_s",
+      "mix_chat_guard_s",
+      "mix_max_depth_db",
     ];
     assert_eq!(names, pinned);
   }

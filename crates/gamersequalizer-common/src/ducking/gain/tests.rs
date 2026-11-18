@@ -56,6 +56,66 @@ fn a_quiet_talker_answering_a_loud_one_ducks_within_a_second() {
   assert!((gain.learned.quiet_db.unwrap() + 30.0).abs() < 1.0, "{:?}", gain.learned.quiet_db);
 }
 
+#[test]
+fn an_endless_talker_is_let_go_once_the_game_stays_calm() {
+  // A podcast at -24 dB never pauses: one spurt. The game is loud for 10 s, then calm for 20 s.
+  let mut gain = DuckGain::default();
+  settle(&mut gain);
+  let mut latched = Vec::new();
+  for i in 0..3000 {
+    drive_levels(&mut gain, 0.01, if i < 1000 { -22.0 } else { -60.0 }, |_| Some(-24.0));
+    latched.push(gain.latched);
+  }
+  let released = latched.iter().rposition(|l| *l).map_or(0, |i| i + 1);
+  assert!(latched[999], "ducked in the loud part");
+  // The game level falls over ~2 s until it stops masking, then `latch_release_s`.
+  let after_calm_s = (released - 1000) as f32 * 0.01;
+  assert!((T.latch_release_s..T.latch_release_s + 3.0).contains(&after_calm_s), "{after_calm_s} s");
+  assert!(gain.depth_db == 0.0, "stays released");
+  // Loud again: ducks again in the same spurt.
+  drive_levels(&mut gain, 2.0, -22.0, |_| Some(-24.0));
+  assert!(gain.latched && gain.depth_db > 0.0);
+}
+
+#[test]
+fn gaps_in_a_fight_shorter_than_the_release_do_not_pump() {
+  // The endless talker over a fight with 4 s gaps: unmasked for under `latch_release_s` each time.
+  let mut gain = DuckGain::default();
+  settle(&mut gain);
+  drive_levels(&mut gain, 4.0, -22.0, |_| Some(-24.0));
+  for _ in 0..4 {
+    for game_db in [-60.0, -22.0] {
+      for _ in 0..400 {
+        drive_levels(&mut gain, 0.01, game_db, |_| Some(-24.0));
+        assert!(gain.latched);
+      }
+    }
+  }
+}
+
+#[test]
+fn the_same_scenario_at_10_and_50_ms_steps_ends_at_the_same_depth() {
+  // The service's mix ducker steps 20-100 ms: sentences over a fight, 2 minutes.
+  let run = |dt: f32| {
+    let mut gain = DuckGain::default();
+    let (mut peak, mut last_peak) = (0.0f32, 0.0f32);
+    for step in 0..(120.0 / dt).round() as usize {
+      let t = step as f32 * dt % 7.0;
+      let in_sentence = (1.0..4.0).contains(&t) && (t - 1.0) % 0.7 < 0.5;
+      let chat_ms = if in_sentence { 10f32.powf(-3.0) } else { 0.0 };
+      let depth = gain.update(dt, chat_ms, 10f32.powf(-2.2), true, &DEFAULT, &T);
+      if (1.0..4.0).contains(&t) {
+        peak = peak.max(depth);
+      } else if peak > 0.0 {
+        (last_peak, peak) = (peak, 0.0); // the sentence is over
+      }
+    }
+    last_peak
+  };
+  let (fine, coarse) = (run(0.01), run(0.05));
+  assert!(fine > 5.0 && (fine - coarse).abs() < 0.5, "{fine} vs {coarse}");
+}
+
 // --- The quiet talker level ---
 
 #[test]
@@ -406,7 +466,7 @@ fn drive_levels_at(
 ) -> Vec<f32> {
   let game_ms = 10f32.powf(game_db / 10.0);
   (0..(seconds * 100.0).round() as usize)
-    .map(|i| gain.update(0.01, voice(i).map_or(0.0, |db| 10f32.powf(db / 10.0)), game_ms, settings, &T))
+    .map(|i| gain.update(0.01, voice(i).map_or(0.0, |db| 10f32.powf(db / 10.0)), game_ms, true, settings, &T))
     .collect()
 }
 

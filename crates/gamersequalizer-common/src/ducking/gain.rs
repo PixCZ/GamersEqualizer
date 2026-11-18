@@ -1,8 +1,10 @@
 //! The gain computer of one game stream: from the game's and the chat's speech-band levels, per
 //! block, whether this talk spurt ducks and how deep. No filters, no shared memory.
 //!
-//! All levels are raw (before the session volumes the listener applies after the APO), so a volume
-//! change counts at once: the volumes and the margin are added only where a decision is made.
+//! All levels are as the APO sees them. A per-app session volume (and so the ChatMix balance) is
+//! applied before the APO (DEVLOG Milestone 19), so it is already in them; only the volume of a
+//! channel on its own output comes after the APO and is added (`game_gain` / `chat_gain`), with
+//! the margin, only where a decision is made.
 
 use super::{DuckSettings, DuckTuning, db};
 
@@ -48,8 +50,11 @@ pub(super) struct DuckGain {
   /// Talk time of this spurt and its level (dB, a leaky mean over `spurt_level_s`).
   talk_s: f32,
   spurt_db: f32,
-  /// This spurt ducks: set once the game masked it, until the hold runs out.
+  /// This spurt ducks: set once the game masked it, until the hold runs out or the game has not
+  /// masked it for `latch_release_s` (a talker who never pauses, e.g. a podcast).
   latched: bool,
+  /// How long in a row the game has not masked this spurt, seconds.
+  unmasked_s: f32,
   /// The last block's inputs and decision, for `DuckStatus`.
   talking: bool,
   chat_db: f32,
@@ -80,12 +85,24 @@ struct Learned {
 
 impl DuckGain {
   /// One block of `dt` seconds: `chat_ms` / `game_ms` are the summed raw speech-band levels of the
-  /// chat and the game streams. Returns the depth (dB) the game's band is lowered by.
-  pub(super) fn update(&mut self, dt: f32, chat_ms: f32, game_ms: f32, s: &DuckSettings, t: &DuckTuning) -> f32 {
+  /// chat and the game streams. `learn_loud`: whether `game_ms` may teach the loud level (the mix
+  /// ducker's estimate may not while it is lowering the game). Returns the depth (dB) the game's
+  /// band is lowered by.
+  pub(super) fn update(
+    &mut self,
+    dt: f32,
+    chat_ms: f32,
+    game_ms: f32,
+    learn_loud: bool,
+    s: &DuckSettings,
+    t: &DuckTuning,
+  ) -> f32 {
     // The game level runs while nobody talks too, so it is known when speech starts.
     self.game_ms = smooth(self.game_ms, game_ms, dt, t.game_rise_s, t.game_fall_s);
     let game_db = db(self.game_ms);
-    self.learned.learn_loud(game_db, dt, t);
+    if learn_loud {
+      self.learned.learn_loud(game_db, dt, t);
+    }
 
     let talking = s.enabled && s.chat_gain > 0.0 && db(chat_ms) > t.talk_threshold_db;
     let talked_s = self.talk_s;
@@ -102,12 +119,12 @@ impl DuckGain {
     } else {
       self.hold_s = if s.enabled { (self.hold_s - dt).max(0.0) } else { 0.0 };
       if self.hold_s <= 0.0 {
-        (self.talk_s, self.spurt_db, self.latched) = (0.0, 0.0, false);
+        (self.talk_s, self.spurt_db, self.latched, self.unmasked_s) = (0.0, 0.0, false, 0.0);
       }
     }
     let spurt_db = (self.talk_s > 0.0).then_some(self.spurt_db);
 
-    // What the listener hears: the volumes after the APO and the margin, on top of raw levels.
+    // What the listener hears: the volumes after the APO (channel outputs) and the margin.
     let gains_db = db(s.game_gain * s.game_gain) - db(s.chat_gain * s.chat_gain);
     let margin_db = s.strength * t.max_margin_db;
     let need_db = |talker_db: f32| game_db - talker_db + gains_db + margin_db;
@@ -117,8 +134,14 @@ impl DuckGain {
       self.learned.loud_s += dt; // fight heard
     }
     self.learned.update_lock(quiet_db, t);
-    if let Some(spurt) = spurt_db.filter(|_| talking && self.talk_s >= t.spurt_min_s) {
-      self.latched |= need_db(spurt) > t.on_threshold_db;
+    if let Some(spurt) = spurt_db {
+      let masks = need_db(spurt) > t.on_threshold_db;
+      self.latched |= masks && talking && self.talk_s >= t.spurt_min_s;
+      // Lets go only after the game stopped masking it for a while: gaps in a fight do not pump.
+      self.unmasked_s = if masks { 0.0 } else { self.unmasked_s + dt };
+      if self.unmasked_s >= t.latch_release_s {
+        self.latched = false;
+      }
     }
     self.target_db = self.learned.lock_db.map(|lock| (lock + gains_db + margin_db).clamp(0.0, t.max_depth_db));
     (self.talking, self.chat_db, self.need_db) = (talking, db(chat_ms), spurt_db.map(need_db));

@@ -2,11 +2,11 @@
 //! stream's speech band, publishes it in the stream's slot, reads the other streams' levels from
 //! the table, runs the gain computer and applies the cut. No allocation, no locks.
 
+use super::band::{self, BandPass};
 use super::gain::DuckGain;
-use super::{DuckRole, DuckSettings, DuckStatus, DuckTuning, GAP_HNS, db, dbg};
+use super::{DuckRole, DuckSettings, DuckStatus, DuckTuning, FRESH_HNS, GAP_HNS, db, dbg};
 use crate::shm::ShmHeader;
 use crate::streams::{StreamBus, StreamSlot, StreamTable};
-use std::f64::consts::PI;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 // ---------------------------------------------------------------------------------------
@@ -15,15 +15,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Channels with filter state (7.1); a stream with more passes through untouched.
 const MAX_CHANNELS: usize = 8;
-/// A slot whose last block is older than this (100 ns units) is silent: the audio engine does not
-/// call a silent stream.
-const FRESH_HNS: u64 = 500_000;
 /// A saved level outside this range (dB x 10) is not trusted (another process wrote it).
 const SAVED_DB_X10: std::ops::RangeInclusive<i32> = -1000..=-1;
-/// Filter state under this is zeroed: with exact-zero input it would otherwise decay into the
-/// subnormal range, which costs CPU per sample unless the thread flushes denormals.
-const TINY_STATE: f64 = 1e-30;
-
 // ---------------------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------------------
@@ -48,15 +41,6 @@ pub struct StreamDucker {
   /// This stream's copy of the tuning and the `duck_tune_version` it was read at.
   tuning: DuckTuning,
   tune_version: Option<u32>,
-}
-
-/// RBJ band-pass with 0 dB peak gain, normalized (b1 = 0, b2 = -b0). With it, `x - c * bp(x)` is
-/// exactly a bell of gain `1 - c` at the centre, so the depth moves without new coefficients.
-#[derive(Debug, Clone, Copy)]
-struct BandPass {
-  b0: f64,
-  a1: f64,
-  a2: f64,
 }
 
 // ---------------------------------------------------------------------------------------
@@ -147,7 +131,8 @@ impl StreamDucker {
       self.adopt_saved(own);
     }
     let dt = frames as f32 / self.sample_rate;
-    let depth = self.gain.update(dt, chat_ms, game_ms, &DuckSettings { enabled: ducking, ..*settings }, &self.tuning);
+    let settings = DuckSettings { enabled: ducking, ..*settings };
+    let depth = self.gain.update(dt, chat_ms, game_ms, true, &settings, &self.tuning);
     if ducking {
       self.publish(own);
     }
@@ -243,26 +228,14 @@ impl StreamDucker {
     dbg::set(own, dbg::QUIET_EVIDENCE_S, st.quiet_s as i32);
   }
 
-  /// Mean square of the band-pass output over the block; advances the filter state.
+  /// Mean square of the band over the block; advances the filter state.
   fn measure(&mut self, buf: &[f32], channels: usize) -> f32 {
-    let band = self.band;
-    let mut sum = 0.0f64;
-    let mut count = 0usize;
-    for frame in buf.chunks_exact(channels) {
-      for (x, z) in frame.iter().zip(self.state.iter_mut()) {
-        let y = band.run(z, f64::from(*x));
-        sum += y * y;
-      }
-      count += channels;
-    }
-    self.flush_bad_and_tiny_state();
-    let ms = (sum / count.max(1) as f64) as f32;
-    if ms.is_finite() { ms } else { 0.0 }
+    self.band.measure(&mut self.state, buf, channels)
   }
 
   /// `y = x - (1 - g) * bp(x)`, `g` ramped per frame from the last block's gain to `gain`.
   fn apply(&mut self, buf: &mut [f32], channels: usize, gain: f32) {
-    let band = self.band;
+    let filter = self.band;
     let frames = (buf.len() / channels) as f64;
     let start = 1.0 - f64::from(self.last_gain);
     let step = (f64::from(gain) - f64::from(self.last_gain)) / frames;
@@ -270,41 +243,10 @@ impl StreamDucker {
       let cut = start - step * (n + 1) as f64;
       for (x, z) in frame.iter_mut().zip(self.state.iter_mut()) {
         let input = f64::from(*x);
-        *x = (input - cut * band.run(z, input)) as f32;
+        *x = (input - cut * filter.run(z, input)) as f32;
       }
     }
-    self.flush_bad_and_tiny_state();
-  }
-
-  /// Zeroes non-finite filter state (one NaN/inf input sample must not poison the filter for the
-  /// life of the stream) and tiny state (`TINY_STATE`). Once per block is enough: from 1e-30 the
-  /// state needs far longer than a block to become subnormal.
-  fn flush_bad_and_tiny_state(&mut self) {
-    for z in &mut self.state {
-      if !z.iter().all(|v| v.is_finite()) {
-        *z = [0.0; 2];
-      }
-      for v in z.iter_mut().filter(|v| v.abs() < TINY_STATE) {
-        *v = 0.0;
-      }
-    }
-  }
-}
-
-impl BandPass {
-  fn new(sample_rate: f64, t: &DuckTuning) -> Self {
-    // Below Nyquist whatever the tuning says.
-    let w0 = 2.0 * PI * f64::from(t.band_center_hz).min(0.45 * sample_rate) / sample_rate;
-    let alpha = w0.sin() / (2.0 * f64::from(t.band_q));
-    let a0 = 1.0 + alpha;
-    BandPass { b0: alpha / a0, a1: -2.0 * w0.cos() / a0, a2: (1.0 - alpha) / a0 }
-  }
-
-  fn run(&self, z: &mut [f64; 2], x: f64) -> f64 {
-    let [z1, z2] = *z;
-    let y = self.b0 * x + z1;
-    *z = [z2 - self.a1 * y, -self.b0 * x - self.a2 * y];
-    y
+    band::flush(&mut self.state);
   }
 }
 

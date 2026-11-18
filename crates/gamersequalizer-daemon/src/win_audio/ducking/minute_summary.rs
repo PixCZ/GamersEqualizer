@@ -30,6 +30,9 @@ pub struct Sample {
   pub prob: Option<i32>,
   /// Chat streams sampled whose band level is above the talk threshold (speech or not).
   pub chat_sound: u32,
+  /// The most lowered game is mix mode's (`MixRun::view`), and the chat made sound (its level held).
+  pub mix: bool,
+  pub chat_sounding: bool,
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +57,10 @@ pub struct MinuteSummary {
   chat_speech: u32,
   chat_sound: u32,
   prob_max: Option<i32>,
+  /// Mix mode lowered the game this minute; its ticks and those with the chat sounding.
+  mix: bool,
+  mix_ticks: u32,
+  sounding_ticks: u32,
 }
 
 impl Sample {
@@ -69,6 +76,8 @@ impl Sample {
       has_game: main.is_some(),
       game_speech_ms: main.map_or(0.0, |s| s.speech_ms),
       learned: main.map_or((0, 0), |s| s.learned),
+      mix: main.is_some_and(|s| s.mix.is_some()),
+      chat_sounding: main.and_then(|s| s.mix).is_some_and(|(_, _, sounding)| sounding),
       need: games()
         .filter(talking)
         .map(|s| view::at(&s.dbg, NEED_DB))
@@ -116,6 +125,11 @@ impl MinuteSummary {
     if s.has_game {
       self.learned = s.learned;
     }
+    self.mix |= s.mix && s.reduction > 0;
+    if s.mix {
+      self.mix_ticks += 1;
+      self.sounding_ticks += u32::from(s.chat_sounding);
+    }
     if s.talking && s.need != dbg::NA {
       self.need_max = Some(self.need_max.map_or(s.need, |m| m.max(s.need)));
     }
@@ -149,7 +163,8 @@ impl MinuteSummary {
       let sound = share(self.chat_sound, self.chat_samples);
       return format!("last minute: chat sound without speech {sound} % of samples ({prob}), nothing lowered");
     }
-    let mut parts = vec![format!("last minute: {} spurts", self.spurts)];
+    let mix = if self.mix { " (mix)" } else { "" };
+    let mut parts = vec![format!("last minute{mix}: {} spurts", self.spurts)];
     if self.lowered_spurts > 0 {
       let (lo, hi) = self.peaks.unwrap_or_default();
       let game = if self.game_db_n == 0 {
@@ -172,6 +187,10 @@ impl MinuteSummary {
       if chat_gain_permille == 0 {
         parts.push("chat gain 0 %".to_string());
       }
+    }
+    if self.mix {
+      // Those ticks did not update the game's level: it stands still while the chat sounds.
+      parts.push(format!("chat sounding {} %", share(self.sounding_ticks, self.mix_ticks)));
     }
     parts.push(super::levels_text(self.learned));
     parts.join(", ")
@@ -203,6 +222,8 @@ mod tests {
       chat_speech: u32::from(talking),
       prob: Some(if talking { 900 } else { 100 }),
       chat_sound: 0,
+      mix: false,
+      chat_sounding: false,
     }
   }
 

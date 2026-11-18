@@ -24,6 +24,8 @@ pub struct StreamView {
   pub owner: u64,
   pub is_game: bool,
   pub exe: String,
+  /// The app's image path (empty for mix mode's line).
+  pub path: String,
   pub sample_rate: u32,
   pub channels: u32,
   /// It played within the last 200 ms; else its values are old.
@@ -38,6 +40,9 @@ pub struct StreamView {
   /// (the other process's values are checked here, so the rest works on clean ones).
   pub learned: (i32, i32),
   pub saved: (i32, i32),
+  /// Mix mode's line (`MixRun::view`): the mix level and the chat band level, dB x 10, and whether
+  /// the chat made sound (the game's level held, not measured).
+  pub mix: Option<(i32, i32, bool)>,
 }
 
 /// The settings the APO works with, as the log reports them.
@@ -69,14 +74,16 @@ pub fn read_streams(table: &StreamTable, paired: Vec<PairedStream>, now_hns: u64
         owner: p.owner,
         is_game: p.is_game,
         exe: p.exe,
+        path: p.path,
         sample_rate: slot.sample_rate.load(r),
         channels: slot.channels.load(r),
-        fresh: last != 0 && now_hns.saturating_sub(last) < FRESH_HNS,
+        fresh: is_fresh(last, now_hns),
         duck_permille: slot.duck_permille.load(r),
         speech_ms: f32::from_bits(slot.speech_ms.load(r)),
         dbg: std::array::from_fn(|i| slot.duck_dbg.get(i).map_or(dbg::NA, |a| a.load(r))),
         learned: (valid(slot.duck_loud_db_x10.load(r)), valid(slot.duck_quiet_db_x10.load(r))),
         saved: (valid(slot.duck_saved_loud_db_x10.load(r)), valid(slot.duck_saved_quiet_db_x10.load(r))),
+        mix: None,
       })
     })
     .collect();
@@ -96,6 +103,11 @@ impl Settings {
       talk_threshold_db_x10: (tuning.talk_threshold_db * 10.0).round() as i32,
     }
   }
+}
+
+/// A stream that last played at `last_audio_hns` still plays (0: never played).
+pub fn is_fresh(last_audio_hns: u64, now_hns: u64) -> bool {
+  last_audio_hns != 0 && now_hns.saturating_sub(last_audio_hns) < FRESH_HNS
 }
 
 /// How far the game is lowered now (permille): the most over the game streams that play.
@@ -144,6 +156,7 @@ pub(super) mod tests {
       owner,
       is_game,
       exe: if is_game { "game.exe" } else { "Discord.exe" }.to_string(),
+      path: String::new(),
       sample_rate: 48_000,
       channels: 2,
       fresh: true,
@@ -152,6 +165,7 @@ pub(super) mod tests {
       dbg: [dbg::NA; DUCK_DBG_SLOTS],
       learned: (0, 0),
       saved: (0, 0),
+      mix: None,
     }
   }
 

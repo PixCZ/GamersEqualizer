@@ -1,8 +1,5 @@
-use log::info;
 use serde::{Deserialize, Serialize};
-use windows::Win32::Media::Audio::{
-  IMMDevice, ISpatialAudioClient, ISpatialAudioObjectRenderStream, eConsole, eRender,
-};
+use windows::Win32::Media::Audio::{IMMDevice, ISpatialAudioClient, ISpatialAudioObjectRenderStream};
 use windows::Win32::System::Com::CLSCTX_ALL;
 use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RegGetValueW};
 use windows::core::{Interface, PCWSTR};
@@ -70,38 +67,7 @@ impl SpatialFormat {
   }
 }
 
-#[derive(Default)]
-pub struct DolbyAtmosGuard {
-  last_status: SpatialAudioStatus,
-}
-
-impl DolbyAtmosGuard {
-  /// Check active spatial audio status on default render endpoint
-  pub fn check_spatial_status(&mut self) -> SpatialAudioStatus {
-    // SAFETY: the service and window threads initialize COM at start; on a thread without it CoCreateInstance fails
-    // and the status reads Unsupported.
-    let status = unsafe { self.query_active_endpoint() };
-    if status != self.last_status {
-      info!("[DolbyAtmosGuard] Spatial audio status transition: {:?} -> {:?}", self.last_status, status);
-      self.last_status = status;
-    }
-    status
-  }
-
-  /// # Safety
-  /// COM must be initialized on the calling thread.
-  unsafe fn query_active_endpoint(&self) -> SpatialAudioStatus {
-    // SAFETY: the contract above; the interfaces are created here and released when dropped.
-    unsafe {
-      match super::mmdevice::default_device(eRender, eConsole) {
-        Ok(device) => device_status(&device),
-        Err(_) => SpatialAudioStatus::Unsupported,
-      }
-    }
-  }
-}
-
-/// Spatial sound on one output (full endpoint id), for the tray's setup check.
+/// Spatial sound on one output (full endpoint id), for the tray's setup check and the window.
 pub fn spatial_status(device_id: &str) -> SpatialAudioStatus {
   // SAFETY: COM is initialized on the calling thread; the device is live for the call.
   unsafe {

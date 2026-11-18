@@ -89,6 +89,11 @@ struct GameStats {
   prev_flags: i32,
   /// The last sample's values and learned levels.
   last: Option<([i32; DUCK_DBG_SLOTS], (i32, i32))>,
+  /// Mix mode only: the mix level and the chat band level it used.
+  mix_level: Stat,
+  chat_band: Stat,
+  /// Mix mode samples in which the chat made sound (the game's level held).
+  chat_sounding: u32,
 }
 
 impl DebugLog {
@@ -247,6 +252,11 @@ impl GameStats {
       self.need.add(view::at(&s.dbg, NEED_DB));
     }
     self.last = Some((s.dbg, s.learned));
+    if let Some((mix, chat_band, sounding)) = s.mix {
+      self.mix_level.add(mix);
+      self.chat_band.add(chat_band);
+      self.chat_sounding += u32::from(sounding);
+    }
   }
 
   fn learned(&self) -> Learned {
@@ -259,7 +269,7 @@ impl GameStats {
 
   fn text(&self, chat: &str) -> String {
     let (d, (loud, quiet)) = self.last.unwrap_or(([dbg::NA; DUCK_DBG_SLOTS], (0, 0)));
-    format!(
+    let line = format!(
       "game {} (now {}), {chat}, spurts {} ({} latched), talking {} %, latched {} %, need {}, depth {} \
        (target {}), loud level {}, quiet talker {}, lock {}",
       self.band.text(),
@@ -284,6 +294,15 @@ impl GameStats {
         view::flag(&d, FLAG_QUIET_SEEDED)
       ),
       one(view::at(&d, LOCKED_DIFF_DB)),
+    );
+    if self.mix_level.n == 0 {
+      return line;
+    }
+    format!(
+      "{line}, mix level {}, chat band {}, chat sounding {} %",
+      self.mix_level.text(),
+      self.chat_band.text(),
+      share(self.chat_sounding, self.mix_level.n)
     )
   }
 }

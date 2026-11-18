@@ -1,7 +1,8 @@
 use super::state::{ActiveTab, AppState};
-use super::theme::{self, Icon, icons};
+use super::theme::{self, Icon, Severity, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::app_channels::{self, AppChannel};
+use crate::win_audio::ducking::Mode;
 use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
 use egui::{Color32, CornerRadius, RichText, Sense, Ui, Vec2};
 use gamersequalizer_common::streams::StreamBus;
@@ -384,15 +385,17 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       }
     });
     ui.add_space(4.0);
-    duck_row(ui, state);
+    let session_mode = win_audio.chatmix.game_device_id.is_none() && win_audio.chatmix.chat_device_id.is_none();
+    duck_row(ui, state, session_mode);
   });
   // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
 }
 
 /// The Automatic ChatMix switch under the balance (the card on the output page has its strength),
-/// with what it does on hover and, while it works, how far the game is lowered now. Saved with the
-/// other audio settings (`save_pending`).
-fn duck_row(ui: &mut Ui, state: &AppState) {
+/// with what it does on hover and, while it works, how far the game is lowered now, or what it does
+/// about a game it cannot hear at its stream. Saved with the other audio settings (`save_pending`).
+fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
+  let unheard = state.ducking_unheard(session_mode).and_then(|(game, mode)| unheard_text(&game, mode));
   let Some(h) = state.shm_header() else { return };
   let help = tr(
     "Lowers the game while someone in the chat is talking and the game is drowning them out. \
@@ -404,13 +407,47 @@ fn duck_row(ui: &mut Ui, state: &AppState) {
     if ui.add(theme::Toggle(&mut on)).on_hover_text(help).changed() {
       h.duck_enabled.store(on, Ordering::Relaxed);
     }
-    // Last in the row, so the text coming and going moves nothing else.
+    // Last in the row and one line high, so what comes and goes there moves nothing else.
     let reduction = h.duck_reduction_permille.load(Ordering::Relaxed);
-    if on && reduction > 0 {
+    if let Some((text, severity)) = unheard.filter(|_| on) {
+      let (icon, color) = if severity == Severity::Warning {
+        (icons::WARNING, theme::severity_color(ui, severity))
+      } else {
+        (icons::INFO, theme::palette(ui).text_secondary)
+      };
+      ui.label(theme::icon(icon, 14.0).color(color));
+      ui.add(egui::Label::new(RichText::new(&text).color(color)).truncate()).on_hover_text(&text);
+    } else if on && reduction > 0 {
       let text = trf("Game lowered by {} %", &[&reduction.div_ceil(10)]);
       ui.label(RichText::new(text).color(theme::palette(ui).text_secondary));
     }
   });
+}
+
+/// What Automatic ChatMix does about a `game` it cannot hear at its stream
+/// (`AppState::ducking_unheard`): lowered from the mix (information), or why not and what helps
+/// (warning). None while the game is heard at its stream. Also on the output page.
+pub(super) fn unheard_text(game: &str, mode: Mode) -> Option<(String, Severity)> {
+  let warning = |text: String| Some((text, Severity::Warning));
+  match mode {
+    Mode::Stream => None,
+    Mode::Mix => Some((
+      trf("With spatial sound on, {} is lowered as a whole, not only in the range of speech.", &[&game]),
+      Severity::Info,
+    )),
+    Mode::ChannelOutputs => warning(trf(
+      "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with \
+       Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate \
+       Game and Chat output devices (such as Sonar's).",
+      &[&game],
+    )),
+    Mode::NoReference => warning(trf(
+      "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and \
+       without the output EQ on this output it cannot hear the mix to lower the game as a whole. Install the \
+       output EQ on this output.",
+      &[&game],
+    )),
+  }
 }
 
 fn render_strip(

@@ -130,6 +130,17 @@ impl ApoLink {
     self.watch.is_live()
   }
 
+  /// Automatic ChatMix's mix mode needs the speaker reference too (a second reader of the ring).
+  pub fn mix_wants_reference(&self) -> bool {
+    self.ducking.wants_reference()
+  }
+
+  /// Every reference tick, unthrottled: mix mode moves the game's volume 20+ times a second.
+  pub fn tick_mix(&mut self, local: &SharedMemoryClient) {
+    let layout = self.shm.as_ref().filter(|_| self.driving).map(|apo| apo.layout());
+    self.ducking.tick_mix(&local.layout().header, layout);
+  }
+
   /// Open the mapping if needed, then mirror settings in and telemetry out.
   pub fn tick(&mut self, local: &SharedMemoryClient, tap_active: bool) {
     if self.last_sync.elapsed() < SYNC_INTERVAL {

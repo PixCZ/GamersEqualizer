@@ -10,7 +10,11 @@
 //!
 //!   cargo run --release -p gamersequalizer-common --example duck_sim -- <game.wav> <chat.wav> <out_dir>
 //!     [duck_tuning.json] [--strength 0.5] [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3]
-//!     [--seed <loud_db> <quiet_db>]
+//!     [--seed <loud_db> <quiet_db>] [--mix]
+//!
+//! `--mix` runs the service's path instead (`MixDucker`, for games that bypass the stream effects):
+//! the game stream is left alone, a 50 ms tick sees the output mix (game at the applied volume +
+//! chat) and lowers the game's whole band from the next tick on.
 //!
 //! Writes `game_ducked.wav`, `mix_before.wav` and `mix_after.wav` (volumes applied) into
 //! `out_dir`, and prints one line per talk spurt plus a summary. `duck_tuning.json` is the file
@@ -21,7 +25,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
-use gamersequalizer_common::ducking::{DuckRole, DuckSettings, DuckTuning, GAP_HNS, StreamDucker};
+use gamersequalizer_common::ducking::{
+  DuckRole, DuckSettings, DuckTuning, GAP_HNS, MixDucker, StreamDucker, chat_levels, chat_sounding,
+};
 use gamersequalizer_common::shm::ShmHeader;
 use gamersequalizer_common::streams::{StreamBus, StreamInfo, StreamTable};
 use silero_vad::Vad48k;
@@ -45,8 +51,15 @@ struct Options {
   out: PathBuf,
   tuning: Option<PathBuf>,
   settings: DuckSettings,
+  run: Run,
+}
+
+/// How a simulation runs: pairing delay, stored levels, the service's mix path.
+#[derive(Default)]
+struct Run {
   pair_delay_s: f32,
   seed: Option<(f32, f32)>,
+  mix: bool,
 }
 
 /// One talk spurt as the game stream's ducker saw it.
@@ -101,7 +114,7 @@ fn run() -> Result<(), String> {
     vad.process(mono, |p| last_prob = p);
     last_prob
   };
-  let sim = simulate(&game, &chat, &tuning, &opts.settings, opts.pair_delay_s, opts.seed, detector)?;
+  let sim = simulate(&game, &chat, &tuning, &opts.settings, &opts.run, detector)?;
 
   std::fs::create_dir_all(&opts.out).map_err(|e| format!("{}: {e}", opts.out.display()))?;
   let s = &opts.settings;
@@ -120,10 +133,10 @@ fn simulate(
   chat: &Audio,
   tuning: &DuckTuning,
   settings: &DuckSettings,
-  pair_delay_s: f32,
-  seed: Option<(f32, f32)>,
+  run: &Run,
   mut detector: impl FnMut(&[f32], bool) -> f32,
 ) -> Result<Sim, String> {
+  let Run { pair_delay_s, seed, mix } = *run;
   let table = zeroed_table();
   let info = |channels: usize| StreamInfo { pid: 1, now_hns: 0, sample_rate: RATE, channels: channels as u32, mode: 0 };
   let game_slot = table.claim(&info(game.channels)).map(|c| c.0).ok_or("no stream slot")?;
@@ -140,6 +153,11 @@ fn simulate(
   let (mut game_ducker, mut chat_ducker) = (StreamDucker::new(RATE as f32), StreamDucker::new(RATE as f32));
   game_ducker.refresh_tuning(&header);
   chat_ducker.refresh_tuning(&header);
+  // The service's path (`--mix`): its 50 ms tick, the mix it heard and the depth it applies.
+  let (mut mixer, mut tick_mix, mut mix_depth) = (MixDucker::new(RATE as f32), Vec::new(), 0.0f32);
+  if let Some((loud, quiet)) = seed.filter(|_| mix) {
+    mixer.seed(Some(loud), Some(quiet));
+  }
 
   let frames = game.samples.len() / game.channels.max(1);
   let chat_frames = chat.samples.len() / chat.channels.max(1);
@@ -184,11 +202,30 @@ fn simulate(
     }
     let start = first * game.channels;
     let mut block = game.samples.get(start..start + count * game.channels).ok_or("short game file")?.to_vec();
-    let role = if paired { DuckRole::Ducked } else { DuckRole::Other };
+    let role = if paired && !mix { DuckRole::Ducked } else { DuckRole::Other };
     game_ducker.process(&mut block, game.channels, role, false, &table, game_slot, now, settings);
+    if mix {
+      let gain = 10f32.powf(-mix_depth / 20.0);
+      block.iter_mut().for_each(|s| *s *= gain);
+      let chat_at = |i: usize| chat.samples.get((first + i) * chat.channels).copied().unwrap_or(0.0);
+      for (i, frame) in block.chunks_exact(game.channels).enumerate() {
+        let sample =
+          frame.iter().sum::<f32>() / frame.len() as f32 * settings.game_gain + chat_at(i) * settings.chat_gain;
+        tick_mix.extend([sample; 2]);
+      }
+      if (first / BLOCK) % 5 == 4 {
+        // As the service: the chat's speech level, and whether its envelope (recorded above per
+        // 10 ms block) sounded during the tick, with a small margin.
+        let (speech_ms, _) = chat_levels(&table, now);
+        let sounding = chat_sounding(&table, now, 0.06);
+        let s = DuckSettings { enabled: settings.enabled && paired, ..*settings };
+        mix_depth = mixer.process(&tick_mix, 0.05, speech_ms, sounding, &s, tuning);
+        tick_mix.clear();
+      }
+    }
     out.extend_from_slice(&block);
 
-    let st = game_ducker.status();
+    let st = if mix { mixer.status() } else { game_ducker.status() };
     if st.talking {
       sim.talk_s += count as f32 / RATE as f32;
       if st.latched {
@@ -272,10 +309,10 @@ fn mix(game: &Audio, game_samples: &[f32], chat: &Audio, s: &DuckSettings) -> Ve
 
 fn parse_args(args: Vec<String>) -> Result<Options, String> {
   let usage = "usage: duck_sim <game.wav> <chat.wav> <out_dir> [duck_tuning.json] [--strength 0.5] \
-               [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3] [--seed <loud_db> <quiet_db>]";
+               [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3] [--seed <loud_db> <quiet_db>] [--mix]";
   let mut positional = Vec::new();
   let mut settings = DuckSettings { enabled: true, strength: 0.5, game_gain: 1.0, chat_gain: 1.0 };
-  let (mut seed, mut pair_delay_s) = (None, PAIR_DELAY_S);
+  let mut run = Run { pair_delay_s: PAIR_DELAY_S, ..Run::default() };
   let mut args = args.into_iter();
   let number = |args: &mut std::vec::IntoIter<String>, flag: &str| -> Result<f32, String> {
     args.next().and_then(|v| v.parse().ok()).ok_or(format!("{flag} needs a number; {usage}"))
@@ -285,17 +322,16 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
       "--strength" => settings.strength = number(&mut args, "--strength")?.clamp(0.0, 1.0),
       "--game-gain" => settings.game_gain = number(&mut args, "--game-gain")?.max(0.0),
       "--chat-gain" => settings.chat_gain = number(&mut args, "--chat-gain")?.max(0.0),
-      "--pair-delay" => pair_delay_s = number(&mut args, "--pair-delay")?.max(0.0),
-      "--seed" => seed = Some((number(&mut args, "--seed")?, number(&mut args, "--seed")?)),
+      "--pair-delay" => run.pair_delay_s = number(&mut args, "--pair-delay")?.max(0.0),
+      "--seed" => run.seed = Some((number(&mut args, "--seed")?, number(&mut args, "--seed")?)),
+      "--mix" => run.mix = true,
       _ if arg.starts_with("--") => return Err(format!("unknown option {arg}; {usage}")),
       _ => positional.push(PathBuf::from(arg)),
     }
   }
   let mut positional = positional.into_iter();
   match (positional.next(), positional.next(), positional.next(), positional.next(), positional.next()) {
-    (Some(game), Some(chat), Some(out), tuning, None) => {
-      Ok(Options { game, chat, out, tuning, settings, pair_delay_s, seed })
-    }
+    (Some(game), Some(chat), Some(out), tuning, None) => Ok(Options { game, chat, out, tuning, settings, run }),
     _ => Err(usage.to_string()),
   }
 }
@@ -367,7 +403,8 @@ mod tests {
     };
     let settings = DuckSettings { enabled: true, strength: 0.5, game_gain: 1.0, chat_gain: 1.0 };
     let speech = |mono: &[f32], _reset: bool| if mono.iter().any(|s| s.abs() > 0.01) { 1.0 } else { 0.0 };
-    let sim = simulate(&game, &chat, &DuckTuning::default(), &settings, PAIR_DELAY_S, None, speech).unwrap();
+    let run = Run { pair_delay_s: PAIR_DELAY_S, ..Run::default() };
+    let sim = simulate(&game, &chat, &DuckTuning::default(), &settings, &run, speech).unwrap();
     (game, sim)
   }
 

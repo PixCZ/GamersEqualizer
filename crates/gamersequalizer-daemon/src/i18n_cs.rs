@@ -971,6 +971,19 @@ pub static CS: &[(&str, &str)] = &[
     "Zeslabí hru, když někdo v chatu mluví a hra ho přehlušuje. Jen v rozsahu řeči, plynule a pokaždé zhruba stejně.",
   ),
   ("Game lowered by {} %", "Hra zeslabena o {} %"),
+  (
+    "With spatial sound on, {} is lowered as a whole, not only in the range of speech.",
+    "Se zapnutým prostorovým zvukem zeslabuje automatický ChatMix {} jako celek, nejen v rozsahu řeči.",
+  ),
+  (
+    "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate Game and Chat output devices (such as Sonar's).",
+    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem hra hraje mimo efekty jednotlivých aplikací, a když mají Hra a Chat vlastní výstupy, nemůže ji zeslabit jako celek. Jde to, když nejsou k dispozici samostatná výstupní zařízení pro Hru a Chat (například ze Sonaru).",
+  ),
+  (
+    "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and without the output EQ on this output it cannot hear the mix to lower the game as a whole. Install the output EQ on this output.",
+    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem hra hraje mimo efekty jednotlivých aplikací a bez výstupního EQ na tomto výstupu neslyší mix, aby ji zeslabil jako celek. Nainstalujte výstupní EQ na tento výstup.",
+  ),
+  ("the game", "hru"),
   ("Click to customize EQ curves for {}", "Kliknutím upravíte křivky EQ pro {}"),
   (
     "{} - you put it on this channel. Drag to move, right-click to undo.",

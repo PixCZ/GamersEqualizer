@@ -105,9 +105,10 @@ admin or restart Windows audio are never delegated: a human runs them.
   every mic-chain stage (WAV) plus per-block variables (`vars.tsv`, `info.txt`) into
   `test_data/private/captures/` (git-ignored). Never ship an APO built with it.
 - Automatic ChatMix offline: `cargo run --release -p gamersequalizer-common --example duck_sim -- game.wav
-  chat.wav out_dir [duck_tuning.json] [--strength 0.5] [--pair-delay 3] [--seed <loud> <quiet>]` runs two
-  48 kHz recordings through the stream APOs' ducking path (Silero on the chat, pairing after a delay), writes
-  the ducked game and both mixes and prints one line per talk spurt. It does not model the chat stream's EQ
+  chat.wav out_dir [duck_tuning.json] [--strength 0.5] [--pair-delay 3] [--seed <loud> <quiet>] [--mix]`
+  runs two 48 kHz recordings through the stream APOs' ducking path (Silero on the chat, pairing after a
+  delay), or with `--mix` through the service's path for games the stream effects cannot see, writes the
+  ducked game and both mixes and prints one line per talk spurt. It does not model the chat stream's EQ
   before the detector or more than one chat and one game stream. The service reads the same
   `duck_tuning.json` from `%APPDATA%\GamersEqualizer` and hands it to the running APOs (names and ranges:
   `ducking::DuckTuning`), so tuning never needs a new APO install.

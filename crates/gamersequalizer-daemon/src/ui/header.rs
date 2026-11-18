@@ -5,7 +5,7 @@
 use super::state::{ActiveTab, AppState};
 use super::theme::{self, Icon, icons};
 use crate::i18n::{tk, tr, trf};
-use crate::win_audio::dolby_atmos::active_format;
+use crate::win_audio::dolby_atmos::{active_format, spatial_status};
 use crate::win_audio::{SpatialAudioStatus, WinAudioSystem, shell};
 use egui::{Color32, RichText, Ui};
 use std::time::{Duration, Instant};
@@ -161,8 +161,9 @@ pub fn refresh_spatial(state: &mut AppState, win_audio: &mut WinAudioSystem) {
     return;
   }
   state.spatial_checked_at = Some(Instant::now());
-  state.spatial_status = win_audio.dolby_guard.check_spatial_status();
+  // Changes are logged by the service (`health`), which checks whether or not the window is open.
   let output = win_audio.endpoint_lock.get_default_output_id();
+  state.spatial_status = output.as_deref().map_or(SpatialAudioStatus::Unsupported, spatial_status);
   let active = state.spatial_status.is_active();
   state.spatial_format = output.as_deref().filter(|_| active).and_then(active_format);
   // Learned by the background service (`health`); the window only reads it.

@@ -15,8 +15,9 @@
 //! What it decides (`gain.rs`), per 10 ms block:
 //! - Whether, per talk spurt: a spurt is talk with pauses shorter than the hold; its level is a
 //!   leaky mean of its talking blocks. The spurt ducks once the current game level masks it (game -
-//!   spurt + margin above a threshold) and stays ducked until it ends: a loud talker above the game
-//!   does not duck it, a quiet one does, and a quiet talker answering a loud one does within a second.
+//!   spurt + margin above a threshold) and stays ducked until it ends or the game has not masked it
+//!   for a few seconds (a talker who never pauses): a loud talker above the game does not duck it, a
+//!   quiet one does, and a quiet talker answering a loud one does within a second.
 //! - How much, once for the run: the depth comes from a locked difference between two learned
 //!   levels, the loud game level (an upper envelope of the game) and the quiet talker level (the
 //!   quietest of the people who normally talk: a mean of the first talkers, then a lower envelope).
@@ -29,17 +30,25 @@
 //! it is locked from its first sentence. Every level and time is a starting point to be tuned by
 //! ear and lives in `DuckTuning` (`tuning.rs`), which the service changes while the APO runs; none
 //! of them is measured. `dbg.rs` is the per-slot telemetry the service logs.
+//!
+//! A game whose stream the APO cannot see (spatial audio objects bypass the per-stream effects) is
+//! ducked by the service instead (`mix.rs`): the same decisions, with the game measured in the
+//! output mix while the chat makes no sound and held while it does, applied to the game's session
+//! volume, full band. `band.rs` is the filter both paths measure with.
 
 use crate::shm::ShmHeader;
 use crate::streams::StreamBus;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+mod band;
 pub mod dbg;
 mod gain;
+mod mix;
 mod stream;
 mod tuning;
 
 pub use gain::DuckStatus;
+pub use mix::{MixDucker, chat_levels, chat_sounding};
 pub use stream::StreamDucker;
 pub use tuning::DuckTuning;
 
@@ -52,6 +61,9 @@ pub use tuning::DuckTuning;
 pub const GAP_HNS: u64 = 5_000_000;
 /// Mean square read as silence by the dB conversion (-120 dB).
 const FLOOR_MS: f32 = 1e-12;
+/// A slot whose last block is older than this (100 ns units) is silent: the audio engine does not
+/// call a silent stream.
+const FRESH_HNS: u64 = 500_000;
 
 // ---------------------------------------------------------------------------------------
 // Types
@@ -75,7 +87,8 @@ pub struct DuckSettings {
   /// Strength, 0..=1: how far the voice should sit above the game in the band, as a share of
   /// `DuckTuning::max_margin_db` (0.5 = 6 dB by default).
   pub strength: f32,
-  /// Linear volume the listener hears game / chat at, relative to the stream the APO sees.
+  /// Linear volume the listener hears game / chat at, relative to the stream the APO sees: only a
+  /// channel output's volume (after the APO); session volumes are already in the stream.
   pub game_gain: f32,
   pub chat_gain: f32,
 }

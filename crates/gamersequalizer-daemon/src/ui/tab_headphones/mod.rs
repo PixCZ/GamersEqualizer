@@ -132,12 +132,15 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
     }
   });
 
-  ducking_card(ui, state);
+  let session_mode = win_audio.chatmix.game_device_id.is_none() && win_audio.chatmix.chat_device_id.is_none();
+  ducking_card(ui, state, session_mode);
 }
 
 /// Automatic ChatMix, built like the voice leveler card: the switch (also on the mixer page) and how
 /// clearly the voice should stand out, which applies while the switch is on.
-fn ducking_card(ui: &mut Ui, state: &AppState) {
+fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
+  let unheard =
+    state.ducking_unheard(session_mode).and_then(|(game, mode)| super::tab_mixer::unheard_text(&game, mode));
   let Some(h) = state.shm_header() else { return };
   let on = h.duck_enabled.load(Ordering::Relaxed);
   theme::card(ui, |ui| {
@@ -154,6 +157,9 @@ fn ducking_card(ui: &mut Ui, state: &AppState) {
         }
       });
     });
+    if let Some((text, severity)) = unheard.filter(|_| on) {
+      theme::status_line(ui, severity, &text);
+    }
     ui.add_enabled_ui(on, |ui| {
       egui::Grid::new("ducking_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
         ui.label(tr("Strength:"));

@@ -283,8 +283,9 @@ pub struct ShmHeader {
   /// (12 dB). The DSP clamps it to 0..=1000.
   pub duck_strength_permille: AtomicU32,
   /// Daemon -> stream APOs: the linear volume the listener hears the game / chat channel at,
-  /// relative to the stream the APO sees (session and ChatMix volume come after the APO; 1000 =
-  /// unchanged, 0 = muted).
+  /// relative to the stream the APO sees (1000 = unchanged, 0 = muted). Only a channel on its own
+  /// output (Sonar-like) has one: its endpoint volume comes after the APO. Session and ChatMix
+  /// volumes come BEFORE it (measured, DEVLOG Milestone 19), so in that mode both are 1000.
   pub duck_game_gain_permille: AtomicU32,
   pub duck_chat_gain_permille: AtomicU32,
   /// Daemon -> window: how much the game is lowered now, from the slots' `duck_permille`. Not
