@@ -47,7 +47,7 @@ pub struct ShmHeader {
   pub denoise_model: AtomicU32,
   pub denoise_model_active: AtomicU32,
 
-  // --- v3: reference timing (loopback writer -> DSP), guarded by a seqlock ---
+  // --- v3: reference timing (reference writer -> DSP), guarded by a seqlock ---
   /// Odd while the writer updates the snapshot.
   pub ref_seq: AtomicU32,
   /// Ring index whose frame plays at `ref_snap_qpc_hns`.
@@ -261,8 +261,8 @@ pub struct ShmHeader {
 
   // --- v23: speaker reference written by the output APO (`reference_ring.rs`) ---
   /// Daemon -> output APOs (mirrored with the controls): `device_hash` of the output whose APO
-  /// writes the reference ring; 0 = nobody writes (no app records through the mic chain, the
-  /// output has no effect, or the loopback is forced).
+  /// writes the reference ring; 0 = nobody writes (no app records through the mic chain, or the
+  /// output has no effect).
   pub aec_ref_output_hash: AtomicU32,
   /// Output APO -> daemon: bumped on every block the one writer puts into the ring.
   pub aec_ref_writer_beat: AtomicU32,

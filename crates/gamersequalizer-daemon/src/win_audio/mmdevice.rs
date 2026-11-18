@@ -4,7 +4,9 @@
 //! the COM error. They do not initialize it here: the window's thread must stay free for the
 //! apartment its own libraries pick.
 
-use windows::Win32::Media::Audio::{EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator};
+use windows::Win32::Media::Audio::{
+  EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole, eRender,
+};
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use windows_core::{PCWSTR, Result};
 
@@ -41,4 +43,17 @@ pub fn device_id(device: &IMMDevice) -> Option<String> {
 /// Id of the current default endpoint for `flow` / `role`.
 pub fn default_device_id(flow: EDataFlow, role: ERole) -> Option<String> {
   device_id(&default_device(flow, role).ok()?)
+}
+
+/// Id of the output the echo reference is taken from: the explicit one, else the Windows default.
+pub fn resolve_render_id(explicit: Option<&str>) -> Option<String> {
+  if let Some(id) = explicit {
+    return Some(id.to_string());
+  }
+  default_device_id(eRender, eConsole)
+}
+
+/// Id of the Windows default microphone (the endpoint the APO most likely runs on).
+pub fn resolve_default_capture_id() -> Option<String> {
+  default_device_id(eCapture, eConsole)
 }

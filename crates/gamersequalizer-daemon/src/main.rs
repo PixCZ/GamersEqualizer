@@ -162,7 +162,7 @@ fn run_gui_mode() {
   // Update SHM with live channel volumes
   state.sync_mixer_to_shm(&win_audio.chatmix);
 
-  // The echo reference loopback and the APO link run only in the background service (started
+  // The echo reference thread and the APO link run only in the background service (started
   // above, restarted by the window's watchdog). The window used to start its own when the
   // service was not up within 150 ms of a cold start, and never stopped it: two APO owners
   // mixing echo reference frames.

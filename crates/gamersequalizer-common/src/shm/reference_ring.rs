@@ -1,5 +1,5 @@
 //! The speaker reference: a timed ring of stereo frames one writer fills (the output APO on the
-//! reference output, or the daemon's loopback capture) and the AEC reads.
+//! reference output) and the AEC reads.
 
 use super::*;
 

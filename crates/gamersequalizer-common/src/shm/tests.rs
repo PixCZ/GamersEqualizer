@@ -341,7 +341,6 @@ fn test_state_enums_roundtrip_and_unknown() {
     AecRefStatus::EffectMissing,
     AecRefStatus::EffectOutdated,
     AecRefStatus::EndpointUnknown,
-    AecRefStatus::Loopback,
   ] {
     assert_eq!(AecRefStatus::from_u32(s.to_u32()), s);
   }

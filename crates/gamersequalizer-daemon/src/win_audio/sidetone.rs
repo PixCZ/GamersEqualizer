@@ -21,7 +21,7 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::core::Interface;
 
-use super::loopback;
+use super::mmdevice;
 use crate::output_eq::settings::write_atomic;
 
 // ---------------------------------------------------------------------------------------
@@ -374,7 +374,7 @@ impl WorkerState {
     // 1. The pair, and publishing it when it or the saved pairs changed. The only writer of
     // the hashes and of `enabled`; hashes, EQ and values before `enabled` (`write_sidetone`).
     let pair_ids =
-      active_pair(h.get_selected_mic_id(), loopback::resolve_default_capture_id, loopback::resolve_render_id(None));
+      active_pair(h.get_selected_mic_id(), mmdevice::resolve_default_capture_id, mmdevice::resolve_render_id(None));
     let (current_pairs, version) = pairs();
     if pair_ids != self.last_pair || version != self.last_version {
       self.last_version = version;

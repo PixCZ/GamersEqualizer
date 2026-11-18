@@ -23,14 +23,13 @@ pub static CS: &[(&str, &str)] = &[
   ("Microphone processing is not on the microphone in use", "Zpracování mikrofonu není na používaném mikrofonu"),
   ("Microphone processing is not installed", "Zpracování mikrofonu není nainstalované"),
   ("Microphone processing does not work on \"{}\"", "Zpracování mikrofonu na „{}“ nefunguje"),
-  ("Output EQ does not work on \"{}\"", "EQ výstupu na „{}“ nefunguje"),
   (
     "It is installed, but processed nothing while apps recorded: they get the raw microphone. The reason is in the app's log.",
     "Je nainstalované, ale nic nezpracovalo, zatímco aplikace nahrávaly: dostávají neupravený mikrofon. Důvod je v logu aplikace.",
   ),
   (
-    "It is installed, but processed nothing while sound played. The reason is in the app's log.",
-    "Je nainstalovaný, ale nic nezpracoval, zatímco hrál zvuk. Důvod je v logu aplikace.",
+    "Our effect is installed, but processed nothing while sound played: no EQ, no echo cancellation. The reason is in the app's log.",
+    "Náš efekt je nainstalovaný, ale nic nezpracoval, zatímco hrál zvuk: bez EQ a bez potlačení ozvěny. Důvod je v logu aplikace.",
   ),
   ("\"{}\" is not the Windows default microphone", "„{}“ není výchozí mikrofon Windows"),
   ("Switch back to \"{}\"", "Přepnout zpět na „{}“"),
@@ -51,12 +50,12 @@ pub static CS: &[(&str, &str)] = &[
     "Efekt mikrofonu ve Windows není na tomto mikrofonu (viz zpráva nahoře)",
   ),
   (
-    "Microphone processing is not installed: Discord, Signal, games ... get your raw microphone, without echo cancellation, noise suppression or EQ.",
-    "Zpracování mikrofonu není nainstalované: Discord, Signal, hry … dostávají surový mikrofon bez potlačení ozvěny, hluku i bez EQ.",
+    "Microphone processing is not installed: apps get your raw microphone (no echo cancellation, noise suppression or EQ).",
+    "Zpracování mikrofonu není nainstalované: aplikace dostávají surový mikrofon (bez potlačení ozvěny, šumu a EQ).",
   ),
   (
-    "Microphone processing is installed, but not on the microphone in use: apps get it unprocessed.",
-    "Zpracování mikrofonu je nainstalované, ale ne na používaném mikrofonu: aplikace dostávají nezpracovaný zvuk.",
+    "Microphone processing is not on the microphone in use: apps get it raw (no echo cancellation, noise suppression or EQ).",
+    "Zpracování mikrofonu není na používaném mikrofonu: aplikace ho dostávají surový (bez potlačení ozvěny, šumu a EQ).",
   ),
   ("The selected microphone", "Vybraný mikrofon"),
   (
@@ -116,12 +115,12 @@ pub static CS: &[(&str, &str)] = &[
     "Efekt mikrofonu ve Windows je zastaralý (sestavení {}, viz zpráva nahoře)",
   ),
   (
-    "The GamersEqualizer installed in Windows is older than this one or incomplete (installed {}, this one {}): new fixes and settings may not work.",
-    "GamersEqualizer nainstalovaný ve Windows je starší než tento nebo neúplný (nainstalováno {}, tento {}): nové opravy a nastavení nemusí fungovat.",
+    "The effect in Windows is out of date. Newer features do not work until you update it.",
+    "Efekt ve Windows je zastaralý. Novější funkce nefungují, dokud ho neaktualizujete.",
   ),
   (
-    "\"{}\" is not the Windows default microphone: Discord, games and other apps use the default one, so they don't get this microphone or its processing.",
-    "„{}“ není výchozí mikrofon Windows: Discord, hry a další aplikace používají výchozí, takže tento mikrofon ani jeho zpracování nedostanou.",
+    "\"{}\" is not the Windows default microphone: Discord and games use the default one, not this one.",
+    "„{}“ není výchozí mikrofon Windows: Discord a hry používají výchozí, ne tento.",
   ),
   ("Install…", "Nainstalovat…"),
   ("Update…", "Aktualizovat…"),
@@ -184,12 +183,17 @@ pub static CS: &[(&str, &str)] = &[
     "Vytvořila ho novější verze aplikace. Tato verze jím zvuk pouští beze změny a nechává ho, jak je.",
   ),
   // --- top bar, navigation, device card ---
-  ("Service running", "Služba běží"),
+  ("Not running: {}", "Neběží: {}"),
+  ("service", "služba"),
+  ("Windows effect", "efekt ve Windows"),
+  (
+    "Apps get the sound unprocessed. The message below says what to do.",
+    "Aplikace dostávají zvuk bez úprav. Co s tím, říká zpráva níže.",
+  ),
   (
     "Audio keeps being processed in the background when you close this window.",
     "Po zavření okna se zvuk dál zpracovává na pozadí.",
   ),
-  ("No background service", "Služba na pozadí neběží"),
   (
     "Processing runs inside this window only and stops when you close it.",
     "Zpracování běží jen v tomto okně a po jeho zavření skončí.",
@@ -827,7 +831,6 @@ pub static CS: &[(&str, &str)] = &[
     "Chybí reference reproduktorů: Windows výstupnímu EQ na „{}“ neřekla, na kterém zařízení běží. Víc řekne log aplikace ([ApoNote]).",
   ),
   ("No speaker reference: no output device", "Chybí reference reproduktorů: žádné výstupní zařízení"),
-  ("No speaker reference (loopback capture not running)", "Chybí reference reproduktorů (zachytávání loopback neběží)"),
   ("Looking for the speaker reference...", "Hledá se reference reproduktorů..."),
   (
     "No speaker reference (no timestamps from the microphone)",
@@ -853,8 +856,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Auto", "Automaticky"),
   ("CPU load:", "Zatížení CPU:"),
   (
-    "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
-    "Čas, který řetězec mikrofonu potřebuje na jeden zvukový blok, jako podíl délky bloku. Řetězec běží na jednom jádru procesoru, takže jde o vytížení tohoto jednoho jádra; Správce úloh ukazuje stejnou práci rozpočítanou na všechna jádra. Nad 100 % blok nestihne: praskání nebo výpadky. Trvalé přetížení přepne DeepFilterNet nebo DPDFNet na RNNoise (viz Protokol).",
+    "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts.\nSustained overload switches DeepFilterNet 3 or DPDFNet to RNNoise (see Log).",
+    "Čas, který řetězec mikrofonu potřebuje na jeden zvukový blok, jako podíl délky bloku. Řetězec běží na jednom jádru procesoru, takže jde o vytížení tohoto jednoho jádra; Správce úloh ukazuje stejnou práci rozpočítanou na všechna jádra. Nad 100 % blok nestihne: praskání nebo výpadky.\nTrvalé přetížení přepne DeepFilterNet 3 nebo DPDFNet na RNNoise (viz Protokol).",
   ),
   ("Stage 3: Voice parametric EQ", "Stupeň 3: Parametrický EQ hlasu"),
   (
@@ -890,8 +893,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Peak {} %, about {} % of the whole CPU.", "Špička {} %, asi {} % celého procesoru."),
   ("late blocks: {}", "opožděné bloky: {}"),
   (
-    "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing sometimes gets through (most often with RNNoise, which removes the least).",
-    "Když nemluvíte, ztlumí mikrofon o 12 dB. Otevírá se na řeč, ne na hlasitost: funguje stejně pro hlasitý i tichý hlas. Je naladěná tak, aby nikdy neořezala hlas, takže hlasité psaní občas projde (nejčastěji s RNNoise, který odstraní nejméně).",
+    "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: works the same for a loud or quiet voice.\nTuned to never cut your voice, so loud typing sometimes gets through, most often with RNNoise (it removes the least noise).",
+    "Když nemluvíte, ztlumí mikrofon o 12 dB. Otevírá se na řeč, ne na hlasitost: funguje stejně pro hlasitý i tichý hlas.\nJe naladěná tak, aby nikdy neořezala hlas, takže hlasité psaní občas projde, nejčastěji s RNNoise (odstraní nejméně hluku).",
   ),
   (
     "Only the noise suppression runs; nothing is turned down between words.",
@@ -903,16 +906,16 @@ pub static CS: &[(&str, &str)] = &[
     "Hlas nepatrně pozdrží, aby brána byla otevřená už ve chvíli, kdy po pauze začne slovo. Bez toho může první slabika vyjít tišší. Přidá právě tolik zpoždění; platí jen se zapnutou bránou.",
   ),
   (
-    "RNNoise: light classic model (nnnoiseless), ~0.1 % CPU.\nVoice: stays natural, the model itself never cuts it.\nNoise: removes very little; keyboard only ~12-15 dB, loud typing stays audible and can keep the gate open.\nPick it for a quiet room or a weak CPU.",
-    "RNNoise: lehký klasický model (nnnoiseless), ~0,1 % CPU.\nHlas: zůstane přirozený, model sám ho nikdy neořeže.\nŠum: odstraní ho velmi málo; klávesnici jen ~12–15 dB, hlasité psaní zůstane slyšet a může držet bránu otevřenou.\nVhodný do tiché místnosti nebo na slabší CPU.",
+    "RNNoise: light classic model (nnnoiseless), the voice stays natural. For a quiet room or a weak CPU.\nCost: ~0.1 % CPU · Weak point: removes little noise (keyboard only ~12-15 dB); loud typing stays audible and can keep the gate open.",
+    "RNNoise: lehký klasický model (nnnoiseless), hlas zůstane přirozený. Do tiché místnosti nebo na slabší CPU.\nCena: ~0,1 % CPU · Slabina: hluku odstraní málo (klávesnici jen ~12–15 dB); hlasité psaní zůstane slyšet a může držet bránu otevřenou.",
   ),
   (
-    "DeepFilterNet 3: best open-source quality, full-band 48 kHz, ~1 % CPU.\nKeyboard: removed well (~20-30 dB), but a keystroke during speech sometimes gets through.\nVoice: a very quiet voice under loud typing can lose some soft syllables.\nSwitching during a call loads the model (~0.2 s gap).",
-    "DeepFilterNet 3: nejlepší open-source kvalita, plné pásmo 48 kHz, ~1 % CPU.\nKlávesnice: odstraní ji dobře (~20–30 dB), ale stisk klávesy během řeči občas projde.\nHlas: velmi tichému hlasu při hlasitém psaní může ubrat některé tiché slabiky.\nPřepnutí během hovoru načte model (výpadek ~0,2 s).",
+    "DeepFilterNet 3: best open-source quality (full-band 48 kHz), removes keyboard well (~20-30 dB).\nCost: ~1 % CPU, ~0.2 s gap when switched during a call · Weak point: a keystroke during speech sometimes gets through; a very quiet voice under loud typing can lose soft syllables.",
+    "DeepFilterNet 3: nejlepší open-source kvalita (plné pásmo 48 kHz), klávesnici odstraní dobře (~20–30 dB).\nCena: ~1 % CPU, při přepnutí během hovoru výpadek ~0,2 s · Slabina: stisk klávesy během řeči občas projde; velmi tichý hlas při hlasitém psaní může přijít o tiché slabiky.",
   ),
   (
-    "DPDFNet: strongest keyboard removal (~47-50 dB); the gate almost never lets keys through.\nVoice: slightly changes its tone; very loud typing right over a word can thin it out.\nAbout 3x the CPU of DeepFilterNet 3. Switching during a call loads the model (~0.1 s gap).",
-    "DPDFNet: nejsilněji odstraní klávesnici (~47–50 dB); brána klávesy skoro nikdy nepropustí.\nHlas: trochu mu změní barvu; velmi hlasité psaní přímo přes slovo ho může ztenčit.\nZhruba 3× víc CPU než DeepFilterNet 3. Přepnutí během hovoru načte model (výpadek ~0,1 s).",
+    "DPDFNet: strongest keyboard removal (~47-50 dB), the gate almost never lets keys through.\nCost: about 3x the CPU of DeepFilterNet 3, ~0.1 s gap when switched during a call · Weak point: slightly changes the voice's tone; very loud typing right over a word can thin it out.",
+    "DPDFNet: klávesnici odstraní nejsilněji (~47–50 dB), brána klávesy skoro nikdy nepropustí.\nCena: zhruba 3× víc CPU než DeepFilterNet 3, při přepnutí během hovoru výpadek ~0,1 s · Slabina: trochu změní barvu hlasu; velmi hlasité psaní přímo přes slovo ho může ztenčit.",
   ),
   ("{} ms", "{} ms"),
   (
@@ -1026,8 +1029,8 @@ pub static CS: &[(&str, &str)] = &[
     "Potlačení ozvěny, šumu a EQ pro Discord, hry a všechny ostatní aplikace.",
   ),
   (
-    "Headphone correction and the game, chat and media EQ on what you hear.",
-    "Korekce sluchátek a EQ pro hry, chat a média v tom, co slyšíte.",
+    "Headphone correction and the game, chat and media EQ; echo cancellation needs it too.",
+    "Korekce sluchátek a EQ pro hry, chat a média; potřebuje ho i potlačení ozvěny.",
   ),
   (
     "The background service starts when you sign in, so the effects get their settings.",
@@ -1054,8 +1057,8 @@ pub static CS: &[(&str, &str)] = &[
     "Discord, hry a další aplikace používají výchozí mikrofon, ne tento.",
   ),
   (
-    "A new sound device? Your headphone correction, EQ and the mic's echo cancellation do not work on it. Open GamersEqualizer to set it up.",
-    "Nové zvukové zařízení? Korekce sluchátek, EQ ani potlačení ozvěny v mikrofonu na něm nefungují. Nastavíte to v GamersEqualizer.",
+    "A new sound device? Open GamersEqualizer to set it up: headphone correction, EQ and echo cancellation need it.",
+    "Nové zvukové zařízení? Nastavte ho v GamersEqualizer: korekce sluchátek, EQ i potlačení ozvěny to potřebují.",
   ),
   (
     "Nobody hears you. Fix it from the GamersEqualizer icon in the notification area.",
@@ -1064,16 +1067,17 @@ pub static CS: &[(&str, &str)] = &[
   ("Set up in GamersEqualizer...", "Nastavit v GamersEqualizer..."),
   ("Unmute the microphone", "Zrušit ztlumení mikrofonu"),
   ("Set the microphone volume to 100 %", "Nastavit hlasitost mikrofonu na 100 %"),
-  ("Output EQ is not set up on \"{}\"", "EQ výstupu není nastavený na „{}“"),
+  ("Echo cancellation and EQ do not work on \"{}\"", "Na „{}“ nefunguje potlačení ozvěny ani EQ"),
   ("{} is recording, but the microphone is muted", "{} nahrává, ale mikrofon je ztlumený"),
   ("{} is recording, but the microphone volume is 0 %", "{} nahrává, ale hlasitost mikrofonu je 0 %"),
   ("{} is recording, but no microphone is turned on", "{} nahrává, ale žádný mikrofon není zapnutý"),
   ("Nobody hears you.", "Nikdo vás neslyší."),
   ("Set up…", "Nastavit…"),
   (
-    "Output EQ is not set up on \"{}\" (a new sound device?): your headphone correction and EQ are not applied to it.",
-    "EQ výstupu není nastavený na „{}“ (nové zvukové zařízení?): korekce sluchátek a EQ se na něj nepoužívají.",
+    "Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds.",
+    "Otevře nastavení: jeden dotaz správce, pak se zvuk Windows na pár sekund restartuje.",
   ),
+  ("Newer features do not work until you update it.", "Novější funkce nefungují, dokud ho neaktualizujete."),
   // --- AutoEQ file check ---
   (
     "no filters found (expected lines like \"Filter 1: ON PK Fc 100 Hz Gain -3.0 dB Q 1.41\")",

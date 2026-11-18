@@ -30,7 +30,7 @@ use telemetry::*;
 
 /// Publish telemetry every 10 blocks (~100 ms): enough for a smooth UI, negligible cost.
 const TELEMETRY_EVERY_BLOCKS: u32 = 10;
-/// Reference older than 200 ms means nothing is playing (loopback delivers no packets).
+/// Reference older than 200 ms means nothing is playing (no block was written).
 const REF_STALE_HNS: u64 = 2_000_000;
 /// Below this RMS the reference counts as silent for the UI state.
 const REF_SILENT_RMS: f32 = 1e-4;
@@ -899,14 +899,14 @@ mod tests {
   const BLOCK: usize = 441;
   const T0_HNS: u64 = 10_000_000_000;
 
-  /// Chain on a private mapping whose loopback reference played `reference` from `T0_HNS`;
+  /// Chain on a private mapping whose reference played `reference` from `T0_HNS`;
   /// RNNoise, 100 % volume.
   fn chain_with_reference(tag: &str, reference: &[f32]) -> MicChain {
     let name = format!("Local\\GamersEqualizer_test_{tag}_{}", std::process::id());
     let mut shm = SharedMemoryClient::create_named(&name, None).expect("test mapping");
     let frames: Vec<StereoFrame> = reference.iter().map(|&s| StereoFrame { left: s, right: s }).collect();
     shm.ring_buffer().push_frames_timed(&frames, T0_HNS);
-    shm.layout().header.tap_active.store(true, Ordering::Relaxed); // the loopback writer's flag
+    shm.layout().header.tap_active.store(true, Ordering::Relaxed); // the reference writer's flag
     let mut p = MicChain::with_shm(Some(shm));
     p.test_overrides = Some((DenoiseModel::RnNoise, 1000));
     p

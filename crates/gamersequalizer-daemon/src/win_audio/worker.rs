@@ -1,5 +1,5 @@
 //! What the service's supervised worker threads share: an error that repeats is logged once, and
-//! the APO shared memory is opened with retries instead of ending the thread (the loopback thread
+//! the APO shared memory is opened with retries instead of ending the thread (the reference thread
 //! carries the link to the APO; ended, the APO ran without settings until a restart).
 
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;

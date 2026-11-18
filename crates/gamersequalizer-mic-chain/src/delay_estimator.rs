@@ -1,6 +1,6 @@
 //! Echo-path delay estimator (speaker reference -> microphone) using GCC-PHAT.
 //!
-//! The mic and the loopback reference are aligned by QPC timestamps first, so what is
+//! The mic and the speaker reference are aligned by QPC timestamps first, so what is
 //! measured here is only the stable part: output/input driver latency + acoustic flight
 //! time. It is measured over ~1 s windows, confirmed several times before it is used or
 //! changed, and can be warm-started from a value cached on disk.

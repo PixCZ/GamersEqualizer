@@ -101,8 +101,6 @@ pub enum AecRefStatus {
   /// The effect runs, but Windows did not say which device it is on, so it cannot tell it is
   /// the reference output.
   EndpointUnknown,
-  /// `GAMERSEQUALIZER_AEC_REF=loopback`: WASAPI loopback capture, kept for comparison.
-  Loopback,
   Unknown(u32),
 }
 
@@ -173,7 +171,6 @@ impl AecRefStatus {
       AecRefStatus::EffectMissing => 3,
       AecRefStatus::EffectOutdated => 4,
       AecRefStatus::EndpointUnknown => 5,
-      AecRefStatus::Loopback => 6,
       AecRefStatus::Unknown(v) => v,
     }
   }
@@ -186,7 +183,6 @@ impl AecRefStatus {
       3 => AecRefStatus::EffectMissing,
       4 => AecRefStatus::EffectOutdated,
       5 => AecRefStatus::EndpointUnknown,
-      6 => AecRefStatus::Loopback,
       other => AecRefStatus::Unknown(other),
     }
   }

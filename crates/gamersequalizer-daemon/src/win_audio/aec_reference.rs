@@ -2,12 +2,15 @@
 //! that output carries the effect, and what the APOs (`aec_ref_output_hash`, `tap_active`) and
 //! the window (`aec_ref_status`) are told. The output APO writes the ring itself (`ref_feed.rs`
 //! in the APO crate); there is no fallback: an output without the effect gets no echo
-//! cancellation, and the window says how to fix it.
+//! cancellation, and the window says how to fix it. `spawn` is the thread that drives this and the
+//! link to the APOs.
 
 use log::info;
-use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 use gamersequalizer_common::shm::{AecRefStatus, ShmHeader};
 use gamersequalizer_common::sidetone::device_hash;
@@ -16,9 +19,11 @@ use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use super::apo_install::{self, ApoStatus, Flow};
 use super::apo_link::ApoLink;
 use super::endpoint_lock::get_endpoint_info;
-use super::loopback::resolve_render_id;
-use super::mmdevice;
+use super::{mmdevice, worker};
 
+/// Wait between ticks. Known limit: when an app opens the mic, the echo canceller gets its
+/// reference ~100-200 ms later (first telemetry, then the output effect starts writing).
+const TICK: Duration = Duration::from_millis(50);
 /// How often the Windows default output is resolved again (one RPC).
 const RESOLVE_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the registry is read for the effect on the reference output (or at once on a change).
@@ -26,7 +31,7 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// A beat of the APO counts as moving while it changed within this time.
 const BEAT_WINDOW: Duration = Duration::from_secs(3);
 
-/// State of the APO source, ticked by the loopback thread (`loopback::spawn`).
+/// State of the reference, ticked by the thread `spawn` starts.
 #[derive(Default)]
 pub struct OutputReference {
   /// The user's output selection last seen (None = the Windows default) and what it resolved to.
@@ -52,6 +57,35 @@ struct BeatWatch {
   last: Option<(u32, Option<Instant>)>,
 }
 
+/// Spawn the supervised reference thread: it ticks `OutputReference` and the link to the APOs until
+/// `running` is cleared. `selection`: the output the user picked (None = the Windows default).
+pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) -> Option<std::thread::JoinHandle<()>> {
+  std::thread::Builder::new()
+    .name("GamersEqualizer_AecReference".into())
+    .spawn(move || {
+      // SAFETY: COM init for this thread with no reserved pointer; it stays for the thread's life.
+      unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+      }
+      let Some(shm) = worker::open_shm("AecRef", || running.load(Ordering::SeqCst)) else {
+        return;
+      };
+      let mut apo = ApoLink::new();
+      let mut reference = OutputReference::default();
+      info!("[AecRef] reference thread started");
+      while running.load(Ordering::SeqCst) {
+        reference.tick(&shm, &mut apo, &selection);
+        std::thread::sleep(TICK);
+      }
+      let h = &shm.layout().header;
+      h.tap_active.store(false, Ordering::Relaxed);
+      h.aec_ref_output_hash.store(0, Ordering::Relaxed);
+      apo.set_tap_active(false);
+      info!("[AecRef] reference thread stopped");
+    })
+    .ok()
+}
+
 impl OutputReference {
   /// One step: resolve the output, check its effect on a timer, publish the result into the
   /// daemon's mapping (`local`), then let `apo` mirror it into the APO's.
@@ -60,7 +94,7 @@ impl OutputReference {
     let wanted = selection.lock().ok().and_then(|g| g.clone());
     if wanted != self.selection || self.resolved_at.is_none_or(|t| now.duration_since(t) >= RESOLVE_INTERVAL) {
       self.resolved_at = Some(now);
-      let render_id = resolve_render_id(wanted.as_deref());
+      let render_id = mmdevice::resolve_render_id(wanted.as_deref());
       if render_id != self.render_id {
         self.render_id = render_id;
         self.checked_at = None;
@@ -156,7 +190,7 @@ fn device_name(id: &str) -> String {
   let Ok(device) = mmdevice::device(id) else {
     return id.to_string();
   };
-  // SAFETY: COM is initialized on the loopback thread that calls this; `device` is live.
+  // SAFETY: COM is initialized on the reference thread that calls this; `device` is live.
   unsafe { get_endpoint_info(&device, "") }.map_or_else(|_| id.to_string(), |info| info.name)
 }
 

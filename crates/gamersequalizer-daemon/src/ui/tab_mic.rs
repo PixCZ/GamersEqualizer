@@ -437,7 +437,6 @@ fn no_reference_text(status: Option<AecRefStatus>, output: Option<&str>) -> Stri
       &[&output],
     ),
     Some(AecRefStatus::NoOutput) => tr("No speaker reference: no output device").into(),
-    Some(AecRefStatus::Loopback) => tr("No speaker reference (loopback capture not running)").into(),
     Some(AecRefStatus::NotChecked) => tr("Looking for the speaker reference...").into(),
     // The output EQ is there: the microphone gave no timestamps to line the reference up with.
     _ => tr("No speaker reference (no timestamps from the microphone)").into(),
@@ -635,8 +634,9 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
           .selectable_value(&mut gate_auto, true, tr("Auto"))
           .on_hover_text(tr(
             "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: \
-             works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing \
-             sometimes gets through (most often with RNNoise, which removes the least).",
+             works the same for a loud or quiet voice.\n\
+             Tuned to never cut your voice, so loud typing sometimes gets through, most often with RNNoise \
+             (it removes the least noise).",
           ))
           .changed();
         changed |= ui
@@ -717,7 +717,7 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
 
 {}",
       tr(
-        "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+        "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts.\nSustained overload switches DeepFilterNet 3 or DPDFNet to RNNoise (see Log).",
       )
     ));
     // Only a problem is shown; zero late blocks needs no words.
@@ -729,21 +729,16 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
 }
 
 const RNNOISE_ABOUT: &str = tk(
-  "RNNoise: light classic model (nnnoiseless), ~0.1 % CPU.\n\
-  Voice: stays natural, the model itself never cuts it.\n\
-  Noise: removes very little; keyboard only ~12-15 dB, loud typing stays audible and can keep the gate open.\n\
-  Pick it for a quiet room or a weak CPU.",
+  "RNNoise: light classic model (nnnoiseless), the voice stays natural. For a quiet room or a weak CPU.\n\
+  Cost: ~0.1 % CPU · Weak point: removes little noise (keyboard only ~12-15 dB); loud typing stays audible and can keep the gate open.",
 );
 const DEEPFILTER_ABOUT: &str = tk(
-  "DeepFilterNet 3: best open-source quality, full-band 48 kHz, ~1 % CPU.\n\
-  Keyboard: removed well (~20-30 dB), but a keystroke during speech sometimes gets through.\n\
-  Voice: a very quiet voice under loud typing can lose some soft syllables.\n\
-  Switching during a call loads the model (~0.2 s gap).",
+  "DeepFilterNet 3: best open-source quality (full-band 48 kHz), removes keyboard well (~20-30 dB).\n\
+  Cost: ~1 % CPU, ~0.2 s gap when switched during a call · Weak point: a keystroke during speech sometimes gets through; a very quiet voice under loud typing can lose soft syllables.",
 );
 const DPDFNET_ABOUT: &str = tk(
-  "DPDFNet: strongest keyboard removal (~47-50 dB); the gate almost never lets keys through.\n\
-  Voice: slightly changes its tone; very loud typing right over a word can thin it out.\n\
-  About 3x the CPU of DeepFilterNet 3. Switching during a call loads the model (~0.1 s gap).",
+  "DPDFNet: strongest keyboard removal (~47-50 dB), the gate almost never lets keys through.\n\
+  Cost: about 3x the CPU of DeepFilterNet 3, ~0.1 s gap when switched during a call · Weak point: slightly changes the voice's tone; very loud typing right over a word can thin it out.",
 );
 
 /// Delay the mic gets with this model: its own (measured, see the denoiser's latency test)

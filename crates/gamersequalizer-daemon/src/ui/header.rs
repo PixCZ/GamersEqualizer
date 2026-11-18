@@ -66,12 +66,21 @@ pub fn render_top_bar(ui: &mut Ui, state: &mut AppState) {
     theme::icon_label(ui, icons::EQUALIZER, 18.0, brand, theme::strong("GamersEqualizer", 15.0));
     ui.add_space(8.0);
     let p = theme::palette(ui);
-    if state.is_daemon_active() {
-      status_pill(ui, p.ok, tr("Service running"))
-        .on_hover_text(tr("Audio keeps being processed in the background when you close this window."));
-    } else {
-      status_pill(ui, p.text_tertiary, tr("No background service"))
-        .on_hover_text(tr("Processing runs inside this window only and stops when you close it."));
+    // Only what does not run is said: "running" next to "Sound adjustments off" read as a
+    // contradiction, and "no background service" alone hid that the effect may be down too.
+    let service_down = !state.is_daemon_active();
+    let effect_down = super::apo_banner::effect_not_running(state);
+    if service_down || effect_down {
+      let parts: Vec<&str> = [service_down.then(|| tr("service")), effect_down.then(|| tr("Windows effect"))]
+        .into_iter()
+        .flatten()
+        .collect();
+      let hover = if service_down {
+        tr("Processing runs inside this window only and stops when you close it.")
+      } else {
+        tr("Apps get the sound unprocessed. The message below says what to do.")
+      };
+      status_pill(ui, p.warn, &trf("Not running: {}", &[&parts.join(", ")])).on_hover_text(hover);
     }
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

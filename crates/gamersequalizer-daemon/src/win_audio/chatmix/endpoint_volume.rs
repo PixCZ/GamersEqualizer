@@ -73,7 +73,7 @@ pub fn endpoint_used_by_others(device_id: &str) -> Option<bool> {
       if control.GetState().ok() != Some(AudioSessionStateActive) {
         continue;
       }
-      // Our own streams (speaker loopback) don't count.
+      // Our own streams (sidetone) don't count.
       let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
       if control2.GetProcessId().is_ok_and(|pid| pid != own_pid) {
         return Ok(true);

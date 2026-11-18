@@ -369,7 +369,7 @@ mod tests {
   }
 
   /// Measured round (Brave playing music, The Division 2 silent in the background): the
-  /// browser's stream must pair with brave.exe and not with our loopback (= the whole mix).
+  /// browser's stream must pair with brave.exe and not with the whole-mix session of our former loopback.
   #[test]
   fn hold_match_pairs_the_recorded_browser_stream() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_data/stream_probe/brave_music_round.csv");

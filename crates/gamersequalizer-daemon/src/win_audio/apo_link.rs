@@ -1,7 +1,7 @@
 //! Link to the APOs running inside audiodg (session 0). The APO creates the Global mapping
-//! `APO_SHM_NAME`; this side opens it when it appears and mirrors: GUI settings (and, with the
-//! loopback source, the speaker reference) in, AEC/denoise/output telemetry back into the
-//! daemon's mapping (which the UI already reads). Driven from the loopback thread.
+//! `APO_SHM_NAME`; this side opens it when it appears and mirrors: GUI settings in,
+//! AEC/denoise/output telemetry back into the daemon's mapping (which the UI already reads).
+//! Driven from the reference thread (`aec_reference::spawn`).
 //!
 //! It also persists the echo delay for the APO path: the APO runs as LOCAL SERVICE and can't
 //! read `%APPDATA%`, so the cached delay of the (default mic, reference output) pair is handed
@@ -13,13 +13,13 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, CopiedEqVersions, StereoFrame};
+use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, CopiedEqVersions};
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::aec_delay_cache;
 use super::console_owner::ConsoleOwner;
 use super::dsp_watch::DspWatch;
-use super::loopback::{RefSource, resolve_default_capture_id};
+use super::mmdevice::resolve_default_capture_id;
 
 /// How often to look for the APO's mapping while it doesn't exist (cheap OpenFileMapping).
 const OPEN_RETRY: Duration = Duration::from_secs(2);
@@ -35,10 +35,6 @@ const LEVEL_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const ECHO_SAVE_MIN_CHANGE_X10: i32 = 20;
 /// After "Learn again", the APO still reports the old level for a moment: don't save it back.
 const LEVEL_RESET_QUIET: Duration = Duration::from_secs(2);
-/// `reference_seq` a service starts at with the loopback as the source. The microphone APO outlives the
-/// service and keeps the sequence it last saw: a restart with the other source must differ from it, or the
-/// delay locked against the other source's timestamps stays (shortcut: goes away with the loopback, step 3).
-const LOOPBACK_SEQ_BASE: u32 = 1 << 16;
 
 pub struct ApoLink {
   shm: Option<SharedMemoryClient>,
@@ -48,8 +44,6 @@ pub struct ApoLink {
   last_sync: Instant,
   last_apo_seq: u32,
   render_id: Option<String>,
-  /// Where the reference comes from: part of the delay and echo-strength cache keys.
-  source: RefSource,
   cache_path: PathBuf,
   cache_key: Option<String>,
   last_key_check: Option<Instant>,
@@ -78,7 +72,7 @@ pub struct ApoLink {
 }
 
 impl ApoLink {
-  pub fn new(source: RefSource) -> Self {
+  pub fn new() -> Self {
     Self {
       shm: None,
       last_open_try: None,
@@ -86,7 +80,6 @@ impl ApoLink {
       last_sync: Instant::now(),
       last_apo_seq: 0,
       render_id: None,
-      source,
       cache_path: aec_delay_cache::default_path(),
       cache_key: None,
       last_key_check: None,
@@ -94,7 +87,7 @@ impl ApoLink {
       echo_cache_path: aec_delay_cache::echo_path(),
       saved_echo: None,
       last_echo_save: None,
-      reference_seq: initial_reference_seq(source),
+      reference_seq: 0,
       reference_switch_pending: false,
       capture_id: None,
       level_cache_path: aec_delay_cache::leveler_path(),
@@ -116,16 +109,6 @@ impl ApoLink {
       self.reference_switch_pending |= self.render_id.is_some();
       self.render_id = render_id;
       self.last_key_check = None;
-    }
-  }
-
-  /// Same frames the daemon's own ring got.
-  pub fn push_reference(&mut self, frames: &[StereoFrame], qpc_first_hns: u64) {
-    if !self.driving {
-      return;
-    }
-    if let Some(shm) = self.shm.as_mut() {
-      shm.ring_buffer().push_frames_timed(frames, qpc_first_hns);
     }
   }
 
@@ -250,7 +233,7 @@ impl ApoLink {
         self.capture_id = capture.clone();
       }
       let key = match (capture, self.render_id.as_deref()) {
-        (Some(capture), Some(render)) => Some(aec_delay_cache::key(&capture, render, self.source)),
+        (Some(capture), Some(render)) => Some(aec_delay_cache::key(&capture, render)),
         _ => None,
       };
       if key != self.cache_key {
@@ -314,20 +297,8 @@ impl ApoLink {
   }
 }
 
-fn initial_reference_seq(source: RefSource) -> u32 {
-  match source {
-    RefSource::OutputEffect => 0,
-    RefSource::Loopback => LOOPBACK_SEQ_BASE,
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  /// Regression: a service restarted with the other source kept the APO's delay lock from the first one.
-  #[test]
-  fn the_two_sources_start_at_different_reference_seqs() {
-    assert_ne!(initial_reference_seq(RefSource::OutputEffect), initial_reference_seq(RefSource::Loopback));
+impl Default for ApoLink {
+  fn default() -> Self {
+    Self::new()
   }
 }

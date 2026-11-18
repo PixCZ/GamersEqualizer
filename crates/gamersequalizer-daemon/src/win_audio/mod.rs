@@ -12,7 +12,6 @@ pub mod dsp_watch;
 pub mod endpoint_lock;
 pub mod game_detector;
 pub mod leveler_log;
-pub mod loopback;
 pub mod mic_gain;
 pub mod mic_probe;
 pub mod mmdevice;
