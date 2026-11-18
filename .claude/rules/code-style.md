@@ -10,7 +10,7 @@
 ## Rust
 
 - Logging only via `log` macros (`error!`, `warn!`, `info!`, `debug!`, `trace!`), with the component
-  in brackets first: `info!("[Loopback] ...")`. No `println!` / `eprintln!` outside tests, examples
+  in brackets first: `info!("[AecRef] ...")`. No `println!` / `eprintln!` outside tests, examples
   and pre-logger bootstrap.
 - Errors: see `architecture.md` (`Result<T, String>` for log-and-show, an enum where the caller
   decides by kind).

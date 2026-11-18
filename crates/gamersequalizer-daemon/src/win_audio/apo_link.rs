@@ -1,7 +1,7 @@
-//! Link to the capture APO running inside audiodg (session 0). The APO creates the Global
-//! mapping `APO_SHM_NAME`; this side opens it when it appears and mirrors:
-//! speaker reference + GUI settings in, AEC/denoise telemetry back into the daemon's mapping
-//! (which the UI already reads). Driven from the loopback thread.
+//! Link to the APOs running inside audiodg (session 0). The APO creates the Global mapping
+//! `APO_SHM_NAME`; this side opens it when it appears and mirrors: GUI settings in,
+//! AEC/denoise/output telemetry back into the daemon's mapping (which the UI already reads).
+//! Driven from the reference thread (`aec_reference::spawn`).
 //!
 //! It also persists the echo delay for the APO path: the APO runs as LOCAL SERVICE and can't
 //! read `%APPDATA%`, so the cached delay of the (default mic, reference output) pair is handed
@@ -13,13 +13,13 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, CopiedEqVersions, StereoFrame};
+use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, CopiedEqVersions};
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::aec_delay_cache;
 use super::console_owner::ConsoleOwner;
 use super::dsp_watch::DspWatch;
-use super::loopback::resolve_default_capture_id;
+use super::mmdevice::resolve_default_capture_id;
 
 /// How often to look for the APO's mapping while it doesn't exist (cheap OpenFileMapping).
 const OPEN_RETRY: Duration = Duration::from_secs(2);
@@ -71,12 +71,6 @@ pub struct ApoLink {
   copied_eqs: CopiedEqVersions,
 }
 
-impl Default for ApoLink {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
 impl ApoLink {
   pub fn new() -> Self {
     Self {
@@ -115,16 +109,6 @@ impl ApoLink {
       self.reference_switch_pending |= self.render_id.is_some();
       self.render_id = render_id;
       self.last_key_check = None;
-    }
-  }
-
-  /// Same frames the daemon's own ring got.
-  pub fn push_reference(&mut self, frames: &[StereoFrame], qpc_first_hns: u64) {
-    if !self.driving {
-      return;
-    }
-    if let Some(shm) = self.shm.as_mut() {
-      shm.ring_buffer().push_frames_timed(frames, qpc_first_hns);
     }
   }
 
@@ -310,5 +294,11 @@ impl ApoLink {
       aec_delay_cache::save(&self.cache_path, key, delay);
       self.saved_delay = Some(delay);
     }
+  }
+}
+
+impl Default for ApoLink {
+  fn default() -> Self {
+    Self::new()
   }
 }

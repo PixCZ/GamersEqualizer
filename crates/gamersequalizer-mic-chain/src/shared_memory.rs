@@ -66,7 +66,7 @@ impl SharedMemoryClient {
   pub fn ring_buffer(&mut self) -> ShmRingBuffer<'_> {
     // SAFETY: `mapped_ptr` is a live view of a whole `ShmLayout` until `Drop`, and `&mut self` keeps
     // this client's references exclusive. Other processes share the memory: the header is atomics,
-    // the frames have one writer per mapping (the service's loopback thread) and the reader
+    // the frames have one writer per mapping (the output APO) and the reader
     // sanitizes torn frames (`read_frames_from`).
     unsafe { ShmRingBuffer::new(self.mapped_ptr.as_mut()) }
   }

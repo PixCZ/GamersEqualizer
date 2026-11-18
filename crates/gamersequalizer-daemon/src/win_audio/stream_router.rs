@@ -209,7 +209,7 @@ impl Router {
         let key = raw_key.to_string().unwrap_or_default();
         CoTaskMemFree(Some(raw_key.0 as *const _));
         let pid = control2.GetProcessId().unwrap_or(0);
-        // Our own session is the loopback capture: the whole mix, never one stream.
+        // Our own sessions (sidetone) are never an app's stream.
         if pid == own_pid || key.is_empty() {
           continue;
         }

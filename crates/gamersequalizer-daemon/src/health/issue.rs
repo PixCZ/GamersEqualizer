@@ -92,7 +92,9 @@ impl Issue {
       }
       Issue::MicProcessing { .. } => tr("Microphone processing is not installed").to_string(),
       Issue::NotDefaultMic { mic_name, .. } => trf("\"{}\" is not the Windows default microphone", &[mic_name]),
-      Issue::OutputProcessing { device_name, .. } => trf("Output EQ is not set up on \"{}\"", &[device_name]),
+      Issue::OutputProcessing { device_name, .. } => {
+        trf("Echo cancellation and EQ do not work on \"{}\"", &[device_name])
+      }
       Issue::MicSilenced { why: Silenced::Muted, apps, .. } => {
         trf("{} is recording, but the microphone is muted", &[apps])
       }
@@ -106,7 +108,7 @@ impl Issue {
         trf("Microphone processing does not work on \"{}\"", &[device_name])
       }
       Issue::NotRunning { flow: Flow::Render, device_name, .. } => {
-        trf("Output EQ does not work on \"{}\"", &[device_name])
+        trf("Echo cancellation and EQ do not work on \"{}\"", &[device_name])
       }
     }
   }
@@ -119,12 +121,13 @@ impl Issue {
       Issue::SpatialChanged { .. } => {
         tr("Switch it back in the sound settings, or keep the new one; the tray menu has both.")
       }
+      Issue::MicProcessing { status: ApoStatus::Outdated, .. } => tr("Newer features do not work until you update it."),
       Issue::MicProcessing { .. } => {
         tr("Apps get your microphone without echo cancellation, noise suppression and EQ.")
       }
       Issue::NotDefaultMic { .. } => tr("Discord, games and other apps use the default microphone, not this one."),
       Issue::OutputProcessing { .. } => tr(
-        "A new sound device? Your headphone correction and EQ are not applied on it. Open GamersEqualizer to set it up.",
+        "A new sound device? Open GamersEqualizer to set it up: headphone correction, EQ and echo cancellation need it.",
       ),
       Issue::MicSilenced { .. } => {
         tr("Nobody hears you. Fix it from the GamersEqualizer icon in the notification area.")
@@ -133,9 +136,10 @@ impl Issue {
       Issue::NotRunning { flow: Flow::Capture, .. } => tr(
         "It is installed, but processed nothing while apps recorded: they get the raw microphone. The reason is in the app's log.",
       ),
-      Issue::NotRunning { flow: Flow::Render, .. } => {
-        tr("It is installed, but processed nothing while sound played. The reason is in the app's log.")
-      }
+      Issue::NotRunning { flow: Flow::Render, .. } => tr(
+        "Our effect is installed, but processed nothing while sound played: no EQ, no echo cancellation. The reason \
+           is in the app's log.",
+      ),
     }
   }
 

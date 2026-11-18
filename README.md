@@ -63,7 +63,8 @@ choice adds. It should be just as useful outside games.
 **Microphone chain** (installed as a Windows mic effect, so Discord, Teams, Signal, OBS and browsers all
 get it)
 
-1. Speaker echo cancellation (a Rust port of WebRTC AEC3).
+1. Speaker echo cancellation (a Rust port of WebRTC AEC3). It takes what the speakers play from this
+   app's effect on the playback device, so that device needs the effect too (the app offers to set it up).
 2. AI noise suppression. Each model trades delay against how much noise it removes:
 
    | Model            | Added delay | What to expect                                                         |

@@ -2,7 +2,8 @@
 //! - Mic chain (capture): AEC -> denoise -> EQ -> boost, from `gamersequalizer-mic-chain`, so
 //!   every app receives processed audio without a virtual sound card.
 //! - Output EQ (render): headphone correction + game profile as one biquad cascade per channel,
-//!   at any sample rate. The bands come from the daemon through the same Global mapping.
+//!   at any sample rate. The bands come from the daemon through the same Global mapping. On the
+//!   output the daemon names, it also writes the echo canceller's speaker reference (`ref_feed`).
 //! - Stream EQ (render SFX, one instance per app stream, before the mix): publishes the
 //!   stream's level envelope in the stream table; the daemon pairs it with an app and writes
 //!   back its channel. Chat / media streams then run their channel's EQ (channel profile +
@@ -52,6 +53,7 @@ mod mic;
 mod notes;
 mod output;
 mod rate_bridge;
+mod ref_feed;
 mod sidetone_tap;
 mod stream;
 
@@ -80,6 +82,7 @@ use mic::*;
 use notes::*;
 use output::*;
 use rate_bridge::RateBridge;
+use ref_feed::RefFeed;
 use sidetone_tap::*;
 use stream::*;
 use windows::Win32::Foundation::{

@@ -6,7 +6,7 @@ use egui::{Color32, RichText, Stroke, Ui};
 use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, VLine};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::shm::{
-  AecState, DenoiseLimit, DenoiseModel, NOISE_GATE_AUTO, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
+  AecRefStatus, AecState, DenoiseLimit, DenoiseModel, NOISE_GATE_AUTO, NOISE_GATE_AUTO_LOOKAHEAD, NOISE_GATE_OFF,
 };
 use gamersequalizer_mic_chain::ai_denoiser::AiVoiceIsolator;
 use gamersequalizer_mic_chain::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
@@ -49,7 +49,7 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
     ui.add_space(theme::CARD_GAP);
 
     input_section(ui, state, win_audio);
-    aec_section(ui, state);
+    aec_section(ui, state, win_audio);
     denoise_section(ui, state);
     eq_section(ui, state);
     leveler_section(ui, state);
@@ -274,14 +274,14 @@ fn clipping_status(ui: &mut Ui, clips: u32) {
   }
 }
 
-fn aec_section(ui: &mut Ui, state: &mut AppState) {
+fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
   theme::card(ui, |ui| {
     // Header: title, description in a tooltip, on/off switch on the right.
     let (aec_enabled, ai_strength, gate_db) = mic_controls(state);
     ui.horizontal(|ui| {
       theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation (AEC)"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
-        "Speaker output is captured (WASAPI loopback) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
+        "What the speakers play is taken by GamersEqualizer's output EQ on that device (before your sidetone is mixed in) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut on = aec_enabled;
@@ -292,7 +292,10 @@ fn aec_section(ui: &mut Ui, state: &mut AppState) {
     });
 
     let t = state.poll_aec_telemetry();
-    let (status, severity) = aec_status_text(&t);
+    // The service takes the reference from the same output (Master) as this window.
+    let output =
+      win_audio.chatmix.master_device_id.as_deref().and_then(|id| state.endpoints.iter().find(|e| e.id == id));
+    let (status, severity) = aec_status_text(&t, output.map(|e| e.name.as_str()));
     theme::status_line(ui, severity, &status);
 
     if !aec_enabled {
@@ -397,16 +400,15 @@ fn aec_meter(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: Strin
   theme::meter_with(ui, fraction, width, fill, text);
 }
 
-fn aec_status_text(t: &AecTelemetry) -> (String, Severity) {
+/// `output`: name of the output the reference is taken from.
+fn aec_status_text(t: &AecTelemetry, output: Option<&str>) -> (String, Severity) {
   // Shared memory exists but no stream writes it: whatever state it holds is stale.
   if t.state.is_some() && !t.live {
     return (tr("Idle: no app is using the microphone now").into(), Severity::Info);
   }
   match t.state {
     Some(AecState::Disabled) => (tr("Disabled").into(), Severity::Info),
-    Some(AecState::NoReference) => {
-      (tr("No speaker reference (loopback not running or no timestamps)").into(), Severity::Error)
-    }
+    Some(AecState::NoReference) => (no_reference_text(t.ref_status, output), Severity::Error),
     Some(AecState::ReferenceSilent) if t.delay_ms.is_some() => {
       (tr("Ready: nothing playing right now").into(), Severity::Success)
     }
@@ -415,6 +417,29 @@ fn aec_status_text(t: &AecTelemetry) -> (String, Severity) {
     Some(AecState::Locked) => (tr("Active: cancelling speaker echo").into(), Severity::Success),
     Some(AecState::Unknown(v)) => (trf("Unknown state {} (newer DSP build?)", &[&v]), Severity::Info),
     None => (tr("Mic DSP not running").into(), Severity::Info),
+  }
+}
+
+/// Why the echo canceller has no speaker reference, with the next step.
+fn no_reference_text(status: Option<AecRefStatus>, output: Option<&str>) -> String {
+  let output = output.unwrap_or_else(|| tr("the current output"));
+  match status {
+    Some(AecRefStatus::EffectMissing) => trf(
+      "No speaker reference: the output EQ is not installed on \"{}\". Install it there (Output & headphones) and the echo is cancelled.",
+      &[&output],
+    ),
+    Some(AecRefStatus::EffectOutdated) => trf(
+      "No speaker reference: the output EQ on \"{}\" is older than this app. Update it in Output & headphones.",
+      &[&output],
+    ),
+    Some(AecRefStatus::EndpointUnknown) => trf(
+      "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. The app log ([ApoNote]) says more.",
+      &[&output],
+    ),
+    Some(AecRefStatus::NoOutput) => tr("No speaker reference: no output device").into(),
+    Some(AecRefStatus::NotChecked) => tr("Looking for the speaker reference...").into(),
+    // The output EQ is there: the microphone gave no timestamps to line the reference up with.
+    _ => tr("No speaker reference (no timestamps from the microphone)").into(),
   }
 }
 
@@ -609,8 +634,9 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
           .selectable_value(&mut gate_auto, true, tr("Auto"))
           .on_hover_text(tr(
             "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: \
-             works the same for a loud or quiet voice. Tuned to never cut your voice, so loud typing \
-             sometimes gets through (most often with RNNoise, which removes the least).",
+             works the same for a loud or quiet voice.\n\
+             Tuned to never cut your voice, so loud typing sometimes gets through, most often with RNNoise \
+             (it removes the least noise).",
           ))
           .changed();
         changed |= ui
@@ -691,7 +717,7 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
 
 {}",
       tr(
-        "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts. Sustained overload switches DeepFilterNet or DPDFNet to RNNoise (see Log).",
+        "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts.\nSustained overload switches DeepFilterNet 3 or DPDFNet to RNNoise (see Log).",
       )
     ));
     // Only a problem is shown; zero late blocks needs no words.
@@ -703,21 +729,16 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
 }
 
 const RNNOISE_ABOUT: &str = tk(
-  "RNNoise: light classic model (nnnoiseless), ~0.1 % CPU.\n\
-  Voice: stays natural, the model itself never cuts it.\n\
-  Noise: removes very little; keyboard only ~12-15 dB, loud typing stays audible and can keep the gate open.\n\
-  Pick it for a quiet room or a weak CPU.",
+  "RNNoise: light classic model (nnnoiseless), the voice stays natural. For a quiet room or a weak CPU.\n\
+  Cost: ~0.1 % CPU · Weak point: removes little noise (keyboard only ~12-15 dB); loud typing stays audible and can keep the gate open.",
 );
 const DEEPFILTER_ABOUT: &str = tk(
-  "DeepFilterNet 3: best open-source quality, full-band 48 kHz, ~1 % CPU.\n\
-  Keyboard: removed well (~20-30 dB), but a keystroke during speech sometimes gets through.\n\
-  Voice: a very quiet voice under loud typing can lose some soft syllables.\n\
-  Switching during a call loads the model (~0.2 s gap).",
+  "DeepFilterNet 3: best open-source quality (full-band 48 kHz), removes keyboard well (~20-30 dB).\n\
+  Cost: ~1 % CPU, ~0.2 s gap when switched during a call · Weak point: a keystroke during speech sometimes gets through; a very quiet voice under loud typing can lose soft syllables.",
 );
 const DPDFNET_ABOUT: &str = tk(
-  "DPDFNet: strongest keyboard removal (~47-50 dB); the gate almost never lets keys through.\n\
-  Voice: slightly changes its tone; very loud typing right over a word can thin it out.\n\
-  About 3x the CPU of DeepFilterNet 3. Switching during a call loads the model (~0.1 s gap).",
+  "DPDFNet: strongest keyboard removal (~47-50 dB), the gate almost never lets keys through.\n\
+  Cost: about 3x the CPU of DeepFilterNet 3, ~0.1 s gap when switched during a call · Weak point: slightly changes the voice's tone; very loud typing right over a word can thin it out.",
 );
 
 /// Delay the mic gets with this model: its own (measured, see the denoiser's latency test)

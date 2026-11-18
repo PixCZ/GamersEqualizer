@@ -133,6 +133,18 @@ pub fn render_mic_warning(ui: &mut Ui, state: &mut AppState) {
   state.apo_banner.mic_checked_at = None;
 }
 
+/// Our effect in Windows is not doing its job: not installed or not on the microphone in use, or
+/// the service saw it process nothing while apps recorded or sound played.
+pub fn effect_not_running(state: &AppState) -> bool {
+  let missing = state
+    .apo_banner
+    .check
+    .as_ref()
+    .is_some_and(|c| matches!(c.status, ApoStatus::NotInstalled | ApoStatus::NotOnThisMic));
+  let silent = run_status(state).is_some_and(|r| r.mic_not_running.is_some() || r.output_not_running.is_some());
+  missing || silent
+}
+
 /// Full-width error info bar; render only when `has_problems`.
 pub fn render_health_bar(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
   let list = problems(state);
@@ -292,23 +304,22 @@ fn problems(state: &AppState) -> Vec<Problem> {
       ApoStatus::Active | ApoStatus::NoMicrophone => None,
       ApoStatus::NotInstalled => Some((
         tr(
-          "Microphone processing is not installed: Discord, Signal, games ... get your raw microphone, without echo \
-            cancellation, noise suppression or EQ.",
+          "Microphone processing is not installed: apps get your raw microphone (no echo cancellation, noise \
+           suppression or EQ).",
         )
         .to_string(),
         tk("Install…"),
       )),
       ApoStatus::Outdated => Some((
-        trf(
-          "The GamersEqualizer installed in Windows is older than this one or incomplete (installed {}, this one {}): \
-           new fixes and settings may not work.",
-          &[&check.installed_version.as_deref().unwrap_or("?"), &check.bundled_version.as_deref().unwrap_or("?")],
-        ),
+        tr("The effect in Windows is out of date. Newer features do not work until you update it.").to_string(),
         tk("Update…"),
       )),
       ApoStatus::NotOnThisMic => Some((
-        tr("Microphone processing is installed, but not on the microphone in use: apps get it unprocessed.")
-          .to_string(),
+        tr(
+          "Microphone processing is not on the microphone in use: apps get it raw (no echo cancellation, noise \
+           suppression or EQ).",
+        )
+        .to_string(),
         tk("Enable on this microphone…"),
       )),
     };
@@ -337,8 +348,9 @@ fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str) {
     return;
   };
   ui.horizontal_wrapped(|ui| {
-    ui.label(title);
+    // The button first (as in every row): a long line wraps and would push it out of sight.
     if !check.can_install {
+      ui.label(title);
       ui.label(
         RichText::new(tr("Installer files were not found next to the app; reinstall the app."))
           .color(theme::palette(ui).warn),
@@ -346,36 +358,40 @@ fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str) {
       return;
     }
     // The setup card explains the admin prompt and bundles every admin step into one.
-    if !super::setup::visible(state) && ui.add(theme::accent_button(ui, tr(button))).clicked() {
+    if !super::setup::visible(state) && setup_button(ui, tr(button)).clicked() {
       super::setup::open(state);
     }
+    ui.label(title);
   });
+}
+
+/// The accent button that opens the setup card, with what it costs said on hover.
+fn setup_button(ui: &mut Ui, text: &str) -> egui::Response {
+  ui.add(theme::accent_button(ui, text))
+    .on_hover_text(tr("Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds."))
 }
 
 fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str) {
   ui.horizontal_wrapped(|ui| {
-    ui.label(trf(
-      "Output EQ is not set up on \"{}\" (a new sound device?): your headphone correction and EQ are not applied to it.",
-      &[&name],
-    ));
-    if !super::setup::visible(state) && ui.add(theme::accent_button(ui, tr("Set up…"))).clicked() {
+    // The button first: a long line wraps and would push it out of sight.
+    if !super::setup::visible(state) && setup_button(ui, tr("Set up…")).clicked() {
       super::setup::open(state);
     }
+    ui.label(trf("Echo cancellation and EQ do not work on \"{}\"", &[&name]));
   });
 }
 
 fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, mic_name: &str) {
   let mut clicked = false;
   ui.horizontal_wrapped(|ui| {
-    ui.label(trf(
-      "\"{}\" is not the Windows default microphone: Discord, games and other apps use the default one, \
-       so they don't get this microphone or its processing.",
-      &[&mic_name],
-    ));
     clicked = ui
       .add(theme::accent_button(ui, tr("Make it the default")))
       .on_hover_text(tr("Sets it as the Windows default and communications microphone. No admin rights needed."))
       .clicked();
+    ui.label(trf(
+      "\"{}\" is not the Windows default microphone: Discord and games use the default one, not this one.",
+      &[&mic_name],
+    ));
   });
   if clicked && let Some(id) = state.selected_mic_endpoint_id.clone() {
     set_default_mic(state, win_audio, &id);

@@ -69,8 +69,8 @@ logged, shown, retried, never unwound.
 
 ## Real-time audio threads
 
-Applies to the APO's `rt_*` path, the mic chain's `process*` functions and the WASAPI loops in the
-service (loopback, sidetone).
+Applies to the APO's `rt_*` path (including the output APO's reference feed), the mic chain's
+`process*` functions and the WASAPI loop in the service (sidetone).
 
 - Per block: no allocation, no blocking lock (`try_lock` only), no file I/O, no logging. A failure
   that repeats is logged once (a flag), not per frame.

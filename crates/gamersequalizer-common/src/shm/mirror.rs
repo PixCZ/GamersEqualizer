@@ -32,6 +32,7 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);
     self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
     self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
+    self.aec_ref_output_hash.store(src.aec_ref_output_hash.load(r), r);
     // Sidetone: the EQ and the values first, `enabled` last (as `write_sidetone` does), so
     // the APOs never run a fresh "on" with the previous pair's values.
     let version = src.sidetone_eq_version.load(Ordering::Acquire);
@@ -82,6 +83,9 @@ impl ShmHeader {
     self.sidetone_underruns.store(src.sidetone_underruns.load(r), r);
     self.sidetone_resyncs.store(src.sidetone_resyncs.load(r), r);
     self.sidetone_output_hash_seen.store(src.sidetone_output_hash_seen.load(r), r);
+    // The reference writer runs whether or not a mic chain publishes telemetry.
+    self.aec_ref_writer_beat.store(src.aec_ref_writer_beat.load(r), r);
+    self.aec_ref_blind_beat.store(src.aec_ref_blind_beat.load(r), r);
     // The mic APO's sidetone tap too: it runs without the mic chain (whose telemetry
     // `copy_dsp_telemetry_from` waits for), e.g. after the chain failed.
     self.sidetone_writer_beat.store(src.sidetone_writer_beat.load(r), r);

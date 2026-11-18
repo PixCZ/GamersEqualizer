@@ -1,6 +1,12 @@
-//! The speaker reference: a timed ring of stereo frames the loopback writes and the AEC reads.
+//! The speaker reference: a timed ring of stereo frames one writer fills (the output APO on the
+//! reference output) and the AEC reads.
 
 use super::*;
+
+/// A packet that starts up to this many frames after the end of the previous one continues it:
+/// the difference is clock rounding (a resampler's fractional position, a smoothed block clock),
+/// not audio that was missed. Filling it would put a few silent samples into the reference.
+const GAP_TOLERANCE_FRAMES: i32 = 48;
 
 /// A stereo sample frame in the ring buffer
 #[repr(C)]
@@ -15,8 +21,9 @@ impl StereoFrame {
   /// the centre and the surrounds join their side 3 dB down, the LFE is left out (a mic hears
   /// little of it, and the chain cuts under 70 Hz).
   /// shortcut: the layout is taken from the channel count (FL FR FC LFE + surround pairs), not
-  /// from `dwChannelMask`; other counts keep their first two channels. Only reached when
-  /// Windows refuses to convert the loopback to stereo itself.
+  /// from `dwChannelMask`; other counts keep their first two channels. The output APO folds
+  /// every multichannel output this way; read the mask once a 6- or 8-channel device with
+  /// another layout turns up.
   pub fn from_channels(frame: &[f32]) -> Self {
     const DOWN_3_DB: f32 = std::f32::consts::FRAC_1_SQRT_2;
     match *frame {
@@ -75,9 +82,9 @@ impl<'a> ShmRingBuffer<'a> {
     Self { layout }
   }
 
-  /// Write a timestamped loopback packet (48 kHz). `qpc_first_hns` is the QPC time of
-  /// `frames[0]`. Gaps (WASAPI loopback delivers nothing while nothing plays) are filled
-  /// with silence so ring index stays linear in time.
+  /// Write a timestamped packet (48 kHz). `qpc_first_hns` is the QPC time `frames[0]` plays at.
+  /// Gaps (nothing is delivered while nothing plays) are filled with silence so the ring index
+  /// stays linear in time; gaps up to `GAP_TOLERANCE_FRAMES` are not gaps.
   pub fn push_frames_timed(&mut self, frames: &[StereoFrame], qpc_first_hns: u64) {
     let header = &self.layout.header;
     let mut write_pos = header.write_frame_index.load(Ordering::Relaxed);
@@ -87,7 +94,7 @@ impl<'a> ShmRingBuffer<'a> {
       // Where the writer should be for this packet's timestamp.
       let expected = header.ref_index_at(qpc_first_hns).unwrap_or(write_pos);
       let gap = expected.wrapping_sub(write_pos) as i32;
-      if gap > 0 {
+      if gap > GAP_TOLERANCE_FRAMES {
         let fill = (gap as usize).min(RING_BUFFER_CAPACITY);
         for _ in 0..fill {
           self.write_slot(write_pos, StereoFrame::default());

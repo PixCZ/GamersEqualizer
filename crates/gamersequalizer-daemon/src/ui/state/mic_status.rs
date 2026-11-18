@@ -11,6 +11,8 @@ const DENOISE_SWITCH_GRACE: std::time::Duration = std::time::Duration::from_secs
 #[derive(Debug, Clone, Default)]
 pub struct AecTelemetry {
   pub state: Option<AecState>,
+  /// Where the speaker reference comes from or why there is none (from the service).
+  pub ref_status: Option<AecRefStatus>,
   pub delay_ms: Option<f32>,
   pub raw_delay_ms: Option<f32>,
   pub from_cache: bool,
@@ -148,6 +150,7 @@ impl AppState {
     let raw_us = h.aec_raw_delay_us.load(Ordering::Relaxed);
     let mut t = AecTelemetry {
       state: Some(AecState::from_u32(h.aec_state.load(Ordering::Relaxed))),
+      ref_status: Some(AecRefStatus::from_u32(h.aec_ref_status.load(Ordering::Relaxed))),
       delay_ms: (delay_us > 0).then(|| us_to_ms(delay_us)),
       raw_delay_ms: (raw_us > 0).then(|| us_to_ms(raw_us)),
       from_cache: h.aec_delay_from_cache.load(Ordering::Relaxed),

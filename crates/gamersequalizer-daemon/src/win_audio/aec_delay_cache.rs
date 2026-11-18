@@ -31,8 +31,10 @@ pub fn echo_path() -> PathBuf {
   app_dir().join(ECHO_FILE_NAME)
 }
 
+/// Per microphone and output. The `|apo` suffix is kept: entries without it were measured against
+/// the old WASAPI loopback reference, which differs by about 10 ms, and must not warm-start this one.
 pub fn key(capture_id: &str, render_id: &str) -> String {
-  format!("{capture_id}|{render_id}")
+  format!("{capture_id}|{render_id}|apo")
 }
 
 /// Missing or corrupt file -> None (and a log line); never an error for the caller.
@@ -112,6 +114,11 @@ mod tests {
     save(&path, "a|b", 7);
     assert_eq!(load(&path, "a|b"), Some(7));
     let _ = fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn key_keeps_the_apo_suffix_of_the_delays_saved_so_far() {
+    assert_eq!(key("{mic}", "{out}"), "{mic}|{out}|apo");
   }
 
   #[test]

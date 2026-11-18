@@ -113,11 +113,11 @@ pub(super) fn run_background_daemon() {
   // SAFETY: as above.
   output_eq.apply(shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header }));
 
-  // Speaker reference for the echo canceller, plus the link to the microphone APO. The echo
-  // reference = the physical output (Master), what actually reaches the speakers.
-  let loopback_running = Arc::new(AtomicBool::new(true));
+  // Speaker reference for the echo canceller (our output effect on the Master output writes it),
+  // plus the link to the microphone APO.
+  let reference_running = Arc::new(AtomicBool::new(true));
   let echo_reference = Arc::new(Mutex::new(win_audio.chatmix.master_device_id.clone()));
-  let loopback = win_audio::loopback::spawn(loopback_running.clone(), echo_reference.clone());
+  let reference_thread = win_audio::aec_reference::spawn(reference_running.clone(), echo_reference.clone());
 
   let mut last_volume_sync: Option<Instant> = None;
   let mut last_output_check: Option<Instant> = None;
@@ -300,8 +300,8 @@ pub(super) fn run_background_daemon() {
     std::thread::sleep(Duration::from_millis(50));
   }
 
-  loopback_running.store(false, Ordering::SeqCst);
-  if let Some(handle) = loopback {
+  reference_running.store(false, Ordering::SeqCst);
+  if let Some(handle) = reference_thread {
     let _ = handle.join();
   }
   if let Some(ptr) = shm_ptr {

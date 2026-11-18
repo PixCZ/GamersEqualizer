@@ -14,6 +14,7 @@
 //! unticked (each costs extra audio restarts if its check fails). A device the installer rolled
 //! back is not offered again until the user clicks "Try again".
 
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use egui::Ui;
@@ -153,11 +154,17 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
   }
 }
 
-/// The output in use lacks the output EQ that other outputs have (a new sound card or headset).
+/// The output in use lacks our output effect: another output has it (a new sound card or headset),
+/// or echo cancellation is on, which takes its speaker reference from this effect.
 pub fn output_needs_setup(state: &AppState) -> Option<&str> {
   let check = state.setup.output.as_ref()?;
-  (check.status == ApoStatus::NotOnThisMic && state.setup.output_anywhere && check.can_install)
+  let aec_on = state.shm_header().is_some_and(|h| h.aec_enabled.load(Ordering::Relaxed));
+  needs_output_setup(&check.status, check.can_install, state.setup.output_anywhere, aec_on)
     .then_some(state.setup.output_name.as_str())
+}
+
+fn needs_output_setup(status: &ApoStatus, can_install: bool, output_anywhere: bool, aec_on: bool) -> bool {
+  *status == ApoStatus::NotOnThisMic && can_install && (output_anywhere || aec_on)
 }
 
 pub fn visible(state: &AppState) -> bool {
@@ -376,7 +383,8 @@ fn items(state: &AppState) -> Vec<Item> {
   }
   if let Some(guid) = state.setup.output.as_ref().and_then(needs_install).filter(|g| offered(Flow::Render, g)) {
     let title = trf("Output EQ on \"{}\"", &[&state.setup.output_name]);
-    let detail = tr("Headphone correction and the game, chat and media EQ on what you hear.").to_string();
+    let detail =
+      tr("Headphone correction and the game, chat and media EQ; echo cancellation needs it too.").to_string();
     list.push(Item { kind: Kind::Output, title, detail, admin_targets: vec![(Flow::Render, guid)] });
   }
   if !state.prefs.setup_done && !state.autostart_enabled {
@@ -473,7 +481,19 @@ fn set_ticked(state: &mut AppState, kind: Kind, on: bool) {
 
 #[cfg(test)]
 mod tests {
-  use super::default_output_ticked;
+  use super::{default_output_ticked, needs_output_setup};
+  use crate::win_audio::apo_install::ApoStatus;
+
+  /// Regression: with the effect on no output at all (declined at setup), echo cancellation on still
+  /// needs it on the output in use, so the bar must show.
+  #[test]
+  fn output_without_the_effect_is_flagged_when_echo_cancellation_needs_it() {
+    assert!(needs_output_setup(&ApoStatus::NotOnThisMic, true, false, true));
+    assert!(needs_output_setup(&ApoStatus::NotOnThisMic, true, true, false));
+    assert!(!needs_output_setup(&ApoStatus::NotOnThisMic, true, false, false));
+    assert!(!needs_output_setup(&ApoStatus::Active, true, true, true));
+    assert!(!needs_output_setup(&ApoStatus::NotOnThisMic, false, true, true));
+  }
 
   #[test]
   fn output_starts_ticked_unless_explicitly_declined() {

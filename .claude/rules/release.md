@@ -33,6 +33,12 @@ commands through the `cmd-runner` agent.
   the fork; the pull requests are not opened yet. Report their state and whether a tract release
   carries them; once one does, move to that release and drop the patch. Moving tract means rebasing
   the fork branch onto the new version (the patch must match the exact `=0.23.x` pin).
+- **egui-wgpu fork** (`crates/vendor/egui-wgpu`, `[patch.crates-io]` in the root `Cargo.toml`):
+  0.37.0 plus emilk/egui#8784, so the window does not keep the NVIDIA GPU of hybrid laptops awake
+  (issue emilk/egui#8704). Report the state of #8784 and whether an egui release carries it; once one
+  does, move eframe / egui / egui-wgpu to that release, delete the directory and its two lines in the
+  root `Cargo.toml` (`[patch.crates-io]`, `exclude`). An egui bump before that has to re-vendor the
+  matching egui-wgpu version with the same change, or the patch no longer applies.
 - **Rust toolchain** (`rust-toolchain.toml`, used by the dev PC and both workflows): compare the pinned
   version with the current stable (`rustup check`). A bump goes into its own commit and passes the
   gate (format and clippy can change with it).
