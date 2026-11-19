@@ -159,9 +159,11 @@ pub fn mode(unheard: bool, session_mode: bool, reference_flowing: bool) -> Mode 
   }
 }
 
-/// The store key of a game's mix-mode levels: measured from the mix, not at the stream.
+/// The store key of a game's mix-mode levels: measured from the mix, not at the stream, and kept
+/// as at 100 % session volume (`@100`; records under the earlier `[mix]` key are as measured, at
+/// whatever volume was set, so they are left unread).
 pub fn mix_key(game: &str) -> String {
-  format!("{game} [mix]")
+  format!("{game} [mix@100]")
 }
 
 impl RingCursor {
@@ -493,7 +495,7 @@ mod tests {
 
   #[test]
   fn mix_levels_have_their_own_store_key() {
-    assert_eq!(mix_key("thedivision2.exe"), "thedivision2.exe [mix]");
+    assert_eq!(mix_key("thedivision2.exe"), "thedivision2.exe [mix@100]");
   }
 
   #[test]

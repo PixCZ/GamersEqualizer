@@ -105,8 +105,9 @@ z mixu, ne z hodnot. Současné řešení měří hru jen v tichu chatu právě 
 
 - **Jeden výstřel:** 18 dB na 25 s → 0 dB.
 - **Hra o 10 dB níž:** další přestřelka 16 dB → 8 dB; dozvuk po přestřelce 56 % → 0 % (po 30 s).
-- **Lobby beze změny.** Přestřelky v lobby a mezery v přestřelce dál bez cukání, hloubka 15–17 dB
-  místo stropu 18 dB (během ztlumení se hlasitá hladina učí jen do úrovně změřené před ním).
+- **Lobby beze změny.** Mezery v přestřelce dál bez cukání, hloubka kolem 16 dB místo stropu 18 dB.
+- Strop učení během ztlumení (z revize) byl zase odebrán: živý log 2026-11-19 ukázal, že přestřelka,
+  která pod ztlumením zesílí, se pak nenaučí (10 dB místo zhruba 18 dB).
 - **Cena:** v hovoru skoro bez pauz se přestřelka pozná později (17 s místo 10 s) a první
   dvojice mluvčích ve scénáři 3 je ztlumená později.
 

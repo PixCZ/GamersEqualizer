@@ -85,16 +85,16 @@ struct Learned {
 
 impl DuckGain {
   /// One block of `dt` seconds: `chat_ms` / `game_ms` are the summed raw speech-band levels of the
-  /// chat and the game streams. `loud`: (seconds of game the current level stands for in the
-  /// loud level, 0 = it teaches nothing; the most it may teach, dB): the mix ducker measures only in
-  /// the chat's pauses, one measurement standing for the time since the previous one, and caps
-  /// what it learns while lowered. Returns the depth (dB) the game's band is lowered by.
+  /// chat and the game streams. `loud_dt`: seconds of game `game_ms` stands for in the loud level,
+  /// 0 = it teaches nothing (the mix ducker measures only in the chat's pauses, and one
+  /// measurement stands for the time since the previous one). Returns the depth (dB) the game's
+  /// band is lowered by.
   pub(super) fn update(
     &mut self,
     dt: f32,
     chat_ms: f32,
     game_ms: f32,
-    (loud_dt, loud_cap_db): (f32, f32),
+    loud_dt: f32,
     s: &DuckSettings,
     t: &DuckTuning,
   ) -> f32 {
@@ -102,7 +102,7 @@ impl DuckGain {
     self.game_ms = smooth(self.game_ms, game_ms, dt, t.game_rise_s, t.game_fall_s);
     let game_db = db(self.game_ms);
     if loud_dt > 0.0 {
-      self.learned.learn_loud(game_db.min(loud_cap_db), loud_dt, t);
+      self.learned.learn_loud(game_db, loud_dt, t);
     }
 
     let talking = s.enabled && s.chat_gain > 0.0 && db(chat_ms) > t.talk_threshold_db;

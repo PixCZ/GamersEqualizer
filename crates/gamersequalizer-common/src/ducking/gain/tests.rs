@@ -103,7 +103,7 @@ fn the_same_scenario_at_10_and_50_ms_steps_ends_at_the_same_depth() {
       let t = step as f32 * dt % 7.0;
       let in_sentence = (1.0..4.0).contains(&t) && (t - 1.0) % 0.7 < 0.5;
       let chat_ms = if in_sentence { 10f32.powf(-3.0) } else { 0.0 };
-      let depth = gain.update(dt, chat_ms, 10f32.powf(-2.2), (dt, f32::INFINITY), &DEFAULT, &T);
+      let depth = gain.update(dt, chat_ms, 10f32.powf(-2.2), dt, &DEFAULT, &T);
       if (1.0..4.0).contains(&t) {
         peak = peak.max(depth);
       } else if peak > 0.0 {
@@ -480,9 +480,7 @@ fn drive_levels_at(
 ) -> Vec<f32> {
   let game_ms = 10f32.powf(game_db / 10.0);
   (0..(seconds * 100.0).round() as usize)
-    .map(|i| {
-      gain.update(0.01, voice(i).map_or(0.0, |db| 10f32.powf(db / 10.0)), game_ms, (0.01, f32::INFINITY), settings, &T)
-    })
+    .map(|i| gain.update(0.01, voice(i).map_or(0.0, |db| 10f32.powf(db / 10.0)), game_ms, 0.01, settings, &T))
     .collect()
 }
 

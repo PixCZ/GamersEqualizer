@@ -237,19 +237,22 @@ fn a_fight_heard_only_in_short_pauses_is_learned_after_the_reduction_starts() {
 }
 
 #[test]
-fn a_reduction_that_never_arrives_cannot_inflate_the_loud_level() {
-  // The undo lifts whatever the service does not lower (here: the volume change never happens);
-  // learning it would raise the depth, then the level, up to the bound, and store it.
+fn a_fight_growing_louder_while_lowered_is_learned() {
+  // Regression (live log 2026-11-19): the loud level learned only up to the level read before the
+  // reduction, so a fight that began moderate and grew louder under it was never learned and the
+  // depth stayed sized for its start.
   let mut rig = MixRig::new();
-  rig.applied_after = None;
-  rig.run(20.0, FIGHT, 0.0);
-  let loud = rig.ducker.status().loud_db.unwrap();
+  rig.run(20.0, QUIET_GAME, 0.0);
+  rig.run(5.0, QUIET_GAME, VOICE);
+  let start = rig.ducker.status();
   for _ in 0..20 {
     rig.run(3.0, FIGHT, VOICE);
     rig.run(0.4, FIGHT, 0.0);
   }
   let st = rig.ducker.status();
-  assert!(st.depth_db > 5.0 && st.loud_db.unwrap() <= loud + 0.5, "{loud} -> {:?}", st.loud_db);
+  let loud = st.loud_db.unwrap();
+  assert!(start.depth_db > 0.5 && loud > st.game_db - 3.0, "loud {loud}, game {}", st.game_db);
+  assert!(st.depth_db > start.depth_db + 5.0, "{} -> {}", start.depth_db, st.depth_db);
 }
 
 #[test]

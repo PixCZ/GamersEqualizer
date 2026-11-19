@@ -132,7 +132,7 @@ impl StreamDucker {
     }
     let dt = frames as f32 / self.sample_rate;
     let settings = DuckSettings { enabled: ducking, ..*settings };
-    let depth = self.gain.update(dt, chat_ms, game_ms, (dt, f32::INFINITY), &settings, &self.tuning);
+    let depth = self.gain.update(dt, chat_ms, game_ms, dt, &settings, &self.tuning);
     if ducking {
       self.publish(own);
     }

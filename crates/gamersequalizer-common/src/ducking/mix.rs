@@ -15,7 +15,7 @@
 
 use super::band::BandPass;
 use super::gain::DuckGain;
-use super::{DuckSettings, DuckStatus, DuckTuning, FRESH_HNS, db, dbg};
+use super::{DuckSettings, DuckStatus, DuckTuning, FRESH_HNS, dbg};
 use crate::streams::{ENVELOPE_BLOCK_HNS, ENVELOPE_LEN, StreamBus, StreamTable};
 use std::sync::atomic::Ordering;
 
@@ -30,13 +30,6 @@ const SEGMENT_S: f32 = 1.0;
 /// The most game time one measurement stands for in the loud level: a single short pause in a
 /// loud moment must not set it at once.
 const MAX_LOUD_STEP_S: f32 = 2.0;
-/// The loud level learns freely only while the applied depth is below this. While lowered it
-/// learns too (the depth is undone), but never above the game level read when the depth was last
-/// below this: the undo also lifts whatever the service does not lower (another app, a volume change
-/// that failed), which would otherwise raise the depth, then itself, up to the bound, and be stored
-/// for the next run. Cost: a fight that starts while a calmer game is already lowered is learned
-/// only once the reduction has come back.
-const UNLOWERED_DB: f32 = 0.5;
 /// Longest step `process` takes; a longer stall of the caller counts as this.
 const MAX_STEP_S: f32 = 0.2;
 
@@ -67,9 +60,6 @@ pub struct MixDucker {
   /// The depth the last call returned: the caller applies it within one tick, so the next mix
   /// already carries it.
   last_depth_db: f32,
-  /// The held game level when the depth was last below `UNLOWERED_DB`: the loud level's cap while
-  /// lowered.
-  unlowered_ms: f32,
   /// The stored levels `seed` adopted.
   loud_seeded: bool,
   quiet_seeded: bool,
@@ -137,7 +127,6 @@ impl MixDucker {
       unmeasured_s: 0.0,
       game_ms: 0.0,
       last_depth_db: 0.0,
-      unlowered_ms: 0.0,
       loud_seeded: false,
       quiet_seeded: false,
       tuning: DuckTuning::DEFAULT,
@@ -207,16 +196,17 @@ impl MixDucker {
       self.close_segment(); // the next pause starts a new segment
     }
     // A measurement stands for the time since the previous one in the loud level too, or a talker
-    // with few pauses would keep it from ever learning a fight.
+    // with few pauses would keep it from ever learning a fight. It learns while lowered as well (the
+    // depth undone), or a fight that grows louder under a reduction is never learned (live log
+    // 2026-11-19: the game rose from -53 to -42 dB under 10 dB, the level stayed at -46 dB).
+    // shortcut: the undo also lifts what the service does not lower (another app in the mix, a
+    // volume change that failed), which can carry the loud level and the depth up to
+    // `mix_max_depth_db` while that sound plays; a deeper duck is the lesser evil. Tell the game from
+    // the rest of the mix if it shows in a live log.
     let loud_dt = if measured { (dt + self.unmeasured_s).min(MAX_LOUD_STEP_S) } else { 0.0 };
-    let unlowered = self.last_depth_db <= UNLOWERED_DB;
-    if unlowered {
-      self.unlowered_ms = self.game_ms;
-    }
-    let loud = (loud_dt, if unlowered { f32::INFINITY } else { db(self.unlowered_ms) });
     self.unmeasured_s = if measured { 0.0 } else { self.unmeasured_s + dt };
     let speech_ms = if chat_speech_ms.is_finite() && chat_speech_ms > 0.0 { chat_speech_ms } else { 0.0 };
-    self.last_depth_db = self.gain.update(dt, speech_ms, self.game_ms, loud, settings, &self.tuning);
+    self.last_depth_db = self.gain.update(dt, speech_ms, self.game_ms, loud_dt, settings, &self.tuning);
     self.last_depth_db
   }
 
@@ -246,7 +236,6 @@ impl MixDucker {
     self.game_ms *= factor;
     self.seg_sum *= factor;
     self.prev_seg_ms = self.prev_seg_ms.map(|ms| ms * factor);
-    self.unlowered_ms *= factor;
     self.gain.shift(game_db, chat_db);
   }
 
@@ -269,7 +258,7 @@ impl MixDucker {
     self.gain.restart();
     self.state = [[0.0; 2]; 2];
     (self.since_chat_s, self.seg_sum, self.seg_s, self.prev_seg_ms) = (f32::INFINITY, 0.0, 0.0, None);
-    (self.unmeasured_s, self.game_ms, self.last_depth_db, self.unlowered_ms) = (0.0, 0.0, 0.0, 0.0);
+    (self.unmeasured_s, self.game_ms, self.last_depth_db) = (0.0, 0.0, 0.0);
   }
 
   fn close_segment(&mut self) {

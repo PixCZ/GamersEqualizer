@@ -3188,10 +3188,14 @@ calm game with a stray sound: nothing happens.
   held: nothing is learned and nothing moves it. The segment before ages with `mix_game_fall_s` over
   the talk since, so a fight long over confirms no shot. The loud level learns from chat-free ticks
   only, each one standing for the time since the previous measurement (at most 2 s), also while
-  lowered (the depth is undone), but then never above the game level read when the depth was last
-  under 0.5 dB: the undo also lifts what the service does not lower (another app, a failed volume
-  change), which would feed the depth and itself up to the bound and be stored (offline: -9 dB grew
-  to +6.6 dB without the cap). It used to learn only with no reduction applied and one tick per measurement: in a
+  lowered (the depth is undone). A cap at the level read before the reduction was tried after a
+  review: the live log of 2026-11-19 showed a fight growing from -53 to -42 dB under a 10 dB
+  reduction with the loud level stuck at -46 dB, so the depth stayed 10 dB. Removed; the known
+  cost: the undo also lifts what the service does not lower (another app in the mix, a failed
+  volume change), which can carry the loud level and the depth to `mix_max_depth_db` while that
+  sound plays (offline: -9 dB grew to +6.6 dB). Mix levels are stored under `<exe> [mix@100]`, as at
+  100 % session volume; the earlier `[mix]` records were as measured (at a 41 % game volume the
+  first live run seeded 8 dB too low) and are no longer read. It used to learn only with no reduction applied and one tick per measurement: in a
   `duck_sim --mix` lobby scenario (20 min calm game with constant talk, fights in between) a fight
   starting while ducked was never learned, the loud level stayed 20-25 dB under the fight and the
   depth was 2-6 dB instead of the 18 dB bound; now every fight gets 18 dB, the lobbies 0. `resync` (a gap in the reference) keeps the decision

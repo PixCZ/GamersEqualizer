@@ -131,10 +131,11 @@ fast (12 dB/s) for a whole-game session volume, now `mix_release_db_per_s` 4.
    slowdowns, warm-up values; slots kept as `retired_*`, so the installed APO is unaffected until
    reinstalled); mix mode raises the held game level only when two segments agree (one shot no longer
    lowers a calm game); mix mode shifts learned levels when the Game / Chat session volume moves and
-   stores them as at 100 %. After review: while lowered the loud level learns only up to the level
-   read before the reduction (else another app in the mix inflated it to the bound); the previous
-   segment ages over talk. `[mix]` records stored before this are read as at 100 %: delete the
-   test game's `[mix]` entry in `%APPDATA%\GamersEqualizer\duck_level_cache.json`, or let it relearn.
+   stores them as at 100 % (key `<exe> [mix@100]`; old `[mix]` records are not read). After review
+   the previous segment ages over talk. A cap on learning while lowered was added and removed again:
+   the live log of 2026-11-19 (game at ~41 % session volume) showed a fight growing under the
+   reduction and never learned (depth 10 dB). Known cost without it: another app in the mix can
+   carry the depth to 18 dB while it plays.
    Needs: the gate on Windows, an APO reinstall (gain.rs changed), a live run.
 
 1. **Verify the uncommitted work**: gate, then a live run (loud game, continuous podcast). In the log expect
