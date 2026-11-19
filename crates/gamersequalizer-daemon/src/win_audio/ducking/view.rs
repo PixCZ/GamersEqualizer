@@ -115,12 +115,12 @@ pub fn reduction(streams: &[StreamView]) -> u32 {
   main_game(streams).map_or(0, |s| s.duck_permille)
 }
 
-/// The playing game stream lowered the most (the first one when none is).
+/// The playing game stream lowered the most; at a tie mix mode's line, else the first one. In mix
+/// mode the game's own stream plays silence (its ducker learns nothing useful), so a summary taken
+/// while nothing is lowered must show the mix's levels, not that stream's.
 pub fn main_game(streams: &[StreamView]) -> Option<&StreamView> {
-  streams
-    .iter()
-    .filter(|s| s.is_game && s.fresh)
-    .reduce(|best, s| if s.duck_permille > best.duck_permille { s } else { best })
+  let rank = |s: &StreamView| (s.duck_permille, s.mix.is_some());
+  streams.iter().filter(|s| s.is_game && s.fresh).reduce(|best, s| if rank(s) > rank(best) { s } else { best })
 }
 
 /// One `duck_dbg` value, `dbg::NA` when missing.
@@ -181,6 +181,19 @@ pub(super) mod tests {
     assert_eq!(reduction(&streams), 300);
     assert_eq!(main_game(&streams).map(|s| s.owner), Some(5));
     assert_eq!(reduction(&[]), 0);
+  }
+
+  #[test]
+  fn with_nothing_lowered_mix_modes_line_is_the_game() {
+    // Regression: the minute summary of mix mode showed the silent game stream's learned levels
+    // (live log 2026-11-19: loud level -54.7 dB in the summary, -43.7 dB in the mix lines).
+    let (silent, mut mix) = (stream(5, true), stream(u64::MAX, true));
+    mix.mix = Some((-500, -600, false));
+    let streams = vec![silent.clone(), mix.clone()];
+    assert_eq!(main_game(&streams).map(|s| s.owner), Some(u64::MAX));
+    let mut lowered = silent;
+    lowered.duck_permille = 100; // a stream that is lowered still wins
+    assert_eq!(main_game(&[mix, lowered]).map(|s| s.owner), Some(5));
   }
 
   #[test]

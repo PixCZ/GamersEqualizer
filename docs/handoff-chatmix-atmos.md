@@ -99,7 +99,8 @@ Not covered: a game with no stream at all (never claimed a slot).
 While the chat stream is not paired (`chat_sounding` is never true) the whole mix is read as game. At 20:29:34,
 when the chat was paired, the "game" fell from -40 dB to -70 dB. The learned "loud level" (-40.4 dB, "settled,
 stored" in the 10 s lines) may therefore come from the podcast; the minute summary prints a different loud level
-(-55 to -60 dB). I did not find out why the two differ (stream key vs `mix_key`?). Worth checking.
+(-55 to -60 dB). Found 2026-11-19: with nothing lowered the summary took the game's silent stream
+(first in the list) instead of the mix line; `view::main_game` now prefers the mix line at a tie.
 
 ### 4.4 Pumping
 The depth is recomputed continuously from the game level, so a game that is quiet for a few seconds between
