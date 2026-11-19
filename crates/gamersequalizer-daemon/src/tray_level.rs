@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
 use windows::core::{PCWSTR, w};
 
 /// The bars change at most this often (the service loop adds up to one of its steps).
-const FRAME_INTERVAL: Duration = Duration::from_millis(200);
+const FRAME_INTERVAL: Duration = Duration::from_millis(1000);
 /// Bar heights the level is rounded to; an icon is sent only when the step changes.
 const STEPS: u8 = 8;
 /// The chain's output level (dBFS, RMS) of the lowest and of the full bars. Full is the voice
@@ -28,7 +28,7 @@ const STEPS: u8 = 8;
 const FLOOR_DB: f32 = -60.0;
 const FULL_DB: f32 = -24.0;
 /// The bars rise at once and fall this many steps per frame.
-const FALL_STEPS: u8 = 2;
+const FALL_STEPS: u8 = 4;
 /// Bar height at step 0 as a share of the full one: a silent, working mic still shows bars.
 const MIN_SCALE: f32 = 0.2;
 /// The mic effect counts as running this long after its last telemetry (it comes every ~100 ms).
