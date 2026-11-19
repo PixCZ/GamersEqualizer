@@ -3456,12 +3456,67 @@ Every line starts with `[Ducking]`; levels and depths are dB with one decimal (`
   tuning name -> number, polled every 2 s by the service and applied to the running APO; the app
   never writes or moves it.
 
-- Mix mode hears a fight that starts in speech (2026-11-19). Live log 17:13: shooting began while a
-  podcast talked and the game was lowered 5-10 s later, because `MixDucker` measured the game only in
-  chat pauses. Fluent speech has no pause longer than the guard (0.3 s): `duck_sim` with a
-  near-continuous chat never measured the game at all with the default guard, and 1-11 s late with
-  guards down to 0.05 s. Now, while the chat sounds, the mix less 4x the chat's own band level
-  (peak-held 0.5 s) is a lower bound of the game and can raise the held level, never lower it; a
-  fight needs two segments (1 s) in a row, also in speech. Latency in the simulation 0.5-4 s. A first
-  try with 2x let the chat through as game (the stream publishes one 10 ms block per tick). Limit:
-  a fight less than 6 dB above the chat's peaks is noticed only in a pause.
+### Findings of the live tests on 2026-11-19 (Division 2 under Dolby Atmos, a podcast in Brave as the chat)
+
+- Two levels (`d7a3341` -> `074be4e`): nobody talks, nothing lowered; someone talks, lowered by one level
+  that starts at 0 every run, is raised only by the fights it has to get through and comes down by 1 dB
+  in 10 minutes (an ear notices about 1 dB at once, 3 dB clearly; broadcast ducking is 6-12 dB, 10 dB is
+  about half the loudness). Heard live: "works absolutely great"; the one thing left was the first few
+  sentences of a talk.
+- The first sentences were unlowered for two reasons. (1) The "cannot be heard" verdict for an Atmos game
+  waited 10 s of a silent paired stream (live 16:59: chat paired 16:59:05, mix mode 16:59:48, first
+  lowering 17:00:05); now 3 s, leaving it still needs 10 s of audio. After the change the switch came
+  2.9 s after the stream start (17:12:02, 17:53:07). (2) Mix mode measured the game only in chat pauses.
+- Live 17:13, mix mode since 17:12:02: the game sat at -71 dB (calm) and jumped to -47 dB in the bucket
+  17:13:47-57; the first lowering was in the same 10 s bucket (64 % of it), full 9.3 dB from the next.
+  The 10 s lines cannot show the second, the user felt 5-10 s, and the cause is in the design: a
+  podcast sounds 50-77 % of the time, the game is measured only in pauses longer than the guard (0.3 s)
+  and a fight needs two segments (1 s) in a row, so a fight that starts mid-sentence waits for the next
+  pause. It was not the mode switch (done at 17:12:02) and the log has no WARN / ERROR / `[ApoNote]` there.
+- `duck_sim` reproduction (calm game -68 dB, a 40 s fight starting at five different places in a
+  near-continuous chat, `--mix --chat-gain 0.25 --pair-delay 0`), seconds until the game is lowered by
+  3 dB:
+
+  | variant                                   | five fight starts, seconds             |
+  | ----------------------------------------- | -------------------------------------- |
+  | guard 0.3 s (the default then)            | never (the pauses are shorter)         |
+  | guard 0.2 s                               | never                                  |
+  | guard 0.1 s                               | 7.5  11.5  9.0  8.0  1.0               |
+  | guard 0.05 s (the minimum)                | 2.5  11.5  5.5  1.0  1.0               |
+  | chat taken out of the mix, 4x, hold 0.5 s | 2.5  1.0   4.0  0.5  1.0               |
+  | the same, 8x, hold 0.5 s                  | 3.5  1.0   4.0  2.5  1.0               |
+  | the same, 8x, hold 1.0 s                  | 2.5  1.0   4.5  2.5  3.0               |
+
+  Tuning the guard or the sound threshold (-45 .. -32 dB) alone is erratic: how long a fight waits is
+  how long the next usable gap takes, so reacting "when the talker breathes" is not reliable.
+- The fix (`mix.rs`): while the chat sounds, the mix less 4x the chat's own band level (its stream
+  level at the output volume, peak-held 0.5 s) is a lower bound of the game and may only raise the held
+  level; the fall still waits for a pause; a fight needs two segments in a row also in speech, and the
+  first segment ever stands alone only in a pause (its onset read as game: the held chat level had not
+  caught up). A first try with 2x let the chat through as game: the stream publishes one 10 ms block per
+  50 ms tick, speech varies by tens of dB between blocks, so peaks are missed; 4x showed no rise in a
+  calm game over 280 s. Limit: a fight less than 6 dB above the chat's peaks is noticed only in a pause
+  (live: the fight at about -47 .. -50 dB against chat peaks of about -44 dB is borderline).
+- It relies on the chat sitting in the mix at its stream's level. Checked in the log, game at -70 dB,
+  gains 100 %: the chat band average equals its stream's within 0.6 dB, and the peaks in the mix sit
+  1.2-4.6 dB under the chat's band peaks. Averages of mix minus chat band (+5 .. +16 dB) are a floor
+  effect (the chat band falls to -120 dB in silence) and mean nothing by themselves.
+- Check after the change (17:53-17:55, mix mode): the game went from silent to -49.9 dB in the bucket
+  17:53:24, the depth rose in the same bucket and was 4.9 dB from 17:53:34, held 4.7-4.9 dB for two
+  minutes while the game fell to -58.6 dB and the need to -6 .. -8 dB (by design: the level comes down
+  by 1 dB in 10 minutes and starts over after 60 s of a silent game). The chat was unpaired at 17:55:15
+  after 10 s of silence. No WARN / ERROR. Again only the 10 s granularity, so the felt delay is the
+  measure.
+- `duck_sim` pitfalls found on the way: with the default `--pair-delay 3` the chat is read as game for
+  its first 3 s (the service does the same while the chat is unpaired); a chat gap shorter than
+  `hold_s` makes the whole file one endless spurt, which prints nothing until its end (the per-spurt
+  table is empty); the ducked WAV is float, the game's is 16 bit.
+- Configuration directory: no `duck_tuning.json`; `audio_settings.json` holds only the user's settings
+  (`duck_enabled`, `duck_strength_permille`) and `ducking_lowered.json` the crash-recovery volumes. The
+  `duck_level_cache.json` of the removed level store is orphaned: nothing reads it, it can be deleted.
+- Still open: the `retired_*` tunables and four `StreamSlot` fields are still carried in shared memory
+  as constants; removing them needs a new `shm_version`, so an older installed APO stops working until
+  the Update (the installed one dates from 16:00 and does not know the two levels); why the chat is
+  unpaired without a logged reason (16:59:07, 17:06:21, 17:08:51, 17:15:49, 17:55:15 after silence); a
+  bucket gap of 60 s in the log (17:12:06-17:13:06); a mix peak of -32 dB in the bucket 17:13:47 while
+  the game's peak was -69.7 dB and the chat band's -42.6 dB.
