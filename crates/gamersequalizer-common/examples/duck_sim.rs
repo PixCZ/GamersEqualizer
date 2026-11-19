@@ -383,20 +383,21 @@ fn zeroed_table() -> Box<StreamTable> {
 mod tests {
   use super::*;
 
-  /// 10 s of a 1.5 kHz game tone and a 1 kHz voice talking 2-5 s and 6-9 s; the detector here
-  /// is the voice's level (a tone is no speech to Silero).
+  /// 16 s of a 1.5 kHz game tone and a 1 kHz voice talking 2-5 s and 9-12 s (the gap and the end
+  /// longer than the hold, so two spurts that end); the detector here is the voice's level (a tone
+  /// is no speech to Silero).
   fn run(game_amplitude: f32) -> (Audio, Sim) {
     let tone = |f: f32, a: f32, t: f32| a * (2.0 * std::f32::consts::PI * f * t).sin();
     let game = Audio {
       channels: 2,
-      samples: (0..10 * RATE as usize)
+      samples: (0..16 * RATE as usize)
         .flat_map(|i| [tone(1500.0, game_amplitude, i as f32 / RATE as f32); 2])
         .collect(),
     };
-    let talking = |t: f32| (2.0..5.0).contains(&t) || (6.0..9.0).contains(&t);
+    let talking = |t: f32| (2.0..5.0).contains(&t) || (9.0..12.0).contains(&t);
     let chat = Audio {
       channels: 1,
-      samples: (0..10 * RATE as usize)
+      samples: (0..16 * RATE as usize)
         .map(|i| i as f32 / RATE as f32)
         .map(|t| if talking(t) { tone(1000.0, 0.1, t) } else { 0.0 })
         .collect(),

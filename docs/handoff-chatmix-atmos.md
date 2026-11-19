@@ -13,7 +13,7 @@ spatial objects bypasses the per-app stream effects: its stream and its session 
 
 | Mode   | Who lowers          | How                                                       | When                            |
 | ------ | ------------------- | --------------------------------------------------------- | ------------------------------- |
-| stream | the stream APO      | cuts the game's speech band at its stream                 | the game is heard at its stream |
+| stream | the stream APO      | lowers the game's stream, full band                       | the game is heard at its stream |
 | mix    | the service         | game level from the output mix, depth set as the game's session volume (full band) | the game "cannot be heard" |
 
 - Mix ducker: `crates/gamersequalizer-common/src/ducking/mix.rs` (`MixDucker`); the decision is the stream
@@ -26,8 +26,8 @@ spatial objects bypasses the per-app stream effects: its stream and its session 
 - Mode switch: `UnheardWatch` says "cannot be heard" when a paired game stream plays and reads silence for
   10 s while spatial sound is on; ending it needs 10 s of audio (hysteresis, so the mode does not flap).
 - The depth: `margin_db = strength * max_margin_db`; target = lock + gains + margin, bounded by `max_depth_db`
-  (mix: `mix_max_depth_db`). The depth follows the target at the slow/fast attack and release rates; a
-  "latch" keeps a ducked spurt ducked until the game has not masked the talker for `latch_release_s`.
+  (both modes). The depth follows the target at the slow/fast attack and release rates; a "latch" keeps
+  the talk ducked until the game has not masked the talker for `latch_release_s` of talk, across pauses.
 - Tuning reaches the APO through shared memory slots (`duck_tune`, 48 slots, **append only**; the pinned
   list is in `ducking/tuning.rs` test `the_tuning_slots_are_pinned`). The user's file is
   `%APPDATA%\GamersEqualizer\duck_tuning.json`; no new APO needed for tuning changes.
@@ -142,7 +142,7 @@ fast (12 dB/s) for a whole-game session volume, now `mix_release_db_per_s` 4.
 1. **Verify the uncommitted work**: gate, then a live run (loud game, continuous podcast). In the log expect
    `stream #N -> TheDivision2.exe ... silent`, `mode mix`, depth 13 dB held, releases only after the talk
    ends and 4 dB/s ramps.
-2. **Proposed, not done:** a mix-only `mix_latch_release_s` (about 30 s instead of 3 s) so a quiet game does
+2. **Done 2026-11-19:** `latch_release_s` 30 s instead of 3 s, for both modes now so a quiet game does
    not release the duck while someone talks; release after a pause in the speech (`mix_hold_s` 3 s). The
    user thinks the microphone auto-gain logic (`win_audio/mic_gain.rs`: steps only in a pause, dead band,
    cool-down) is the model: two states instead of continuous following.
@@ -162,14 +162,11 @@ fast (12 dB/s) for a whole-game session volume, now `mix_release_db_per_s` 4.
 | ---------------------- | ------- | ------- |
 | `mix_chat_guard_s`     | 0.3     | the game is measured this long after the chat last sounded |
 | `mix_chat_sound_db`    | -45     | chat envelope peak above this counts as a sound |
-| `mix_max_depth_db`     | 18      | bound of the whole-game depth |
-| `mix_hold_s`           | 3.0     | hold after speech (breaths do not bring the game back) |
-| `mix_max_margin_db`    | 17      | the margin at 100 % strength (50 % -> 8.5 dB) |
 | `mix_game_fall_s`      | 6.0     | the game level falls with this time constant (rises at once) |
-| `mix_release_db_per_s` | 4.0     | the depth comes back at this rate |
 
-Stream-mode defaults (`hold_s` 0.5, `max_margin_db` 12, release 12 dB/s, latch 3 s) are pinned by tests and
-unchanged.
+Since 2026-11-19 both modes share one decision and its values: `max_depth_db` 18, `hold_s` 3.0,
+`max_margin_db` 17 (50 % -> 8.5 dB), `release_db_per_s` 4.0, `latch_release_s` 30 (the latch is kept between
+talks: the next talk starts where the last one ended). The old `mix_*` copies are retired slots.
 
 ## 7. How to look at it
 

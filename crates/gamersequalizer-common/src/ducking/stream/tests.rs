@@ -14,6 +14,8 @@ const FIGHT: &[(f64, f32)] = &[(1500.0, LOUD)];
 /// Strength 500.
 const DEFAULT: DuckSettings = DuckSettings { enabled: true, strength: 0.5, game_gain: 1.0, chat_gain: 1.0 };
 const T: DuckTuning = DuckTuning::DEFAULT;
+/// Long enough for the whole depth to come back at the release rate.
+const RELEASE_S: f32 = T.max_depth_db / T.release_db_per_s + 0.5;
 
 /// A game stream and a chat stream in one table, stereo blocks.
 struct Rig {
@@ -105,7 +107,7 @@ impl Rig {
     }
   }
 
-  /// Fully ducked (the 20 dB bound), learning settled: 12 s of talk in a fight (10 s of it teach
+  /// Fully ducked (the bound), learning settled: 12 s of talk in a fight (10 s of it teach
   /// the quiet level), 20 s more of the fight, then talk over it.
   fn ducked(&mut self) {
     self.run(10.0, 0.0, FIGHT);
@@ -189,7 +191,7 @@ fn a_muted_chat_or_a_quiet_game_does_not_duck() {
   rig.assert_untouched(3.0, VOICE, FIGHT);
 
   let mut rig = Rig::new();
-  rig.settings.game_gain = 0.1; // -20 dB: the voice is on top already
+  rig.settings.game_gain = 0.05; // -26 dB: the voice is on top already
   rig.run(10.0, 0.0, FIGHT);
   rig.assert_untouched(3.0, VOICE, FIGHT);
 }
@@ -211,8 +213,8 @@ fn levels_sum_chat_and_game_slots_and_ignore_other_buses() {
 }
 
 #[test]
-fn default_strength_is_the_six_db_margin() {
-  assert_eq!(DuckSettings::read(&ShmHeader::default()).strength * T.max_margin_db, 6.0);
+fn default_strength_is_the_8_5_db_margin() {
+  assert_eq!(DuckSettings::read(&ShmHeader::default()).strength * T.max_margin_db, 8.5);
 }
 
 // --- The cut: small first words, no steps, only the speech band ---
@@ -222,7 +224,7 @@ fn a_single_word_dips_little_and_returns_exactly() {
   let mut rig = Rig::new();
   rig.run(10.0, 0.0, FIGHT);
   let word = rig.run(0.3, VOICE, FIGHT);
-  let after = rig.run(2.0, 0.0, FIGHT);
+  let after = rig.run(T.hold_s + 1.0, 0.0, FIGHT);
   let peak = word.iter().chain(&after).fold(0.0f32, |m, d| m.max(*d));
   assert!(peak > 0.5 && peak <= 3.0, "dip {peak} dB");
   assert_eq!((rig.depth(), rig.game.last_gain), (0.0, 1.0));
@@ -270,7 +272,7 @@ fn the_gain_moves_smoothly_sample_by_sample() {
 }
 
 #[test]
-fn only_the_speech_band_is_lowered() {
+fn the_whole_band_is_lowered_like_mix_modes_session_volume() {
   let mut rig = Rig::new();
   let tones = [(60.0, 0.3), (1500.0, 0.3)];
   rig.run(10.0, 0.0, &tones);
@@ -279,13 +281,13 @@ fn only_the_speech_band_is_lowered() {
   assert!(depth > 12.0, "{depth}");
   let (first, (dry, out)) = (rig.phase, collect(&mut rig, 0.1, &tones));
   let change_db = |f| 20.0 * (amplitude(&out, first, f, 48_000.0) / amplitude(&dry, first, f, 48_000.0)).log10();
-  assert!(change_db(60.0).abs() < 0.1, "60 Hz {}", change_db(60.0));
+  assert!((change_db(60.0) + f64::from(depth)).abs() < 0.5, "60 Hz {}", change_db(60.0));
   assert!((change_db(1500.0) + f64::from(depth)).abs() < 0.5, "1.5 kHz {}", change_db(1500.0));
 }
 
 #[test]
 fn rates_and_depth_do_not_depend_on_rate_or_block_size() {
-  // The 400 Hz tone sits on the band's flank, where a band built for another rate shows.
+  // The 400 Hz tone sits on the measuring band's flank: lowered like the rest at every rate.
   let tones = [(1500.0, LOUD), (400.0, 0.2)];
   let mut flank_at_48k = None;
   for (rate, frames) in [(48_000.0, 480), (44_100.0, 441), (44_100.0, 1024)] {
@@ -301,8 +303,8 @@ fn rates_and_depth_do_not_depend_on_rate_or_block_size() {
     assert!((change(1500.0) + T.max_depth_db as f64).abs() < 0.5, "{rate}/{frames}: {} dB", change(1500.0));
     let flank = *flank_at_48k.get_or_insert(change(400.0));
     assert!((change(400.0) - flank).abs() < 0.05, "{rate}/{frames}: 400 Hz {} vs {flank} dB", change(400.0));
-    rig.run(0.6, 0.0, &tones); // the hold
-    let release = rig.run(1.0, 0.0, &tones);
+    rig.run(T.hold_s + 0.1, 0.0, &tones); // the hold
+    let release = rig.run(3.0, 0.0, &tones);
     let rates = |depths: &[f32], low: f32| -> Vec<f32> {
       depths.windows(2).filter(|p| p.iter().all(|d| *d > low && *d < 10.0)).map(|p| (p[1] - p[0]) / dt).collect()
     };
@@ -328,7 +330,11 @@ fn too_many_channels_pass_and_a_bad_sample_does_not_poison_the_filter() {
   for n in 0..10 {
     let (_, out) = rig.block(VOICE, FIGHT);
     let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    assert!(out.iter().all(|s| s.is_finite()) && (n == 0 || (peak / 0.05 - 1.0).abs() < 0.1), "peak {peak}");
+    assert!(
+      out.iter().all(|s| s.is_finite())
+        && (n == 0 || (peak / (LOUD * 10f32.powf(-T.max_depth_db / 20.0)) - 1.0).abs() < 0.1),
+      "peak {peak}"
+    );
   }
 }
 
@@ -339,7 +345,7 @@ fn turned_off_mid_duck_releases_smoothly_then_passes_through() {
   let mut rig = Rig::new();
   rig.ducked();
   rig.settings.enabled = false;
-  let depths = rig.run(2.0, VOICE, FIGHT);
+  let depths = rig.run(RELEASE_S, VOICE, FIGHT);
   assert_releases(&mut rig, &depths, 0.0);
   for slot in [GAME, CHAT] {
     assert_eq!(rig.table.slots[slot].speech_ms.load(Ordering::Relaxed), 0);
@@ -351,7 +357,7 @@ fn losing_the_game_channel_mid_duck_releases_smoothly() {
   let mut rig = Rig::new();
   rig.ducked();
   rig.role = DuckRole::Other;
-  let depths = rig.run(2.0, VOICE, FIGHT);
+  let depths = rig.run(RELEASE_S, VOICE, FIGHT);
   assert_releases(&mut rig, &depths, 0.0);
 }
 
@@ -376,7 +382,7 @@ fn two_firefights_get_the_same_depth() {
   // 6 dB quieter, still masking the voice: the learned level forgets only 0.5 dB per minute.
   rig.run(3.0, 0.0, &[(1500.0, LOUD / 2.0)]);
   let second = rig.sentence(3.0, LOUD_VOICE, &[(1500.0, LOUD / 2.0)]);
-  assert!(peak(&first) > 10.0 && peak(&first) < T.max_depth_db - 1.0, "{}", peak(&first));
+  assert!(peak(&first) > 10.0 && peak(&first) < T.max_depth_db - 0.5, "{}", peak(&first));
   assert!((peak(&first) - peak(&second)).abs() < 1.0, "{} vs {}", peak(&first), peak(&second));
 }
 
@@ -523,7 +529,7 @@ fn a_tuning_change_mid_duck_applies_next_block_through_the_slew_rates() {
   tuning.set("max_depth_db", 10.0);
   tuning.write_to(&h);
   rig.game.refresh_tuning(&h);
-  let depths = rig.run(1.5, VOICE, FIGHT);
+  let depths = rig.run(RELEASE_S, VOICE, FIGHT);
   assert!(depths[0] < T.max_depth_db, "next block");
   assert_releases(&mut rig, &depths, 10.0);
   // Another band: the depth carries on, the output stays sane.
@@ -575,7 +581,7 @@ fn debug_telemetry_shows_the_duckers_state_and_na_when_idle() {
   assert_eq!(read(GAME, dbg::QUIET_EVIDENCE_S), st.quiet_s as i32);
   assert!(read(CHAT, dbg::BAND_DB) != dbg::NA && read(CHAT, dbg::GAME_DB) == dbg::NA);
   rig.settings.enabled = false;
-  rig.run(2.5, VOICE, FIGHT);
+  rig.run(RELEASE_S, VOICE, FIGHT);
   assert!(rig.table.slots[GAME].duck_dbg.iter().all(|v| v.load(Ordering::Relaxed) == dbg::NA));
 }
 

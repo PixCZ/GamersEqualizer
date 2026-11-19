@@ -149,14 +149,7 @@ impl MixDucker {
     if (tuning.band_center_hz, tuning.band_q) != (self.tuning.band_center_hz, self.tuning.band_q) {
       self.band = BandPass::new(f64::from(self.sample_rate), tuning);
     }
-    // This depth is full band: bounded by its own maximum.
-    self.tuning = DuckTuning {
-      max_depth_db: tuning.max_depth_db.min(tuning.mix_max_depth_db),
-      hold_s: tuning.mix_hold_s,
-      max_margin_db: tuning.mix_max_margin_db,
-      release_db_per_s: tuning.mix_release_db_per_s,
-      ..*tuning
-    };
+    self.tuning = *tuning;
     if !dt.is_finite() || dt <= 0.0 {
       return self.last_depth_db;
     }
@@ -201,7 +194,7 @@ impl MixDucker {
     // 2026-11-19: the game rose from -53 to -42 dB under 10 dB, the level stayed at -46 dB).
     // shortcut: the undo also lifts what the service does not lower (another app in the mix, a
     // volume change that failed), which can carry the loud level and the depth up to
-    // `mix_max_depth_db` while that sound plays; a deeper duck is the lesser evil. Tell the game from
+    // `max_depth_db` while that sound plays; a deeper duck is the lesser evil. Tell the game from
     // the rest of the mix if it shows in a live log.
     let loud_dt = if measured { (dt + self.unmeasured_s).min(MAX_LOUD_STEP_S) } else { 0.0 };
     self.unmeasured_s = if measured { 0.0 } else { self.unmeasured_s + dt };

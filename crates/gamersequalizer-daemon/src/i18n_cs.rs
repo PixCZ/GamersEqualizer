@@ -967,8 +967,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Chat +{}%", "Chat +{} %"),
   ("Automatic ChatMix", "Automatický ChatMix"),
   (
-    "Lowers the game while someone in the chat is talking and the game is drowning them out. Only in the range of speech, smoothly, and by about the same amount each time.",
-    "Zeslabí hru, když někdo v chatu mluví a hra ho přehlušuje. Jen v rozsahu řeči, plynule a pokaždé zhruba stejně.",
+    "Lowers the game while someone in the chat is talking and the game is drowning them out. Smoothly, by about the same amount each time, and back up when the talk stops.",
+    "Zeslabí hru, když někdo v chatu mluví a hra ho přehlušuje. Plynule, pokaždé zhruba stejně, a když se přestane mluvit, vrátí ji.",
   ),
   ("Game lowered by {} %", "Hra zeslabena o {} %"),
   ("Spatial sound: the whole game is lowered", "Prostorový zvuk: zeslabuje se celá hra"),

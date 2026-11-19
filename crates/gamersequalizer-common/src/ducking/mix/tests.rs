@@ -106,7 +106,7 @@ fn a_fight_running_when_speech_starts_ducks_to_the_locked_depth_and_holds_the_ga
   rig.run(20.0, FIGHT, 0.0);
   let game = rig.game_db();
   let depths = rig.run(5.0, FIGHT, VOICE);
-  let max = rig.tuning.mix_max_depth_db;
+  let max = rig.tuning.max_depth_db;
   assert!(depths.iter().all(|d| *d <= max) && depths[40..].iter().all(|d| *d == max), "{depths:?}");
   assert!((rig.game_db() - game).abs() < 0.01, "held: {game} -> {}", rig.game_db());
 }
@@ -119,11 +119,11 @@ fn a_game_going_calm_in_speech_is_followed_at_the_first_pause_longer_than_the_gu
   let game = rig.game_db();
   // Calm, but the talker does not pause: not noticed.
   let unnoticed = rig.run(10.0, 0.0, VOICE);
-  assert!((rig.game_db() - game).abs() < 0.01 && unnoticed.iter().all(|d| *d == rig.tuning.mix_max_depth_db));
+  assert!((rig.game_db() - game).abs() < 0.01 && unnoticed.iter().all(|d| *d == rig.tuning.max_depth_db));
   // 0.4 s pauses: longer than the guard, shorter than the hold (still one spurt); each one measures
   // the calm game and the level falls slowly towards it.
-  let after: Vec<f32> = (0..12).flat_map(|_| [rig.run(0.4, 0.0, 0.0), rig.run(3.0, 0.0, VOICE)].concat()).collect();
-  let slowest = rig.tuning.mix_release_db_per_s * TICK_S + 1e-4;
+  let after: Vec<f32> = (0..20).flat_map(|_| [rig.run(0.4, 0.0, 0.0), rig.run(3.0, 0.0, VOICE)].concat()).collect();
+  let slowest = rig.tuning.release_db_per_s * TICK_S + 1e-4;
   assert!(after.windows(2).all(|w| w[0] - w[1] <= slowest), "the whole game comes back slowly");
   let released = after.iter().position(|d| *d == 0.0).expect("released while the talk goes on");
   assert!(released as f32 * TICK_S >= rig.tuning.latch_release_s, "{released}");
@@ -141,6 +141,37 @@ fn a_few_quiet_seconds_between_fights_do_not_let_go_of_the_duck_while_the_talk_g
   let quiet: Vec<f32> =
     (0..3).flat_map(|_| [rig.run(1.5, QUIET_GAME, VOICE), rig.run(0.4, QUIET_GAME, 0.0)].concat()).collect();
   assert!(quiet.iter().all(|d| *d >= ducked - 0.5), "{quiet:?}");
+}
+
+#[test]
+fn a_lull_between_fights_keeps_the_duck_while_the_talk_goes_on() {
+  // Regression (live log 2026-11-19): a podcast ran on, a calm stretch let go of the duck and the
+  // next fight needed two pauses to lower the game again; a sentence was lost. This lull lets go
+  // after about 27 s at the stream ducker's 3 s release.
+  let mut rig = MixRig::new();
+  rig.run(20.0, FIGHT, 0.0);
+  rig.run(5.0, FIGHT, VOICE);
+  let max = rig.tuning.max_depth_db;
+  let lull: Vec<f32> = (0..12).flat_map(|_| [rig.run(3.0, 0.0, VOICE), rig.run(0.4, 0.0, 0.0)].concat()).collect();
+  assert!(lull.iter().all(|d| *d == max), "{lull:?}");
+  assert!(rig.run(1.0, FIGHT, VOICE).iter().all(|d| *d == max), "the next fight finds it lowered");
+}
+
+#[test]
+fn the_next_talk_starts_at_the_depth_the_last_one_ended_with() {
+  // The user: when the talk stops the game comes back; when it starts again it goes straight back to
+  // the reduction of the talk before (a paused podcast played again in a calm moment of a fight
+  // waited for chat pauses to measure the fight again).
+  let mut rig = MixRig::new();
+  rig.run(20.0, FIGHT, 0.0);
+  rig.run(5.0, FIGHT, VOICE);
+  let max = rig.tuning.max_depth_db;
+  assert_eq!(*rig.run(120.0, 0.0, 0.0).last().unwrap(), 0.0, "nobody talks: the game comes back");
+  assert_eq!(*rig.run(1.0, 0.0, VOICE).last().unwrap(), max, "talk again: the depth at once");
+  // In talk a calm game lets go after `latch_release_s`; the next talk starts unlowered.
+  assert_eq!(*rig.run(40.0, 0.0, VOICE).last().unwrap(), 0.0);
+  rig.run(10.0, 0.0, 0.0);
+  assert!(rig.run(3.0, 0.0, VOICE).iter().all(|d| *d == 0.0));
 }
 
 #[test]
@@ -300,7 +331,7 @@ fn stored_levels_give_the_locked_depth_from_the_first_sentence() {
   rig.ducker.seed(Some(-23.0), Some(-23.2));
   rig.run(3.0, QUIET_GAME, 0.0);
   let first = rig.sentence(3.0, QUIET_GAME).iter().fold(0.0f32, |m, d| m.max(*d));
-  let target = 0.2 + DEFAULT.strength * rig.tuning.mix_max_margin_db;
+  let target = 0.2 + DEFAULT.strength * rig.tuning.max_margin_db;
   assert!((first - target).abs() < 0.1, "{first} vs {target}");
   let st = rig.ducker.status();
   assert!(st.loud_seeded && st.quiet_seeded);

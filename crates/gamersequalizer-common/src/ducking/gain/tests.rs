@@ -14,10 +14,13 @@ fn strength_sets_how_soon_and_how_deep() {
     drive_at(&mut gain, &settings, 30.0, game_db, voice_db, |_| false);
     peak(&drive_at(&mut gain, &settings, 3.0, game_db, voice_db, |i| i % 70 < 50))
   };
-  // The game 3 dB over the voice: strength 0 ducks a little, every 50 % about 6 dB more.
+  // The game 3 dB over the voice: strength 0 ducks a little, every 50 % half the margin more (up
+  // to the bound).
   let (none, half, full) = (depth_at(0.0, -22.0, -25.0), depth_at(0.5, -22.0, -25.0), depth_at(1.0, -22.0, -25.0));
+  let step = T.max_margin_db / 2.0;
   assert!(none > 0.0 && none < 4.0, "{none}");
-  assert!((half - none - 6.0).abs() < 0.3 && (full - half - 6.0).abs() < 0.3, "{none} {half} {full}");
+  assert!((half - none - step).abs() < 0.3, "{none} {half}");
+  assert!((full - (half + step).min(T.max_depth_db)).abs() < 0.3, "{half} {full}");
   // The game 8 dB under the voice: only full strength ducks.
   assert_eq!(depth_at(0.5, -32.0, -24.0), 0.0);
   assert!(depth_at(1.0, -32.0, -24.0) > 2.0);
@@ -28,6 +31,7 @@ fn strength_sets_how_soon_and_how_deep() {
 fn a_loud_talker_over_the_game_does_not_duck_a_quiet_one_does_by_the_margin() {
   let mut gain = DuckGain::default();
   settle(&mut gain); // learned with the quiet talker at -30 dB
+  gain.restart(); // a talk of its own: after a lowered one it keeps that one's depth
   assert_eq!(sentence_at(&mut gain, -22.0, -12.0), 0.0, "loud talker");
   let quiet = sentence_at(&mut gain, -22.0, -30.0);
   // The game lowered by the depth sits the margin under the quiet talker.
@@ -38,8 +42,9 @@ fn a_loud_talker_over_the_game_does_not_duck_a_quiet_one_does_by_the_margin() {
 fn a_loud_talkers_soft_onset_does_not_latch() {
   let mut gain = DuckGain::default();
   fight_at(&mut gain, -22.0);
+  gain.restart(); // a talk of its own: after a lowered one it keeps that one's depth
   drive(&mut gain, 1.0, -22.0, |_| false);
-  let depths = drive_levels(&mut gain, 2.0, -22.0, |i| Some(if i < 5 { -35.0 } else { -10.0 }));
+  let depths = drive_levels(&mut gain, 2.0, -22.0, |i| Some(if i < 5 { -35.0 } else { -6.0 }));
   assert_eq!(peak(&depths), 0.0);
 }
 
@@ -47,6 +52,7 @@ fn a_loud_talkers_soft_onset_does_not_latch() {
 fn a_quiet_talker_answering_a_loud_one_ducks_within_a_second() {
   let mut gain = DuckGain::default();
   settle(&mut gain);
+  gain.restart(); // a talk of its own: after a lowered one it keeps that one's depth
   drive(&mut gain, 1.0, -22.0, |_| false);
   let loud = drive_voice(&mut gain, 4.0, -22.0, -12.0, |_| true);
   drive(&mut gain, 0.3, -22.0, |_| false); // within the hold: one spurt
@@ -58,11 +64,12 @@ fn a_quiet_talker_answering_a_loud_one_ducks_within_a_second() {
 
 #[test]
 fn an_endless_talker_is_let_go_once_the_game_stays_calm() {
-  // A podcast at -24 dB never pauses: one spurt. The game is loud for 10 s, then calm for 20 s.
+  // A podcast at -24 dB never pauses: one spurt. The game is loud for 10 s, then calm for 40 s.
   let mut gain = DuckGain::default();
   settle(&mut gain);
+  gain.restart(); // the loud part must latch by itself
   let mut latched = Vec::new();
-  for i in 0..3000 {
+  for i in 0..5000 {
     drive_levels(&mut gain, 0.01, if i < 1000 { -22.0 } else { -60.0 }, |_| Some(-24.0));
     latched.push(gain.latched);
   }
@@ -78,10 +85,28 @@ fn an_endless_talker_is_let_go_once_the_game_stays_calm() {
 }
 
 #[test]
+fn sentences_in_a_calm_game_let_a_kept_latch_go() {
+  // Sentences with pauses longer than the hold, each starting with a soft syllable the game would
+  // mask: the calm talk adds up across them and lets go after `latch_release_s`.
+  let mut gain = DuckGain::default();
+  settle(&mut gain);
+  assert!(gain.latched, "kept from the fight");
+  let sentence = |gain: &mut DuckGain| {
+    drive_levels(gain, 2.5, -40.0, |i| Some(if i < 3 { -48.0 } else { -30.0 }));
+    drive(gain, T.hold_s + 0.5, -40.0, |_| false);
+  };
+  let enough = (T.latch_release_s / 2.5).ceil() as usize + 2;
+  (0..enough).for_each(|_| sentence(&mut gain));
+  assert!(!gain.latched);
+  assert_eq!(peak(&drive_levels(&mut gain, 2.5, -40.0, |_| Some(-30.0))), 0.0);
+}
+
+#[test]
 fn gaps_in_a_fight_shorter_than_the_release_do_not_pump() {
   // The endless talker over a fight with 4 s gaps: unmasked for under `latch_release_s` each time.
   let mut gain = DuckGain::default();
   settle(&mut gain);
+  gain.restart(); // the fight must latch by itself
   drive_levels(&mut gain, 4.0, -22.0, |_| Some(-24.0));
   for _ in 0..4 {
     for game_db in [-60.0, -22.0] {
@@ -142,18 +167,19 @@ fn the_first_talkers_average_before_the_quiet_level_settles() {
 
 #[test]
 fn one_very_quiet_spurt_moves_the_depth_a_little_several_move_it_further() {
+  // A quieter fight than elsewhere, so the depth has room under `max_depth_db` to grow.
   let mut gain = DuckGain::default();
   for _ in 0..20 {
-    sentence_at(&mut gain, -22.0, -30.0);
+    sentence_at(&mut gain, -28.0, -30.0);
   }
-  let settled = sentence_at(&mut gain, -22.0, -30.0);
-  sentence_at(&mut gain, -22.0, -45.0); // a whisper or a far-away mic: counts 6 dB under at most
-  let after_one = sentence_at(&mut gain, -22.0, -30.0) - settled;
+  let settled = sentence_at(&mut gain, -28.0, -30.0);
+  sentence_at(&mut gain, -28.0, -45.0); // a whisper or a far-away mic: counts 6 dB under at most
+  let after_one = sentence_at(&mut gain, -28.0, -30.0) - settled;
   assert!(after_one > 0.0 && after_one <= 2.5, "{after_one}");
   for _ in 0..10 {
-    sentence_at(&mut gain, -22.0, -45.0);
+    sentence_at(&mut gain, -28.0, -45.0);
   }
-  assert!(sentence_at(&mut gain, -22.0, -30.0) > settled + after_one + 3.0);
+  assert!(sentence_at(&mut gain, -28.0, -30.0) > settled + after_one + 3.0);
 }
 
 #[test]
@@ -328,18 +354,21 @@ fn a_settled_depth_ignores_fights_that_wander_within_the_hysteresis() {
 
 #[test]
 fn a_sustained_louder_game_moves_the_depth_by_the_excess_only() {
+  // A quieter fight than `settle`, so 5 dB more stays under `max_depth_db`.
   let mut gain = DuckGain::default();
-  settle(&mut gain);
-  let before = *fight_at(&mut gain, -22.0).last().unwrap();
+  for _ in 0..12 {
+    sentence_at(&mut gain, -26.0, -30.0);
+  }
+  let before = *fight_at(&mut gain, -26.0).last().unwrap();
   let mut lock = gain.learned.lock_db.unwrap();
   for _ in 0..12_000 {
-    drive(&mut gain, 0.01, -17.0, |_| false);
+    drive(&mut gain, 0.01, -21.0, |_| false);
     let now = gain.learned.lock_db.unwrap();
     // The loud level rises with `loud_rise_s`: about 1.7 dB/s at first, 0.017 dB per block.
     assert!((now - lock).abs() < 0.02, "step {lock} -> {now}");
     lock = now;
   }
-  let after = *fight_at(&mut gain, -17.0).last().unwrap();
+  let after = *fight_at(&mut gain, -21.0).last().unwrap();
   assert!((after - before - (5.0 - T.hysteresis_up_db)).abs() < 0.3, "{before} -> {after}");
 }
 
@@ -362,9 +391,10 @@ fn strength_and_volume_changes_after_settling_apply_in_full() {
     drive_at(gain, settings, 5.0, -22.0, -30.0, |_| false);
     peak(&drive_at(gain, settings, 3.0, -22.0, -30.0, |i| i % 70 < 50))
   };
-  let stronger = sentence(&mut gain, &DuckSettings { strength: 1.0, ..DEFAULT });
+  // Weaker, not stronger: the full margin would reach `max_depth_db`.
+  let weaker = sentence(&mut gain, &DuckSettings { strength: 0.0, ..DEFAULT });
   let quieter_game = sentence(&mut gain, &DuckSettings { game_gain: 0.5, ..DEFAULT });
-  assert!((stronger - before - 6.0).abs() < 0.01, "{before} -> {stronger}");
+  assert!((before - weaker - T.max_margin_db / 2.0).abs() < 0.01, "{before} -> {weaker}");
   assert!((before - quieter_game - 6.02).abs() < 0.01, "{before} -> {quieter_game}");
 }
 
@@ -397,7 +427,7 @@ fn a_seeded_stream_is_locked_from_its_first_sentence() {
   // A fight 2 dB quieter than the stored one, inside the backlash: the lock holds the stored
   // difference.
   let first = fight_at(&mut gain, -24.0)[0];
-  assert!((first - 14.0).abs() < 1e-4, "{first}");
+  assert!((first - 8.0 - DEFAULT.strength * T.max_margin_db).abs() < 1e-4, "{first}");
 }
 
 #[test]
@@ -491,12 +521,12 @@ fn settle(gain: &mut DuckGain) {
   }
 }
 
-/// One second of game, then a 3 s sentence (one spurt, 2.2 s of talk) at `voice_db`, then 1 s
-/// so it ends: the sentence's peak depth.
+/// One second of game, then a 3 s sentence (one spurt, 2.2 s of talk) at `voice_db`, then the
+/// hold and a second so it ends: the sentence's peak depth.
 fn sentence_at(gain: &mut DuckGain, game_db: f32, voice_db: f32) -> f32 {
   drive(gain, 1.0, game_db, |_| false);
   let depth = peak(&drive_voice(gain, 3.0, game_db, voice_db, |i| i % 70 < 50));
-  drive(gain, 1.0, game_db, |_| false);
+  drive(gain, T.hold_s + 1.0, game_db, |_| false);
   depth
 }
 

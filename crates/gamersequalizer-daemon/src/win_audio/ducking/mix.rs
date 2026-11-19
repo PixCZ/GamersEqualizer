@@ -294,7 +294,7 @@ impl MixRun {
           game.ducker.reset();
           game.paused = true;
         }
-        self.depth_db = (self.depth_db - tuning.mix_release_db_per_s * dt).max(0.0);
+        self.depth_db = (self.depth_db - tuning.release_db_per_s * dt).max(0.0);
       }
     }
     if self.depth_db == 0.0

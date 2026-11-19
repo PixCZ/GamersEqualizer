@@ -414,7 +414,7 @@ fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) -> bool {
   let Some(h) = state.shm_header() else { return false };
   let help = tr(
     "Lowers the game while someone in the chat is talking and the game is drowning them out. \
-     Only in the range of speech, smoothly, and by about the same amount each time.",
+     Smoothly, by about the same amount each time, and back up when the talk stops.",
   );
   let mut on = h.duck_enabled.load(Ordering::Relaxed);
   ui.horizontal(|ui| {

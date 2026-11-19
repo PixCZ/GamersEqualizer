@@ -1,8 +1,9 @@
 //! The ducker of one app stream, run by its stream APO instance on the audio thread: measures the
 //! stream's speech band, publishes it in the stream's slot, reads the other streams' levels from
-//! the table, runs the gain computer and applies the cut. No allocation, no locks.
+//! the table, runs the gain computer and lowers the whole stream by the depth, full band like mix
+//! mode's session volume (one feel for both). No allocation, no locks.
 
-use super::band::{self, BandPass};
+use super::band::BandPass;
 use super::gain::DuckGain;
 use super::{DuckRole, DuckSettings, DuckStatus, DuckTuning, FRESH_HNS, GAP_HNS, db, dbg};
 use crate::shm::ShmHeader;
@@ -29,7 +30,7 @@ pub struct StreamDucker {
   /// Band-pass state (transposed direct form II) per channel.
   state: [[f64; 2]; MAX_CHANNELS],
   gain: DuckGain,
-  /// Linear gain of the band at the end of the last block (1 = untouched).
+  /// Linear gain of the stream at the end of the last block (1 = untouched).
   last_gain: f32,
   last_hns: Option<u64>,
   /// Not processing, and the slot's level, reduction and telemetry already read "none".
@@ -67,8 +68,8 @@ impl StreamDucker {
   }
 
   /// Takes a new tuning when `duck_tune_version` moved (one atomic load per block otherwise) and
-  /// rebuilds the band-pass from it. Its filter state carries on and the depth still moves only at
-  /// the slew rates, but a new band reshapes a cut in progress at once (see `band_center_hz`).
+  /// rebuilds the measuring band-pass from it. Its filter state carries on and the depth still moves
+  /// only at the slew rates.
   pub fn refresh_tuning(&mut self, h: &ShmHeader) {
     let version = h.duck_tune_version.load(Ordering::Acquire);
     if self.tune_version != Some(version) {
@@ -117,7 +118,6 @@ impl StreamDucker {
       return;
     }
     self.idle = false;
-    let before = self.state;
     let level = self.measure(buf, channels);
     let published = if role == DuckRole::Voice && !is_speech { 0.0 } else { level };
     own.speech_ms.store(published.to_bits(), Ordering::Relaxed);
@@ -139,8 +139,6 @@ impl StreamDucker {
     let gain = 10f32.powf(-depth / 20.0);
     own.duck_permille.store(((1.0 - gain) * 1000.0).round() as u32, Ordering::Relaxed);
     if gain < 1.0 || self.last_gain < 1.0 {
-      // The band-pass runs again over the same input from the same state.
-      self.state = before;
       self.apply(buf, channels, gain);
     }
     self.last_gain = gain;
@@ -233,20 +231,14 @@ impl StreamDucker {
     self.band.measure(&mut self.state, buf, channels)
   }
 
-  /// `y = x - (1 - g) * bp(x)`, `g` ramped per frame from the last block's gain to `gain`.
-  fn apply(&mut self, buf: &mut [f32], channels: usize, gain: f32) {
-    let filter = self.band;
-    let frames = (buf.len() / channels) as f64;
-    let start = 1.0 - f64::from(self.last_gain);
-    let step = (f64::from(gain) - f64::from(self.last_gain)) / frames;
+  /// `y = g x`, `g` ramped per frame from the last block's gain to `gain`.
+  fn apply(&self, buf: &mut [f32], channels: usize, gain: f32) {
+    let frames = (buf.len() / channels) as f32;
+    let step = (gain - self.last_gain) / frames;
     for (n, frame) in buf.chunks_exact_mut(channels).enumerate() {
-      let cut = start - step * (n + 1) as f64;
-      for (x, z) in frame.iter_mut().zip(self.state.iter_mut()) {
-        let input = f64::from(*x);
-        *x = (input - cut * filter.run(z, input)) as f32;
-      }
+      let g = self.last_gain + step * (n + 1) as f32;
+      frame.iter_mut().for_each(|x| *x *= g);
     }
-    band::flush(&mut self.state);
   }
 }
 

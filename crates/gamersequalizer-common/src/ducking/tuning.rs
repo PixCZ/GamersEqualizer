@@ -39,8 +39,7 @@ macro_rules! duck_tuning {
 
 duck_tuning! {
   /// Speech band: a band-pass around 1.5 kHz with Q 0.5 covers about 500 Hz .. 4.5 kHz, the band
-  /// that carries intelligibility. A change while ducking reshapes the cut at once (audible): make
-  /// it between sentences.
+  /// that carries intelligibility. Every level is measured in it; the game is lowered full band.
   band_center_hz = 1500.0 in 300.0..=4000.0,
   band_q = 0.5 in 0.2..=3.0,
   /// Raw chat speech level (band mean square, dB) above which someone talks.
@@ -49,8 +48,9 @@ duck_tuning! {
   /// or above this probability. DEVLOG milestone 38: at 0.5 normal speech is found in 90-98 % of
   /// loud frames, pause frames score 0.4-8 %, keyboard 0 % (clicks never exceed 0.15).
   speech_prob = 0.5 in 0.05..=0.95,
-  /// The depth holds this long after the last talking block, over pauses between words.
-  hold_s = 0.5 in 0.05..=5.0,
+  /// The depth holds this long after the last talking block, over pauses between words and a
+  /// podcast's breath between sentences (live test in mix mode: at 0.5 s the game came back up).
+  hold_s = 3.0 in 0.05..=5.0,
   /// A spurt's level (the mean dB of its talking blocks) decides whether it ducks only from this
   /// much talk on, so a soft syllable onset cannot latch a loud talker's spurt.
   spurt_min_s = 0.2 in 0.0..=2.0,
@@ -63,10 +63,11 @@ duck_tuning! {
   /// Talk time of a spurt under which the depth grows only slowly: a single word causes a small
   /// dip only.
   short_talk_s = 0.35 in 0.0..=5.0,
-  /// The only rates the depth moves at (the "no sharp transition").
+  /// The only rates the depth moves at (the "no sharp transition"). The release is slow: in mix
+  /// mode 12 dB/s brought 13 dB back in about a second, which sounded like a jump (live test).
   slow_attack_db_per_s = 8.0 in 0.5..=200.0,
   fast_attack_db_per_s = 40.0 in 0.5..=200.0,
-  release_db_per_s = 12.0 in 0.5..=200.0,
+  release_db_per_s = 4.0 in 0.5..=200.0,
   /// Time constants of the current game level (rise, fall), which decides whether a spurt ducks:
   /// a click in a calm game must barely move it, sustained gunfire must.
   game_rise_s = 0.4 in 0.01..=10.0,
@@ -114,33 +115,31 @@ duck_tuning! {
   /// that is too shallow fails (the voice is not understood) while one too deep only makes the
   /// game a little quieter than needed: small upwards, so the lock never stays short of the
   /// estimate while the quiet talker level still falls. Both must stay clearly below the margin
-  /// (6 dB at the default strength), or the lock could leave the voice no margin at all.
+  /// (8.5 dB at the default strength), or the lock could leave the voice no margin at all.
   hysteresis_up_db = 0.5 in 0.0..=20.0,
   hysteresis_down_db = 4.0 in 0.0..=20.0,
   /// A spurt ducks once the current game level would need more than this (game - spurt level +
   /// margin).
   on_threshold_db = 2.0 in -20.0..=20.0,
   /// The voice's margin over the game at full strength (`duck_strength_permille` 1000; 500 = half).
-  max_margin_db = 12.0 in 0.0..=30.0,
-  /// Safety bound of the depth, whatever the levels and the strength (20 dB: the game's speech
-  /// band to one tenth of its amplitude).
-  max_depth_db = 20.0 in 0.0..=40.0,
-  /// A ducked spurt lets go once the game has not masked the talker for this long in a row, and
-  /// may duck again later in the same spurt: a talker who never pauses (a podcast) is not ducked
-  /// for minutes by one loud moment. Gaps in a fight shorter than this do not pump.
-  latch_release_s = 3.0 in 0.5..=600.0,
+  /// A loud game with a quiet podcast needed about 8.5 dB (live test), which half strength gives.
+  max_margin_db = 17.0 in 0.0..=30.0,
+  /// Safety bound of the depth, whatever the levels and the strength.
+  max_depth_db = 18.0 in 0.0..=40.0,
+  /// A ducked talk lets go once the game has not masked the talker for this long in a row while
+  /// someone talks, and may duck again later: a talker who never pauses (a podcast) is not ducked
+  /// for good by one fight. A calm stretch between fights shorter than this keeps the game lowered
+  /// (live test: at 3 s a 20 s lull let go and the next fight needed time to lower it again, a
+  /// sentence lost). The latch outlives the talk: the next talk starts where the last one ended.
+  latch_release_s = 30.0 in 0.5..=600.0,
   /// The service's mix ducker (`MixDucker`) measures the game only this long after the chat last
   /// made a sound: it covers the chat's way through the spatial renderer and the tail of a word.
   mix_chat_guard_s = 0.3 in 0.05..=5.0,
-  /// The mix ducker lowers the game's whole band (its session volume), so it needs less than the
-  /// band cut's `max_depth_db`.
-  mix_max_depth_db = 18.0 in 0.0..=40.0,
-  /// The mix ducker's `hold_s`: longer, so a podcast's breath between sentences does not bring the game
-  /// back up (live test: at 0.5 s it did).
-  mix_hold_s = 3.0 in 0.05..=5.0,
-  /// The mix ducker's `max_margin_db`: the lowered game is the whole band and a loud game with a quiet
-  /// podcast needed about 8.5 dB (live test), which half strength now gives.
-  mix_max_margin_db = 17.0 in 0.0..=30.0,
+  /// Mix mode's own depth bound, hold and margin until both modes shared one decision (2026-11-19);
+  /// now `max_depth_db`, `hold_s`, `max_margin_db` carry these values.
+  retired_mix_max_depth_db = 18.0 in 18.0..=18.0,
+  retired_mix_hold_s = 3.0 in 3.0..=3.0,
+  retired_mix_max_margin_db = 17.0 in 17.0..=17.0,
   /// A chat block's envelope peak above this (dBFS) is a sound that holds the game's level (see
   /// `chat_sounding`). Raised from -60: a podcast's breaths and room never fell below that, so the game
   /// was never measured and its stale level hid the need to duck (live test).
@@ -149,9 +148,8 @@ duck_tuning! {
   /// quiet for a few seconds between fights must not let go of the duck while the talker goes on
   /// (live test: the game came back up and went down again every few seconds).
   mix_game_fall_s = 6.0 in 0.1..=60.0,
-  /// The mix ducker's `release_db_per_s`: the whole game comes back, so slower than the speech band
-  /// of a stream (live test: 12 dB/s brought 13 dB back in about a second, which sounded like a jump).
-  mix_release_db_per_s = 4.0 in 0.5..=200.0,
+  /// Mix mode's own release rate until both modes shared one decision; now `release_db_per_s`.
+  retired_mix_release_db_per_s = 4.0 in 4.0..=4.0,
 }
 
 const _: () = assert!(PARAMS.len() <= DUCK_TUNE_SLOTS, "more tunables than shared-memory slots");
@@ -303,12 +301,12 @@ mod tests {
       "max_depth_db",
       "latch_release_s",
       "mix_chat_guard_s",
-      "mix_max_depth_db",
-      "mix_hold_s",
-      "mix_max_margin_db",
+      "retired_mix_max_depth_db",
+      "retired_mix_hold_s",
+      "retired_mix_max_margin_db",
       "mix_chat_sound_db",
       "mix_game_fall_s",
-      "mix_release_db_per_s",
+      "retired_mix_release_db_per_s",
     ];
     assert_eq!(names, pinned);
   }

@@ -1,4 +1,4 @@
-//! Automatic ChatMix, the service's half. The APO lowers the game's speech band while someone in
+//! Automatic ChatMix, the service's half. The APO lowers the game's stream while someone in
 //! the chat talks (`gamersequalizer_common::ducking`); the service hands it what it cannot know
 //! itself and writes the log that explains it:
 //! - which streams are game and which chat: the stream router pairs them (`stream_router`);

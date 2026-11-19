@@ -50,8 +50,8 @@ pub(super) struct DuckGain {
   /// Talk time of this spurt and its level (dB, a leaky mean over `spurt_level_s`).
   talk_s: f32,
   spurt_db: f32,
-  /// This spurt ducks: set once the game masked it, until the hold runs out or the game has not
-  /// masked it for `latch_release_s` (a talker who never pauses, e.g. a podcast).
+  /// The talk ducks: set once the game masked a spurt, until the game has not masked the talk for
+  /// `latch_release_s` (a talker who never pauses, e.g. a podcast). Kept between spurts.
   latched: bool,
   /// How long in a row the game has not masked this spurt, seconds.
   unmasked_s: f32,
@@ -120,7 +120,15 @@ impl DuckGain {
     } else {
       self.hold_s = if s.enabled { (self.hold_s - dt).max(0.0) } else { 0.0 };
       if self.hold_s <= 0.0 {
-        (self.talk_s, self.spurt_db, self.latched, self.unmasked_s) = (0.0, 0.0, false, 0.0);
+        (self.talk_s, self.spurt_db) = (0.0, 0.0);
+        // The latch outlives the talk: the next talk starts where this one ended (lowered or not)
+        // instead of measuring the fight again (mix mode measures it only in the chat's pauses).
+        // shortcut: talk an hour later in a lobby is lowered for `latch_release_s` first; forget
+        // after a long silence if that bothers. The calm count carries on too: sentences of a few
+        // seconds in a calm game add up to the release (a fight resets it at its first block).
+        if !s.enabled {
+          (self.latched, self.unmasked_s) = (false, 0.0);
+        }
       }
     }
     let spurt_db = (self.talk_s > 0.0).then_some(self.spurt_db);
@@ -137,18 +145,21 @@ impl DuckGain {
     self.learned.update_lock(quiet_db, t);
     if let Some(spurt) = spurt_db {
       let masks = need_db(spurt) > t.on_threshold_db;
-      self.latched |= masks && talking && self.talk_s >= t.spurt_min_s;
-      // Lets go only after the game stopped masking it for a while: gaps in a fight do not pump.
-      self.unmasked_s = if masks { 0.0 } else { self.unmasked_s + dt };
-      if self.unmasked_s >= t.latch_release_s {
-        self.latched = false;
+      // Decided only from `spurt_min_s` on, so a soft onset neither latches nor resets the calm count.
+      if self.talk_s >= t.spurt_min_s {
+        self.latched |= masks && talking;
+        // Lets go only after the game stopped masking it for a while: gaps in a fight do not pump.
+        self.unmasked_s = if masks { 0.0 } else { self.unmasked_s + dt };
+        if self.unmasked_s >= t.latch_release_s {
+          self.latched = false;
+        }
       }
     }
     self.target_db = self.learned.lock_db.map(|lock| (lock + gains_db + margin_db).clamp(0.0, t.max_depth_db));
     (self.talking, self.chat_db, self.need_db) = (talking, db(chat_ms), spurt_db.map(need_db));
 
-    let goal_db = if !self.latched {
-      0.0
+    let goal_db = if !self.latched || spurt_db.is_none() {
+      0.0 // between spurts a kept latch lowers nothing: nobody to hear over the game
     } else if talking {
       self.target_db.unwrap_or(0.0)
     } else {
@@ -217,7 +228,7 @@ impl DuckGain {
     let l = &self.learned;
     DuckStatus {
       talking: self.talking,
-      latched: self.latched,
+      latched: self.latched && self.talk_s > 0.0, // this spurt ducks, not a latch kept between spurts
       game_db: db(self.game_ms),
       chat_db: self.chat_db,
       spurt_db: (self.talk_s > 0.0).then_some(self.spurt_db),
