@@ -120,6 +120,23 @@ fast (12 dB/s) for a whole-game session volume, now `mix_release_db_per_s` 4.
 
 ## 5. Open work, in order
 
+0. **Done after this was written (uncommitted, Mac: common crate tests and clippy pass):** the mix
+   ducker's loud level now learns while the game is lowered (the depth is undone) and each measurement
+   counts for the time since the previous one, at most 2 s (`MAX_LOUD_STEP_S` in `ducking/mix.rs`;
+   `DuckGain::update` takes `loud_dt` instead of `learn_loud`). Found offline: in a lobby scenario the
+   loud level never learned a fight that started while ducked, so the depth stayed 2-6 dB. Dropped
+   guard: a failed volume change or another app in the mix now inflates the loud level by up to the
+   depth, bounded by `mix_max_depth_db`.
+   Then (2026-11-19, see `docs/chatmix-redesign-comparison.md`): six tunables retired (learning
+   slowdowns, warm-up values; slots kept as `retired_*`, so the installed APO is unaffected until
+   reinstalled); mix mode raises the held game level only when two segments agree (one shot no longer
+   lowers a calm game); mix mode shifts learned levels when the Game / Chat session volume moves and
+   stores them as at 100 %. After review: while lowered the loud level learns only up to the level
+   read before the reduction (else another app in the mix inflated it to the bound); the previous
+   segment ages over talk. `[mix]` records stored before this are read as at 100 %: delete the
+   test game's `[mix]` entry in `%APPDATA%\GamersEqualizer\duck_level_cache.json`, or let it relearn.
+   Needs: the gate on Windows, an APO reinstall (gain.rs changed), a live run.
+
 1. **Verify the uncommitted work**: gate, then a live run (loud game, continuous podcast). In the log expect
    `stream #N -> TheDivision2.exe ... silent`, `mode mix`, depth 13 dB held, releases only after the talk
    ends and 4 dB/s ramps.

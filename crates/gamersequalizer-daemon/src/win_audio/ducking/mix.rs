@@ -8,7 +8,9 @@
 //! Threads: `MixRun::step` runs on the reference thread (`apo_link`, which holds the APO's mapping)
 //! at every reference tick, 40 ms while something moves; the depth goes to the service loop, the one
 //! writer of the session volumes (`ChatMixController::apply_session_mix`), through `DEPTH_X100`.
-//! The service loop tells it whether it owns the session volumes (`SESSION_MODE`).
+//! The service loop tells it whether it owns the session volumes (`SESSION_MODE`) and the Game /
+//! Chat session volumes it sets (`SESSION_GAINS`): the levels are measured after them, so what was
+//! learned moves with them, and the per-game store keeps the levels as at 100 %.
 
 use gamersequalizer_common::ducking::dbg::{
   self, BAND_DB, DEPTH_DB, FLAG_LATCHED, FLAG_LOUD_SEEDED, FLAG_LOUD_SETTLED, FLAG_QUIET_SEEDED, FLAG_QUIET_SETTLED,
@@ -36,9 +38,14 @@ pub const REFERENCE_MISSING: Duration = Duration::from_secs(5);
 const SAMPLE_MAX: f32 = 8.0;
 /// Owner value of the mix-mode line in the log (never a slot's: those carry an audiodg pid).
 const MIX_OWNER: u64 = u64::MAX;
+/// A session volume at or below this is muted: it says nothing about the level once unmuted.
+const MUTED_GAIN: f32 = 0.001;
 
 /// Service loop -> reference thread: the mixer owns the per-app session volumes.
 static SESSION_MODE: AtomicBool = AtomicBool::new(false);
+/// Service loop -> reference thread: the Game and Chat session volumes (linear, f32 bits) without
+/// this module's own lowering.
+static SESSION_GAINS: [AtomicU32; 2] = [AtomicU32::new(1.0f32.to_bits()), AtomicU32::new(1.0f32.to_bits())];
 /// Reference thread -> service loop: the depth (dB x 100) to fold into the Game sessions' volume.
 static DEPTH_X100: AtomicU32 = AtomicU32::new(0);
 /// Reference thread -> both loops: a reduction moves or holds, tick fast (`mix_fast`).
@@ -102,15 +109,21 @@ pub struct MixRun {
   chat_band_db: f32,
   /// The chat made sound in the last step: the game's level was held, not measured.
   chat_sounding: bool,
+  /// The Game and Chat session volumes (dB) the learned levels are at; None before the first look.
+  gains_db: Option<(f32, f32)>,
 }
 
 // ---------------------------------------------------------------------------------------
 // Public functions
 // ---------------------------------------------------------------------------------------
 
-/// Service loop: whether the mixer owns the per-app session volumes now.
-pub fn set_session_mode(on: bool) {
+/// Service loop: whether the mixer owns the per-app session volumes now, and the Game and Chat
+/// session volumes it sets (`ChatMixController::get_multipliers`).
+/// shortcut: a session the user moved by hand in the Windows mixer is not seen; it is relearned slowly.
+pub fn set_session_mode(on: bool, (game, chat): (f32, f32)) {
   SESSION_MODE.store(on, Ordering::Relaxed);
+  SESSION_GAINS[0].store(game.to_bits(), Ordering::Relaxed);
+  SESSION_GAINS[1].store(chat.to_bits(), Ordering::Relaxed);
 }
 
 /// Service loop: the factor to fold into the Game sessions' volume (1 = untouched).
@@ -123,6 +136,12 @@ pub fn game_duck_factor() -> f32 {
 /// lock was poisoned.
 pub fn mix_subject() -> Option<String> {
   SUBJECT.lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// The Game and Chat session volumes `set_session_mode` was given, for `step` / `seed_and_learn`.
+pub fn session_gains() -> (f32, f32) {
+  let [game, chat] = &SESSION_GAINS;
+  (f32::from_bits(game.load(Ordering::Relaxed)), f32::from_bits(chat.load(Ordering::Relaxed)))
 }
 
 /// A reduction moves or holds: both loops tick fast so the volume moves in small steps.
@@ -186,6 +205,7 @@ impl MixRun {
       mix_db: 0.0,
       chat_band_db: 0.0,
       chat_sounding: false,
+      gains_db: None,
     }
   }
 
@@ -212,8 +232,10 @@ impl MixRun {
   }
 
   /// Every reference tick: read the mix since the last step and lower the game, or let it come
-  /// back at the release rate. `layout`: the APO's mapping while we drive it.
-  pub fn step(&mut self, layout: Option<&ShmLayout>, settings: &DuckSettings, tuning: &DuckTuning) {
+  /// back at the release rate. `layout`: the APO's mapping while we drive it; `gains`: the Game and
+  /// Chat session volumes (`session_gains`).
+  pub fn step(&mut self, layout: Option<&ShmLayout>, settings: &DuckSettings, tuning: &DuckTuning, gains: (f32, f32)) {
+    self.follow_gains(gains);
     let now = Instant::now();
     // At most 0.5 s: a long pause (the thread was held up) must not jump the depth.
     let dt = self.last_step.map_or(0.0, |t| now.duration_since(t).as_secs_f32()).min(0.5);
@@ -290,14 +312,28 @@ impl MixRun {
     FAST.store(self.depth_db > 0.0 || talking, Ordering::Relaxed);
   }
 
+  /// When the session volumes moved, every game's levels move with them. Returns the volumes (dB)
+  /// the levels are at now.
+  fn follow_gains(&mut self, gains: (f32, f32)) -> (f32, f32) {
+    let now = gains_db(self.gains_db, gains);
+    if let Some((game_was, chat_was)) = self.gains_db
+      && now != (game_was, chat_was)
+    {
+      self.games.values_mut().for_each(|g| g.ducker.shift(now.0 - game_was, now.1 - chat_was));
+    }
+    self.gains_db = Some(now);
+    now
+  }
+
   /// Mix mode runs, or its reduction is still coming back.
   fn active(&self) -> bool {
     self.mode == Mode::Mix || self.depth_db > 0.0
   }
 
   /// Every 100 ms: hands the stored levels to a new run once, keeps what it settled on. Returns
-  /// the levels handed (for the log), once.
-  pub fn seed_and_learn(&mut self, store: &mut LevelStore) -> Option<(i32, i32)> {
+  /// the levels handed (for the log), once. `gains`: as for `step`.
+  pub fn seed_and_learn(&mut self, store: &mut LevelStore, gains: (f32, f32)) -> Option<(i32, i32)> {
+    let (game_db, chat_db) = self.follow_gains(gains);
     let key = self.key.as_deref()?;
     let game = self.games.get_mut(key)?;
     let key = mix_key(key);
@@ -305,13 +341,14 @@ impl MixRun {
     if game.seeded.is_none() {
       let levels = store.get(&key).unwrap_or((0, 0));
       let db = |x10: i32| (x10 != 0).then_some(x10 as f32 / 10.0);
-      game.ducker.seed(db(levels.0), db(levels.1));
+      // Stored as at 100 %: at the volumes now.
+      game.ducker.seed(db(levels.0).map(|v| v + game_db), db(levels.1).map(|v| v + chat_db));
       game.seeded = Some(levels);
       handed = (levels != (0, 0)).then_some(levels);
     }
     let (loud, quiet) = game.ducker.learned();
-    let x10 = |v: Option<f32>| valid(v.map_or(0, |db| (db * 10.0).round() as i32));
-    store.learn(&key, (x10(loud), x10(quiet)));
+    let x10 = |v: Option<f32>, at: f32| valid(v.map_or(0, |db| ((db - at) * 10.0).round() as i32));
+    store.learn(&key, (x10(loud, game_db), x10(quiet, chat_db)));
     handed
   }
 
@@ -352,6 +389,13 @@ impl Default for MixRun {
 
 /// The telemetry a slot would carry for this status (`StreamDucker`'s publish), so the log reads
 /// a mix-mode run with the same code as a stream.
+/// The session volumes in dB; a muted or broken one keeps its previous value (0 dB at first).
+fn gains_db(previous: Option<(f32, f32)>, (game, chat): (f32, f32)) -> (f32, f32) {
+  let to_db = |gain: f32, was: f32| if gain.is_finite() && gain > MUTED_GAIN { 20.0 * gain.log10() } else { was };
+  let (game_was, chat_was) = previous.unwrap_or((0.0, 0.0));
+  (to_db(game, game_was), to_db(chat, chat_was))
+}
+
 fn telemetry(st: &DuckStatus) -> [i32; DUCK_DBG_SLOTS] {
   let mut d = [dbg::NA; DUCK_DBG_SLOTS];
   let mut set = |index: usize, value: i32| {
@@ -459,15 +503,41 @@ mod tests {
     let tuning = DuckTuning::default();
     let settings = DuckSettings { enabled: true, strength: 0.5, game_gain: 1.0, chat_gain: 1.0 };
     // No mapping: not mix mode, but the game's run exists and keeps its seed across pauses.
-    run.step(None, &settings, &tuning);
+    run.step(None, &settings, &tuning, (1.0, 1.0));
     run.games.get_mut("game.exe").unwrap().seeded = Some((-200, -300));
     run.set_unheard(false, None); // a menu sound through the stream: paused
-    run.step(None, &settings, &tuning);
+    run.step(None, &settings, &tuning, (1.0, 1.0));
     run.set_unheard(true, None); // back, and nothing names another game
-    run.step(None, &settings, &tuning);
+    run.step(None, &settings, &tuning, (1.0, 1.0));
     assert_eq!(run.key.as_deref(), Some("game.exe"));
     assert_eq!(run.games.len(), 1);
     assert_eq!(run.games["game.exe"].seeded, Some((-200, -300)), "not handed again");
+  }
+
+  #[test]
+  fn a_session_volume_change_moves_the_levels_and_the_store_keeps_them_as_at_full_volume() {
+    let dir = std::env::temp_dir().join(format!("geq_mix_gains_{}", std::process::id()));
+    let mut store = LevelStore::load(dir.join("levels.json"));
+    store.learn(&mix_key("game.exe"), (-200, -300)); // as at 100 %
+    let mut run = MixRun::new();
+    run.set_unheard(true, Some(("game.exe".into(), r"\Device\HarddiskVolume3\game.exe".into())));
+    let settings = DuckSettings { enabled: true, strength: 0.5, game_gain: 1.0, chat_gain: 1.0 };
+    run.step(None, &settings, &DuckTuning::default(), (0.5, 1.0));
+    run.seed_and_learn(&mut store, (0.5, 1.0));
+    let learned = |run: &MixRun| run.games["game.exe"].ducker.learned();
+    let (loud, quiet) = learned(&run);
+    assert!((loud.unwrap() + 26.02).abs() < 0.01 && quiet == Some(-30.0), "seeded at -6 dB: {loud:?} {quiet:?}");
+    run.seed_and_learn(&mut store, (1.0, 1.0)); // the game turned up to 100 %
+    assert!((learned(&run).0.unwrap() + 20.0).abs() < 0.01, "{:?}", learned(&run));
+    assert_eq!(store.get(&mix_key("game.exe")), Some((-200, -300)), "stored as at 100 % throughout");
+    let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn session_volumes_in_db_keep_the_last_audible_value_through_a_mute() {
+    let at_half = gains_db(None, (0.5, 1.0));
+    assert!((at_half.0 + 6.02).abs() < 0.01 && at_half.1 == 0.0, "{at_half:?}");
+    assert_eq!(gains_db(Some(at_half), (0.0, f32::NAN)), at_half, "muted and garbage keep the last");
   }
 
   #[test]

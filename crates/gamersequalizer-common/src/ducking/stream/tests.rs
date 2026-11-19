@@ -464,7 +464,7 @@ fn only_the_saved_value_present_is_adopted() {
   rig.run(1.0, 0.0, FIGHT); // the spurt ends and teaches
   assert!((rig.game.loud_seed == Some(true)) && !(rig.game.quiet_seed == Some(true)));
   let learned = rig.game.status();
-  assert!(learned.loud_s >= T.loud_warm_s && learned.quiet_s > 0.9, "{learned:?}");
+  assert!(learned.loud_s >= T.loud_settled_s && learned.quiet_s > 0.9, "{learned:?}");
   // Learned from the chat's own level.
   let chat_db = db(f32::from_bits(rig.table.slots[CHAT].speech_ms.load(Ordering::Relaxed)));
   assert!((learned.quiet_db.unwrap() - chat_db).abs() < 0.5, "{:?} vs {chat_db}", learned.quiet_db);
@@ -476,10 +476,11 @@ fn a_saved_pair_arriving_mid_duck_moves_the_depth_only_at_the_slew_rates() {
   rig.run(10.0, 0.0, FIGHT);
   let mut depths = rig.run(2.0, VOICE, FIGHT); // not settled yet: the pair is adopted
   assert!(rig.depth() > 10.0);
+  let own = rig.game.status().loud_db.unwrap();
   slot(&rig).duck_saved_loud_db_x10.store(-200, Ordering::Relaxed);
   slot(&rig).duck_saved_quiet_db_x10.store(-150, Ordering::Relaxed);
   depths.extend(rig.run(3.0, VOICE, FIGHT));
-  assert!((rig.game.loud_seed == Some(true)) && rig.game.status().loud_db.unwrap() < -15.0, "adopted");
+  assert!((rig.game.loud_seed == Some(true)) && rig.game.status().loud_db.unwrap() < own, "adopted");
   for pair in depths.windows(2) {
     let step = pair[1] - pair[0];
     assert!(step <= T.fast_attack_db_per_s * 0.01 + 1e-4 && -step <= T.release_db_per_s * 0.01 + 1e-4, "{pair:?}");

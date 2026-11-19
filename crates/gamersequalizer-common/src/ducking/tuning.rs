@@ -72,41 +72,39 @@ duck_tuning! {
   game_rise_s = 0.4 in 0.01..=10.0,
   game_fall_s = 1.5 in 0.01..=30.0,
   /// The learned loud game level is an upper envelope of the current game level: above it, it
-  /// rises with a time constant (dB) of `loud_rise_s` plus one second per `loud_slowdown` seconds
-  /// of fight heard, at most `loud_rise_max_s`: fast in the first fight, then one explosion moves
-  /// it less and less. Fight heard = the current game level would mask the quiet talker (or,
-  /// before one is learned, the current spurt); nothing counts before a voice is heard, so calm
-  /// play and menus before the first fight leave the rise fast.
+  /// rises with this time constant (dB): the first fight is learned within seconds. Cost: a late
+  /// 2 s explosion 12 dB above the fight moves it about 6 dB, and the depth with it until the slow
+  /// fall brings it back.
   loud_rise_s = 3.0 in 0.1..=60.0,
-  loud_rise_max_s = 20.0 in 0.1..=300.0,
-  loud_slowdown = 15.0 in 1.0..=1000.0,
+  /// Slots of values no longer read, kept at their old default so an APO built before still reads
+  /// what it expects. shortcut: they hold slots of an unreleased layout; drop them with the next
+  /// `shm_version!` bump.
+  retired_loud_rise_max_s = 20.0 in 20.0..=20.0,
+  retired_loud_slowdown = 15.0 in 15.0..=15.0,
   /// Otherwise it falls at this fixed rate per minute of processed audio, however far below the
   /// game is, and never below the current level: a minute of travel costs 0.5 dB, ten minutes
   /// 5 dB; a one-off extreme and fights that really got quieter are forgotten over tens of
   /// minutes, the depth staying within `max_depth_db` meanwhile.
   loud_fall_db_per_min = 0.5 in 0.0..=60.0,
-  /// A loud level remembered from an earlier run counts as this much fight heard.
-  loud_warm_s = 30.0 in 0.0..=600.0,
+  retired_loud_warm_s = 30.0 in 30.0..=30.0,
   /// The quiet talker level is a lower envelope over spurt levels. A quieter spurt pulls it down
-  /// with a time constant (in seconds of the spurt's talk) of `quiet_fall_s` plus one second per
-  /// `quiet_slowdown` seconds of talk learned, at most `quiet_fall_max_s`; once settled, a spurt
-  /// counts as at most `quiet_outlier_db` under it (one whisper or a far-away mic moves it a
-  /// little, a real quiet talker gets there over a few spurts). A louder spurt lets it rise only
-  /// at `quiet_rise_db_per_min` per minute of talk: a quiet person who left is forgotten.
+  /// with this time constant (in seconds of the spurt's talk); once settled, a spurt counts as at
+  /// most `quiet_outlier_db` under it (one whisper or a far-away mic moves it a little, a real
+  /// quiet talker gets there over a few spurts). A louder spurt lets it rise only at
+  /// `quiet_rise_db_per_min` per minute of talk: a quiet person who left is forgotten.
   /// The fall is fast on purpose: the quiet person usually talks little, so the level must get
   /// there within a few of their sentences. Cost: one whispered stretch of about 3 s moves the
   /// depth by roughly 2.5 dB, and it comes back only at the slow rise.
-  quiet_fall_s = 2.0 in 0.1..=60.0,
-  quiet_fall_max_s = 3.0 in 0.1..=600.0,
-  quiet_slowdown = 10.0 in 1.0..=1000.0,
+  quiet_fall_s = 2.5 in 0.1..=60.0,
+  retired_quiet_fall_max_s = 3.0 in 3.0..=3.0,
+  retired_quiet_slowdown = 10.0 in 10.0..=10.0,
   quiet_outlier_db = 6.0 in 0.0..=60.0,
   quiet_rise_db_per_min = 1.0 in 0.0..=60.0,
-  /// A quiet talker level remembered from an earlier run counts as this much talk (so as settled).
-  quiet_warm_s = 10.0 in 0.0..=600.0,
+  retired_quiet_warm_s = 10.0 in 10.0..=10.0,
   /// The depth comes from a locked loud - quiet talker difference. Until the loud level has this
   /// much fight heard (so: 20 s of masking game after the first voice was heard) and the quiet
-  /// talker level this much talk learned, the lock follows the estimates; a remembered pair
-  /// counts at once.
+  /// talker level this much talk learned, the lock follows the estimates. A level remembered from
+  /// an earlier run counts as settled at once.
   loud_settled_s = 20.0 in 0.0..=600.0,
   quiet_settled_s = 10.0 in 0.0..=600.0,
   /// Then the lock is a backlash: the estimated difference must rise `hysteresis_up_db` above it
@@ -267,7 +265,8 @@ mod tests {
     // The installed APO reads `ShmHeader::duck_tune` by position while the exe is rebuilt: changing
     // this list (other than appending) means a new APO for everyone. Slots 32-34 were added after
     // the APO the user has installed and no APO build reads them, so slot 33 (`mix_chat_factor`)
-    // became `mix_chat_guard_s` in place; from here on, only append.
+    // became `mix_chat_guard_s` in place; from here on, only append. A value no longer read keeps
+    // its slot as `retired_*`, pinned to its old default.
     let names: Vec<&str> = PARAMS.iter().map(|p| p.0).collect();
     let pinned = [
       "band_center_hz",
@@ -285,16 +284,16 @@ mod tests {
       "game_rise_s",
       "game_fall_s",
       "loud_rise_s",
-      "loud_rise_max_s",
-      "loud_slowdown",
+      "retired_loud_rise_max_s",
+      "retired_loud_slowdown",
       "loud_fall_db_per_min",
-      "loud_warm_s",
+      "retired_loud_warm_s",
       "quiet_fall_s",
-      "quiet_fall_max_s",
-      "quiet_slowdown",
+      "retired_quiet_fall_max_s",
+      "retired_quiet_slowdown",
       "quiet_outlier_db",
       "quiet_rise_db_per_min",
-      "quiet_warm_s",
+      "retired_quiet_warm_s",
       "loud_settled_s",
       "quiet_settled_s",
       "hysteresis_up_db",

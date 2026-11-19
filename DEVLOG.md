@@ -3152,12 +3152,12 @@ calm game with a stray sound: nothing happens.
   within the hold latches within about a second.
 - How much, once per run: depth = locked difference + volumes + margin, at most 20 dB. The difference is
   the learned loud game level minus the learned quiet talker level:
-  - loud: an upper envelope of the game level, rising with 3 s (slower with the fight heard, at most 20 s,
-    so an explosion late in a session moves it ~2 dB), falling 0.5 dB per minute, never below the game;
+  - loud: an upper envelope of the game level, rising with 3 s (a 2 s explosion 12 dB above the fight
+    moves it about 6 dB), falling 0.5 dB per minute, never below the game;
     "fight heard" = the game masks the quiet talker, so menus and travel before the first talk count nothing;
   - quiet: the quietest of the people who normally talk. Spurts teach it from 1 s of talk on: a running mean
-    until 10 s of such talk (the first talkers average), then a lower envelope (falls with 2 s of talk,
-    at most 3 s, because the quiet talker usually says little and the level must get there within a few
+    until 10 s of such talk (the first talkers average), then a lower envelope (falls with 2.5 s of talk,
+    because the quiet talker usually says little and the level must get there within a few
     of their sentences; one spurt counts at most 6 dB under it, so one whispered stretch of ~3 s moves the
     depth by ~2.5 dB and it comes back only slowly; rises 1 dB per minute of talk, so a quiet talker who
     left is forgotten);
@@ -3182,16 +3182,28 @@ calm game with a stray sound: nothing happens.
   no sound at all: `chat_sounding` reads the chat streams' level envelopes (broadband, before the
   voice detector: any chat sound counts), plus `mix_chat_guard_s` (0.3 s) for the chat's way through
   the spatial renderer and the tail of a word. Then the mix is the game, with the ducker's own lowering
-  undone (the depth it returned last tick); the level held is the mean over the latest chat-free
-  stretch (a running mean from its start, then over 1 s). While the chat sounds it is held: nothing is
-  learned and nothing moves it. The loud level learns only from chat-free ticks with no reduction
-  applied. `resync` (a gap in the reference) keeps the decision and the depth; `duck_sim --mix` runs
-  this path, with `chat_sounding` from the chat file's envelope.
+  undone (the depth it returned last tick). It is read in segments (a chat-free stretch, cut every
+  1 s); the held level falls with `mix_game_fall_s` and rises only to what two segments in a row read
+  (the lower mean), so one shot in a calm game cannot pass for a fight. While the chat sounds it is
+  held: nothing is learned and nothing moves it. The segment before ages with `mix_game_fall_s` over
+  the talk since, so a fight long over confirms no shot. The loud level learns from chat-free ticks
+  only, each one standing for the time since the previous measurement (at most 2 s), also while
+  lowered (the depth is undone), but then never above the game level read when the depth was last
+  under 0.5 dB: the undo also lifts what the service does not lower (another app, a failed volume
+  change), which would feed the depth and itself up to the bound and be stored (offline: -9 dB grew
+  to +6.6 dB without the cap). It used to learn only with no reduction applied and one tick per measurement: in a
+  `duck_sim --mix` lobby scenario (20 min calm game with constant talk, fights in between) a fight
+  starting while ducked was never learned, the loud level stayed 20-25 dB under the fight and the
+  depth was 2-6 dB instead of the 18 dB bound; now every fight gets 18 dB, the lobbies 0. `resync` (a gap in the reference) keeps the decision
+  and the depth; `duck_sim --mix` runs this path, with `chat_sounding` from the chat file's envelope.
 - Per game: once settled, the two levels go to the slot (`duck_loud_db_x10`, `duck_quiet_db_x10`); the
   service stores them per game exe and writes them back (`duck_saved_*`) when it pairs the next run's
-  stream. Adopted once, as 30 s of fight / 10 s of talk, so the next run is locked from its first sentence;
-  refused when the stream already settled on its own (service restart, late pairing).
-- Tuning: every value above is a starting point in `DuckTuning` (32 named values with sane ranges, 48 slots
+  stream. Adopted once, as settled, so the next run is locked from its first sentence; refused when
+  the stream already settled on its own (service restart, late pairing). Mix mode stores them as at
+  100 % session volume and, when the Game or Chat session volume moves during a run, shifts what it
+  learned by the change (`MixDucker::shift`), so the next fight gets the depth for the new volume at
+  once. Stream mode does not yet: its levels live in the APO.
+- Tuning: every value above is a starting point in `DuckTuning` (34 named values with sane ranges, 48 slots
   in `ShmHeader::duck_tune`, positions pinned by a test). The service reads `duck_tuning.json` from
   `%APPDATA%\GamersEqualizer` and publishes it; the APOs re-read it when `duck_tune_version` moves, so one APO
   install lasts through all tuning. A band change while ducking reshapes the cut at once: make it between
@@ -3233,6 +3245,16 @@ calm game with a stray sound: nothing happens.
   it); one learned voice level for everyone (loud talkers ducked, quiet ones under-ducked); the first spurt
   setting the quiet level and settling after 3 s (an early quiet spurt pinned it); a spurt level that was
   the mean since the spurt began (a quiet talker answering a loud one inherited the loud mean).
+- Simplified, not replaced (2026-11-19): a design from scratch with 10 constants and no learning (a
+  chat-to-game ratio estimated in the mix by subtraction, a talk gate, one slew rate) ran against this one
+  in `duck_sim --mix` on nine scenarios (lobbies, a pause-free chat, two talkers, short words, one shot,
+  a talker above the game, the game turned down, gaps in a fight, the talk ending). It lowered calm
+  lobbies and a talker above the game and was deeper in a fight's gaps than in its bursts: during
+  continuous talk its "game" was the chat. Kept the learning; dropped the slowdown of both learning
+  rates and the warm-up values (six tunables, their slots kept as `retired_*`). Taken from the
+  comparison: one shot no longer lowers a calm game for ~25 s (two segments must agree; cost: in a
+  chat with few pauses a fight is picked up about 7 s later), and a session volume change moves the
+  learned levels (a game turned down 10 dB: next fight 8 dB instead of 16 dB).
 
 Tests: `ducking/gain/tests.rs` (who ducks, the quiet and loud levels, the lock, seeding),
 `ducking/stream/tests.rs` (bit-exact idle, slew and per-sample smoothness, band limits, sample rates and

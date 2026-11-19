@@ -85,23 +85,24 @@ struct Learned {
 
 impl DuckGain {
   /// One block of `dt` seconds: `chat_ms` / `game_ms` are the summed raw speech-band levels of the
-  /// chat and the game streams. `learn_loud`: whether `game_ms` may teach the loud level (the mix
-  /// ducker's estimate may not while it is lowering the game). Returns the depth (dB) the game's
-  /// band is lowered by.
+  /// chat and the game streams. `loud`: (seconds of game the current level stands for in the
+  /// loud level, 0 = it teaches nothing; the most it may teach, dB): the mix ducker measures only in
+  /// the chat's pauses, one measurement standing for the time since the previous one, and caps
+  /// what it learns while lowered. Returns the depth (dB) the game's band is lowered by.
   pub(super) fn update(
     &mut self,
     dt: f32,
     chat_ms: f32,
     game_ms: f32,
-    learn_loud: bool,
+    (loud_dt, loud_cap_db): (f32, f32),
     s: &DuckSettings,
     t: &DuckTuning,
   ) -> f32 {
     // The game level runs while nobody talks too, so it is known when speech starts.
     self.game_ms = smooth(self.game_ms, game_ms, dt, t.game_rise_s, t.game_fall_s);
     let game_db = db(self.game_ms);
-    if learn_loud {
-      self.learned.learn_loud(game_db, dt, t);
+    if loud_dt > 0.0 {
+      self.learned.learn_loud(game_db.min(loud_cap_db), loud_dt, t);
     }
 
     let talking = s.enabled && s.chat_gain > 0.0 && db(chat_ms) > t.talk_threshold_db;
@@ -172,6 +173,18 @@ impl DuckGain {
     *self = DuckGain { learned: self.learned, ..DuckGain::default() };
   }
 
+  /// A volume before the measurement moved (a session volume, `game_db` / `chat_db` its change):
+  /// the learned levels and the current game level move with it, so the next fight gets the
+  /// depth for the new volume at once instead of after tens of minutes of slow learning.
+  pub(super) fn shift(&mut self, game_db: f32, chat_db: f32) {
+    let l = &mut self.learned;
+    l.loud_db = l.loud_db.map(|v| v + game_db);
+    l.quiet_db = l.quiet_db.map(|v| v + chat_db);
+    l.lock_db = l.lock_db.map(|v| v + game_db - chat_db);
+    self.game_ms *= 10f32.powf(game_db / 10.0);
+    self.spurt_db += chat_db;
+  }
+
   /// Adopts a level an earlier run of this game learned, unless this stream's own estimate has
   /// already settled (a service restart or a late pairing mid-run must not shift the depth).
   /// Returns whether it was adopted.
@@ -179,7 +192,7 @@ impl DuckGain {
     let l = &mut self.learned;
     let adopt = l.loud_s < t.loud_settled_s;
     if adopt {
-      (l.loud_db, l.loud_s, l.lock_db) = (Some(db), l.loud_s.max(t.loud_warm_s), None);
+      (l.loud_db, l.loud_s, l.lock_db) = (Some(db), l.loud_s.max(t.loud_settled_s), None);
     }
     adopt
   }
@@ -188,7 +201,7 @@ impl DuckGain {
     let l = &mut self.learned;
     let adopt = l.quiet_s < t.quiet_settled_s;
     if adopt {
-      (l.quiet_db, l.quiet_s, l.lock_db) = (Some(db), l.quiet_s.max(t.quiet_warm_s), None);
+      (l.quiet_db, l.quiet_s, l.lock_db) = (Some(db), l.quiet_s.max(t.quiet_settled_s), None);
     }
     adopt
   }
@@ -230,15 +243,12 @@ impl DuckGain {
 // ---------------------------------------------------------------------------------------
 
 impl Learned {
-  /// The loud level is an upper envelope of the game level: above it, it rises (ever slower with
-  /// the fight heard); otherwise it falls at a fixed rate, never below the game.
+  /// The loud level is an upper envelope of the game level: above it, it rises with
+  /// `loud_rise_s`; otherwise it falls at a fixed rate, never below the game.
   fn learn_loud(&mut self, game_db: f32, dt: f32, t: &DuckTuning) {
     self.loud_db = Some(match self.loud_db {
       None => game_db,
-      Some(loud) if game_db > loud => {
-        let rise_s = (t.loud_rise_s + self.loud_s / t.loud_slowdown).min(t.loud_rise_max_s);
-        smooth(loud, game_db, dt, rise_s, rise_s)
-      }
+      Some(loud) if game_db > loud => smooth(loud, game_db, dt, t.loud_rise_s, t.loud_rise_s),
       Some(loud) => (loud - t.loud_fall_db_per_min * dt / 60.0).max(game_db),
     });
   }
@@ -255,8 +265,7 @@ impl Learned {
       Some(quiet) => {
         let level = level.max(quiet - t.quiet_outlier_db);
         if level < quiet {
-          let fall_s = (t.quiet_fall_s + self.quiet_s / t.quiet_slowdown).min(t.quiet_fall_max_s);
-          quiet + (level - quiet) * (1.0 - (-dt / fall_s).exp())
+          quiet + (level - quiet) * (1.0 - (-dt / t.quiet_fall_s).exp())
         } else {
           (quiet + t.quiet_rise_db_per_min * dt / 60.0).min(level)
         }

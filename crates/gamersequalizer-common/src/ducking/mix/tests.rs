@@ -144,14 +144,33 @@ fn a_few_quiet_seconds_between_fights_do_not_let_go_of_the_duck_while_the_talk_g
 }
 
 #[test]
-fn a_fight_starting_in_speech_is_picked_up_at_the_next_pause() {
+fn a_fight_starting_in_speech_is_picked_up_at_the_second_pause() {
   let mut rig = MixRig::new();
   rig.run(20.0, FIGHT, 0.0); // an earlier fight: the loud level is known
   rig.run(40.0, 0.0, 0.0); // the level falls slowly: long enough to be gone
   rig.run(5.0, 0.0, VOICE);
   assert!(rig.run(5.0, FIGHT, VOICE).iter().all(|d| *d == 0.0), "not while the talk goes on");
   rig.run(0.4, FIGHT, 0.0);
+  assert!(rig.run(1.0, FIGHT, VOICE).iter().all(|d| *d == 0.0), "one pause could be one shot");
+  rig.run(0.4, FIGHT, 0.0);
   assert!(*rig.run(3.0, FIGHT, VOICE).last().unwrap() > 5.0);
+}
+
+#[test]
+fn one_shot_in_a_calm_game_does_not_lower_it_while_the_talk_goes_on() {
+  // Regression: a pause's mean became the held game level at once, so one shot in a pause of a
+  // calm game was held as a fight and lowered the game for about 25 s while the talk went on.
+  let mut rig = MixRig::new();
+  rig.run(20.0, FIGHT, 0.0); // the loud level is known
+  rig.run(40.0, 0.0, 0.0);
+  let calm = rig.game_db();
+  let mut depths = rig.run(3.0, 0.0, VOICE);
+  depths.extend([rig.run(0.3, 0.0, 0.0), rig.run(0.1, FIGHT, 0.0), rig.run(3.0, 0.0, VOICE)].concat());
+  for _ in 0..5 {
+    depths.extend([rig.run(0.4, 0.0, 0.0), rig.run(3.0, 0.0, VOICE)].concat());
+  }
+  assert!(depths.iter().all(|d| *d == 0.0), "{depths:?}");
+  assert!(rig.game_db() <= calm, "{calm} -> {}", rig.game_db());
 }
 
 #[test]
@@ -164,6 +183,9 @@ fn the_guard_keeps_the_chats_tail_out_of_the_game() {
     rig.run(20.0, QUIET_GAME, 0.0);
     rig.run(3.0, QUIET_GAME, VOICE);
     let before = rig.game_db();
+    // Two pauses: the held level rises only to what two segments in a row read.
+    rig.run(0.1, QUIET_GAME, 0.0);
+    rig.run(1.0, QUIET_GAME, VOICE);
     rig.run(0.1, QUIET_GAME, 0.0);
     rig.game_db() - before
   };
@@ -189,18 +211,59 @@ fn its_own_reduction_is_undone_during_the_release_with_the_depth_applied_late() 
 }
 
 #[test]
-fn the_loud_level_learns_neither_from_chat_nor_under_a_reduction() {
-  // The caller never applies the depth: undone, the mix would read the game too loud.
+fn the_chat_never_teaches_the_loud_level() {
   let mut rig = MixRig::new();
-  rig.applied_after = None;
   rig.chat_in_mix = 10.0;
   rig.run(20.0, FIGHT, 0.0);
   let loud = rig.ducker.status().loud_db.unwrap();
   rig.run(10.0, FIGHT, VOICE);
-  assert_eq!(rig.ducker.status().loud_db.unwrap(), loud, "chat");
-  while rig.tick(FIGHT, 0.0) > LEARN_BELOW_DEPTH_DB {
-    assert_eq!(rig.ducker.status().loud_db.unwrap(), loud, "reduction applied");
+  assert_eq!(rig.ducker.status().loud_db.unwrap(), loud);
+}
+
+#[test]
+fn a_fight_heard_only_in_short_pauses_is_learned_after_the_reduction_starts() {
+  // Regression: the loud level learned only with no reduction applied, and one measurement counted
+  // as one tick, so a fight that began with the talk was learned for one tick, then lowered, and
+  // the depth stayed sized for whatever the game was before.
+  let mut rig = MixRig::new();
+  rig.run(20.0, 0.0, 0.0);
+  for _ in 0..20 {
+    rig.run(3.0, FIGHT, VOICE);
+    rig.run(0.4, FIGHT, 0.0);
   }
+  let st = rig.ducker.status();
+  let loud = st.loud_db.unwrap();
+  assert!(st.depth_db > 5.0 && loud > st.game_db - 3.0, "loud {loud}, game {}, depth {}", st.game_db, st.depth_db);
+}
+
+#[test]
+fn a_reduction_that_never_arrives_cannot_inflate_the_loud_level() {
+  // The undo lifts whatever the service does not lower (here: the volume change never happens);
+  // learning it would raise the depth, then the level, up to the bound, and store it.
+  let mut rig = MixRig::new();
+  rig.applied_after = None;
+  rig.run(20.0, FIGHT, 0.0);
+  let loud = rig.ducker.status().loud_db.unwrap();
+  for _ in 0..20 {
+    rig.run(3.0, FIGHT, VOICE);
+    rig.run(0.4, FIGHT, 0.0);
+  }
+  let st = rig.ducker.status();
+  assert!(st.depth_db > 5.0 && st.loud_db.unwrap() <= loud + 0.5, "{loud} -> {:?}", st.loud_db);
+}
+
+#[test]
+fn a_segment_from_long_ago_confirms_no_shot() {
+  // After a minute of talk the segment before is the fight that ended meanwhile: aged, it must not
+  // let one shot in the next pause pass for the fight going on.
+  let mut rig = MixRig::new();
+  rig.run(20.0, FIGHT, 0.0);
+  let fight = rig.game_db();
+  rig.run(60.0, 0.0, VOICE);
+  rig.run(0.6, 0.0, 0.0); // the guard, then the calm game measured: the held level falls to it
+  rig.run(0.1, FIGHT, 0.0); // one shot, same pause
+  rig.run(10.0, 0.0, VOICE);
+  assert!(rig.game_db() < fight - 20.0, "fight {fight}, now {}", rig.game_db());
 }
 
 #[test]

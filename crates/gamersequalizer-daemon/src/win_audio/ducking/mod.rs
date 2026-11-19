@@ -122,7 +122,7 @@ impl Ducking {
       self.failed.retain(live);
       let store = self.store.get_or_insert_with(LevelStore::load_default);
       hand_and_learn(store, &mut self.handed, table, &streams);
-      if let Some(levels) = self.mix.seed_and_learn(store) {
+      if let Some(levels) = self.mix.seed_and_learn(store, mix::session_gains()) {
         info!("[Ducking] {name} (mix) was handed stored levels: {}", levels_text(levels));
       }
     }
@@ -147,7 +147,7 @@ impl Ducking {
   /// Every reference tick (40 ms while a reduction moves, else 50 ms): mix mode's step. `layout`:
   /// the APO's mapping while we drive it.
   pub fn tick_mix(&mut self, h: &ShmHeader, layout: Option<&ShmLayout>) {
-    self.mix.step(layout, &DuckSettings::read(h), self.tuning.tuning());
+    self.mix.step(layout, &DuckSettings::read(h), self.tuning.tuning(), mix::session_gains());
   }
 
   /// Mix mode needs the speaker reference (`aec_reference` asks the output APO for it).

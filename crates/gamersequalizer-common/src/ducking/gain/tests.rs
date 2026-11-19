@@ -103,7 +103,7 @@ fn the_same_scenario_at_10_and_50_ms_steps_ends_at_the_same_depth() {
       let t = step as f32 * dt % 7.0;
       let in_sentence = (1.0..4.0).contains(&t) && (t - 1.0) % 0.7 < 0.5;
       let chat_ms = if in_sentence { 10f32.powf(-3.0) } else { 0.0 };
-      let depth = gain.update(dt, chat_ms, 10f32.powf(-2.2), true, &DEFAULT, &T);
+      let depth = gain.update(dt, chat_ms, 10f32.powf(-2.2), (dt, f32::INFINITY), &DEFAULT, &T);
       if (1.0..4.0).contains(&t) {
         peak = peak.max(depth);
       } else if peak > 0.0 {
@@ -256,20 +256,33 @@ fn ten_minutes_of_calm_cost_five_db() {
 }
 
 #[test]
-fn an_explosion_moves_the_loud_level_less_and_less() {
-  let explosion = |gain: &mut DuckGain| {
-    let before = gain.learned.loud_db.unwrap();
-    drive(gain, 2.0, -10.0, |_| false);
-    drive(gain, 10.0, -22.0, |_| false);
-    gain.learned.loud_db.unwrap() - before
-  };
-  // Fight time counts once a voice is known: a sentence at the start of each.
-  let mut early = DuckGain::default();
-  drive(&mut early, 10.0, -22.0, |i| i < 300);
-  let mut late = DuckGain::default();
-  drive(&mut late, 300.0, -22.0, |i| i < 300);
-  let (early, late) = (explosion(&mut early), explosion(&mut late));
-  assert!(early > 3.0 && late < 2.5, "early {early} dB, late {late} dB");
+fn a_volume_change_moves_the_depth_with_it_at_once() {
+  // Regression: the levels are learned as measured, after the session volumes; the game turned
+  // down 6 dB was ducked as deep as before until the slow fall caught up (tens of minutes).
+  let mut gain = DuckGain::default();
+  settle(&mut gain); // locked on a -22 dB fight, quiet talker -30 dB
+  let before = *fight_at(&mut gain, -22.0).last().unwrap();
+  gain.shift(-6.0, 0.0);
+  let game_down = *fight_at(&mut gain, -28.0).last().unwrap();
+  assert!((before - game_down - 6.0).abs() < 0.3, "{before} -> {game_down}");
+  gain.shift(0.0, -3.0); // the chat turned down 3 dB: it talks at -33
+  let chat_down = drive_voice(&mut gain, 3.0, -28.0, -33.0, |i| i % 70 < 50);
+  assert!((peak(&chat_down) - game_down - 3.0).abs() < 0.3, "{game_down} -> {}", peak(&chat_down));
+}
+
+#[test]
+fn an_explosion_moves_the_loud_level_by_its_rise_only() {
+  // The rise is one time constant at any point of a session: a 2 s explosion 12 dB above the
+  // fight moves the level by at most what 2 s of `loud_rise_s` allow.
+  let mut gain = DuckGain::default();
+  drive(&mut gain, 300.0, -22.0, |i| i < 300);
+  let before = gain.learned.loud_db.unwrap();
+  drive(&mut gain, 2.0, -10.0, |_| false);
+  drive(&mut gain, 10.0, -22.0, |_| false);
+  let moved = gain.learned.loud_db.unwrap() - before;
+  // The current game level falls after it with `game_fall_s`, still above the loud level.
+  let bound = 12.0 * (1.0 - (-(2.0 + T.game_fall_s) / T.loud_rise_s).exp());
+  assert!(moved > 3.0 && moved <= bound + 0.1, "{moved} dB, bound {bound} dB");
 }
 
 // --- The lock: one depth for the run ---
@@ -322,7 +335,8 @@ fn a_sustained_louder_game_moves_the_depth_by_the_excess_only() {
   for _ in 0..12_000 {
     drive(&mut gain, 0.01, -17.0, |_| false);
     let now = gain.learned.lock_db.unwrap();
-    assert!((now - lock).abs() < 0.01, "step {lock} -> {now}");
+    // The loud level rises with `loud_rise_s`: about 1.7 dB/s at first, 0.017 dB per block.
+    assert!((now - lock).abs() < 0.02, "step {lock} -> {now}");
     lock = now;
   }
   let after = *fight_at(&mut gain, -17.0).last().unwrap();
@@ -409,7 +423,7 @@ fn a_seeded_quiet_level_too_loud_comes_down_and_too_quiet_rises_only_slowly() {
   let mut gain = DuckGain::default();
   gain.seed_quiet(-40.0, &T);
   spurts(&mut gain);
-  let (rise, learned_s) = (gain.learned.quiet_db.unwrap() + 40.0, gain.learned.quiet_s - T.quiet_warm_s);
+  let (rise, learned_s) = (gain.learned.quiet_db.unwrap() + 40.0, gain.learned.quiet_s - T.quiet_settled_s);
   assert!((rise - T.quiet_rise_db_per_min * learned_s / 60.0).abs() < 0.02, "{rise} after {learned_s} s");
 }
 
@@ -466,7 +480,9 @@ fn drive_levels_at(
 ) -> Vec<f32> {
   let game_ms = 10f32.powf(game_db / 10.0);
   (0..(seconds * 100.0).round() as usize)
-    .map(|i| gain.update(0.01, voice(i).map_or(0.0, |db| 10f32.powf(db / 10.0)), game_ms, true, settings, &T))
+    .map(|i| {
+      gain.update(0.01, voice(i).map_or(0.0, |db| 10f32.powf(db / 10.0)), game_ms, (0.01, f32::INFINITY), settings, &T)
+    })
     .collect()
 }
 

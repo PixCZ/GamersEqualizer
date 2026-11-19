@@ -287,7 +287,10 @@ pub(super) fn run_background_daemon() {
       // Atomics only: automatic ChatMix in the APO weighs game against chat as they are heard.
       win_audio.chatmix.write_duck_gains(header);
       // Mix mode lowers the Game sessions through the one writer of them (`apply_session_mix`).
-      win_audio::ducking::set_session_mode(win_audio.chatmix.owns_session_volumes());
+      win_audio::ducking::set_session_mode(
+        win_audio.chatmix.owns_session_volumes(),
+        win_audio.chatmix.get_multipliers(),
+      );
       win_audio.chatmix.duck_factor = win_audio::ducking::game_duck_factor();
       win_audio.chatmix.duck_subject = win_audio::ducking::mix_subject();
 
