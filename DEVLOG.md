@@ -2831,8 +2831,9 @@ Branch `genre-presets`. Planned as release 0.2.0 "profile edition".
   (`winsqlite3`, 500 ms busy timeout; it was seen locked) and Steam's `appinfo.vdf` (binary KV v28/v29,
   `common/store_tags`, `common/type`). Specific labels (fps, moba, rts, visual novel...) win over broad
   ones (strategy, rpg, survival...); among broad ones the game's own label order decides. Cached per exe
-  in `genre_cache.json` (cleared when Galaxy / Steam data or `RULES_VERSION` change; not cached while
-  Galaxy is unreadable). One log line per game: verdict, Galaxy labels, Steam tags.
+  in `genre_cache.json` (cleared when `RULES_VERSION` changes; when Galaxy / Steam data change only the
+  games without a result are looked up again, since Galaxy writes its database at almost every game
+  start, 2026-11-19; not cached while Galaxy is unreadable). One log line per game: verdict, Galaxy labels, Steam tags.
 - Not a game: Steam apps whose type is not Game / Demo (Lossless Scaling, Game Compressor) never become
   the active game, even with launcher facts; a binding still wins. Store apps count as launcher games only
   under `XboxGames` (WindowsApps also holds Windows Terminal, Snipping Tool).
