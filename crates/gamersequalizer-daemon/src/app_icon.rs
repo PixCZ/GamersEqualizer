@@ -1,6 +1,7 @@
 //! The app's icon (window and tray), drawn in code: equalizer bars on a rounded square.
 //! Red variant = some app is recording from a microphone. Warning badge (amber circle with
 //! "!", bottom right) = a setup problem (`health`); it combines with either colour.
+//! `bar_scale` below 1.0 shortens the bars: the tray shows the microphone level with it (`tray_level`).
 
 /// Bar heights as a fraction of the icon, left to right (an EQ curve).
 const BARS: [f32; 4] = [0.42, 0.62, 0.36, 0.52];
@@ -32,8 +33,8 @@ const MARK_BAR_BOTTOM: f32 = 0.70;
 const MARK_DOT_TOP: f32 = 0.77;
 const MARK_DOT_BOTTOM: f32 = 0.89;
 
-/// Square RGBA image, `size` x `size`.
-pub fn rgba(size: u32, mic_active: bool, warning: bool) -> Vec<u8> {
+/// Square RGBA image, `size` x `size`. `bar_scale`: bar heights as a share of the full ones.
+pub fn rgba(size: u32, mic_active: bool, warning: bool, bar_scale: f32) -> Vec<u8> {
   let (bg, bars) = if mic_active { (MIC_BG, MIC_BARS) } else { (NORMAL_BG, NORMAL_BARS) };
   let mut out = Vec::with_capacity((size * size * 4) as usize);
   let samples = (SUPERSAMPLE * SUPERSAMPLE) as f32;
@@ -46,7 +47,7 @@ pub fn rgba(size: u32, mic_active: bool, warning: bool) -> Vec<u8> {
           let x = (px as f32 + (sx as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
           let y = (py as f32 + (sy as f32 + 0.5) / SUPERSAMPLE as f32) / size as f32;
           let color = if warning { badge_color(x, y) } else { None }
-            .or_else(|| in_rounded_square(x, y).then_some(if in_bar(x, y) { bars } else { bg }));
+            .or_else(|| in_rounded_square(x, y).then_some(if in_bar(x, y, bar_scale) { bars } else { bg }));
           if let Some(c) = color {
             covered += 1.0;
             for (s, v) in sum.iter_mut().zip(c) {
@@ -86,12 +87,12 @@ fn in_rounded_square(x: f32, y: f32) -> bool {
   (x - cx).powi(2) + (y - cy).powi(2) <= r * r
 }
 
-fn in_bar(x: f32, y: f32) -> bool {
+fn in_bar(x: f32, y: f32, scale: f32) -> bool {
   let total = BARS.len() as f32 * BAR_WIDTH + (BARS.len() - 1) as f32 * BAR_GAP;
   let left = (1.0 - total) / 2.0;
   BARS.iter().enumerate().any(|(i, h)| {
     let x0 = left + i as f32 * (BAR_WIDTH + BAR_GAP);
-    x >= x0 && x < x0 + BAR_WIDTH && y <= BAR_BOTTOM && y >= BAR_BOTTOM - h
+    x >= x0 && x < x0 + BAR_WIDTH && y <= BAR_BOTTOM && y >= BAR_BOTTOM - h * scale
   })
 }
 
@@ -104,12 +105,21 @@ mod tests {
   #[test]
   fn badge_shows_only_with_warning_and_keeps_mic_colour() {
     // Inside the badge, left of the "!".
-    let badge = pixel(&rgba(SIZE, true, true), 0.45, 0.62);
+    let badge = pixel(&rgba(SIZE, true, true, 1.0), 0.45, 0.62);
     assert_eq!(&badge[..3], &BADGE_FILL);
-    let plain = pixel(&rgba(SIZE, true, false), 0.45, 0.62);
+    let plain = pixel(&rgba(SIZE, true, false, 1.0), 0.45, 0.62);
     assert_ne!(&plain[..3], &BADGE_FILL);
     // Top left is untouched: still the red mic background.
-    assert_eq!(&pixel(&rgba(SIZE, true, true), 0.3, 0.1)[..3], &MIC_BG);
+    assert_eq!(&pixel(&rgba(SIZE, true, true, 1.0), 0.3, 0.1)[..3], &MIC_BG);
+  }
+
+  #[test]
+  fn bars_shorten_with_the_scale() {
+    // Inside the tallest bar: near its top, and near its bottom.
+    let (top, bottom) = ((0.41, 0.25), (0.41, 0.75));
+    assert_eq!(&pixel(&rgba(SIZE, true, false, 1.0), top.0, top.1)[..3], &MIC_BARS);
+    assert_eq!(&pixel(&rgba(SIZE, true, false, 0.3), top.0, top.1)[..3], &MIC_BG);
+    assert_eq!(&pixel(&rgba(SIZE, true, false, 0.3), bottom.0, bottom.1)[..3], &MIC_BARS);
   }
 
   fn pixel(img: &[u8], x: f32, y: f32) -> [u8; 4] {

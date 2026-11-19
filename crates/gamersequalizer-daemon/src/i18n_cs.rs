@@ -1004,6 +1004,11 @@ pub static CS: &[(&str, &str)] = &[
   ("Startup and background service", "Spouštění a služba na pozadí"),
   ("Starts the background service when you sign in to Windows.", "Spustí službu na pozadí po přihlášení do Windows."),
   ("Start with Windows", "Spouštět s Windows"),
+  ("Show the microphone level in the tray icon", "Ukazovat úroveň mikrofonu v ikoně na hlavním panelu"),
+  (
+    "While an app records, the bars in the icon follow what others hear from you; only with microphone processing on. They stand still behind a full-screen app and while Windows keeps the icon among the hidden icons: drag it to the taskbar.",
+    "Když nějaká aplikace nahrává, čárky v ikoně se hýbou podle toho, co od vás slyší ostatní; jen se zapnutým zpracováním mikrofonu. Stojí, když je v popředí aplikace přes celou obrazovku a když Windows drží ikonu mezi skrytými ikonami: přetáhněte ji na hlavní panel.",
+  ),
   ("Close window", "Zavřít okno"),
   (
     "Closes only this window; the background service keeps processing audio.",

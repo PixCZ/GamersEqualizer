@@ -4,9 +4,12 @@
 //! top of the menu.
 
 use crate::health::{Fix, Issue};
+use crate::tray_level::{self, LevelMeter};
+use gamersequalizer_common::shm::ShmHeader;
 use log::{info, warn};
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -55,6 +58,9 @@ pub struct TrayHost {
   mic_checked_at: Option<Instant>,
   /// Setup problems: badge, tooltip lines and the top of the menu.
   issues: Vec<Issue>,
+  /// The bars follow the microphone level; `level_shown` is the step the icon has now.
+  level: LevelMeter,
+  level_shown: Option<u8>,
 }
 
 impl TrayManager {
@@ -63,7 +69,7 @@ impl TrayManager {
       // Left click opens the window; the menu is on right click.
       .with_menu_on_left_click(false)
       .with_tooltip(TOOLTIP)
-      .with_icon(tray_icon(false, false)?)
+      .with_icon(tray_icon(false, false, None)?)
       .build()
       .map_err(|e| format!("Failed to create tray icon: {}", e))?;
     let mut tray = Self {
@@ -114,8 +120,17 @@ impl TrayManager {
   }
 
   /// Red icon while an app records from a microphone; badge while there are setup problems.
-  fn show_state(&self, mic_active: bool, issues: &[Issue]) {
-    match tray_icon(mic_active, !issues.is_empty()) {
+  fn show_state(&self, mic_active: bool, issues: &[Issue], level: Option<u8>) {
+    self.set_icon(mic_active, !issues.is_empty(), level);
+    let base = if mic_active { TOOLTIP_MIC } else { TOOLTIP };
+    let lines: Vec<String> =
+      std::iter::once(base.to_string()).chain(issues.iter().map(|i| format!("⚠ {}", i.title()))).collect();
+    let _ = self.tray_icon.set_tooltip(Some(truncate_tooltip(&lines.join("\n"))));
+  }
+
+  /// The icon alone (a level frame leaves the tooltip as it is).
+  fn set_icon(&self, mic_active: bool, warning: bool, level: Option<u8>) {
+    match tray_icon(mic_active, warning, level) {
       Ok(icon) => {
         if let Err(e) = self.tray_icon.set_icon(Some(icon)) {
           warn!("[Tray] could not change the icon: {e}");
@@ -123,10 +138,6 @@ impl TrayManager {
       }
       Err(e) => warn!("[Tray] {e}"),
     }
-    let base = if mic_active { TOOLTIP_MIC } else { TOOLTIP };
-    let lines: Vec<String> =
-      std::iter::once(base.to_string()).chain(issues.iter().map(|i| format!("⚠ {}", i.title()))).collect();
-    let _ = self.tray_icon.set_tooltip(Some(truncate_tooltip(&lines.join("\n"))));
   }
 
   /// Principle 1: Air-gapped update check via OS default browser
@@ -146,8 +157,17 @@ impl TrayManager {
 }
 
 impl TrayHost {
-  pub fn new() -> Self {
-    Self { tray: None, last_attempt: None, mic_active: false, mic_checked_at: None, issues: Vec::new() }
+  /// `prefs_dir`: where the window saves `ui_prefs.json` (the switch for the microphone level).
+  pub fn new(prefs_dir: &Path) -> Self {
+    Self {
+      tray: None,
+      last_attempt: None,
+      mic_active: false,
+      mic_checked_at: None,
+      issues: Vec::new(),
+      level: LevelMeter::new(prefs_dir),
+      level_shown: None,
+    }
   }
 
   /// New list of setup problems (from `HealthMonitor::tick`).
@@ -157,13 +177,17 @@ impl TrayHost {
       if let Err(e) = tray.set_menu(&self.issues) {
         warn!("[Tray] {e}");
       }
-      tray.show_state(self.mic_active, &self.issues);
+      // A badge covers the bars: the icon stands still, and the next step decides again.
+      self.level_shown = None;
+      self.mic_checked_at = None;
+      tray.show_state(self.mic_active, &self.issues, None);
     }
   }
 
   /// One service-loop step: pumps this thread's window messages (the tray icon's hidden
-  /// window lives on it), creates the icon if missing, and handles clicks and menu items.
-  pub fn poll(&mut self) -> Option<TrayAction> {
+  /// window lives on it), creates the icon if missing, moves its bars with the microphone
+  /// level (`header`: the service's mapping) and handles clicks and menu items.
+  pub fn poll(&mut self, header: Option<&ShmHeader>) -> Option<TrayAction> {
     pump_messages();
 
     if self.tray.is_none() && self.last_attempt.is_none_or(|t| t.elapsed() >= RETRY_INTERVAL) {
@@ -175,11 +199,12 @@ impl TrayHost {
           // A new icon starts plain; recheck the mic right away and restore the problems.
           self.mic_active = false;
           self.mic_checked_at = None;
+          self.level_shown = None;
           if !self.issues.is_empty() {
             if let Err(e) = t.set_menu(&self.issues) {
               warn!("[Tray] {e}");
             }
-            t.show_state(false, &self.issues);
+            t.show_state(false, &self.issues, None);
           }
           self.tray = Some(t);
         }
@@ -190,14 +215,24 @@ impl TrayHost {
     }
     let tray = self.tray.as_ref()?;
 
+    let mut mic_changed = false;
     if self.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
       let active = crate::mic_usage::microphone_in_use();
       if active != self.mic_active {
         self.mic_active = active;
         info!("[Tray] microphone {}", if active { "in use" } else { "free" });
-        tray.show_state(active, &self.issues);
+        mic_changed = true;
       }
+      self.level.check(active, !self.issues.is_empty(), || tray.tray_icon.rect());
+    }
+    // One icon per step at most: the colour and the bars go out together.
+    let level = self.level.frame(header);
+    let level_changed = level != std::mem::replace(&mut self.level_shown, level);
+    if mic_changed {
+      tray.show_state(self.mic_active, &self.issues, level);
+    } else if level_changed {
+      tray.set_icon(self.mic_active, !self.issues.is_empty(), level);
     }
 
     let mut action = None;
@@ -218,12 +253,6 @@ impl TrayHost {
       }
     }
     action
-  }
-}
-
-impl Default for TrayHost {
-  fn default() -> Self {
-    Self::new()
   }
 }
 
@@ -285,9 +314,9 @@ fn pump_messages() {
   }
 }
 
-fn tray_icon(mic_active: bool, warning: bool) -> Result<Icon, String> {
-  Icon::from_rgba(crate::app_icon::rgba(TRAY_ICON_SIZE, mic_active, warning), TRAY_ICON_SIZE, TRAY_ICON_SIZE)
-    .map_err(|e| format!("Icon creation failed: {}", e))
+fn tray_icon(mic_active: bool, warning: bool, level: Option<u8>) -> Result<Icon, String> {
+  let rgba = crate::app_icon::rgba(TRAY_ICON_SIZE, mic_active, warning, tray_level::bar_scale(level));
+  Icon::from_rgba(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE).map_err(|e| format!("Icon creation failed: {}", e))
 }
 
 /// Windows cuts tray tooltips at 127 UTF-16 units; cut at a char boundary with an ellipsis.

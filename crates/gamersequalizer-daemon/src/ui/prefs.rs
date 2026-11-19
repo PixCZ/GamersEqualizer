@@ -7,7 +7,7 @@ use crate::output_eq::settings::write_atomic;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const FILE: &str = "ui_prefs.json";
+pub(crate) const FILE: &str = "ui_prefs.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ThemePref {
@@ -35,6 +35,9 @@ pub struct UiPrefs {
   /// Time of the newest installer rollback line already taken into `rolled_back` (ISO UTC, as in
   /// the note), so a line still in the notes does not bring back a device the user retried.
   pub rolled_back_seen: String,
+  /// The tray icon's bars stand still instead of following the microphone level (`tray_level`;
+  /// the service reads it from this file while an app records).
+  pub tray_mic_level_off: bool,
   /// Fields from a newer version of the app, kept so a save here does not drop them.
   #[serde(flatten)]
   pub extra: serde_json::Map<String, serde_json::Value>,
@@ -102,8 +105,8 @@ mod tests {
     std::fs::write(dir.join(FILE), r#"{"language":"Czech","theme":"HighContrast","setup_done":true}"#).unwrap();
     let loaded = UiPrefs::load_or_default(&dir);
     assert_eq!(
-      (loaded.language, loaded.theme, loaded.setup_done, loaded.output_declined),
-      (LanguagePref::Czech, ThemePref::System, true, false)
+      (loaded.language, loaded.theme, loaded.setup_done, loaded.output_declined, loaded.tray_mic_level_off),
+      (LanguagePref::Czech, ThemePref::System, true, false, false)
     );
     let _ = std::fs::remove_dir_all(&dir);
   }

@@ -117,6 +117,15 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
         tr("Processing runs inside this window only and stops when you close it."),
       );
     }
+    ui.horizontal(|ui| {
+      let mut on = !state.prefs.tray_mic_level_off;
+      if ui.add(theme::Toggle(&mut on)).changed() {
+        state.prefs.tray_mic_level_off = !on;
+        state.prefs.save();
+      }
+      ui.label(tr("Show the microphone level in the tray icon"));
+    });
+    ui.label(theme::caption(tr("While an app records, the bars in the icon follow what others hear from you; only with microphone processing on. They stand still behind a full-screen app and while Windows keeps the icon among the hidden icons: drag it to the taskbar.")));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
       if ui

@@ -129,7 +129,7 @@ pub(super) fn run_background_daemon() {
   let mut chain_log = win_audio::chain_log::ChainLog::default();
 
   // Notification-area icon: the window "hides to tray" by closing, the service keeps the icon.
-  let mut tray_host = tray::TrayHost::new();
+  let mut tray_host = tray::TrayHost::new(storage.base_dir());
   // Setup problems (default output / spatial sound lost, mic processing) for the tray badge.
   let mut health = health::HealthMonitor::new(storage.base_dir());
   // Automatic ChatMix's mix mode lowers Game sessions; what an earlier run left lowered (a crash,
@@ -139,7 +139,9 @@ pub(super) fn run_background_daemon() {
   info!("[GamersEqualizer] Background service running smoothly. Entering audio monitoring loop...");
 
   loop {
-    match tray_host.poll() {
+    // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop); atomics only.
+    let tray_header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
+    match tray_host.poll(tray_header) {
       Some(tray::TrayAction::Exit) => {
         info!("[GamersEqualizer] Exit chosen in the tray. Closing the window and the service.");
         // Close the window first, or its watchdog would start the service again.

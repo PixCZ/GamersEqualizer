@@ -16,6 +16,7 @@ pub mod shm_mapping;
 pub mod sonar_importer;
 pub mod takeover;
 pub mod tray;
+pub mod tray_level;
 pub mod ui;
 pub mod uninstall;
 pub mod win_audio;
@@ -174,7 +175,7 @@ fn run_gui_mode() {
   let mut viewport = egui::ViewportBuilder::default()
     .with_title(tray::WINDOW_TITLE)
     .with_icon(std::sync::Arc::new(egui::IconData {
-      rgba: app_icon::rgba(WINDOW_ICON_SIZE, false, false),
+      rgba: app_icon::rgba(WINDOW_ICON_SIZE, false, false, 1.0),
       width: WINDOW_ICON_SIZE,
       height: WINDOW_ICON_SIZE,
     }))
