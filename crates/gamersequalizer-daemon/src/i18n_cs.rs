@@ -534,6 +534,16 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Headphone EQ", "EQ sluchátek"),
   ("My headphones", "Moje sluchátka"),
+  ("Enable Automatic ChatMix", "Zapnout automatický ChatMix"),
+  ("Strength:", "Síla:"),
+  (
+    "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
+    "Jak zřetelně má hlas vyčnívat nad hru. Vyšší nastavení zeslabí hru dřív a víc.",
+  ),
+  (
+    "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about four times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game is part of the game's sound and cannot be told apart from it.",
+    "Při 50 % bude hlas v rozsahu řeči zhruba dvakrát hlasitější než hra, při 100 % zhruba čtyřikrát. Funguje s chatovacími aplikacemi v kanálu Chat (Discord, TeamSpeak ...); hlasový chat vestavěný ve hře je součástí zvuku hry a nedá se od něj oddělit.",
+  ),
   (
     "Click to switch. The choice is remembered for the current output device, so a USB headset and headphones on the jack switch by themselves when you change the output.",
     "Kliknutím přepnete. Volba se pamatuje pro aktuální výstupní zařízení, takže USB headset a sluchátka v jacku se při změně výstupu přepnou sama.",
@@ -955,6 +965,22 @@ pub static CS: &[(&str, &str)] = &[
   ("In: {}", "Vstup: {}"),
   ("Game +{}%", "Hra +{} %"),
   ("Chat +{}%", "Chat +{} %"),
+  ("Automatic ChatMix", "Automatický ChatMix"),
+  (
+    "Lowers the game while someone in the chat is talking and the game is drowning them out. Smoothly, by about the same amount each time, and back up when the talk stops.",
+    "Zeslabí hru, když někdo v chatu mluví a hra ho přehlušuje. Plynule, pokaždé zhruba stejně, a když se přestane mluvit, vrátí ji.",
+  ),
+  ("Game lowered by {} %", "Hra zeslabena o {} %"),
+  ("Spatial sound: the whole game is lowered", "Prostorový zvuk: zeslabuje se celá hra"),
+  (
+    "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate Game and Chat output devices (such as Sonar's).",
+    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem hra hraje mimo efekty jednotlivých aplikací, a když mají Hra a Chat vlastní výstupy, nemůže ji zeslabit jako celek. Jde to, když nejsou k dispozici samostatná výstupní zařízení pro Hru a Chat (například ze Sonaru).",
+  ),
+  (
+    "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and without the output EQ on this output it cannot hear the mix to lower the game as a whole. Install the output EQ on this output.",
+    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem hra hraje mimo efekty jednotlivých aplikací a bez výstupního EQ na tomto výstupu neslyší mix, aby ji zeslabil jako celek. Nainstalujte výstupní EQ na tento výstup.",
+  ),
+  ("the game", "hru"),
   ("Click to customize EQ curves for {}", "Kliknutím upravíte křivky EQ pro {}"),
   (
     "{} - you put it on this channel. Drag to move, right-click to undo.",

@@ -1137,6 +1137,7 @@ dependencies = [
  "gamersequalizer-common",
  "gamersequalizer-mic-chain",
  "rubato",
+ "silero_vad",
  "windows",
  "windows-core",
 ]
@@ -1145,8 +1146,10 @@ dependencies = [
 name = "gamersequalizer-common"
 version = "0.1.0"
 dependencies = [
+ "hound",
  "serde",
  "serde_json",
+ "silero_vad",
 ]
 
 [[package]]

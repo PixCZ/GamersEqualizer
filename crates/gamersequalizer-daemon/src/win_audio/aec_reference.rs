@@ -24,6 +24,8 @@ use super::{mmdevice, worker};
 /// Wait between ticks. Known limit: when an app opens the mic, the echo canceller gets its
 /// reference ~100-200 ms later (first telemetry, then the output effect starts writing).
 const TICK: Duration = Duration::from_millis(50);
+/// While Automatic ChatMix's mix mode moves the game's volume: 25 steps a second, not 20 minus work.
+const MIX_TICK: Duration = Duration::from_millis(40);
 /// How often the Windows default output is resolved again (one RPC).
 const RESOLVE_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the registry is read for the effect on the reference output (or at once on a change).
@@ -75,7 +77,7 @@ pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) ->
       info!("[AecRef] reference thread started");
       while running.load(Ordering::SeqCst) {
         reference.tick(&shm, &mut apo, &selection);
-        std::thread::sleep(TICK);
+        std::thread::sleep(if super::ducking::mix_fast() { MIX_TICK } else { TICK });
       }
       let h = &shm.layout().header;
       h.tap_active.store(false, Ordering::Relaxed);
@@ -115,10 +117,13 @@ impl OutputReference {
     // The output is named while the effect is there and the mic chain runs, also when the
     // instance cannot tell its endpoint: its beat is what tells that case apart.
     let installed = matches!(status, AecRefStatus::OutputEffect | AecRefStatus::EndpointUnknown);
-    let hash = self.render_id.as_deref().filter(|_| installed && apo.mic_dsp_live()).map_or(0, device_hash);
+    // Read by the mic chain's echo canceller and by Automatic ChatMix's mix mode.
+    let wanted = apo.mic_dsp_live() || apo.mix_wants_reference();
+    let hash = self.render_id.as_deref().filter(|_| installed && wanted).map_or(0, device_hash);
     let tap_active = status == AecRefStatus::OutputEffect;
     publish(h, hash, status, tap_active);
     apo.set_render_device(self.render_id.clone());
+    apo.tick_mix(local);
     apo.tick(local, tap_active);
     self.log_change(status);
   }

@@ -35,7 +35,8 @@ impl Vad48k {
 
 Construction returns `Result` (a corrupt blob is an `Err`, never a panic). `process_chunk` and
 `process` never allocate and never panic: a short chunk is zero-padded, NaN and infinite samples
-count as 0. The blob is parsed once per instance (1.2 MB of f32 copied).
+count as 0. The blob is parsed once per process (1.2 MB of f32) and shared by all instances;
+an instance holds about 13 KB of state (`Vad48k`).
 
 `Vad48k` low-passes (63-tap windowed sinc, cutoff 7.2 kHz, 0.65 ms delay) and keeps every third
 sample. The probability of a chunk arrives when its last sample does, so it describes audio up

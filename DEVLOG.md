@@ -2831,8 +2831,9 @@ Branch `genre-presets`. Planned as release 0.2.0 "profile edition".
   (`winsqlite3`, 500 ms busy timeout; it was seen locked) and Steam's `appinfo.vdf` (binary KV v28/v29,
   `common/store_tags`, `common/type`). Specific labels (fps, moba, rts, visual novel...) win over broad
   ones (strategy, rpg, survival...); among broad ones the game's own label order decides. Cached per exe
-  in `genre_cache.json` (cleared when Galaxy / Steam data or `RULES_VERSION` change; not cached while
-  Galaxy is unreadable). One log line per game: verdict, Galaxy labels, Steam tags.
+  in `genre_cache.json` (cleared when `RULES_VERSION` changes; when Galaxy / Steam data change only the
+  games without a result are looked up again, since Galaxy writes its database at almost every game
+  start, 2026-11-19; not cached while Galaxy is unreadable). One log line per game: verdict, Galaxy labels, Steam tags.
 - Not a game: Steam apps whose type is not Game / Demo (Lossless Scaling, Game Compressor) never become
   the active game, even with launcher facts; a binding still wins. Store apps count as launcher games only
   under `XboxGames` (WindowsApps also holds Windows Terminal, Snipping Tool).
@@ -3123,3 +3124,399 @@ three sit on the +24 dB cap. RNNoise unchanged. Gate green (`check.ps1`); tests
 - DFN3 with the added 45 Hz rumble: leveler +9.3 dB against +8.1 for RNNoise, voice about 2 dB over
   the target in the second section: not looked into.
 - `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.
+
+---
+
+## Milestone 65: Automatic ChatMix: the game makes room for the voice chat (2026-11-18)
+
+Branch `feat/chat-ducking`. In a firefight the game drowns out the chat. With Automatic ChatMix on, the
+game is lowered (full band since 2026-11-19, the speech band before), only during talk the game actually masks, by one depth for
+the whole run of the game, and never with an audible step. Nobody talks, a loud talker above the game, or a
+calm game with a stray sound: nothing happens.
+
+**How it works** (`gamersequalizer_common::ducking`)
+
+- Where: every app stream has its own stream APO instance before the mix (`StreamDucker`). Each measures
+  its stream's speech-band level and publishes it in its `StreamSlot`; the service writes each slot's
+  channel (`StreamBus::Chat` / `Game`; unpaired streams are never lowered). A game stream reads the chat
+  streams' levels straight from the table, a few atomic loads per block: no daemon in the loop.
+- Speech, not sound: a chat stream's level counts only while Silero VAD (`Vad48k`, mono downmix) hears
+  speech at probability 0.5, so coughs, breathing and room noise should not lower the game. Silero's weights
+  are parsed once per process and shared (`OnceLock` in the vendored crate): a detector costs ~13 KB per
+  stream instead of 1.2 MB.
+- The cut: an RBJ band-pass (1.5 kHz, Q 0.5, about 500 Hz - 4.5 kHz) subtracted from the signal,
+  `x - (1 - g) * bp(x)`, is exactly a bell of gain `g` at the centre: bass and highs stay, `g` is ramped
+  per frame, and at depth 0 the buffer is not touched (bit-exact).
+- Whether, per talk spurt: a spurt is talk with pauses under 3 s (`hold_s`); its level is a leaky mean (1 s) of its
+  talking blocks. It ducks once the current game level (0.4 s up / 1.5 s down) masks it, game - spurt +
+  margin > 2 dB, from 0.2 s of talk on, and stays ducked until it ends. A quiet talker answering a loud one
+  within the hold latches within about a second.
+- How much, once per run: depth = locked difference + volumes + margin, at most 18 dB. The difference is
+  the learned loud game level minus the learned quiet talker level:
+  - loud: an upper envelope of the game level, rising with 3 s (a 2 s explosion 12 dB above the fight
+    moves it about 6 dB), falling 0.5 dB per minute, never below the game;
+    "fight heard" = the game masks the quiet talker, so menus and travel before the first talk count nothing;
+  - quiet: the quietest of the people who normally talk. Spurts teach it from 1 s of talk on: a running mean
+    until 10 s of such talk (the first talkers average), then a lower envelope (falls with 2.5 s of talk,
+    because the quiet talker usually says little and the level must get there within a few
+    of their sentences; one spurt counts at most 6 dB under it, so one whispered stretch of ~3 s moves the
+    depth by ~2.5 dB and it comes back only slowly; rises 1 dB per minute of talk, so a quiet talker who
+    left is forgotten);
+  - the lock follows the difference until both levels are settled (20 s of fight, 10 s of talk), then is a
+    backlash: the difference must move 0.5 dB up / 4 dB down before the depth follows, and then only by
+    the excess, without a step. Narrow upwards so the lock never stays short of the estimate while the
+    quiet talker level still falls.
+  A game's first run therefore learns over the first minute or two of conversation, the depth rising in
+  small steps between sentences; later runs start from the stored levels and are locked from the first
+  sentence.
+  The margin is the user's Strength: 0 % = the voice as loud as the game in the band, 50 % (default) =
+  8.5 dB, 100 % = 17 dB. Strength and the session volumes the service reports
+  (`duck_game_gain_permille`, `duck_chat_gain_permille`) apply live on top of raw levels.
+- The depth moves only at slew rates: 8 dB/s for the first 0.35 s of a spurt (one word dips ~3 dB at
+  most), then 40 dB/s, release 4 dB/s, frozen in pauses. Turning it off, losing the channel or a weaker
+  Strength releases at the same rate. A ducked talk lets go once the game has not masked the talker for
+  30 s in a row while someone talks (`latch_release_s`) and may duck again later: a talker who never
+  pauses (a podcast) is not held down for good by one fight; lulls in a fight shorter than that do not
+  pump. When the talk stops the game comes back; the next talk starts where the last one ended
+  (lowered or not), so a resumed podcast in a fight is lowered within about half a second.
+- One decision for both modes (2026-11-19): the stream APO and mix mode share `DuckGain` and every value
+  above (hold, margin, bound, rates, latch), and both lower the game full band: the stream APO
+  multiplies the stream (it cut only the speech band before), mix mode sets the session volume. Only
+  how the game is measured differs (its stream's speech band, or the mix in the chat's pauses). The values are the ones heard in mix mode; the stream mode has not been heard
+  with them.
+- For a game whose stream the APO cannot see (spatial audio objects bypass the per-stream effects),
+  the service ducks with `MixDucker`, on the same gain computer; the depth goes to the game's session volume, full band. The game is measured only while the chat makes
+  no sound at all: `chat_sounding` reads the chat streams' level envelopes (broadband, before the
+  voice detector: any chat sound counts), plus `mix_chat_guard_s` (0.3 s) for the chat's way through
+  the spatial renderer and the tail of a word. Then the mix is the game, with the ducker's own lowering
+  undone (the depth it returned last tick). It is read in segments (a chat-free stretch, cut every
+  1 s); the held level falls with `mix_game_fall_s` and rises only to what two segments in a row read
+  (the lower mean), so one shot in a calm game cannot pass for a fight. While the chat sounds it is
+  held: nothing is learned and nothing moves it. The segment before ages with `mix_game_fall_s` over
+  the talk since, so a fight long over confirms no shot. The loud level learns from chat-free ticks
+  only, each one standing for the time since the previous measurement (at most 2 s), also while
+  lowered (the depth is undone). A cap at the level read before the reduction was tried after a
+  review: the live log of 2026-11-19 showed a fight growing from -53 to -42 dB under a 10 dB
+  reduction with the loud level stuck at -46 dB, so the depth stayed 10 dB. Removed; the known
+  cost: the undo also lifts what the service does not lower (another app in the mix, a failed
+  volume change), which can carry the loud level and the depth to `max_depth_db` while that
+  sound plays (offline: -9 dB grew to +6.6 dB). Mix levels are stored under `<exe> [mix@100]`, as at
+  100 % session volume; the earlier `[mix]` records were as measured (at a 41 % game volume the
+  first live run seeded 8 dB too low) and are no longer read. It used to learn only with no reduction applied and one tick per measurement: in a
+  `duck_sim --mix` lobby scenario (20 min calm game with constant talk, fights in between) a fight
+  starting while ducked was never learned, the loud level stayed 20-25 dB under the fight and the
+  depth was 2-6 dB instead of the 18 dB bound; now every fight gets 18 dB, the lobbies 0. `resync` (a gap in the reference) keeps the decision
+  and the depth; `duck_sim --mix` runs this path, with `chat_sounding` from the chat file's envelope.
+- Per game: once settled, the two levels go to the slot (`duck_loud_db_x10`, `duck_quiet_db_x10`); the
+  service stores them per game exe and writes them back (`duck_saved_*`) when it pairs the next run's
+  stream. Adopted once, as settled, so the next run is locked from its first sentence; refused when
+  the stream already settled on its own (service restart, late pairing). Mix mode stores them as at
+  100 % session volume and, when the Game or Chat session volume moves during a run, shifts what it
+  learned by the change (`MixDucker::shift`), so the next fight gets the depth for the new volume at
+  once. Stream mode does not yet: its levels live in the APO.
+- Tuning: every value above is a starting point in `DuckTuning` (35 named values with sane ranges, 48 slots
+  in `ShmHeader::duck_tune`, positions pinned by a test). The service reads `duck_tuning.json` from
+  `%APPDATA%\GamersEqualizer` and publishes it; the APOs re-read it when `duck_tune_version` moves, so one APO
+  install lasts through all tuning. The band only measures; the game is lowered full band.
+- Telemetry: `StreamSlot::duck_dbg` (16 entries, `ducking::dbg`): band level, detector probability, game,
+  chat, spurt, need, depth, target, lock, flags (talking, latched, settled, seeded, detector, failed),
+  evidence; `NA` when there is none. A stream whose processing panicked passes audio through, zeroes its
+  level and reads `FLAG_FAILED`, and its APO notes it in the Application log when the stream stops.
+- Shared memory v24 (`SHM_LAYOUT_SIZE` 1_260_680): `duck_enabled`, `duck_strength_permille` (default 500),
+  the two gains, `duck_reduction_permille` (service -> window), `duck_tune`, `duck_tune_version`; per slot
+  `speech_ms`, `duck_permille`, the four level fields and `duck_dbg`.
+- `duck_sim` (common crate example) runs a game and a chat WAV (48 kHz) through this path, with the chat's
+  Silero, the detector's gap reset and a pairing delay, writes the ducked game and both mixes and prints
+  one line per spurt. Not modelled: the chat stream's EQ before the detector, more than one chat or game
+  stream.
+
+**Decided, and why**
+
+- Silero, not RNNoise, as the chat's speech key, from milestone 38: keyboard and clicks never pass 0.15
+  with Silero (max 0.08), RNNoise 0.2 fires on 0.2-0.5 % of frames at 0.7; speech is found equally.
+- One depth per run, sized for the quiet talker; the decision per spurt from who talks: a game is about
+  equally loud and its gunfire similar, but people talk at very different levels. The user wants the same
+  reduction in every fight; the mic leveler's stability (running mean, then a slow rate, a stored level as
+  a warm start) was the model.
+- An asymmetric backlash: a depth too shallow fails the voice, one too deep only quietens the game a bit.
+- Strength (the voice's margin) instead of a maximum reduction: people differ in how much the voice must
+  stand out; a cap says nothing about that.
+- The mix path measures the game only in the chat's pauses instead of estimating "mix minus chat": a
+  game's loudness barely changes within a run and nobody talks through every fight, so the pauses are
+  enough, while how loud people talk varies and is the quiet talker level's job. It removes everything
+  that depended on how the chat arrives in the mix (its gain through the spatial renderer and the
+  output EQ, its delay, one snapshot per tick): the chat can never be mistaken for the game, whatever
+  its level in the mix. A first version subtracted the chat; over a silent game it let the chat duck
+  the game by itself until the chat's level was held, and it needed a guessed chat factor.
+- Every tunable in shared memory and an offline simulator: a live test needs friends in a firefight and the
+  APO cannot be redeployed during it.
+- Tried and replaced: the depth following the momentary need (wandered every burst); a loud level falling
+  over 5 minutes towards whatever played, then over 30 s within 15 dB of it (calm play or travel unlearned
+  it); one learned voice level for everyone (loud talkers ducked, quiet ones under-ducked); the first spurt
+  setting the quiet level and settling after 3 s (an early quiet spurt pinned it); a spurt level that was
+  the mean since the spurt began (a quiet talker answering a loud one inherited the loud mean).
+- Simplified, not replaced (2026-11-19): a design from scratch with 10 constants and no learning (a
+  chat-to-game ratio estimated in the mix by subtraction, a talk gate, one slew rate) ran against this one
+  in `duck_sim --mix` on nine scenarios (lobbies, a pause-free chat, two talkers, short words, one shot,
+  a talker above the game, the game turned down, gaps in a fight, the talk ending). It lowered calm
+  lobbies and a talker above the game and was deeper in a fight's gaps than in its bursts: during
+  continuous talk its "game" was the chat. Kept the learning; dropped the slowdown of both learning
+  rates and the warm-up values (six tunables, their slots kept as `retired_*`). Taken from the
+  comparison: one shot no longer lowers a calm game for ~25 s (two segments must agree; cost: in a
+  chat with few pauses a fight is picked up about 7 s later), and a session volume change moves the
+  learned levels (a game turned down 10 dB: next fight 8 dB instead of 16 dB).
+- Replaced later on 2026-11-19 by two levels: 0 dB while nobody talks, a lowering level while someone
+  does. It starts at 0 every run (no store, `duck_level_cache.json` unread), a masked spurt raises it to
+  what that spurt needs, it comes down by only 1 dB in 10 minutes (inaudible; a fight raises it again by that little), and it starts over after 60 s of an
+  unheard game, any volume or strength change, a stream gap or the feature off. The learned loud and
+  quiet levels, the lock, the backlash, the latch and the stored levels above are gone (11 tunables
+  retired). Why: the first fight of a run was not lowered and the depth crept for minutes; on the
+  user's recording (`duck_sim --mix`, strength 50 %) the game is lowered 5-5.5 dB from 10 s on (the
+  fight at 60 s, not lowered before, included), 10 dB from 120 s, 12.4 dB at the end, raised by one spurt. Handoff notes: `docs/handoff-chatmix-atmos.md` 1a.
+
+Tests: `ducking/gain/tests.rs` (who ducks, the quiet and loud levels, the lock, seeding),
+`ducking/stream/tests.rs` (bit-exact idle, slew and per-sample smoothness, band limits, sample rates and
+block sizes, channels and NaN, releases, a run of fights, saved levels, tuning limits, telemetry, failure),
+tuning round trip and pinned slots, and a `duck_sim` self-check. `duck_sim` ran on a synthetic pair
+(`speech_clean.wav` at 0 and -10 dB over noise with bursts): Silero gated it and masked spurts were ducked;
+that says the tool works, nothing about how it sounds. The same pair looped to 190 s (talkers at about -39
+and -44 dB) showed the first-run learning: with the earlier defaults (fall 3 s / at most 30 s, backlash
+2 dB up) the depth was 5.6 dB at 40 s and crept to 6.7 dB by the end, quiet talker level -41.8 dB; with
+today's (2 s / 3 s, 0.5 dB up) 5.6 dB at 40 s, then 7.0 / 7.9 / 8.4 / 8.8 / 9.0 / 9.2 dB, quiet talker
+level -42.8 dB. A synthetic pair, so only the mechanics; nothing heard.
+
+
+**Live test (2026-11-18)**
+
+Measured on the user's PC from `gamersequalizer.log` (build 8b5917b, APO installed): a podcast in
+Brave (`brave.exe`, on the Chat channel) and The Division 2 (`thedivision2.exe`), same headphones,
+48 kHz 2 ch, strength 50 %.
+
+- Run 1, Dolby Atmos for Headphones on: both streams paired and the detector heard speech, but the
+  game's stream read digital silence throughout: `game -120.0/-120.0/-120.0 dB, chat
+  -93.8/-49.9/-28.2 dB, ... depth 0.0/0.0/0.0 dB`; `last minute: 88 spurts, none lowered, chat
+  speech 90 % of samples (prob max 1.00), need max -72.1 dB`.
+- Run 2, Atmos off: `game -68.2/-52.4/-26.6 dB, chat -82.3/-41.4/-24.0 dB, ... depth 16.2/16.2/16.2
+  dB (target 16.2 dB)`; `last minute: 18 spurts, 1 lowered for 35 s, depth 16.8-16.8 dB, game -49.2
+  dB while lowered`. Whether the lowering was audible is not known yet.
+- Cause, as Milestone 19 measured: with a spatial renderer on, a game that renders spatial objects
+  bypasses the per-stream (SFX) effects and its session meter; only menus and videos go through its
+  normal stream. Such a game can be neither measured nor lowered. The service logs it and both
+  places in the window warn, on the evidence the run showed only (spatial sound on, and a paired
+  game stream that plays and reads digital silence for 10 s): a game that plays plain stereo / 7.1
+  into the virtualizer still works, and a paused or alt-tabbed game has no playing stream.
+- Gains corrected: Milestone 19 (live run 3) measured that the session volume is applied before the
+  stream APO (at 50 % session volume the APO saw the attenuated signal). The service had published
+  the session / ChatMix volume as a gain after the APO, so it counted twice (chat at 60 % taken as
+  another 4.4 dB quieter than heard). In session mode both gains are now 1000; only a channel on its
+  own output keeps its volume. Until the APO side is reworked, a volume change there is not
+  compensated at once; the learned levels follow it slowly.
+- Turning Atmos off before run 2 left no `[DolbyAtmosGuard]` line: only the window polled it, and
+  only while it was open. The service now logs every change from its 5 s setup check:
+  `[Spatial] default output: Active -> Disabled`.
+- Mix mode, built after the test (the user confirmed that with Atmos on the game's fader, its
+  session volume, still changes the game's loudness): while the rule above holds, the mixer owns
+  the per-app session volumes (no own Game / Chat outputs) and the speaker reference flows, the
+  service lowers the game itself. It asks the output APO for the reference ring (the echo
+  canceller's; a second reader), takes the frames since its last step, takes the game's level as
+  the level of the mix while the chat makes no sound and holds it while it does (`MixDucker`, same
+  decision / learning / lock as the stream ducker), and lowers the Game sessions through the
+  mixer, the one writer of those volumes. Full
+  band, not only the speech range; 25 steps a second while a reduction moves (reference thread and
+  service loop at 40 ms), writes only for steps of 0.2 dB or more. Never together with the stream
+  ducker: only for a game the APO cannot hear. One ducker per game for the service's run, reset
+  (not dropped) when mix mode pauses; levels stored per game under `<exe> [mix]`; a gap in the ring
+  resyncs it without touching the depth. The reference counts as missing only after 5 s without
+  frames (both the service and the window).
+- The game's volume (`chatmix/game_duck.rs`, a small state machine the mixer pass drives): only
+  the subject game's sessions (by exe path, published next to the depth) are lowered. A reduction
+  starts from the session's volume then (a muted or silent session is left alone); while it lasts,
+  a value the mixer intends for the session (fader, balance, mute) becomes its base exactly as if
+  there were no reduction, and `base x factor` is written on 0.2 dB steps without reading the
+  session; the end writes exactly the base, always. Losing the session volumes (own Game / Chat
+  outputs, the service stopping) writes every base at once; a failed write is warned once and the
+  session left alone (not counted as checked). A lowered session dragged off the Game channel gets
+  its base first. When another game becomes the subject mid-reduction, the old one comes back at the
+  release rate before the new one is lowered. `ducking_lowered.json` holds one entry per exe path
+  (ASCII case-insensitive) with the largest base of its sessions: added before the first lowering of
+  a game's mix-mode run and written again only when that base grows, gone when the run ends with
+  its sessions back (also at a clean stop), a moved base written at most every 5 s. An entry the
+  service starts with, or whose lowered session vanished, waits: every session of that exe is
+  checked once, before it can be lowered, set to the base when it is below it, left alone at or
+  above it or when the mixer sets it that pass; the entry goes when its sessions were checked and
+  are over.
+  Without session mode or the reference the warning stays and names the reason.
+- Mix mode heard (2026-11-18, build faa87a1 and later, The Division 2 on Dolby Atmos, a podcast in Brave on
+  the Chat channel): works. The game fader (seen in EarTrumpet) went down while the podcast talked and back
+  to the base when it stopped. Found and fixed on the way: the mode flipped mix / stream 9 times in 10
+  minutes (the game's stream sounded in a menu; now `UnheardWatch` needs 10 s of audio to end the verdict);
+  a minute held open by a long spurt was labelled "last minute" (now "last N s"); at 50 % the depth lagged
+  behind the need (6 dB margin was too little for a loud game over a quiet podcast), and the game rose at
+  every breath (hold 0.5 s). Mix mode got its own hold 3 s, margin 17 dB (50 % = 8.5 dB) and bound 18 dB;
+  since 2026-11-19 these are the values of both modes.
+  The window shows the lowering as a bar next to the switch. Not run: the base after a killed app or a
+  restarted game (the crash-recovery file), the stream mode with Atmos on.
+
+**Open**
+
+- Heard in mix mode only (above) with one game and one podcast; every value is a starting point and the
+  stream mode has not been heard.
+- Silero's rejection of coughs and breathing on real chat audio is not measured.
+- Chat streams not at 48 kHz go by level only (`shortcut:` in the APO's `stream.rs`; upgrade: `RateBridge`).
+- Voice chat built into the game is the game's own stream and cannot be separated.
+- A next run locks onto the stored levels' difference, up to the backlash (0.5 / 4 dB) away from the last
+  run's lock.
+- A stored loud level that is too high (e.g. after the in-game volume was lowered) comes down only at
+  0.5 dB per minute; a stored quiet level that is too low (a quiet person not on today's call) rises only
+  1 dB per minute of talk. No "Learn again" button yet.
+- The record key is the exe file name alone: two games with the same generic exe name share one record.
+- The endpoint-mode gain the service reports is Windows' tapered scalar.
+- Both paths lower the game's full band (mix mode heard, see above; the stream APO's full-band
+  lowering not heard yet). Every sound in the mix that is not chat counts as the game there (media,
+  other apps). While someone talks the game's level is the one from before they started: a fight that
+  starts or ends in the middle of speech is noticed at the next pause longer than the guard, and
+  someone talking without any pause freezes it (accepted).
+- Games that render spatial objects under a spatial renderer are lowered only by mix mode (their
+  stream carries no audio and their session meter none); mix mode is heard (see above).
+- Run 2 kept the game lowered for 35 s on one talk spurt (a podcast never pauses). The latch now
+  releases after `latch_release_s`: in mix mode at once, at the stream only after the next APO build.
+  Mix mode then let go in every calm stretch of a game while a podcast ran on (about 15 s after the
+  fight), and the next fight needed two chat pauses to lower it again: a sentence was lost (live log
+  2026-11-19). Now `latch_release_s` is 30 s: the duck stays through a lull while the talk goes on and
+  comes back about 40 s after the last fight. A pause in the talk longer than `hold_s` (the video
+  paused) still brings the game back, but the latch is kept: the next talk starts where the last one
+  ended, lowered within about half a second, instead of waiting for chat pauses to measure the fight
+  again (the user's wish: "remember the level"). It lets go only in talk, after `latch_release_s` of a
+  calm game, so talk after a long silence in a lobby is lowered for that long first, and a loud talker
+  after a lowered talk is lowered too.
+- How smoothly Windows applies the session-volume steps of mix mode (0.2 dB, 25 a second) is not known.
+- A game that renders only spatial objects and has no ordinary stream at all (none paired, none
+  playing) is not detected: the rule needs a playing game stream that reads silence.
+- The level store and the tuning file are read and written on the reference thread (every 30 s / a
+  metadata look every 2 s): a slow disk can delay one mix step.
+- The game's volume: a level another program sets while the game is lowered is overwritten, and the
+  level from before comes back; after a crash a level the user set lower than the stored base before
+  the service came back is raised to it; an entry of a game that never runs again stays in the file.
+  The mixer alone loses a session's own level on a mute (it writes 0, then its target on unmute);
+  mix mode ends where the mixer alone would. One base per exe: after a crash every session of a game
+  is set back to at most its loudest session's level, and only if it is below that.
+- Mix mode: sound that is not lowered (a media app) counts as "the game" in the mix and is scaled up
+  by the correction for the applied depth, so it can hold the reduction while someone talks.
+
+**Log**
+
+Every line starts with `[Ducking]`; levels and depths are dB with one decimal (`win_audio/ducking/`).
+
+- Info, always written:
+  - Status, only when one of its facts changes (the strength is printed, not compared). A missing
+    stream says `not paired (...)` with its likely causes (chat: not on the Chat channel, on another
+    output device, or silent so far; game: not recognised as a game, not playing, or no APO on the
+    output); the chat detector reads `yes`, `no (44100 Hz)`
+    or `?` before the APO reports it; `master switch off: nothing is processed`; `(debug lines off)`;
+    `off` when the switch is off:
+    `[Ducking] on, strength 50 %; chat Discord.exe, detector yes; game game.exe; master switch on (debug lines off)`
+  - Stored levels: `stream #n of game.exe was handed stored levels: loud level ..., quiet talker ...`
+    once per stream (what the service sent; the debug line's `stored` shows what the APO adopted),
+    and `learned for game.exe: ...` for a game's first record of a run, then on a 3 dB move. A
+    stream whose processing failed: `stream #n of exe: processing failed in the audio engine, it
+    passes audio through`, once per stream.
+  - Per minute in which someone talked, or the chat carried sound the detector never took as
+    speech (`last minute: chat sound without speech 41 % of samples (prob max 0.12), nothing
+    lowered`); nothing for a silent chat:
+    `[Ducking] last minute: 14 spurts, 9 lowered for 31 s, depth 11.5-12.0 dB, game -21.0 dB while lowered, loud level -20.5 dB, quiet talker -33.0 dB`
+    With none lowered it gives the reasons instead: `none lowered, chat speech 34 % of samples (prob
+    max 0.98), need max -3.0 dB` (negative need: the voice was already above the game), plus
+    `chat gain 0 %` when the chat is muted.
+  - A game it cannot hear (spatial sound on, see the live test): `thedivision2.exe cannot be heard:
+    spatial sound (Dolby Atmos for Headphones) is on and the game sends its sound past the per-app
+    effects; nothing to measure or lower`, and `... can be heard again` when that ends.
+  - Status line `mode stream`, `mode mix (spatial sound: <format>)` or `mode none: ...` with the
+    reason (own Game / Chat outputs, or no output mix); mix mode's stored levels: `<game> (mix) was
+    handed stored levels: ...`; at start `N game(s) may have been left lowered by an earlier run:
+    checked as they play`, then `<exe path>: volume set back to 60 % after an earlier run left it
+    lowered`; a failed write `<exe path>: could not set the volume; this session is left alone`.
+  - Tuning: `tuning from duck_tuning.json: hold_s 0.6; ignored: ...`, `tuning: defaults` when the
+    file goes; a warning for a file that is not JSON (once per version, the previous tuning stays) or
+    cannot be read (retried at the next poll, warned once per error).
+- Debug, sampled every 100 ms, only with "Save debug to disk" on the Log page; like every line they go
+  to `%APPDATA%\GamersEqualizer\logs\gamersequalizer.log`:
+  - A start line with the settings, the tuning and every paired stream (rate, channels, the chat
+    detector or the game's stored levels), again when the streams or a detector change.
+  - Mix mode runs as one more game stream named `<game> (mix)` in the start line and the 10 s line
+    (with `, mix level ..., chat band ..., chat sounding N %`: the share of samples in which the
+    chat made sound, when the game's level is held, not measured); its minutes read
+    `last minute (mix): ...` with the same `chat sounding N %`.
+  - Per 10 s window one line per game stream:
+    `[Ducking] 10 s game.exe: game -41.0/-27.3/-19.0 dB (now -22.0 dB), chat -80.0/-45.0/-24.0 dB, sound 52 %, speech 34 % (prob max 0.98) at -36.0/-30.0/-24.0 dB, spurts 5 (3 latched), talking 31 %, latched 22 %, need -2.0/9.0/14.0 dB, depth 0.0/6.1/12.0 dB (target 12.0 dB), loud level -20.5 dB (45 s, settled), quiet talker -33.0 dB (12 s, settled, stored), lock 12.5 dB`
+  - Written only when something happened: talk, chat sound above the talk threshold, lowering, a
+    rise of the loud level (not its slow fall) or a 1 dB move of the quiet talker or the lock, a
+    settled / stored change, or the stream's first window after its start line. An idle evening
+    writes nothing.
+- Tuning while everything runs: `%APPDATA%\GamersEqualizer\duck_tuning.json`, a flat object of
+  tuning name -> number, polled every 2 s by the service and applied to the running APO; the app
+  never writes or moves it.
+
+### Findings of the live tests on 2026-11-19 (Division 2 under Dolby Atmos, a podcast in Brave as the chat)
+
+- Two levels (`d7a3341` -> `074be4e`): nobody talks, nothing lowered; someone talks, lowered by one level
+  that starts at 0 every run, is raised only by the fights it has to get through and comes down by 1 dB
+  in 10 minutes (an ear notices about 1 dB at once, 3 dB clearly; broadcast ducking is 6-12 dB, 10 dB is
+  about half the loudness). Heard live: "works absolutely great"; the one thing left was the first few
+  sentences of a talk.
+- The first sentences were unlowered for two reasons. (1) The "cannot be heard" verdict for an Atmos game
+  waited 10 s of a silent paired stream (live 16:59: chat paired 16:59:05, mix mode 16:59:48, first
+  lowering 17:00:05); now 3 s, leaving it still needs 10 s of audio. After the change the switch came
+  2.9 s after the stream start (17:12:02, 17:53:07). (2) Mix mode measured the game only in chat pauses.
+- Live 17:13, mix mode since 17:12:02: the game sat at -71 dB (calm) and jumped to -47 dB in the bucket
+  17:13:47-57; the first lowering was in the same 10 s bucket (64 % of it), full 9.3 dB from the next.
+  The 10 s lines cannot show the second, the user felt 5-10 s, and the cause is in the design: a
+  podcast sounds 50-77 % of the time, the game is measured only in pauses longer than the guard (0.3 s)
+  and a fight needs two segments (1 s) in a row, so a fight that starts mid-sentence waits for the next
+  pause. It was not the mode switch (done at 17:12:02) and the log has no WARN / ERROR / `[ApoNote]` there.
+- `duck_sim` reproduction (calm game -68 dB, a 40 s fight starting at five different places in a
+  near-continuous chat, `--mix --chat-gain 0.25 --pair-delay 0`), seconds until the game is lowered by
+  3 dB:
+
+  | variant                                   | five fight starts, seconds             |
+  | ----------------------------------------- | -------------------------------------- |
+  | guard 0.3 s (the default then)            | never (the pauses are shorter)         |
+  | guard 0.2 s                               | never                                  |
+  | guard 0.1 s                               | 7.5  11.5  9.0  8.0  1.0               |
+  | guard 0.05 s (the minimum)                | 2.5  11.5  5.5  1.0  1.0               |
+  | chat taken out of the mix, 4x, hold 0.5 s | 2.5  1.0   4.0  0.5  1.0               |
+  | the same, 8x, hold 0.5 s                  | 3.5  1.0   4.0  2.5  1.0               |
+  | the same, 8x, hold 1.0 s                  | 2.5  1.0   4.5  2.5  3.0               |
+
+  Tuning the guard or the sound threshold (-45 .. -32 dB) alone is erratic: how long a fight waits is
+  how long the next usable gap takes, so reacting "when the talker breathes" is not reliable.
+- The fix (`mix.rs`): while the chat sounds, the mix less 4x the chat's own band level (its stream
+  level at the output volume, peak-held 0.5 s) is a lower bound of the game and may only raise the held
+  level; the fall still waits for a pause; a fight needs two segments in a row also in speech, and the
+  first segment ever stands alone only in a pause (its onset read as game: the held chat level had not
+  caught up). A first try with 2x let the chat through as game: the stream publishes one 10 ms block per
+  50 ms tick, speech varies by tens of dB between blocks, so peaks are missed; 4x showed no rise in a
+  calm game over 280 s. Limit: a fight less than 6 dB above the chat's peaks is noticed only in a pause
+  (live: the fight at about -47 .. -50 dB against chat peaks of about -44 dB is borderline).
+- It relies on the chat sitting in the mix at its stream's level. Checked in the log, game at -70 dB,
+  gains 100 %: the chat band average equals its stream's within 0.6 dB, and the peaks in the mix sit
+  1.2-4.6 dB under the chat's band peaks. Averages of mix minus chat band (+5 .. +16 dB) are a floor
+  effect (the chat band falls to -120 dB in silence) and mean nothing by themselves.
+- Check after the change (17:53-17:55, mix mode): the game went from silent to -49.9 dB in the bucket
+  17:53:24, the depth rose in the same bucket and was 4.9 dB from 17:53:34, held 4.7-4.9 dB for two
+  minutes while the game fell to -58.6 dB and the need to -6 .. -8 dB (by design: the level comes down
+  by 1 dB in 10 minutes and starts over after 60 s of a silent game). The chat was unpaired at 17:55:15
+  after 10 s of silence. No WARN / ERROR. Again only the 10 s granularity, so the felt delay is the
+  measure.
+- `duck_sim` pitfalls found on the way: with the default `--pair-delay 3` the chat is read as game for
+  its first 3 s (the service does the same while the chat is unpaired); a chat gap shorter than
+  `hold_s` makes the whole file one endless spurt, which prints nothing until its end (the per-spurt
+  table is empty); the ducked WAV is float, the game's is 16 bit.
+- Configuration directory: no `duck_tuning.json`; `audio_settings.json` holds only the user's settings
+  (`duck_enabled`, `duck_strength_permille`) and `ducking_lowered.json` the crash-recovery volumes. The
+  `duck_level_cache.json` of the removed level store is orphaned: nothing reads it, it can be deleted.
+- Still open: the `retired_*` tunables and four `StreamSlot` fields are still carried in shared memory
+  as constants; removing them needs a new `shm_version`, so an older installed APO stops working until
+  the Update (the installed one dates from 16:00 and does not know the two levels); why the chat is
+  unpaired without a logged reason (16:59:07, 17:06:21, 17:08:51, 17:15:49, 17:55:15 after silence); a
+  bucket gap of 60 s in the log (17:12:06-17:13:06); a mix peak of -32 dB in the bucket 17:13:47 while
+  the game's peak was -69.7 dB and the chat band's -42.6 dB.

@@ -8,6 +8,7 @@ mod weights;
 
 pub use weights::WeightsError;
 
+use std::sync::OnceLock;
 use weights::{Conv, Weights, BINS, CONVS, FFT, HIDDEN};
 
 /// The network's sample rate.
@@ -31,11 +32,14 @@ const DECIMATOR_CUTOFF: f32 = 7_200.0 / 48_000.0;
 pub const CHUNK_48K: usize = CHUNK * 3;
 
 const BLOB: &[u8] = include_bytes!("../models/silero_vad_v6.bin");
+/// The parsed blob (1.2 MB), once per process: every stream of the audio engine may run a
+/// detector, and a copy each would cost that much per stream.
+static WEIGHTS: OnceLock<Result<Weights, WeightsError>> = OnceLock::new();
 
-/// One detector instance at 16 kHz. About 1.3 MB of weights, so it lives in a `Box`. No heap
+/// One detector instance at 16 kHz: about 10 KB of state, the weights are shared. No heap
 /// allocation after construction.
 pub struct SileroVad {
-  weights: Weights,
+  weights: &'static Weights,
   hidden: [f32; HIDDEN],
   cell: [f32; HIDDEN],
   context: [f32; CONTEXT],
@@ -50,7 +54,7 @@ impl SileroVad {
   /// A corrupt weight blob is an `Err`, never a panic.
   pub fn new() -> Result<Box<Self>, WeightsError> {
     Ok(Box::new(Self {
-      weights: Weights::parse(BLOB)?,
+      weights: WEIGHTS.get_or_init(|| Weights::parse(BLOB)).as_ref().map_err(Clone::clone)?,
       hidden: [0.0; HIDDEN],
       cell: [0.0; HIDDEN],
       context: [0.0; CONTEXT],

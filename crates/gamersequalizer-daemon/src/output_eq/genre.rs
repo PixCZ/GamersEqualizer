@@ -243,15 +243,7 @@ impl GenreLookup {
     let steam_modified = appinfo.as_deref().and_then(modified);
     let path = self.path.clone();
     let cache = self.cache.get_or_insert_with(|| load_cache(&path));
-    if cache.rules_version != RULES_VERSION
-      || cache.galaxy_modified != galaxy_modified
-      || cache.steam_modified != steam_modified
-    {
-      if !cache.games.is_empty() {
-        debug!("[Genre] Galaxy or Steam data or the genre rules changed: cache cleared");
-      }
-      *cache = CacheFile { rules_version: RULES_VERSION, galaxy_modified, steam_modified, games: BTreeMap::new() };
-    }
+    refresh(cache, galaxy_modified, steam_modified);
     let key = full_path.to_lowercase();
     if let Some(hit) = cache.games.get(&key) {
       let genre = hit.genre.map(|g| (g, hit.source.clone()));
@@ -319,6 +311,28 @@ impl GenreLookup {
       Err(e) => warn!("[Genre] could not serialize the cache: {e}"),
     }
     result
+  }
+}
+
+/// New genre rules: everything is looked up again. New launcher data only (Galaxy writes its
+/// database whenever a game starts or is played, so its time moves at almost every launch): a game
+/// whose genre or Steam type was found keeps it, one without is looked up again, its data may have
+/// arrived since.
+/// shortcut: a genre the user changes later in Galaxy or Steam is not seen until the rules change;
+/// key the entries by the data's time if that is ever asked for.
+fn refresh(cache: &mut CacheFile, galaxy_modified: Option<SystemTime>, steam_modified: Option<SystemTime>) {
+  if cache.rules_version != RULES_VERSION {
+    if !cache.games.is_empty() {
+      debug!("[Genre] the genre rules changed: cache cleared");
+    }
+    *cache = CacheFile { rules_version: RULES_VERSION, galaxy_modified, steam_modified, games: BTreeMap::new() };
+  } else if (cache.galaxy_modified, cache.steam_modified) != (galaxy_modified, steam_modified) {
+    let before = cache.games.len();
+    cache.games.retain(|_, hit| hit.genre.is_some() || hit.steam_type.is_some());
+    if cache.games.len() != before {
+      debug!("[Genre] Galaxy or Steam data changed: games without a genre are looked up again");
+    }
+    (cache.galaxy_modified, cache.steam_modified) = (galaxy_modified, steam_modified);
   }
 }
 
@@ -618,6 +632,35 @@ fn modified(path: &Path) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::time::Duration;
+
+  #[test]
+  fn new_launcher_data_keeps_found_genres_and_retries_the_rest() {
+    // Regression: Galaxy writes its database at almost every game start, which cleared the whole
+    // cache, so every launch looked the game up again.
+    let hit = |genre, steam_type: Option<&str>| CachedGenre {
+      genre,
+      source: String::new(),
+      steam_type: steam_type.map(str::to_string),
+    };
+    let t = |s| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+    let mut cache = CacheFile {
+      rules_version: RULES_VERSION,
+      galaxy_modified: t(1),
+      steam_modified: t(1),
+      games: BTreeMap::from([
+        ("game.exe".to_string(), hit(Some(Genre::Shooter), None)),
+        ("tool.exe".to_string(), hit(None, Some("Application"))),
+        ("unknown.exe".to_string(), hit(None, None)),
+      ]),
+    };
+    refresh(&mut cache, t(2), t(1));
+    assert_eq!(cache.games.keys().collect::<Vec<_>>(), ["game.exe", "tool.exe"]);
+    assert_eq!(cache.galaxy_modified, t(2));
+    cache.rules_version = RULES_VERSION + 1;
+    refresh(&mut cache, t(2), t(1));
+    assert!(cache.games.is_empty() && cache.rules_version == RULES_VERSION, "new rules: all again");
+  }
 
   #[test]
   fn specific_labels_beat_broad_ones() {

@@ -64,7 +64,7 @@ pub fn forget_level(path: &Path, mic_id: &str) {
   }
 }
 
-fn app_dir() -> PathBuf {
+pub(super) fn app_dir() -> PathBuf {
   std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join("GamersEqualizer")
 }
 

@@ -274,6 +274,27 @@ pub struct ShmHeader {
   /// Output APO instances: which one writes the ring (`process id << 32 | instance id`, 0 =
   /// none), taken by compare-exchange; another takes over once the writer beat stood still.
   pub aec_ref_writer_id: AtomicU64,
+
+  // --- v24: Automatic ChatMix (ducking), see `ducking.rs` ---
+  /// GUI -> stream APOs: lower the game's speech band while someone in the chat talks.
+  pub duck_enabled: AtomicBool,
+  /// GUI -> stream APOs: how far the voice should stand out from the game in the speech band
+  /// ("Strength"): 0 = as loud as the game, 500 = about twice (6 dB), 1000 = about four times
+  /// (12 dB). The DSP clamps it to 0..=1000.
+  pub duck_strength_permille: AtomicU32,
+  /// Daemon -> stream APOs: the linear volume the listener hears the game / chat channel at,
+  /// relative to the stream the APO sees (1000 = unchanged, 0 = muted). Only a channel on its own
+  /// output (Sonar-like) has one: its endpoint volume comes after the APO. Session and ChatMix
+  /// volumes come BEFORE it (measured, DEVLOG Milestone 19), so in that mode both are 1000.
+  pub duck_game_gain_permille: AtomicU32,
+  pub duck_chat_gain_permille: AtomicU32,
+  /// Daemon -> window: how much the game is lowered now, from the slots' `duck_permille`. Not
+  /// mirrored into the APO mapping.
+  pub duck_reduction_permille: AtomicU32,
+  /// GUI / daemon -> stream APOs: `DuckTuning` (f32 bits, one slot per value, spare slots so a new
+  /// value needs no layout change) and its version, bumped when a value changes.
+  pub duck_tune: [AtomicU32; DUCK_TUNE_SLOTS],
+  pub duck_tune_version: AtomicU32,
 }
 
 /// Game detected by the detection owner (daemon, or the GUI without a daemon).
@@ -351,6 +372,12 @@ impl ShmHeader {
     // Nobody writes the reference until the daemon names the output.
     self.aec_ref_output_hash.store(0, Ordering::Relaxed);
     self.aec_ref_status.store(AecRefStatus::NotChecked.to_u32(), Ordering::Relaxed);
+    self.duck_enabled.store(false, Ordering::Relaxed);
+    self.duck_strength_permille.store(500, Ordering::Relaxed);
+    self.duck_game_gain_permille.store(1000, Ordering::Relaxed);
+    self.duck_chat_gain_permille.store(1000, Ordering::Relaxed);
+    self.duck_reduction_permille.store(0, Ordering::Relaxed);
+    DuckTuning::DEFAULT.write_to(self);
   }
 
   pub fn write_active_game(&self, game: Option<&ActiveGame>) {

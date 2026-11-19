@@ -1,11 +1,13 @@
 use super::state::{ActiveTab, AppState};
-use super::theme::{self, Icon, icons};
+use super::theme::{self, Icon, Severity, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::app_channels::{self, AppChannel};
+use crate::win_audio::ducking::Mode;
 use crate::win_audio::{AudioBus, AudioSessionInfo, WinAudioSystem};
 use egui::{Color32, CornerRadius, RichText, Sense, Ui, Vec2};
 use gamersequalizer_common::streams::StreamBus;
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// Smallest height of the app list in each channel strip; it grows (faders shrink) with more apps.
@@ -15,8 +17,8 @@ const APP_ROW_HEIGHT: f32 = 24.0;
 /// Vertical fader height range; it grows with the window.
 const FADER_MIN: f32 = 110.0;
 const FADER_MAX: f32 = 260.0;
-/// Everything on the page except the faders (header, strip parts, ChatMix).
-const PAGE_WITHOUT_FADERS: f32 = 480.0;
+/// Everything on the page except the faders (header, strip parts, ChatMix with its switch row).
+const PAGE_WITHOUT_FADERS: f32 = 510.0;
 const MASTER_COLOR: Color32 = Color32::from_rgb(78, 168, 222);
 const GAME_COLOR: Color32 = Color32::from_rgb(82, 183, 136);
 const CHAT_COLOR: Color32 = Color32::from_rgb(72, 202, 228);
@@ -346,8 +348,27 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
   ui.label(theme::caption(tr("Drag an app to another channel to move it there; right-click it to undo.")));
   ui.add_space(theme::CARD_GAP);
 
-  // ChatMix balance card
+  // ChatMix card: the Automatic ChatMix switch on top; below it its strength while it is on, else the balance.
   theme::card(ui, |ui| {
+    let session_mode = win_audio.chatmix.game_device_id.is_none() && win_audio.chatmix.chat_device_id.is_none();
+    let auto_on = duck_row(ui, state, session_mode);
+    ui.add_space(4.0);
+    if let (true, Some(h)) = (auto_on, state.shm_header()) {
+      ui.horizontal(|ui| {
+        ui.label(theme::strong(tr("Strength:"), 15.0));
+        ui.add_space(12.0);
+        super::tab_headphones::strength_row(ui, h, 280.0);
+      });
+    } else {
+      balance_row(ui, win_audio);
+    }
+    // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
+  });
+}
+
+/// The game/chat balance slider with the resulting percentages.
+fn balance_row(ui: &mut Ui, win_audio: &mut WinAudioSystem) {
+  {
     ui.horizontal(|ui| {
       ui.label(theme::strong(tr("ChatMix"), 15.0));
       ui.add_space(12.0);
@@ -382,8 +403,86 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
         win_audio.chatmix.set_balance(0.0);
       }
     });
+  }
+}
+
+/// The Automatic ChatMix switch (the card on the output page has its strength too), with what it does
+/// on hover and, while it works, how far the game is lowered now, or what it does about a game it
+/// cannot hear at its stream. Saved with the other audio settings (`save_pending`). Whether it is on.
+fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) -> bool {
+  let unheard = state.ducking_unheard(session_mode).and_then(|(game, mode)| unheard_text(&game, mode));
+  let Some(h) = state.shm_header() else { return false };
+  let help = tr(
+    "Lowers the game while someone in the chat is talking and the game is drowning them out. \
+     Smoothly, by about the same amount each time, and back up when the talk stops.",
+  );
+  let mut on = h.duck_enabled.load(Ordering::Relaxed);
+  ui.horizontal(|ui| {
+    ui.label(tr("Automatic ChatMix")).on_hover_text(help);
+    if ui.add(theme::Toggle(&mut on)).on_hover_text(help).changed() {
+      h.duck_enabled.store(on, Ordering::Relaxed);
+    }
+    let reduction = h.duck_reduction_permille.load(Ordering::Relaxed);
+    if on {
+      reduction_bar(ui, reduction.div_ceil(10).min(100));
+    }
+    // Last in the row and one line high, so what comes and goes there moves nothing else.
+    if let Some((text, severity)) = unheard.filter(|_| on) {
+      let (icon, color) = if severity == Severity::Warning {
+        (icons::WARNING, theme::severity_color(ui, severity))
+      } else {
+        (icons::INFO, theme::palette(ui).text_secondary)
+      };
+      ui.label(theme::icon(icon, 14.0).color(color));
+      ui.add(egui::Label::new(RichText::new(&text).color(color)).truncate()).on_hover_text(&text);
+    }
   });
-  // Applied to Windows and shared memory by the frame loop (`app.rs`), after every tab.
+  on
+}
+
+/// How far the game is lowered now: a fixed-size bar that fills with the cut, its percent inside,
+/// so it never moves what is next to it. The words are on hover.
+fn reduction_bar(ui: &mut Ui, percent: u32) {
+  let (rect, resp) = ui.allocate_exact_size(Vec2::new(96.0, 18.0), Sense::hover());
+  let (p, fill_color) = (theme::palette(ui), ui.visuals().selection.bg_fill);
+  let painter = ui.painter();
+  painter.rect_filled(rect, CornerRadius::same(4), p.inset);
+  if percent > 0 {
+    let mut fill = rect;
+    fill.set_width(rect.width() * percent as f32 / 100.0);
+    painter.rect_filled(fill, CornerRadius::same(4), fill_color);
+    painter.text(
+      rect.center(),
+      egui::Align2::CENTER_CENTER,
+      format!("-{percent} %"),
+      egui::FontId::proportional(12.0),
+      ui.visuals().text_color(),
+    );
+  }
+  resp.on_hover_text(trf("Game lowered by {} %", &[&percent]));
+}
+
+/// What Automatic ChatMix does about a `game` it cannot hear at its stream
+/// (`AppState::ducking_unheard`): lowered from the mix (information), or why not and what helps
+/// (warning). None while the game is heard at its stream. Also on the output page.
+pub(super) fn unheard_text(game: &str, mode: Mode) -> Option<(String, Severity)> {
+  let warning = |text: String| Some((text, Severity::Warning));
+  match mode {
+    Mode::Stream => None,
+    Mode::Mix => Some((tr("Spatial sound: the whole game is lowered").to_string(), Severity::Info)),
+    Mode::ChannelOutputs => warning(trf(
+      "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with \
+       Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate \
+       Game and Chat output devices (such as Sonar's).",
+      &[&game],
+    )),
+    Mode::NoReference => warning(trf(
+      "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and \
+       without the output EQ on this output it cannot hear the mix to lower the game as a whole. Install the \
+       output EQ on this output.",
+      &[&game],
+    )),
+  }
 }
 
 fn render_strip(

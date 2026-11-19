@@ -20,6 +20,9 @@ gamersequalizer-common = { path = "../gamersequalizer-common" }
 gamersequalizer-mic-chain = { path = "../gamersequalizer-mic-chain" }
 # Already in the build through deep_filter; resamples the mic chain at non-48 kHz rates.
 rubato = "5"
+# Silero VAD v6 (pure Rust, see crates/vendor/silero_vad/README.md): tells speech from coughs and
+# noise on chat streams for Automatic ChatMix; the mic chain already builds it.
+silero_vad = { path = "../vendor/silero_vad" }
 
 [build-dependencies]
 # Version resource in the DLL; the daemon already builds with it.

@@ -19,8 +19,11 @@ use windows::Win32::System::Threading::{GetCurrentProcessId, OpenProcess, PROCES
 use windows_core::Interface;
 
 mod endpoint_volume;
+mod game_duck;
 
 pub use endpoint_volume::*;
+pub use game_duck::GameDuck;
+use game_duck::Look;
 
 /// Session volumes are re-checked this often for new sessions (an app that starts playing);
 /// a channel change applies at once.
@@ -88,6 +91,15 @@ pub struct ChatMixController {
   session_set: HashMap<String, f32>,
   last_session_targets: Option<(f32, f32, f32)>,
   last_session_pass: Option<Instant>,
+  /// Automatic ChatMix's mix mode: the factor its subject game is lowered by (1 = none) and that
+  /// game's exe path, set by the service loop (`ducking::game_duck_factor`, `ducking::mix_subject`),
+  /// applied by `game_duck`'s rules.
+  pub duck_factor: f32,
+  pub duck_subject: Option<String>,
+  pub game_duck: GameDuck,
+  /// The Game sessions of the last full pass (id, exe path, volume): a moving duck factor reaches
+  /// them between passes without walking every session.
+  game_sessions: Vec<(String, String, ISimpleAudioVolume)>,
 }
 
 impl Channel {
@@ -164,6 +176,10 @@ impl ChatMixController {
       session_set: HashMap::new(),
       last_session_targets: None,
       last_session_pass: None,
+      duck_factor: 1.0,
+      duck_subject: None,
+      game_duck: GameDuck::default(),
+      game_sessions: Vec::new(),
     }
   }
 
@@ -392,8 +408,38 @@ impl ChatMixController {
     (g, c)
   }
 
+  /// Automatic ChatMix: how loud the listener hears Game and Chat (linear, 1000 = unchanged),
+  /// relative to the app stream the stream APO sees: only volumes applied after the APO count.
+  pub fn write_duck_gains(&self, h: &ShmHeader) {
+    let (game, chat) = self.duck_gains();
+    h.duck_game_gain_permille.store((game * 1000.0).round() as u32, Ordering::Relaxed);
+    h.duck_chat_gain_permille.store((chat * 1000.0).round() as u32, Ordering::Relaxed);
+  }
+
   pub fn get_media_volume(&self) -> f32 {
     if self.media.muted || self.master.muted { 0.0 } else { self.media.volume.clamp(0.0, 1.0) }
+  }
+
+  /// (game, chat) gain for `write_duck_gains`, from where each channel's volume is applied. Master
+  /// scales both alike after the APO, so it does not count.
+  fn duck_gains(&self) -> (f32, f32) {
+    let gain = |channel: &Channel, device: &Option<String>| match device {
+      // shortcut: Windows' endpoint scalar is audio-tapered, not linear amplitude (50 % is well
+      // under half); read `GetMasterVolumeLevel` (dB) if ducking on channel outputs (Sonar) ever
+      // matters. There the virtual device mixes the apps, so the stream APO rarely sees them apart.
+      Some(_) => {
+        if channel.muted {
+          0.0
+        } else {
+          channel.volume.clamp(0.0, 1.0)
+        }
+      }
+      // A per-app session volume (channel level x ChatMix balance) is applied BEFORE the stream
+      // APO (measured, DEVLOG Milestone 19): what the APO sees is already what the listener hears.
+      // A change there starts the APOs' lowering level over (`Ducking::tick`, volume epoch).
+      None => 1.0,
+    };
+    (gain(&self.game, &self.game_device_id), gain(&self.chat, &self.chat_device_id))
   }
 
   /// Apply calculated volumes to live Windows Audio System and Sessions
@@ -427,23 +473,38 @@ impl ChatMixController {
   ///
   /// Never fights the user: a session is set only when it has no level from us yet and its
   /// target is not neutral (100 %), or when its target moved since we last set it.
+  ///
+  /// Automatic ChatMix's mix mode lowers the Game sessions through here too (`duck_game_sessions`,
+  /// every call), so this stays the one writer of the session volumes. A session it lowered is
+  /// left to those rules (`game_duck`) until it has its level back.
   pub fn apply_session_mix(&mut self) {
-    if !self.sessions_enabled || self.game_device_id.is_some() || self.chat_device_id.is_some() {
+    if !self.owns_session_volumes() {
+      self.release_game_sessions();
       return;
     }
     let (game_vol, chat_vol) = self.get_multipliers();
     let targets = (game_vol, chat_vol, self.get_media_volume());
     let changed = self.last_session_targets != Some(targets);
-    if !changed && self.last_session_pass.is_some_and(|t| t.elapsed() < SESSION_MIX_INTERVAL) {
-      return;
+    let mut intents = HashMap::new();
+    if changed || self.last_session_pass.is_none_or(|t| t.elapsed() >= SESSION_MIX_INTERVAL) {
+      intents = self.full_session_pass(targets);
     }
+    self.duck_game_sessions(&intents);
+  }
+
+  /// Every session gets its channel's target (`session_action`). For a session Automatic ChatMix
+  /// holds down the same decision and bookkeeping run as if it did not, but the value is returned
+  /// (session id -> volume) as that session's base instead of being written.
+  fn full_session_pass(&mut self, targets: (f32, f32, f32)) -> HashMap<String, f32> {
     self.last_session_targets = Some(targets);
     self.last_session_pass = Some(Instant::now());
+    let mut game_sessions = Vec::new();
+    let mut intents = HashMap::new();
 
     let mut seen = HashMap::with_capacity(self.session_set.len());
     // SAFETY: COM calls on interfaces enumerated just now.
     unsafe {
-      for (key, session_vol, bus) in self.enumerate_active_sessions_raw() {
+      for (key, path, session_vol, bus) in self.enumerate_active_sessions_raw() {
         let target = match bus {
           AudioBus::Game => targets.0,
           AudioBus::Chat => targets.1,
@@ -451,11 +512,37 @@ impl ChatMixController {
           // Master is the hardware endpoint; never touched per app.
           AudioBus::Master | AudioBus::Mic => continue,
         };
+        let lowered = self.game_duck.is_lowered(&key);
+        if bus == AudioBus::Game {
+          game_sessions.push((key.clone(), path.clone(), session_vol.clone()));
+        } else if let Some((lowered_path, planned)) = self.game_duck.left_game(&key) {
+          // Dragged off the Game channel while lowered: its base back before it is let go.
+          let look = Look { id: &key, path: &lowered_path, intent: None };
+          let ok = session_vol.SetMasterVolume(planned.volume, std::ptr::null()).is_ok();
+          self.game_duck.done(look, planned, ok);
+        }
+        let lowered = lowered && bus == AudioBus::Game;
         match session_action(self.session_set.get(&key).copied(), target) {
           SessionAction::Keep(last) => {
             if let Some(last) = last {
               seen.insert(key, last);
             }
+          }
+          SessionAction::Set if lowered => {
+            intents.insert(key.clone(), target);
+            seen.insert(key, target);
+          }
+          SessionAction::Set if bus == AudioBus::Game => {
+            // Written as usual; the intent also tells recovery the mixer's value is the user's.
+            intents.insert(key.clone(), target);
+            let current = session_vol.GetMasterVolume().unwrap_or(-1.0);
+            if (current - target).abs() > VOLUME_EPSILON
+              && let Err(e) = session_vol.SetMasterVolume(target, std::ptr::null())
+            {
+              log::debug!("[ChatMix] SetMasterVolume failed: {e}");
+              continue;
+            }
+            seen.insert(key, target);
           }
           SessionAction::Set => {
             let current = session_vol.GetMasterVolume().unwrap_or(-1.0);
@@ -472,6 +559,53 @@ impl ChatMixController {
     }
     // Sessions that ended are forgotten; a reopened app is a new session.
     self.session_set = seen;
+    self.game_sessions = game_sessions;
+    intents
+  }
+
+  /// This process sets the per-app session volumes (fallback mode, and not the window while the
+  /// service runs: there `sessions_enabled` is off, so the window never writes one).
+  pub fn owns_session_volumes(&self) -> bool {
+    self.sessions_enabled && self.game_device_id.is_none() && self.chat_device_id.is_none()
+  }
+
+  /// Every pass: the Game sessions through `game_duck` (lowering the subject's, ending, recovering
+  /// what an earlier run left lowered). `intents`: the values the mixer sets this pass.
+  fn duck_game_sessions(&mut self, intents: &HashMap<String, f32>) {
+    let now = Instant::now();
+    let (factor, subject) = (self.duck_factor, self.duck_subject.as_deref());
+    // Gone sessions first: a new session of an exe left lowered is checked before it is lowered.
+    self.game_duck.begin_pass(self.game_sessions.iter().map(|(id, path, _)| (id.as_str(), path.as_str())));
+    for (id, path, volume) in &self.game_sessions {
+      let look = Look { id, path, intent: intents.get(id).copied() };
+      // SAFETY: an interface from the last full pass on this thread; a session that ended since
+      // fails the call, and the next pass drops it.
+      let read = || unsafe { Some((volume.GetMasterVolume().ok()?, volume.GetMute().ok()?.as_bool())) };
+      let Some(planned) = self.game_duck.session(now, look, subject, factor, read) else { continue };
+      // SAFETY: as above.
+      let ok = unsafe { volume.SetMasterVolume(planned.volume, std::ptr::null()) }.is_ok();
+      self.game_duck.done(look, planned, ok);
+    }
+    let present = self.game_sessions.iter().map(|(id, path, _)| (id.as_str(), path.as_str()));
+    self.game_duck.end_pass(now, subject, present);
+  }
+
+  /// The mixer lets go of the session volumes (own Game / Chat outputs bound, the service stops):
+  /// every session Automatic ChatMix holds down gets its base at once.
+  pub fn release_game_sessions(&mut self) {
+    for (id, path, planned) in self.game_duck.release() {
+      let look = Look { id: &id, path: &path, intent: None };
+      let Some((_, _, volume)) = self.game_sessions.iter().find(|(k, _, _)| *k == id) else {
+        self.game_duck.done(look, planned, false);
+        continue;
+      };
+      // SAFETY: an interface from the last full pass on this thread.
+      let ok = unsafe { volume.SetMasterVolume(planned.volume, std::ptr::null()) }.is_ok();
+      self.game_duck.done(look, planned, ok);
+    }
+    // Restored sessions settle their entries: a clean stop leaves nothing to recover.
+    let present = self.game_sessions.iter().map(|(id, path, _)| (id.as_str(), path.as_str()));
+    self.game_duck.end_pass(Instant::now(), None, present);
   }
 
   pub fn list_active_sessions(&self) -> Vec<AudioSessionInfo> {
@@ -515,8 +649,8 @@ impl ChatMixController {
     result
   }
 
-  /// (session instance id, volume control, channel) of every app session on every device.
-  unsafe fn enumerate_active_sessions_raw(&self) -> Vec<(String, ISimpleAudioVolume, AudioBus)> {
+  /// (session instance id, exe path, volume control, channel) of every app session on every device.
+  unsafe fn enumerate_active_sessions_raw(&self) -> Vec<(String, String, ISimpleAudioVolume, AudioBus)> {
     // SAFETY: the session interfaces come from `get_all_session_managers`, which initializes COM on this thread;
     // the returned ones carry their own references.
     unsafe {
@@ -530,14 +664,15 @@ impl ChatMixController {
               && let Ok(pid) = control2.GetProcessId()
               && pid > 0
             {
-              let exe_name = get_exe_name_from_pid(pid).unwrap_or_default();
+              let exe_path = get_exe_path_from_pid(pid).unwrap_or_default();
+              let exe_name = exe_name_of(&exe_path).to_string();
               if is_own_exe(&exe_name) {
                 continue;
               }
               let bus = self.classify_exe(&exe_name);
               let key = session_instance_id(&control2).unwrap_or_else(|| format!("pid:{pid}:{i}"));
               if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
-                list.push((key, vol_ctl, bus));
+                list.push((key, exe_path, vol_ctl, bus));
               }
             }
           }
@@ -609,6 +744,12 @@ unsafe fn get_all_session_managers() -> Vec<IAudioSessionManager2> {
 }
 
 pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
+  get_exe_path_from_pid(pid).map(|path| exe_name_of(&path).to_string())
+}
+
+/// The process's image path (`\Device\HarddiskVolume3\...\game.exe`): one installed game, also
+/// when two games share a generic exe name.
+pub(crate) fn get_exe_path_from_pid(pid: u32) -> Option<String> {
   // SAFETY: the process handle is checked and closed below; the name buffer is a local array whose length the call
   // gets.
   unsafe {
@@ -621,13 +762,13 @@ pub(crate) fn get_exe_name_from_pid(pid: u32) -> Option<String> {
     let len = K32GetProcessImageFileNameW(handle, &mut buf);
     let _ = CloseHandle(handle);
 
-    if len > 0 {
-      let path = String::from_utf16_lossy(buf.get(..len as usize).unwrap_or_default());
-      let filename = path.rsplit('\\').next().unwrap_or(&path).to_string();
-      return Some(filename);
-    }
-    None
+    (len > 0).then(|| String::from_utf16_lossy(buf.get(..len as usize).unwrap_or_default()))
   }
+}
+
+/// The file name of an image path.
+pub(crate) fn exe_name_of(path: &str) -> &str {
+  path.rsplit('\\').next().unwrap_or(path)
 }
 
 /// Endpoint names of virtual devices (Sonar channels, VB-Cable, VR runtimes, NVIDIA Broadcast,
@@ -786,6 +927,20 @@ mod tests {
     // The guard returns before any session pass (which would stamp `last_session_pass`).
     mix.apply_session_mix();
     assert!(mix.last_session_pass.is_none());
+  }
+
+  #[test]
+  fn duck_gains_follow_where_each_channel_gets_its_volume() {
+    let mut mix = ChatMixController::new();
+    mix.master.muted = false;
+    (mix.game.volume, mix.chat.volume, mix.balance) = (0.8, 1.0, 0.5);
+    mix.chat.muted = true;
+    assert_eq!(mix.duck_gains(), (1.0, 1.0), "session volumes come before the APO: already in its levels");
+    // Game on its own output (Sonar): that endpoint's level, after the APO; chat still per session.
+    mix.game_device_id = Some("game".into());
+    assert_eq!(mix.duck_gains(), (0.8, 1.0));
+    mix.game.muted = true;
+    assert_eq!(mix.duck_gains(), (0.0, 1.0));
   }
 
   #[test]

@@ -33,6 +33,19 @@ impl ShmHeader {
     self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
     self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
     self.aec_ref_output_hash.store(src.aec_ref_output_hash.load(r), r);
+    self.duck_enabled.store(src.duck_enabled.load(r), r);
+    self.duck_strength_permille.store(src.duck_strength_permille.load(r), r);
+    self.duck_game_gain_permille.store(src.duck_game_gain_permille.load(r), r);
+    self.duck_chat_gain_permille.store(src.duck_chat_gain_permille.load(r), r);
+    // The values first, the version after, and only when one changed: the APOs rebuild on it.
+    let mut tune_changed = false;
+    for (dst, src) in self.duck_tune.iter().zip(&src.duck_tune) {
+      let value = src.load(r);
+      tune_changed |= dst.swap(value, r) != value;
+    }
+    if tune_changed {
+      self.duck_tune_version.fetch_add(1, Ordering::Release);
+    }
     // Sidetone: the EQ and the values first, `enabled` last (as `write_sidetone` does), so
     // the APOs never run a fresh "on" with the previous pair's values.
     let version = src.sidetone_eq_version.load(Ordering::Acquire);

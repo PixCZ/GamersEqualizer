@@ -1,5 +1,6 @@
 //! Tells each stream APO instance (one per app stream on the output, before the mix) which
-//! channel it belongs to, so chat and media apps get their own EQ.
+//! channel it belongs to, so chat and media apps get their own EQ and Automatic ChatMix knows
+//! which streams are the game and which the chat (`paired_streams`, read by `ducking`).
 //!
 //! The APO runs inside audiodg and can't see the app. This thread samples every audio
 //! session's peak meter on the default output every 5 ms and pairs each instance with the
@@ -7,11 +8,15 @@
 //! the right app 93-100 %, others <= 6 %). The channel then comes from the app's exe, the
 //! same lists the ChatMix volumes use.
 //!
-//! Unpaired streams (silent, just started, or audio that bypasses per-stream effects such as
-//! Atmos spatial objects) stay on `StreamBus::None`: pass-through, i.e. headphone + game EQ
-//! from the output APO, as before.
+//! Game streams get `StreamBus::Game` (no stream EQ: the output APO carries the game EQ).
+//! Unpaired streams (just started, or several silent ones) stay on `StreamBus::None`:
+//! pass-through, i.e. headphone + game EQ from the output APO, as before. A game whose audio
+//! bypasses per-stream effects (Atmos spatial objects) plays silence at its stream and its meter:
+//! it is paired with the one silent stream when it is the only silent Game session (the evidence
+//! `ducking::unheard` needs to switch to mix mode).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -31,7 +36,7 @@ use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::core::Interface;
 
 use super::app_channels::{self, AppChannel};
-use super::chatmix::get_exe_name_from_pid;
+use super::chatmix::{exe_name_of, get_exe_path_from_pid};
 use super::console_owner::ConsoleOwner;
 
 // ---------------------------------------------------------------------------------------
@@ -42,6 +47,8 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(5);
 /// Pairing / bus update cadence; also how often sessions and the default output are re-read.
 const EVAL_INTERVAL: Duration = Duration::from_millis(500);
 const OPEN_RETRY: Duration = Duration::from_secs(2);
+/// A silent stream is the game's only after this many evaluations (3 s) of the same finding.
+const ELIMINATION_EVALS: u32 = 6;
 const SLEEP_ON_ERROR: Duration = Duration::from_secs(1);
 /// Meter history compared per evaluation (1 s), ending `HOLD_PAD_AFTER` blocks ago.
 const MATCH_BLOCKS: usize = 100;
@@ -57,11 +64,29 @@ const _: () = assert!(MATCH_BLOCKS + HOLD_PAD_BEFORE + HOLD_PAD_AFTER + 10 < ENV
 /// One audio session on the default output, with its recent meter peaks.
 struct Session {
   pid: u32,
+  /// The app's image path, and its file name (what the channel lists match).
+  path: String,
   exe: String,
   bus: StreamBus,
   meter: IAudioMeterInformation,
   history: PeakHistory,
 }
+
+/// A chat or game stream paired with its app.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairedStream {
+  /// The slot's owner value (`StreamSlot::owner`).
+  pub owner: u64,
+  pub is_game: bool,
+  pub exe: String,
+  /// The app's image path (which game, for the mixer).
+  pub path: String,
+}
+
+/// The chat and game streams as of the last evaluation. Automatic ChatMix runs on the reference
+/// thread (`apo_link`) and needs the exe names, which only this thread knows: the table carries the
+/// bus but no names. Held only to copy the list in or out.
+static PAIRED: Mutex<Vec<PairedStream>> = Mutex::new(Vec::new());
 
 /// Max meter peak per envelope block, the last `HISTORY` blocks.
 struct PeakHistory {
@@ -79,8 +104,12 @@ struct Router {
   sessions: HashMap<String, Session>,
   /// Slot owner value -> session key it was paired with.
   pairs: HashMap<u64, String>,
-  /// Some stream EQ is active, so streams are metered and paired (logged on change).
+  /// Some stream EQ or Automatic ChatMix is on, so streams are metered and paired (logged on change).
   routing: bool,
+  /// What the last "silent unpaired" line said (silent streams, silent Game sessions, Game sessions).
+  elimination_seen: Option<(usize, usize, usize, usize)>,
+  /// Evaluations in a row the same silent streams had exactly one silent Game session to belong to.
+  elimination_streak: u32,
   /// Only the console session's daemon pairs streams (the APO serves that user).
   console: ConsoleOwner,
 }
@@ -113,13 +142,29 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
     .ok()
 }
 
-/// Stream bus of an app by its exe name; Game = no stream EQ. See `app_channels::channel_for`.
+/// Stream bus of an app by its exe name. See `app_channels::channel_for`.
 pub fn bus_for_exe(exe: &str) -> StreamBus {
   match app_channels::channel_for(exe) {
     AppChannel::Chat => StreamBus::Chat,
-    AppChannel::Game => StreamBus::None,
+    AppChannel::Game => StreamBus::Game,
     AppChannel::Media | AppChannel::Unknown => StreamBus::Media,
   }
+}
+
+/// The paired chat and game streams (see `PAIRED`); empty if its lock was poisoned.
+pub fn paired_streams() -> Vec<PairedStream> {
+  PAIRED.lock().map(|p| p.clone()).unwrap_or_default()
+}
+
+/// Current QPC time in 100 ns units, the clock the APO stamps `last_audio_hns` with.
+pub fn now_hns() -> Option<u64> {
+  let (mut counter, mut freq) = (0i64, 0i64);
+  // SAFETY: out parameters are locals.
+  unsafe {
+    QueryPerformanceCounter(&mut counter).ok()?;
+    QueryPerformanceFrequency(&mut freq).ok()?;
+  }
+  u64::try_from(counter as i128 * 10_000_000 / i128::from(freq.max(1))).ok()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -139,12 +184,21 @@ impl Router {
       std::thread::sleep(EVAL_INTERVAL);
       return Ok(());
     }
-    // No chat / media EQ: the APO passes every stream through, so skip the 200 Hz metering.
-    // Known limit: after an EQ is turned on, new pairings need ~1.5 s of fresh meter history.
-    let active = apo.layout().header.stream_eq_active();
+    // No chat / media EQ and no Automatic ChatMix: the APO passes every stream through, so skip
+    // the 200 Hz metering. Known limit: after one is turned on, new pairings need ~1.5 s of fresh
+    // meter history.
+    let header = &apo.layout().header;
+    let active = header.stream_eq_active() || header.duck_enabled.load(Ordering::Relaxed);
     if active != self.routing {
       self.routing = active;
-      info!("[StreamRouter] {}", if active { "chat/media EQ on: routing streams" } else { "no chat/media EQ: idle" });
+      info!(
+        "[StreamRouter] {}",
+        if active {
+          "chat/media EQ or Automatic ChatMix on: routing streams"
+        } else {
+          "no chat/media EQ, Automatic ChatMix off: idle"
+        }
+      );
     }
     if !active {
       std::thread::sleep(EVAL_INTERVAL);
@@ -220,9 +274,10 @@ impl Router {
           continue;
         }
         let Ok(meter) = control.cast::<IAudioMeterInformation>() else { continue };
-        let exe = if pid == 0 { String::new() } else { get_exe_name_from_pid(pid).unwrap_or_default() };
+        let path = if pid == 0 { String::new() } else { get_exe_path_from_pid(pid).unwrap_or_default() };
+        let exe = exe_name_of(&path).to_string();
         let bus = bus_for_exe(&exe);
-        self.sessions.insert(key, Session { pid, exe, bus, meter, history: PeakHistory::default() });
+        self.sessions.insert(key, Session { pid, path, exe, bus, meter, history: PeakHistory::default() });
       }
       self.sessions.retain(|key, _| seen.contains(key));
     }
@@ -247,6 +302,63 @@ impl Router {
     let meters: Vec<(&String, Vec<f32>)> = self.sessions.iter().map(|(k, s)| (k, s.history.window(first))).collect();
     let mut envelope = vec![0.0f32; MATCH_BLOCKS + HOLD_PAD_BEFORE + HOLD_PAD_AFTER];
     let mut live = HashSet::new();
+
+    // A game on spatial sound plays silence at its stream and at its meter, so no level match can
+    // pair it (and after a service restart there is no pairing from before): the one silent unpaired
+    // stream and the one silent unpaired Game session belong together. Shortcut: a silent stream of
+    // another app looks the same while the game is quiet; any audible match corrects it.
+    let silent_slots: Vec<u64> = owners
+      .iter()
+      .filter(|(_, o)| Some((*o >> 32) as u32) == audiodg && !self.pairs.contains_key(o))
+      .filter(|(i, _)| {
+        table.slots.get(*i).is_some_and(|s| {
+          s.envelope(first.saturating_sub(HOLD_PAD_BEFORE as u64), &mut envelope);
+          envelope.iter().all(|v| *v <= SILENCE)
+        })
+      })
+      .map(|(_, o)| *o)
+      .collect();
+    let silent_games: Vec<&String> = meters
+      .iter()
+      .filter(|(key, peaks)| {
+        peaks.iter().all(|p| *p <= SILENCE)
+          && self.sessions.get(*key).is_some_and(|s| s.bus == StreamBus::Game)
+          && !self.pairs.values().any(|k| k == *key)
+      })
+      .map(|(key, _)| *key)
+      .collect();
+    let counts = (
+      silent_slots.len(),
+      silent_games.len(),
+      self.sessions.values().filter(|s| s.bus == StreamBus::Game).count(),
+      self.sessions.len(),
+    );
+    if self.elimination_seen != Some(counts) {
+      self.elimination_seen = Some(counts);
+      info!(
+        "[StreamRouter] silent unpaired: {} stream(s), {} silent Game session(s) of {} Game session(s), {} active session(s)",
+        counts.0, counts.1, counts.2, counts.3
+      );
+    }
+    // Only after the same candidate held for a while: a chat stream that is silent for a moment
+    // before its first match is not the game's.
+    match pair_by_elimination(&silent_slots, &silent_games) {
+      Some(_) => self.elimination_streak += 1,
+      None => self.elimination_streak = 0,
+    }
+    if self.elimination_streak >= ELIMINATION_EVALS
+      && let Some(key) = pair_by_elimination(&silent_slots, &silent_games)
+    {
+      for owner in &silent_slots {
+        if let Some(s) = self.sessions.get(key) {
+          info!(
+            "[StreamRouter] stream #{} -> {} (pid {}, {:?}): silent, the only silent Game session",
+            *owner as u32, s.exe, s.pid, s.bus
+          );
+        }
+        self.pairs.insert(*owner, key.clone());
+      }
+    }
 
     for (index, owner) in owners {
       let Some(slot) = table.slots.get(index) else { continue };
@@ -279,6 +391,30 @@ impl Router {
       slot.bus.store(bus.to_u32(), Ordering::Relaxed);
     }
     self.pairs.retain(|owner, _| live.contains(owner));
+    let paired: Vec<PairedStream> = self
+      .pairs
+      .iter()
+      .filter_map(|(owner, key)| self.sessions.get(key).map(|s| (*owner, s)))
+      .filter(|(_, s)| matches!(s.bus, StreamBus::Chat | StreamBus::Game))
+      .map(|(owner, s)| PairedStream {
+        owner,
+        is_game: s.bus == StreamBus::Game,
+        exe: s.exe.clone(),
+        path: s.path.clone(),
+      })
+      .collect();
+    if let Ok(mut p) = PAIRED.lock() {
+      *p = paired;
+    }
+  }
+}
+
+/// The silent unpaired Game session the silent unpaired streams belong to: there must be one such
+/// session and at least one stream (a game may open several, and keeps idle ones).
+fn pair_by_elimination<'a>(silent_slots: &[u64], silent_games: &[&'a String]) -> Option<&'a String> {
+  match (silent_slots.is_empty(), silent_games) {
+    (false, [key]) => Some(*key),
+    _ => None,
   }
 }
 
@@ -317,14 +453,7 @@ impl PeakHistory {
 
 /// Current QPC time in envelope blocks (same clock the APO stamps with).
 fn now_block() -> Option<u64> {
-  let (mut counter, mut freq) = (0i64, 0i64);
-  // SAFETY: out parameters are locals.
-  unsafe {
-    QueryPerformanceCounter(&mut counter).ok()?;
-    QueryPerformanceFrequency(&mut freq).ok()?;
-  }
-  let hns = u64::try_from(counter as i128 * 10_000_000 / i128::from(freq.max(1))).ok()?;
-  Some(hns / ENVELOPE_BLOCK_HNS)
+  Some(now_hns()? / ENVELOPE_BLOCK_HNS)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -342,10 +471,20 @@ mod tests {
     assert_eq!(bus_for_exe("steamwebhelper.exe"), StreamBus::Media, "a launcher is no game");
     assert_eq!(bus_for_exe("NoSuchGame.exe"), StreamBus::Media, "not recognized as a game: Media");
     crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", true);
-    assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::None);
+    assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::Game);
     crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", false);
     assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::Media);
     assert_eq!(bus_for_exe(""), StreamBus::Media);
+  }
+
+  #[test]
+  fn a_silent_stream_pairs_with_a_silent_game_only_when_each_is_the_only_one() {
+    let (a, b) = ("a".to_string(), "b".to_string());
+    assert_eq!(pair_by_elimination(&[7], &[&a]), Some(&a));
+    assert_eq!(pair_by_elimination(&[7, 8], &[&a]), Some(&a), "a game keeps more than one stream");
+    assert_eq!(pair_by_elimination(&[7], &[&a, &b]), None);
+    assert_eq!(pair_by_elimination(&[], &[&a]), None);
+    assert_eq!(pair_by_elimination(&[7], &[]), None);
   }
 
   #[test]

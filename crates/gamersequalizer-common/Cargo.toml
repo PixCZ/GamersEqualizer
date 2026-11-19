@@ -10,3 +10,14 @@ serde_json = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# duck_sim example: reads and writes WAV files (already in the lock file via the mic chain).
+hound = "3.5"
+# duck_sim example: the same voice detector the APO runs on chat streams.
+silero_vad = { path = "../vendor/silero_vad" }
+
+[[example]]
+name = "duck_sim"
+# Its self-check runs with `cargo test` (the gate), so the tool cannot rot unnoticed.
+test = true

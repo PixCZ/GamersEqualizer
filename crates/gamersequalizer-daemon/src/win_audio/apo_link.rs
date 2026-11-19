@@ -1,6 +1,7 @@
 //! Link to the APOs running inside audiodg (session 0). The APO creates the Global mapping
 //! `APO_SHM_NAME`; this side opens it when it appears and mirrors: GUI settings in,
 //! AEC/denoise/output telemetry back into the daemon's mapping (which the UI already reads).
+//! It also drives Automatic ChatMix (`ducking`), which works on both mappings.
 //! Driven from the reference thread (`aec_reference::spawn`).
 //!
 //! It also persists the echo delay for the APO path: the APO runs as LOCAL SERVICE and can't
@@ -19,6 +20,7 @@ use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use super::aec_delay_cache;
 use super::console_owner::ConsoleOwner;
 use super::dsp_watch::DspWatch;
+use super::ducking::Ducking;
 use super::mmdevice::resolve_default_capture_id;
 
 /// How often to look for the APO's mapping while it doesn't exist (cheap OpenFileMapping).
@@ -69,6 +71,7 @@ pub struct ApoLink {
   driving: bool,
   /// Source EQ versions last mirrored into the APO mapping.
   copied_eqs: CopiedEqVersions,
+  ducking: Ducking,
 }
 
 impl ApoLink {
@@ -99,6 +102,7 @@ impl ApoLink {
       console: ConsoleOwner::default(),
       driving: false,
       copied_eqs: CopiedEqVersions::default(),
+      ducking: Ducking::new(),
     }
   }
 
@@ -126,6 +130,17 @@ impl ApoLink {
     self.watch.is_live()
   }
 
+  /// Automatic ChatMix's mix mode needs the speaker reference too (a second reader of the ring).
+  pub fn mix_wants_reference(&self) -> bool {
+    self.ducking.wants_reference()
+  }
+
+  /// Every reference tick, unthrottled: mix mode moves the game's volume 20+ times a second.
+  pub fn tick_mix(&mut self, local: &SharedMemoryClient) {
+    let layout = self.shm.as_ref().filter(|_| self.driving).map(|apo| apo.layout());
+    self.ducking.tick_mix(&local.layout().header, layout);
+  }
+
   /// Open the mapping if needed, then mirror settings in and telemetry out.
   pub fn tick(&mut self, local: &SharedMemoryClient, tap_active: bool) {
     if self.last_sync.elapsed() < SYNC_INTERVAL {
@@ -140,6 +155,9 @@ impl ApoLink {
     }
     // After mirroring: the local mapping now holds the APO's telemetry.
     self.watch.check(&local.layout().header);
+    // Not driving (no APO yet, another user at the console): no table, nothing of ours is lowered.
+    let table = self.shm.as_ref().filter(|_| self.driving).map(|apo| &apo.layout().streams);
+    self.ducking.tick(&local.layout().header, table);
   }
 
   fn sync(&mut self, local: &SharedMemoryClient, tap_active: bool) {

@@ -132,6 +132,9 @@ pub(super) fn run_background_daemon() {
   let mut tray_host = tray::TrayHost::new();
   // Setup problems (default output / spatial sound lost, mic processing) for the tray badge.
   let mut health = health::HealthMonitor::new(storage.base_dir());
+  // Automatic ChatMix's mix mode lowers Game sessions; what an earlier run left lowered (a crash,
+  // a game that exited) is set back when its sessions appear.
+  win_audio.chatmix.game_duck = win_audio::chatmix::GameDuck::for_service(storage.base_dir());
 
   info!("[GamersEqualizer] Background service running smoothly. Entering audio monitoring loop...");
 
@@ -281,6 +284,15 @@ pub(super) fn run_background_daemon() {
       win_audio.chatmix.media.muted = med_mute;
 
       win_audio.chatmix.balance = bal;
+      // Atomics only: automatic ChatMix in the APO weighs game against chat as they are heard.
+      win_audio.chatmix.write_duck_gains(header);
+      // Mix mode lowers the Game sessions through the one writer of them (`apply_session_mix`).
+      win_audio::ducking::set_session_mode(
+        win_audio.chatmix.owns_session_volumes(),
+        win_audio.chatmix.get_multipliers(),
+      );
+      win_audio.chatmix.duck_factor = win_audio::ducking::game_duck_factor();
+      win_audio.chatmix.duck_subject = win_audio::ducking::mix_subject();
 
       // Per-app session volumes: fallback mode only, throttled, never against the user's
       // own mixer changes (`apply_session_mix`).
@@ -297,8 +309,13 @@ pub(super) fn run_background_daemon() {
     }
     output_eq.tick(true, win_audio.chatmix.master_device_id.clone(), header);
 
-    std::thread::sleep(Duration::from_millis(50));
+    // While mix mode moves a game's volume: 25 steps a second (the fast slew is 40 dB/s).
+    std::thread::sleep(Duration::from_millis(if win_audio::ducking::mix_fast() { 40 } else { 50 }));
   }
+
+  // A game lowered by mix mode gets its volume back before the service goes (or, if that fails,
+  // at the next start from `ducking_lowered.json`).
+  win_audio.chatmix.release_game_sessions();
 
   reference_running.store(false, Ordering::SeqCst);
   if let Some(handle) = reference_thread {

@@ -160,6 +160,8 @@ pub struct HealthMonitor {
   notes_reading: Option<Receiver<Option<Vec<ApoNote>>>>,
   /// Last `run_status.json` written; None = not written in this run yet.
   run_status: Option<RunStatus>,
+  /// Spatial sound on the default output and its format, as last logged.
+  spatial_logged: Option<(SpatialAudioStatus, Option<String>)>,
 }
 
 impl HealthMemory {
@@ -381,6 +383,7 @@ impl HealthMonitor {
       notes_read_at: None,
       notes_reading: None,
       run_status: None,
+      spatial_logged: None,
     }
   }
 
@@ -442,6 +445,10 @@ impl HealthMonitor {
     }
 
     let snap = snapshot(win_audio);
+    self.log_spatial(&snap);
+    // Automatic ChatMix's rule reads it from here, so its own thread never waits on these calls.
+    let format = snap.spatial_format.as_ref().map(|f| f.label(&f.id).to_string());
+    crate::win_audio::ducking::set_spatial(snap.spatial.is_active(), format);
     let mic = snap.selected_mic.as_deref().or(snap.default_mic.as_deref());
     self.mic_run.watch(run_target(snap.apo.as_ref().map(|(s, _)| s), mic, &snap.mics));
     self.out_run.watch(run_target(snap.out_apo.as_ref().map(|(s, _)| s), snap.output.as_deref(), &snap.outputs));
@@ -456,6 +463,21 @@ impl HealthMonitor {
     }
     self.shown = shown;
     true
+  }
+
+  /// One line per change of spatial sound on the default output: this check runs in the service,
+  /// whether or not the window is open (the window only reads it while it shows).
+  fn log_spatial(&mut self, snap: &Snapshot) {
+    let now = (snap.spatial, snap.spatial_format.as_ref().map(|f| f.label(&f.id).to_string()));
+    if self.spatial_logged.as_ref() == Some(&now) {
+      return;
+    }
+    let format = now.1.as_deref().map_or(String::new(), |f| format!(" ({f})"));
+    match &self.spatial_logged {
+      Some((old, _)) => info!("[Spatial] default output: {old:?} -> {:?}{format}", now.0),
+      None => info!("[Spatial] default output: {:?}{format}", now.0),
+    }
+    self.spatial_logged = Some(now);
   }
 
   /// Effects the registry lists on the device in use that Windows did not run while it was in

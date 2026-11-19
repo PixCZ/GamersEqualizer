@@ -1,6 +1,8 @@
 pub use crate::output_eq::{OutputEq, OutputLayer};
 use crate::shm_mapping::open_or_create_shm;
 use crate::sonar_importer::ProfileStorage;
+use crate::win_audio::ducking::{self, UnheardWatch};
+use crate::win_audio::stream_router;
 use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::ParametricProfile;
@@ -22,6 +24,9 @@ pub use mic_status::*;
 
 /// AEC history kept for the plots (~60 s at 10 updates/s).
 const AEC_HISTORY_LEN: usize = 600;
+/// How often the window looks whether Automatic ChatMix can hear the game (a walk of the stream
+/// table's atomics).
+const UNHEARD_RECHECK: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActiveTab {
@@ -88,6 +93,12 @@ pub struct AppState {
   /// The APO mapping, read-only here: how many app streams each channel has (opened lazily).
   apo_view: Option<SharedMemoryClient>,
   apo_view_tried: Option<std::time::Instant>,
+  /// A game Automatic ChatMix cannot hear (`ducking_unheard`), looked at every `UNHEARD_RECHECK`.
+  duck_unheard: UnheardWatch,
+  duck_unheard_at: Option<std::time::Instant>,
+  /// The speaker reference's writer beat and when it last moved, or was first seen while the game
+  /// cannot be heard (mix mode can hear the mix).
+  ref_beat_seen: Option<(u32, std::time::Instant)>,
 
   pub available_mic_profiles: Vec<super::mic_presets::MicPreset>,
   pub profile_bar: super::profile_bar::ProfileBarUi,
@@ -157,6 +168,9 @@ impl AppState {
       mic_profile,
       apo_view: None,
       apo_view_tried: None,
+      duck_unheard: UnheardWatch::default(),
+      duck_unheard_at: None,
+      ref_beat_seen: None,
       available_mic_profiles,
       profile_bar: Default::default(),
       shm_handle,
@@ -190,11 +204,7 @@ impl AppState {
   /// App streams the stream EQ currently runs on `bus` (paired by the daemon); None while
   /// no stream APO has created its mapping (not installed / nothing played since boot).
   pub fn streams_on_bus(&mut self, bus: StreamBus) -> Option<usize> {
-    if self.apo_view.is_none() && self.apo_view_tried.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2)) {
-      self.apo_view_tried = Some(std::time::Instant::now());
-      self.apo_view = SharedMemoryClient::open_existing(APO_SHM_NAME).ok();
-    }
-    let table = &self.apo_view.as_ref()?.layout().streams;
+    let table = &self.apo_view()?.layout().streams;
     let wanted = bus.to_u32();
     Some(
       table
@@ -203,6 +213,50 @@ impl AppState {
         .filter(|s| s.owner.load(Ordering::Relaxed) != 0 && s.bus.load(Ordering::Relaxed) == wanted)
         .count(),
     )
+  }
+
+  /// A game Automatic ChatMix cannot hear at its stream (its name, or "the game") and what the
+  /// service does about it (`ducking::mode`: lowered from the mix, or why not), by the rules the
+  /// service runs: atomics and the spatial status the header already polls, looked at every
+  /// `UNHEARD_RECHECK`, so it is cheap in the paint path. `session_mode`: the mixer owns the per-app
+  /// session volumes (no own Game / Chat outputs).
+  pub fn ducking_unheard(&mut self, session_mode: bool) -> Option<(String, ducking::Mode)> {
+    if self.duck_unheard_at.is_none_or(|t| t.elapsed() >= UNHEARD_RECHECK) {
+      self.duck_unheard_at = Some(std::time::Instant::now());
+      // Without the service nothing is paired or lowered: nothing to say.
+      let enabled =
+        self.is_daemon_active() && self.shm_header().is_some_and(|h| h.duck_enabled.load(Ordering::Relaxed));
+      let bands = match (self.apo_view().filter(|_| enabled), stream_router::now_hns()) {
+        (Some(apo), Some(now)) => ducking::playing_game_bands(&apo.layout().streams, now),
+        _ => Vec::new(),
+      };
+      let evidence = ducking::Evidence { enabled, spatial_on: self.spatial_status.is_active(), game_bands: &bands };
+      self.duck_unheard.observe(std::time::Instant::now(), &evidence);
+    }
+    if !self.duck_unheard.unheard() {
+      self.ref_beat_seen = None;
+      return None;
+    }
+    // The speaker reference flows while the output APO's writer beat moves (mirrored by the
+    // service); missing only after `REFERENCE_MISSING` without a move, as the service decides.
+    let beat = self.shm_header().map_or(0, |h| h.aec_ref_writer_beat.load(Ordering::Relaxed));
+    let now = std::time::Instant::now();
+    if self.ref_beat_seen.is_none_or(|(seen, _)| seen != beat) {
+      self.ref_beat_seen = Some((beat, now));
+    }
+    let flowing = self.ref_beat_seen.is_some_and(|(_, t)| now.duration_since(t) < ducking::REFERENCE_MISSING);
+    let name = self.active_game_name.clone().unwrap_or_else(|| crate::i18n::tr("the game").to_string());
+    Some((name, ducking::mode(true, session_mode, flowing)))
+  }
+
+  /// The APO's mapping, opened when first needed (retried every 2 s: it exists only once an APO
+  /// has run since boot).
+  fn apo_view(&mut self) -> Option<&SharedMemoryClient> {
+    if self.apo_view.is_none() && self.apo_view_tried.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(2)) {
+      self.apo_view_tried = Some(std::time::Instant::now());
+      self.apo_view = SharedMemoryClient::open_existing(APO_SHM_NAME).ok();
+    }
+    self.apo_view.as_ref()
   }
 
   /// Publish the output EQ (headphone + game) and the master switch.

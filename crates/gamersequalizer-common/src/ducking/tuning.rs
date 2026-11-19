@@ -1,0 +1,279 @@
+//! The ducker's tuning set: every value to be tuned by ear, carried through shared memory
+//! (`ShmHeader::duck_tune`) so the service can change it while the APO runs. One APO install must
+//! last through all tuning, so every tunable lives here, not in a `const`.
+
+use crate::shm::{DUCK_TUNE_SLOTS, ShmHeader};
+use std::sync::atomic::Ordering;
+
+// ---------------------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------------------
+
+/// One table ties each value's name, slot, default and sane range together, so `set`,
+/// `non_default`, `write_to` and `read_from` cannot disagree.
+macro_rules! duck_tuning {
+  ($( $(#[doc = $doc:literal])* $name:ident = $default:literal in $min:literal ..= $max:literal, )*) => {
+    /// Every tunable of the ducker. `Default` is the starting point; nothing in it is measured.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct DuckTuning {
+      $( $(#[doc = $doc])* pub $name: f32, )*
+    }
+
+    /// (name, default, min, max). The position is the `ShmHeader::duck_tune` slot, part of the
+    /// shared-memory layout: append only, never reorder or remove.
+    pub(super) const PARAMS: &[(&str, f32, f32, f32)] = &[ $( (stringify!($name), $default, $min, $max), )* ];
+
+    impl DuckTuning {
+      pub const DEFAULT: DuckTuning = DuckTuning { $( $name: $default, )* };
+
+      fn values(&self) -> [f32; PARAMS.len()] {
+        [ $( self.$name, )* ]
+      }
+
+      fn values_mut(&mut self) -> [&mut f32; PARAMS.len()] {
+        [ $( &mut self.$name, )* ]
+      }
+    }
+  };
+}
+
+duck_tuning! {
+  /// Speech band: a band-pass around 1.5 kHz with Q 0.5 covers about 500 Hz .. 4.5 kHz, the band
+  /// that carries intelligibility. Every level is measured in it; the game is lowered full band.
+  band_center_hz = 1500.0 in 300.0..=4000.0,
+  band_q = 0.5 in 0.2..=3.0,
+  /// Raw chat speech level (band mean square, dB) above which someone talks.
+  talk_threshold_db = -50.0 in -90.0..=-10.0,
+  /// A chat stream's voice detector (Silero VAD, run by the APO) hears speech in a 32 ms chunk at
+  /// or above this probability. DEVLOG milestone 38: at 0.5 normal speech is found in 90-98 % of
+  /// loud frames, pause frames score 0.4-8 %, keyboard 0 % (clicks never exceed 0.15).
+  speech_prob = 0.5 in 0.05..=0.95,
+  /// The depth holds this long after the last talking block, over pauses between words and a
+  /// podcast's breath between sentences (live test in mix mode: at 0.5 s the game came back up).
+  hold_s = 3.0 in 0.05..=5.0,
+  /// A spurt's level (the mean dB of its talking blocks) may raise the lowering level only from
+  /// this much talk on, so a soft syllable onset of a loud talker cannot.
+  spurt_min_s = 0.2 in 0.0..=2.0,
+  /// Slots of values no longer read, kept at their old default so an APO built before still reads
+  /// what it expects (retired with the learned loud and quiet levels, the lock and the latch when
+  /// the lowering level replaced them, and before). shortcut: they hold slots of an unreleased
+  /// layout; drop them with the next `shm_version!` bump.
+  retired_spurt_learn_s = 1.0 in 1.0..=1.0,
+  /// The spurt level is a leaky mean over this much talk (a plain mean until then), so a quiet
+  /// talker answering a loud one within the hold is heard at their own level within about this.
+  spurt_level_s = 1.0 in 0.05..=30.0,
+  /// Talk time of a spurt under which the depth grows only slowly: a single word causes a small
+  /// dip only.
+  short_talk_s = 0.35 in 0.0..=5.0,
+  /// The only rates the depth moves at (the "no sharp transition"). The release is slow: in mix
+  /// mode 12 dB/s brought 13 dB back in about a second, which sounded like a jump (live test).
+  slow_attack_db_per_s = 8.0 in 0.5..=200.0,
+  fast_attack_db_per_s = 40.0 in 0.5..=200.0,
+  release_db_per_s = 4.0 in 0.5..=200.0,
+  /// Time constants of the current game level (rise, fall), which decides whether a spurt ducks:
+  /// a click in a calm game must barely move it, sustained gunfire must.
+  game_rise_s = 0.4 in 0.01..=10.0,
+  game_fall_s = 1.5 in 0.01..=30.0,
+  retired_loud_rise_s = 3.0 in 3.0..=3.0,
+  retired_loud_rise_max_s = 20.0 in 20.0..=20.0,
+  retired_loud_slowdown = 15.0 in 15.0..=15.0,
+  retired_loud_fall_db_per_min = 0.5 in 0.5..=0.5,
+  retired_loud_warm_s = 30.0 in 30.0..=30.0,
+  retired_quiet_fall_s = 2.5 in 2.5..=2.5,
+  retired_quiet_fall_max_s = 3.0 in 3.0..=3.0,
+  retired_quiet_slowdown = 10.0 in 10.0..=10.0,
+  retired_quiet_outlier_db = 6.0 in 6.0..=6.0,
+  retired_quiet_rise_db_per_min = 1.0 in 1.0..=1.0,
+  retired_quiet_warm_s = 10.0 in 10.0..=10.0,
+  retired_loud_settled_s = 20.0 in 20.0..=20.0,
+  retired_quiet_settled_s = 10.0 in 10.0..=10.0,
+  retired_hysteresis_up_db = 0.5 in 0.5..=0.5,
+  retired_hysteresis_down_db = 4.0 in 4.0..=4.0,
+  /// A spurt raises the lowering level once the current game level would need more than this
+  /// (game - spurt level + margin), to what it needs.
+  on_threshold_db = 2.0 in -20.0..=20.0,
+  /// The voice's margin over the game at full strength (`duck_strength_permille` 1000; 500 = half).
+  /// A loud game with a quiet podcast needed about 8.5 dB (live test), which half strength gives.
+  max_margin_db = 17.0 in 0.0..=30.0,
+  /// Safety bound of the lowering level, whatever the levels and the strength.
+  max_depth_db = 18.0 in 0.0..=40.0,
+  retired_latch_release_s = 30.0 in 30.0..=30.0,
+  /// The service's mix ducker (`MixDucker`) measures the game only this long after the chat last
+  /// made a sound: it covers the chat's way through the spatial renderer and the tail of a word.
+  mix_chat_guard_s = 0.3 in 0.05..=5.0,
+  /// Mix mode's own depth bound, hold and margin until both modes shared one decision (2026-11-19);
+  /// now `max_depth_db`, `hold_s`, `max_margin_db` carry these values.
+  retired_mix_max_depth_db = 18.0 in 18.0..=18.0,
+  retired_mix_hold_s = 3.0 in 3.0..=3.0,
+  retired_mix_max_margin_db = 17.0 in 17.0..=17.0,
+  /// A chat block's envelope peak above this (dBFS) is a sound that holds the game's level (see
+  /// `chat_sounding`). Raised from -60: a podcast's breaths and room never fell below that, so the game
+  /// was never measured and its stale level hid the need to duck (live test).
+  mix_chat_sound_db = -45.0 in -90.0..=-10.0,
+  /// The mix ducker's game level falls with this time constant (it rises at once): a game that is
+  /// quiet for a few seconds between fights must not let go of the duck while the talker goes on
+  /// (live test: the game came back up and went down again every few seconds).
+  mix_game_fall_s = 6.0 in 0.1..=60.0,
+  /// Mix mode's own release rate until both modes shared one decision; now `release_db_per_s`.
+  retired_mix_release_db_per_s = 4.0 in 4.0..=4.0,
+}
+
+const _: () = assert!(PARAMS.len() <= DUCK_TUNE_SLOTS, "more tunables than shared-memory slots");
+
+// ---------------------------------------------------------------------------------------
+// Public functions
+// ---------------------------------------------------------------------------------------
+
+impl Default for DuckTuning {
+  fn default() -> Self {
+    Self::DEFAULT
+  }
+}
+
+impl DuckTuning {
+  /// Sets the value named `name` (the field's name). False, and nothing changed, for an unknown
+  /// name, a non-finite value or one outside that value's sane range.
+  pub fn set(&mut self, name: &str, value: f32) -> bool {
+    let Some(index) = PARAMS.iter().position(|p| p.0 == name) else { return false };
+    let valid = PARAMS.get(index).is_some_and(|p| in_range(p, value));
+    match self.values_mut().into_iter().nth(index) {
+      Some(field) if valid => {
+        *field = value;
+        true
+      }
+      _ => false,
+    }
+  }
+
+  /// The values that differ from the defaults, for the log.
+  pub fn non_default(&self) -> Vec<(&'static str, f32)> {
+    PARAMS.iter().zip(self.values()).filter(|(p, v)| *v != p.1).map(|(p, v)| (p.0, v)).collect()
+  }
+
+  /// Publishes all values; `duck_tune_version` moves only when one changed.
+  pub fn write_to(&self, h: &ShmHeader) {
+    let mut changed = false;
+    for (slot, value) in h.duck_tune.iter().zip(self.values()) {
+      changed |= slot.swap(value.to_bits(), Ordering::Relaxed) != value.to_bits();
+    }
+    if changed {
+      h.duck_tune_version.fetch_add(1, Ordering::Release);
+    }
+  }
+
+  /// What is published, never trusting the other process: a value that is not finite or out of
+  /// its range reads as its default.
+  pub fn read_from(h: &ShmHeader) -> Self {
+    let mut tuning = Self::DEFAULT;
+    for ((slot, param), field) in h.duck_tune.iter().zip(PARAMS).zip(tuning.values_mut()) {
+      let value = f32::from_bits(slot.load(Ordering::Relaxed));
+      if in_range(param, value) {
+        *field = value;
+      }
+    }
+    tuning
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------------------
+
+fn in_range(&(_, _, min, max): &(&str, f32, f32, f32), value: f32) -> bool {
+  value.is_finite() && (min..=max).contains(&value)
+}
+
+// ---------------------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::shm::CopiedEqVersions;
+
+  const T: DuckTuning = DuckTuning::DEFAULT;
+
+  #[test]
+  fn tuning_round_trips_through_the_header_and_the_mirror() {
+    let (daemon, apo) = (ShmHeader::default(), ShmHeader::default());
+    let version = |h: &ShmHeader| h.duck_tune_version.load(Ordering::Relaxed);
+    assert_eq!(DuckTuning::read_from(&daemon), T);
+    let mut tuning = T;
+    assert!(tuning.set("hold_s", 0.8) && tuning.set("on_threshold_db", 1.0));
+    assert_eq!(tuning.non_default(), vec![("hold_s", 0.8), ("on_threshold_db", 1.0)]);
+    let before = version(&daemon);
+    tuning.write_to(&daemon);
+    tuning.write_to(&daemon);
+    assert_eq!((version(&daemon), DuckTuning::read_from(&daemon)), (before + 1, tuning), "bumped once");
+    let before = version(&apo);
+    apo.copy_controls_from(&daemon, &mut CopiedEqVersions::default());
+    apo.copy_controls_from(&daemon, &mut CopiedEqVersions::default());
+    assert_eq!((version(&apo), DuckTuning::read_from(&apo)), (before + 1, tuning));
+  }
+
+  #[test]
+  fn tuning_rejects_unknown_names_and_bad_values() {
+    let mut tuning = T;
+    assert!(!tuning.set("no_such_value", 1.0) && !tuning.set("hold_s", f32::NAN) && !tuning.set("hold_s", 1e6));
+    assert_eq!(tuning, T);
+    let h = ShmHeader::default();
+    for garbage in [f32::NAN, f32::INFINITY, 1e9, -1e9] {
+      h.duck_tune.iter().for_each(|slot| slot.store(garbage.to_bits(), Ordering::Relaxed));
+      assert_eq!(DuckTuning::read_from(&h), T, "{garbage}");
+    }
+  }
+
+  #[test]
+  fn the_tuning_slots_are_pinned() {
+    // The installed APO reads `ShmHeader::duck_tune` by position while the exe is rebuilt: changing
+    // this list (other than appending) means a new APO for everyone. Slots 32-34 were added after
+    // the APO the user has installed and no APO build reads them, so slot 33 (`mix_chat_factor`)
+    // became `mix_chat_guard_s` in place; from here on, only append. A value no longer read keeps
+    // its slot as `retired_*`, pinned to its old default.
+    let names: Vec<&str> = PARAMS.iter().map(|p| p.0).collect();
+    let pinned = [
+      "band_center_hz",
+      "band_q",
+      "talk_threshold_db",
+      "speech_prob",
+      "hold_s",
+      "spurt_min_s",
+      "retired_spurt_learn_s",
+      "spurt_level_s",
+      "short_talk_s",
+      "slow_attack_db_per_s",
+      "fast_attack_db_per_s",
+      "release_db_per_s",
+      "game_rise_s",
+      "game_fall_s",
+      "retired_loud_rise_s",
+      "retired_loud_rise_max_s",
+      "retired_loud_slowdown",
+      "retired_loud_fall_db_per_min",
+      "retired_loud_warm_s",
+      "retired_quiet_fall_s",
+      "retired_quiet_fall_max_s",
+      "retired_quiet_slowdown",
+      "retired_quiet_outlier_db",
+      "retired_quiet_rise_db_per_min",
+      "retired_quiet_warm_s",
+      "retired_loud_settled_s",
+      "retired_quiet_settled_s",
+      "retired_hysteresis_up_db",
+      "retired_hysteresis_down_db",
+      "on_threshold_db",
+      "max_margin_db",
+      "max_depth_db",
+      "retired_latch_release_s",
+      "mix_chat_guard_s",
+      "retired_mix_max_depth_db",
+      "retired_mix_hold_s",
+      "retired_mix_max_margin_db",
+      "mix_chat_sound_db",
+      "mix_game_fall_s",
+      "retired_mix_release_db_per_s",
+    ];
+    assert_eq!(names, pinned);
+  }
+}
