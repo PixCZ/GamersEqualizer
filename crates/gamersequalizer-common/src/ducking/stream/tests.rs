@@ -107,8 +107,7 @@ impl Rig {
     }
   }
 
-  /// Fully ducked (the bound), learning settled: 12 s of talk in a fight (10 s of it teach
-  /// the quiet level), 20 s more of the fight, then talk over it.
+  /// Fully ducked (the bound): talk in a fight, more of the fight, then talk over it again.
   fn ducked(&mut self) {
     self.run(10.0, 0.0, FIGHT);
     self.run(12.0, VOICE, FIGHT);
@@ -240,7 +239,7 @@ fn a_sentence_reaches_the_depth_without_pumping_or_steps() {
   assert!(depths.iter().all(|d| *d <= max_db + 1e-4));
   assert!((depths.last().unwrap() - max_db).abs() < 0.01, "{depths:?}");
   for pair in depths.windows(2) {
-    assert!(pair[1] >= pair[0], "the depth went back up in a pause: {pair:?}");
+    assert!(pair[1] >= pair[0] - 1e-3, "the depth went back up in a pause: {pair:?}");
     assert!(pair[1] - pair[0] <= T.fast_attack_db_per_s * 0.01 + 1e-4, "step {pair:?}");
   }
 }
@@ -366,9 +365,11 @@ fn a_lower_strength_mid_duck_comes_up_at_the_release_rate() {
   let mut rig = Rig::new();
   rig.ducked();
   rig.settings.strength = 0.0;
+  // The level starts over and the talk raises it again at once, to what it needs now.
   let depths = rig.run(1.0, VOICE, FIGHT);
-  let lock = rig.game.status().lock_db.unwrap();
-  assert_releases(&mut rig, &depths, lock);
+  let level = rig.game.status().level_db;
+  assert!(level > 10.0 && level < T.max_depth_db - 1.0, "{level}");
+  assert_releases(&mut rig, &depths, level);
 }
 
 // --- Across a run of the game ---
@@ -379,7 +380,7 @@ fn two_firefights_get_the_same_depth() {
   rig.run(15.0, 0.0, FIGHT);
   let first = rig.sentence(3.0, LOUD_VOICE, FIGHT);
   rig.run(5.0, 0.0, &[(1500.0, CALM)]);
-  // 6 dB quieter, still masking the voice: the learned level forgets only 0.5 dB per minute.
+  // 6 dB quieter: the level stays while the game is heard.
   rig.run(3.0, 0.0, &[(1500.0, LOUD / 2.0)]);
   let second = rig.sentence(3.0, LOUD_VOICE, &[(1500.0, LOUD / 2.0)]);
   assert!(peak(&first) > 10.0 && peak(&first) < T.max_depth_db - 0.5, "{}", peak(&first));
@@ -387,16 +388,18 @@ fn two_firefights_get_the_same_depth() {
 }
 
 #[test]
-fn calm_play_and_silence_do_not_unlearn_the_fights() {
+fn calm_play_keeps_the_level_a_long_menu_starts_it_over() {
   let mut rig = Rig::new();
-  // Long enough to settle the learning (20 s of fight, 3 s of talk).
-  rig.run(25.0, 0.0, FIGHT);
+  rig.run(5.0, 0.0, FIGHT);
   let first = rig.sentence(5.0, LOUD_VOICE, FIGHT);
+  let level = rig.game.status().level_db;
   rig.run(120.0, 0.0, &[(1500.0, CALM)]);
-  rig.run(60.0, 0.0, &[]); // a menu sending digital zeros
+  assert!((rig.game.status().level_db - level).abs() < 0.25, "calm play is heard: only the decay");
+  rig.run(80.0, 0.0, &[]); // a menu sending digital zeros
+  assert_eq!(rig.game.status().level_db, 0.0);
   rig.run(1.0, 0.0, FIGHT);
   let second = rig.sentence(3.0, LOUD_VOICE, FIGHT);
-  assert!((peak(&first) - peak(&second)).abs() < 1.0, "{} vs {}", peak(&first), peak(&second));
+  assert!((peak(&first) - peak(&second)).abs() < 1.0, "the same fight again: {} vs {}", peak(&first), peak(&second));
 }
 
 #[test]
@@ -414,108 +417,37 @@ fn bursts_of_gunfire_do_not_move_the_depth_within_a_sentence() {
 }
 
 #[test]
-fn the_learned_depth_survives_a_gap_in_the_stream() {
+fn a_gap_in_the_stream_starts_the_level_over() {
   let mut rig = Rig::new();
   rig.run(15.0, 0.0, FIGHT);
   let before = rig.sentence(3.0, LOUD_VOICE, FIGHT);
   rig.now += 20_000_000; // 2 s without a block: menu, alt-tab
   rig.run(0.01, 0.0, FIGHT);
-  assert_eq!((rig.depth(), rig.game.last_gain), (0.0, 1.0), "restarted");
+  assert_eq!((rig.depth(), rig.game.last_gain, rig.game.status().level_db), (0.0, 1.0, 0.0), "restarted");
   rig.run(0.5, 0.0, FIGHT);
   let after = rig.sentence(2.0, LOUD_VOICE, FIGHT);
   let (a, b) = (before.last().unwrap(), after.last().unwrap());
   assert!((a - b).abs() < 0.5, "{a} vs {b}");
 }
 
-// --- Saved levels in the slot ---
+// --- A session volume change, from the service ---
 
 #[test]
-fn saved_levels_seed_once_and_garbage_or_a_reused_slot_seeds_nothing() {
+fn a_new_volume_epoch_starts_the_level_over_and_a_reused_slot_reads_none() {
   let mut rig = Rig::new();
-  for bad in [i32::MIN, 500] {
-    slot(&rig).duck_saved_loud_db_x10.store(bad, Ordering::Relaxed);
-    slot(&rig).duck_saved_quiet_db_x10.store(bad, Ordering::Relaxed);
-    rig.block(0.0, FIGHT);
-    assert!(!(rig.game.loud_seed == Some(true)) && !(rig.game.quiet_seed == Some(true)), "{bad}");
-  }
-  slot(&rig).duck_saved_loud_db_x10.store(-150, Ordering::Relaxed);
-  slot(&rig).duck_saved_quiet_db_x10.store(-300, Ordering::Relaxed);
-  rig.block(0.0, FIGHT);
-  assert!((rig.game.loud_seed == Some(true)) && (rig.game.quiet_seed == Some(true)));
-  assert_eq!(rig.game.status().quiet_db, Some(-30.0));
-  let published = slot(&rig).duck_loud_db_x10.load(Ordering::Relaxed);
-  assert!((-150..-140).contains(&published), "{published}");
-  assert_eq!(slot(&rig).duck_quiet_db_x10.load(Ordering::Relaxed), -300);
-  slot(&rig).duck_saved_quiet_db_x10.store(-400, Ordering::Relaxed);
-  rig.block(0.0, FIGHT);
-  assert_eq!(rig.game.status().quiet_db, Some(-30.0), "adopted once");
+  rig.ducked();
+  rig.run(0.1, 0.0, FIGHT); // the chat's last blocks still count as talk for 50 ms
+  slot(&rig).duck_volume_epoch.store(1, Ordering::Relaxed);
+  let depths = rig.run(RELEASE_S, 0.0, FIGHT);
+  assert_eq!(rig.game.status().level_db, 0.0);
+  assert_releases(&mut rig, &depths, 0.0);
+  // The next talk learns again, at the new volume.
+  rig.run(2.0, VOICE, FIGHT);
+  assert_eq!(rig.depth(), T.max_depth_db);
 
   let info = StreamInfo { pid: 1, now_hns: 0, sample_rate: 48_000, channels: 2, mode: 0 };
   assert_eq!(rig.table.claim(&info).map(|c| c.0), Some(GAME));
-  let s = slot(&rig);
-  let fields = [&s.duck_loud_db_x10, &s.duck_quiet_db_x10, &s.duck_saved_loud_db_x10, &s.duck_saved_quiet_db_x10];
-  assert_eq!(fields.map(|f| f.load(Ordering::Relaxed)), [0; 4]);
-  s.bus.store(StreamBus::Game.to_u32(), Ordering::Relaxed);
-  rig.game = StreamDucker::new(48_000.0);
-  rig.block(0.0, FIGHT);
-  assert!(!(rig.game.loud_seed == Some(true)) && !(rig.game.quiet_seed == Some(true)));
-}
-
-#[test]
-fn only_the_saved_value_present_is_adopted() {
-  let mut rig = Rig::new();
-  slot(&rig).duck_saved_loud_db_x10.store(-150, Ordering::Relaxed);
-  rig.run(1.0, 0.0, FIGHT);
-  rig.run(2.0, VOICE, FIGHT);
-  rig.run(1.0, 0.0, FIGHT); // the spurt ends and teaches
-  assert!((rig.game.loud_seed == Some(true)) && !(rig.game.quiet_seed == Some(true)));
-  let learned = rig.game.status();
-  assert!(learned.loud_s >= T.loud_settled_s && learned.quiet_s > 0.9, "{learned:?}");
-  // Learned from the chat's own level.
-  let chat_db = db(f32::from_bits(rig.table.slots[CHAT].speech_ms.load(Ordering::Relaxed)));
-  assert!((learned.quiet_db.unwrap() - chat_db).abs() < 0.5, "{:?} vs {chat_db}", learned.quiet_db);
-}
-
-#[test]
-fn a_saved_pair_arriving_mid_duck_moves_the_depth_only_at_the_slew_rates() {
-  let mut rig = Rig::new();
-  rig.run(10.0, 0.0, FIGHT);
-  let mut depths = rig.run(2.0, VOICE, FIGHT); // not settled yet: the pair is adopted
-  assert!(rig.depth() > 10.0);
-  let own = rig.game.status().loud_db.unwrap();
-  slot(&rig).duck_saved_loud_db_x10.store(-200, Ordering::Relaxed);
-  slot(&rig).duck_saved_quiet_db_x10.store(-150, Ordering::Relaxed);
-  depths.extend(rig.run(3.0, VOICE, FIGHT));
-  assert!((rig.game.loud_seed == Some(true)) && rig.game.status().loud_db.unwrap() < own, "adopted");
-  for pair in depths.windows(2) {
-    let step = pair[1] - pair[0];
-    assert!(step <= T.fast_attack_db_per_s * 0.01 + 1e-4 && -step <= T.release_db_per_s * 0.01 + 1e-4, "{pair:?}");
-  }
-}
-
-#[test]
-fn a_refused_saved_value_is_not_reported_as_seeded() {
-  let mut rig = Rig::new();
-  rig.ducked();
-  slot(&rig).duck_saved_loud_db_x10.store(-50, Ordering::Relaxed);
-  slot(&rig).duck_saved_quiet_db_x10.store(-500, Ordering::Relaxed);
-  rig.block(VOICE, FIGHT);
-  assert_eq!((rig.game.loud_seed, rig.game.quiet_seed), (Some(false), Some(false)));
-  let flags = slot(&rig).duck_dbg[dbg::FLAGS].load(Ordering::Relaxed);
-  assert_eq!(flags & (dbg::FLAG_LOUD_SEEDED | dbg::FLAG_QUIET_SEEDED), 0);
-}
-
-#[test]
-fn learned_levels_reach_the_store_only_once_settled() {
-  let mut rig = Rig::new();
-  let stored =
-    |rig: &Rig| [&slot(rig).duck_loud_db_x10, &slot(rig).duck_quiet_db_x10].map(|f| f.load(Ordering::Relaxed));
-  rig.run(10.0, 0.0, FIGHT);
-  rig.run(3.0, VOICE, FIGHT);
-  rig.run(1.0, 0.0, FIGHT);
-  assert_eq!(stored(&rig), [0, 0], "thin estimates");
-  rig.ducked();
-  assert!(stored(&rig).iter().all(|v| *v != 0), "{:?}", stored(&rig));
+  assert_eq!(slot(&rig).duck_volume_epoch.load(Ordering::Relaxed), 0);
 }
 
 // --- Tuning, telemetry, failure ---
@@ -573,12 +505,12 @@ fn debug_telemetry_shows_the_duckers_state_and_na_when_idle() {
   let read = |slot: usize, index: usize| rig.table.slots[slot].duck_dbg[index].load(Ordering::Relaxed);
   let x10 = |v: f32| (v * 10.0).round() as i32;
   assert_eq!(read(GAME, dbg::DEPTH_DB), x10(st.depth_db));
-  assert_eq!(read(GAME, dbg::LOCKED_DIFF_DB), x10(st.lock_db.unwrap()));
+  assert_eq!(read(GAME, dbg::LEVEL_DB), x10(st.level_db));
   assert_eq!(read(GAME, dbg::GAME_DB), x10(st.game_db));
   assert_eq!(read(GAME, dbg::SPURT_DB), x10(st.spurt_db.unwrap()));
-  let all = dbg::FLAG_TALKING | dbg::FLAG_LATCHED | dbg::FLAG_LOUD_SETTLED | dbg::FLAG_QUIET_SETTLED;
-  assert_eq!(read(GAME, dbg::FLAGS), all);
-  assert_eq!(read(GAME, dbg::QUIET_EVIDENCE_S), st.quiet_s as i32);
+  assert_eq!(read(GAME, dbg::FLAGS), dbg::FLAG_TALKING | dbg::FLAG_LOWERING);
+  assert_eq!(read(GAME, dbg::LEVEL_RAISES), st.raises as i32);
+  assert!(st.raises >= 1);
   assert!(read(CHAT, dbg::BAND_DB) != dbg::NA && read(CHAT, dbg::GAME_DB) == dbg::NA);
   rig.settings.enabled = false;
   rig.run(RELEASE_S, VOICE, FIGHT);

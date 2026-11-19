@@ -1,6 +1,6 @@
 //! What the feature reads per tick: the paired chat and game streams from the APO's table (the
 //! stream router names them) and the settings from the service's mapping. The status line, the
-//! level store, the minute summary and the debug log all work from this one walk of the table.
+//! minute summary and the debug log all work from this one walk of the table.
 
 use gamersequalizer_common::ducking::DuckTuning;
 use gamersequalizer_common::ducking::dbg::{self, FLAG_VAD, FLAGS};
@@ -8,7 +8,6 @@ use gamersequalizer_common::shm::ShmHeader;
 use gamersequalizer_common::streams::{DUCK_DBG_SLOTS, StreamTable};
 use std::sync::atomic::Ordering;
 
-use super::level_store::valid;
 use super::tuning_file::tuning_text;
 use crate::win_audio::stream_router::PairedStream;
 
@@ -36,10 +35,6 @@ pub struct StreamView {
   pub speech_ms: f32,
   /// `StreamSlot::duck_dbg`: what the APO saw and decided in its last block.
   pub dbg: [i32; DUCK_DBG_SLOTS],
-  /// Learned (settled) and stored (loud level, quiet talker), dB x 10, 0 = none or implausible
-  /// (the other process's values are checked here, so the rest works on clean ones).
-  pub learned: (i32, i32),
-  pub saved: (i32, i32),
   /// Mix mode's line (`MixRun::view`): the mix level and the chat band level, dB x 10, and whether
   /// the chat made sound (the game's level held, not measured).
   pub mix: Option<(i32, i32, bool)>,
@@ -81,8 +76,6 @@ pub fn read_streams(table: &StreamTable, paired: Vec<PairedStream>, now_hns: u64
         duck_permille: slot.duck_permille.load(r),
         speech_ms: f32::from_bits(slot.speech_ms.load(r)),
         dbg: std::array::from_fn(|i| slot.duck_dbg.get(i).map_or(dbg::NA, |a| a.load(r))),
-        learned: (valid(slot.duck_loud_db_x10.load(r)), valid(slot.duck_quiet_db_x10.load(r))),
-        saved: (valid(slot.duck_saved_loud_db_x10.load(r)), valid(slot.duck_saved_quiet_db_x10.load(r))),
         mix: None,
       })
     })
@@ -163,8 +156,6 @@ pub(super) mod tests {
       duck_permille: 0,
       speech_ms: 0.0,
       dbg: [dbg::NA; DUCK_DBG_SLOTS],
-      learned: (0, 0),
-      saved: (0, 0),
       mix: None,
     }
   }
@@ -185,7 +176,7 @@ pub(super) mod tests {
 
   #[test]
   fn with_nothing_lowered_mix_modes_line_is_the_game() {
-    // Regression: the minute summary of mix mode showed the silent game stream's learned levels
+    // Regression: the minute summary of mix mode showed the silent game stream's levels
     // (live log 2026-11-19: loud level -54.7 dB in the summary, -43.7 dB in the mix lines).
     let (silent, mut mix) = (stream(5, true), stream(u64::MAX, true));
     mix.mix = Some((-500, -600, false));

@@ -79,15 +79,16 @@ pub struct StreamSlot {
   /// amplitude).
   pub speech_ms: AtomicU32,
   pub duck_permille: AtomicU32,
-  /// Automatic ChatMix's learned levels, dB x 10 of the raw speech-band mean square, 0 = none.
-  /// APO -> daemon: what this (game) stream learned (the loud game level, the quiet talker level:
-  /// the quietest of the people who normally talk), each written only once it is settled.
-  pub duck_loud_db_x10: AtomicI32,
-  pub duck_quiet_db_x10: AtomicI32,
-  /// Daemon -> APO: the same two that an earlier run of this game learned, written when the
-  /// daemon pairs the slot with a Game app that has a record.
-  pub duck_saved_loud_db_x10: AtomicI32,
-  pub duck_saved_quiet_db_x10: AtomicI32,
+  /// Retired: the learned and stored levels of the design before the lowering level. An APO built
+  /// before may still write the first two. shortcut: they hold their place in the layout; drop
+  /// them with the next `shm_version!` bump.
+  pub retired_duck_loud_db_x10: AtomicI32,
+  pub retired_duck_quiet_db_x10: AtomicI32,
+  /// Daemon -> APO: moves (> 0) whenever a Game or Chat session volume changed, so this (game)
+  /// stream learns its lowering level again at the new volumes. It held a stored loud level
+  /// before, which an APO built before reads only when negative, so it ignores this.
+  pub duck_volume_epoch: AtomicI32,
+  pub retired_duck_saved_quiet_db_x10: AtomicI32,
   /// Automatic ChatMix debug telemetry, APO -> daemon, indexed by `ducking::dbg`. `reset()`
   /// fills it with `dbg::NA`, so a fresh slot never reads as real values.
   pub duck_dbg: [AtomicI32; DUCK_DBG_SLOTS],
@@ -244,11 +245,13 @@ impl StreamSlot {
     self.speech_ms.store(0, Ordering::Relaxed);
     self.duck_permille.store(0, Ordering::Relaxed);
     crate::ducking::dbg::clear(self);
-    // Never seed another app's stream with the previous owner's levels.
-    for level in
-      [&self.duck_loud_db_x10, &self.duck_quiet_db_x10, &self.duck_saved_loud_db_x10, &self.duck_saved_quiet_db_x10]
-    {
-      level.store(0, Ordering::Relaxed);
+    for cell in [
+      &self.retired_duck_loud_db_x10,
+      &self.retired_duck_quiet_db_x10,
+      &self.duck_volume_epoch,
+      &self.retired_duck_saved_quiet_db_x10,
+    ] {
+      cell.store(0, Ordering::Relaxed);
     }
     // The previous owner's tags would otherwise show up as this stream's audio for 2.56 s.
     // Tag 0 is a real block number only once every ~497 days of uptime.

@@ -436,8 +436,7 @@ impl ChatMixController {
       }
       // A per-app session volume (channel level x ChatMix balance) is applied BEFORE the stream
       // APO (measured, DEVLOG Milestone 19): what the APO sees is already what the listener hears.
-      // Cost until the APO side is reworked: a volume change there is not compensated at once,
-      // the learned levels follow it slowly.
+      // A change there starts the APOs' lowering level over (`Ducking::tick`, volume epoch).
       None => 1.0,
     };
     (gain(&self.game, &self.game_device_id), gain(&self.chat, &self.chat_device_id))

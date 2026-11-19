@@ -1,9 +1,10 @@
 //! The per-minute info line: for every minute in which someone talked, the talk spurts, how many
 //! lowered the game and how far, or when none did, the numbers that say why; for a minute with chat
-//! sound the detector never took as speech, that. A silent chat writes nothing. Fed every 100 ms by
+//! sound the detector never took as speech, that. A silent chat writes nothing. Each line ends with
+//! the lowering level and how often it was raised or started over that minute. Fed every 100 ms by
 //! `Ducking::tick`.
 
-use gamersequalizer_common::ducking::dbg::{self, BAND_DB, FLAG_TALKING, NEED_DB, VAD_PROB};
+use gamersequalizer_common::ducking::dbg::{self, BAND_DB, FLAG_TALKING, LEVEL_DB, LEVEL_RAISES, NEED_DB, VAD_PROB};
 use std::time::{Duration, Instant};
 
 use super::view::{self, Settings, StreamView};
@@ -17,10 +18,11 @@ pub struct Sample {
   pub talking: bool,
   /// How far the game is lowered now (permille).
   pub reduction: u32,
-  /// A game stream plays; the most lowered one's speech-band mean square and learned levels.
+  /// A game stream plays; the most lowered one's speech-band mean square, lowering level (dB x 10)
+  /// and how often it was raised since it last started over (`dbg::NA` when not reported).
   pub has_game: bool,
   pub game_speech_ms: f32,
-  pub learned: (i32, i32),
+  pub level: (i32, i32),
   /// Highest need over the talking game streams (dB x 10, `dbg::NA` = none).
   pub need: i32,
   /// Chat streams sampled, of them taken as speech, and their highest detector probability
@@ -51,7 +53,12 @@ pub struct MinuteSummary {
   /// Game speech-band level while lowered: sum and count of the per-tick dB.
   game_db_sum: f64,
   game_db_n: u32,
-  learned: (i32, i32),
+  /// The lowering level last seen (dB x 10), raises this minute, and whether it started over.
+  level: i32,
+  raised: u32,
+  started_over: bool,
+  /// The raise counter last seen, carried across minutes so each raise counts once.
+  prev_raises: Option<i32>,
   need_max: Option<i32>,
   chat_samples: u32,
   chat_speech: u32,
@@ -75,7 +82,7 @@ impl Sample {
       reduction: main.map_or(0, |s| s.duck_permille),
       has_game: main.is_some(),
       game_speech_ms: main.map_or(0.0, |s| s.speech_ms),
-      learned: main.map_or((0, 0), |s| s.learned),
+      level: main.map_or((dbg::NA, dbg::NA), |s| (view::at(&s.dbg, LEVEL_DB), view::at(&s.dbg, LEVEL_RAISES))),
       mix: main.is_some_and(|s| s.mix.is_some()),
       chat_sounding: main.and_then(|s| s.mix).is_some_and(|(_, _, sounding)| sounding),
       need: games()
@@ -122,8 +129,16 @@ impl MinuteSummary {
         self.game_db_n += 1;
       }
     }
-    if s.has_game {
-      self.learned = s.learned;
+    if s.has_game && s.level.0 != dbg::NA {
+      let (level, raises) = s.level;
+      self.level = level;
+      if let Some(prev) = self.prev_raises.filter(|_| raises != dbg::NA) {
+        // A counter that went back started over (and may have been raised again since).
+        let (from, over) = if raises < prev { (0, true) } else { (prev, false) };
+        self.raised += raises.abs_diff(from);
+        self.started_over |= over;
+      }
+      self.prev_raises = (raises != dbg::NA).then_some(raises);
     }
     self.mix |= s.mix && s.reduction > 0;
     if s.mix {
@@ -146,7 +161,13 @@ impl MinuteSummary {
     }
     let line = (self.spurts > 0 || self.chat_speech > 0 || self.chat_sound > 0)
       .then(|| self.line(chat_gain_permille, now.saturating_duration_since(started)));
-    *self = Self { started: Some(now), last_tick: Some(now), ..Self::default() };
+    *self = Self {
+      started: Some(now),
+      last_tick: Some(now),
+      level: self.level,
+      prev_raises: self.prev_raises,
+      ..Self::default()
+    };
     line
   }
 
@@ -195,7 +216,9 @@ impl MinuteSummary {
       // Those ticks did not update the game's level: it stands still while the chat sounds.
       parts.push(format!("chat sounding {} %", share(self.sounding_ticks, self.mix_ticks)));
     }
-    parts.push(super::levels_text(self.learned));
+    let level = if self.level == dbg::NA { "-".to_string() } else { format!("{:.1} dB", self.level as f32 / 10.0) };
+    let over = if self.started_over { ", started over" } else { "" };
+    parts.push(format!("lowering level {level} (raised {}{over})", self.raised));
     parts.join(", ")
   }
 }
@@ -219,7 +242,7 @@ mod tests {
       reduction,
       has_game: true,
       game_speech_ms: 0.01,
-      learned: (-205, -330),
+      level: (120, 1),
       need: if talking { -30 } else { dbg::NA },
       chat_samples: 1,
       chat_speech: u32::from(talking),
@@ -255,7 +278,7 @@ mod tests {
     let line = &lines[0];
     assert!(line.starts_with("last minute: 3 spurts, 3 lowered for"), "{line}");
     assert!(line.contains("depth 6.0-12.0 dB, game -20.0 dB while lowered"), "{line}");
-    assert!(line.ends_with("loud level -20.5 dB, quiet talker -33.0 dB"), "{line}");
+    assert!(line.ends_with("lowering level 12.0 dB (raised 0)"), "{line}");
     // A minute without talk: nothing.
     let (lines, _) = run(&mut s, t, &[(false, 0); 700]);
     assert!(lines.is_empty(), "{lines:?}");
@@ -274,6 +297,24 @@ mod tests {
       "{line}"
     );
     assert!(line.contains("need max -3.0 dB"), "{line}");
+  }
+
+  #[test]
+  fn raises_count_once_across_minutes_and_a_start_over_is_told() {
+    let t0 = Instant::now();
+    let mut s = MinuteSummary::default();
+    // Chat speech without a spurt, so every minute closes on time and writes its line.
+    let at = |level: i32, raises: i32| Sample { level: (level, raises), chat_speech: 1, ..sample(false, 0) };
+    let mut lines = Vec::new();
+    // Minute 1: raised twice (1 -> 3); minute 2: started over, then raised once.
+    let ticks = [at(60, 1), at(90, 2), at(120, 3), at(0, 0), at(80, 1)];
+    for i in 0..=1200u32 {
+      let tick = ticks.get((i / 201) as usize).copied().unwrap_or(at(80, 1));
+      lines.extend(s.observe(t0 + Duration::from_millis(100 * u64::from(i)), &tick, 800));
+    }
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines[0].ends_with("lowering level 12.0 dB (raised 2)"), "{}", lines[0]);
+    assert!(lines[1].ends_with("lowering level 8.0 dB (raised 1, started over)"), "{}", lines[1]);
   }
 
   #[test]

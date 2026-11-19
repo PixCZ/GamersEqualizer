@@ -20,17 +20,45 @@ spatial objects bypasses the per-app stream effects: its stream and its session 
   ducker's `DuckGain` (`ducking/gain.rs`). Service side: `crates/gamersequalizer-daemon/src/win_audio/ducking/`
   (`mix.rs`, `unheard.rs`, `mod.rs`), session volumes in `win_audio/chatmix/game_duck.rs`
   (`ducking_lowered.json` = crash recovery of the lowered volumes).
-- The game is measured in the mix **only while the chat makes no sound at all** (`chat_sounding` + guard
-  `mix_chat_guard_s`), otherwise the chat would be read as game. While the chat sounds, the game level from
-  before is held. Known cost (documented in `mix.rs`): someone who talks without any pause freezes it.
+- The game is measured in the mix, up and down, while the chat makes no sound at all (`chat_sounding` +
+  guard `mix_chat_guard_s`). While the chat sounds, the mix less 4x the chat's own band level (its stream
+  level at the output volume, peak-held 0.5 s) is a lower bound of the game and may only **raise** the held
+  level, so a fight that starts in the middle of speech is heard in 0.5-4 s (`duck_sim`, podcast-like chat;
+  before: 1-11 s, and never with the default guard 0.3 s because the pauses of fluent speech are shorter).
+  Live log 2026-11-19 17:13: the first lowering came 5-10 s after the shooting started, because the
+  game was measured only in pauses. This relies on the chat sitting in the mix at its stream's level (the log
+  shows its peaks in the mix at its stream's peaks, or just under). The fall still waits for a pause.
 - Mode switch: `UnheardWatch` says "cannot be heard" when a paired game stream plays and reads silence for
-  10 s while spatial sound is on; ending it needs 10 s of audio (hysteresis, so the mode does not flap).
-- The depth: `margin_db = strength * max_margin_db`; target = lock + gains + margin, bounded by `max_depth_db`
-  (both modes). The depth follows the target at the slow/fast attack and release rates; a "latch" keeps
-  the talk ducked until the game has not masked the talker for `latch_release_s` of talk, across pauses.
+  3 s while spatial sound is on (was 10 s: the first sentences of a talk went unlowered, live log 2026-11-19
+  16:59); ending it needs 10 s of audio (hysteresis, so the mode does not flap).
+- The depth (both modes, since 2026-11-19 the two-level design, section 1a): 0 dB while nobody talks, the
+  lowering level L while someone talks, reached at the slow/fast attack and left at the release rate.
 - Tuning reaches the APO through shared memory slots (`duck_tune`, 48 slots, **append only**; the pinned
   list is in `ducking/tuning.rs` test `the_tuning_slots_are_pinned`). The user's file is
   `%APPDATA%\GamersEqualizer\duck_tuning.json`; no new APO needed for tuning changes.
+
+## 1a. Two levels (2026-11-19, replaces the learned levels, lock and latch)
+
+- Every run starts unlowered: L = 0, nothing is stored between runs (`duck_level_cache.json` and
+  `level_store.rs` are gone; an old file is left on disk, unread).
+- need = game - talk spurt + channel gains + margin (`strength * max_margin_db`). A spurt that is
+  talking, at least `spurt_min_s` (0.2 s) old and needs more than `on_threshold_db` (2 dB) raises L to
+  its need, bounded by `max_depth_db` (18 dB). L comes down only by `LEVEL_DECAY_DB_PER_S` (1 dB per 10 minutes, inaudible; the next
+  fight raises it again by that little); a quieter fight keeps it.
+- L starts over at 0 after 60 s without the game heard (band level plus game gain below -65 dB:
+  `SILENT_RESET_S`, `SILENT_GAME_DB` in `gain.rs`, fixed for now), a stream gap, the feature off, a new
+  strength, any Game / Chat channel gain change, and any Game / Chat session volume change (mix mode in
+  `MixRun::follow_gains`; stream mode through `StreamSlot::duck_volume_epoch`, which the service bumps).
+- A pause shorter than `hold_s` (3 s) stays in the spurt at the depth reached.
+- Retired tuning slots (pinned at their old defaults, `retired_*`): `spurt_learn_s`, `loud_rise_s`,
+  `loud_fall_db_per_min`, `quiet_fall_s`, `quiet_outlier_db`, `quiet_rise_db_per_min`, `loud_settled_s`,
+  `quiet_settled_s`, `hysteresis_up_db`, `hysteresis_down_db`, `latch_release_s`. A value for them in
+  `duck_tuning.json` is ignored.
+- Log: the 10 s lines show game level, chat, spurts (and how many lowered), need, depth and
+  `lowering level X dB (raised N)`; the minute summary ends with
+  `lowering level X dB (raised N[, started over])`.
+- Offline: the `--seed` option of `duck_sim` is gone; it reports the lowering level at the end and how
+  many spurts raised it.
 
 ## 2. Commits and working tree
 
@@ -165,14 +193,14 @@ fast (12 dB/s) for a whole-game session volume, now `mix_release_db_per_s` 4.
 | `mix_game_fall_s`      | 6.0     | the game level falls with this time constant (rises at once) |
 
 Since 2026-11-19 both modes share one decision and its values: `max_depth_db` 18, `hold_s` 3.0,
-`max_margin_db` 17 (50 % -> 8.5 dB), `release_db_per_s` 4.0, `latch_release_s` 30 (the latch is kept between
-talks: the next talk starts where the last one ended). The old `mix_*` copies are retired slots.
+`max_margin_db` 17 (50 % -> 8.5 dB), `release_db_per_s` 4.0, `on_threshold_db` 2. The old `mix_*` copies and
+`latch_release_s` are retired slots (section 1a).
 
 ## 7. How to look at it
 
 - Status line: `[Ducking] on, strength N %; mode mix|stream|none (...)`; "cannot be heard" / "can be heard
-  again"; `silent unpaired: ...`; the 10 s `(mix)` lines (game level min/mean/max, chat, spurts, latched,
-  `need`, `depth`, `target`, `loud level`, `lock`, `mix level`, `chat sounding`); `last minute` summaries.
+  again"; `silent unpaired: ...`; the 10 s `(mix)` lines (game level min/mean/max, chat, spurts, lowered,
+  `need`, `depth`, `lowering level`, `mix level`, `chat sounding`); `last minute` summaries.
 - Offline: `cargo run --release -p gamersequalizer-common --example duck_sim -- game.wav chat.wav out_dir
   [duck_tuning.json] [--strength 0.5] [--mix]`.
 - Rules for the repo: `scripts/check.ps1` is the gate (run through `scripts/dev-rebuild.ps1 -Test -Start`),

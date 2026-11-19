@@ -9,8 +9,7 @@
 //! its file lasts); volumes other than the fixed gains given.
 //!
 //!   cargo run --release -p gamersequalizer-common --example duck_sim -- <game.wav> <chat.wav> <out_dir>
-//!     [duck_tuning.json] [--strength 0.5] [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3]
-//!     [--seed <loud_db> <quiet_db>] [--mix]
+//!     [duck_tuning.json] [--strength 0.5] [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3] [--mix]
 //!
 //! `--mix` runs the service's path instead (`MixDucker`, for games that bypass the stream effects):
 //! the game stream is left alone, a 50 ms tick sees the output mix (game at the applied volume +
@@ -18,8 +17,7 @@
 //!
 //! Writes `game_ducked.wav`, `mix_before.wav` and `mix_after.wav` (volumes applied) into
 //! `out_dir`, and prints one line per talk spurt plus a summary. `duck_tuning.json` is the file
-//! the service reads: a flat object of `DuckTuning` names to numbers. `--seed` takes the levels a
-//! first run printed, to hear a second run of the same game, locked from its first sentence.
+//! the service reads: a flat object of `DuckTuning` names to numbers.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -54,11 +52,10 @@ struct Options {
   run: Run,
 }
 
-/// How a simulation runs: pairing delay, stored levels, the service's mix path.
+/// How a simulation runs: pairing delay, the service's mix path.
 #[derive(Default)]
 struct Run {
   pair_delay_s: f32,
-  seed: Option<(f32, f32)>,
   mix: bool,
 }
 
@@ -77,10 +74,9 @@ struct Sim {
   spurts: Vec<Spurt>,
   talk_s: f32,
   ducked_talk_s: f32,
-  loud_db: Option<f32>,
-  quiet_db: Option<f32>,
-  lock_db: Option<f32>,
-  target_db: Option<f32>,
+  /// The lowering level at the end and how many spurts raised it.
+  level_db: f32,
+  raises: u32,
 }
 
 fn main() -> ExitCode {
@@ -136,7 +132,7 @@ fn simulate(
   run: &Run,
   mut detector: impl FnMut(&[f32], bool) -> f32,
 ) -> Result<Sim, String> {
-  let Run { pair_delay_s, seed, mix } = *run;
+  let Run { pair_delay_s, mix } = *run;
   let table = zeroed_table();
   let info = |channels: usize| StreamInfo { pid: 1, now_hns: 0, sample_rate: RATE, channels: channels as u32, mode: 0 };
   let game_slot = table.claim(&info(game.channels)).map(|c| c.0).ok_or("no stream slot")?;
@@ -144,10 +140,6 @@ fn simulate(
   let slot = |index: usize| table.slots.get(index).ok_or("no stream slot");
   slot(game_slot)?.bus.store(StreamBus::Game.to_u32(), Ordering::Relaxed);
   slot(chat_slot)?.bus.store(StreamBus::Chat.to_u32(), Ordering::Relaxed);
-  if let Some((loud, quiet)) = seed {
-    slot(game_slot)?.duck_saved_loud_db_x10.store((loud * 10.0).round() as i32, Ordering::Relaxed);
-    slot(game_slot)?.duck_saved_quiet_db_x10.store((quiet * 10.0).round() as i32, Ordering::Relaxed);
-  }
   let header = Box::new(ShmHeader::default());
   tuning.write_to(&header);
   let (mut game_ducker, mut chat_ducker) = (StreamDucker::new(RATE as f32), StreamDucker::new(RATE as f32));
@@ -155,24 +147,13 @@ fn simulate(
   chat_ducker.refresh_tuning(&header);
   // The service's path (`--mix`): its 50 ms tick, the mix it heard and the depth it applies.
   let (mut mixer, mut tick_mix, mut mix_depth) = (MixDucker::new(RATE as f32), Vec::new(), 0.0f32);
-  if let Some((loud, quiet)) = seed.filter(|_| mix) {
-    mixer.seed(Some(loud), Some(quiet));
-  }
 
   let frames = game.samples.len() / game.channels.max(1);
   let chat_frames = chat.samples.len() / chat.channels.max(1);
   let mut vad_hns: Option<u64> = None;
   let (mut out, mut mono, mut chat_block) = (Vec::with_capacity(game.samples.len()), Vec::new(), Vec::new());
-  let mut sim = Sim {
-    game_ducked: Vec::new(),
-    spurts: Vec::new(),
-    talk_s: 0.0,
-    ducked_talk_s: 0.0,
-    loud_db: None,
-    quiet_db: None,
-    lock_db: None,
-    target_db: None,
-  };
+  let mut sim =
+    Sim { game_ducked: Vec::new(), spurts: Vec::new(), talk_s: 0.0, ducked_talk_s: 0.0, level_db: 0.0, raises: 0 };
   let mut spurt: Option<(Spurt, f32, usize)> = None; // the spurt, its game level sum and blocks
   let mut now = 1_000_000_000u64;
   for first in (0..frames).step_by(BLOCK) {
@@ -214,12 +195,12 @@ fn simulate(
         tick_mix.extend([sample; 2]);
       }
       if (first / BLOCK) % 5 == 4 {
-        // As the service: the chat's speech level, and whether its envelope (recorded above per
+        // As the service: the chat's speech and band levels, and whether its envelope (recorded above per
         // 10 ms block) sounded during the tick, with a small margin.
-        let (speech_ms, _) = chat_levels(&table, now);
+        let levels = chat_levels(&table, now);
         let sounding = chat_sounding(&table, now, 0.06, tuning.mix_chat_sound_db);
         let s = DuckSettings { enabled: settings.enabled && paired, ..*settings };
-        mix_depth = mixer.process(&tick_mix, 0.05, speech_ms, sounding, &s, tuning);
+        mix_depth = mixer.process(&tick_mix, 0.05, levels, sounding, &s, tuning);
         tick_mix.clear();
       }
     }
@@ -228,7 +209,7 @@ fn simulate(
     let st = if mix { mixer.status() } else { game_ducker.status() };
     if st.talking {
       sim.talk_s += count as f32 / RATE as f32;
-      if st.latched {
+      if st.lowering {
         sim.ducked_talk_s += count as f32 / RATE as f32;
       }
     }
@@ -239,7 +220,7 @@ fn simulate(
       }
       (Some((s, game_sum, blocks)), true) => {
         (s.talk_s, s.level_db) = (st.spurt_talk_s, st.spurt_db.unwrap_or(0.0));
-        s.ducked |= st.latched;
+        s.ducked |= st.lowering;
         s.depth_db = s.depth_db.max(st.depth_db);
         (*game_sum, *blocks) = (*game_sum + st.game_db, *blocks + 1);
       }
@@ -251,7 +232,7 @@ fn simulate(
       }
       (None, false) => {}
     }
-    (sim.loud_db, sim.quiet_db, sim.lock_db, sim.target_db) = (st.loud_db, st.quiet_db, st.lock_db, st.target_db);
+    (sim.level_db, sim.raises) = (st.level_db, st.raises);
   }
   sim.game_ducked = out;
   Ok(sim)
@@ -270,18 +251,12 @@ fn print_report(sim: &Sim) {
       s.depth_db
     );
   }
-  let db = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.1} dB"));
   println!(
-    "learned loud level {}, quiet talker {}, locked difference {}, depth when ducking {}, talk ducked {:.0} %",
-    db(sim.loud_db),
-    db(sim.quiet_db),
-    db(sim.lock_db),
-    db(sim.target_db),
+    "lowering level at the end {:.1} dB, raised by {} spurts, talk ducked {:.0} %",
+    sim.level_db,
+    sim.raises,
     100.0 * sim.ducked_talk_s / sim.talk_s.max(1e-6)
   );
-  if let (Some(loud), Some(quiet)) = (sim.loud_db, sim.quiet_db) {
-    println!("a second run of this game: --seed {loud:.1} {quiet:.1}");
-  }
 }
 
 /// Applies a flat JSON object of tuning names to numbers; returns what was ignored.
@@ -309,7 +284,7 @@ fn mix(game: &Audio, game_samples: &[f32], chat: &Audio, s: &DuckSettings) -> Ve
 
 fn parse_args(args: Vec<String>) -> Result<Options, String> {
   let usage = "usage: duck_sim <game.wav> <chat.wav> <out_dir> [duck_tuning.json] [--strength 0.5] \
-               [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3] [--seed <loud_db> <quiet_db>] [--mix]";
+               [--game-gain 1.0] [--chat-gain 1.0] [--pair-delay 3] [--mix]";
   let mut positional = Vec::new();
   let mut settings = DuckSettings { enabled: true, strength: 0.5, game_gain: 1.0, chat_gain: 1.0 };
   let mut run = Run { pair_delay_s: PAIR_DELAY_S, ..Run::default() };
@@ -323,7 +298,6 @@ fn parse_args(args: Vec<String>) -> Result<Options, String> {
       "--game-gain" => settings.game_gain = number(&mut args, "--game-gain")?.max(0.0),
       "--chat-gain" => settings.chat_gain = number(&mut args, "--chat-gain")?.max(0.0),
       "--pair-delay" => run.pair_delay_s = number(&mut args, "--pair-delay")?.max(0.0),
-      "--seed" => run.seed = Some((number(&mut args, "--seed")?, number(&mut args, "--seed")?)),
       "--mix" => run.mix = true,
       _ if arg.starts_with("--") => return Err(format!("unknown option {arg}; {usage}")),
       _ => positional.push(PathBuf::from(arg)),

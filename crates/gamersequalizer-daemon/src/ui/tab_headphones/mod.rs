@@ -149,7 +149,7 @@ fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
       theme::card_title(ui, Some((icons::CHAT, COLOR)), tr("Automatic ChatMix"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
         "Lowers the game while someone in the chat is talking and the game is drowning them out. \
-         Only in the range of speech, smoothly, and by about the same amount each time.",
+         Smoothly, by about the same amount each time, and back up when the talk stops.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut new_on = on;

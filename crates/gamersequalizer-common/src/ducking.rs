@@ -1,40 +1,32 @@
 //! Automatic ChatMix ("ducking"): while someone in the voice chat talks over a loud game, the game
-//! is lowered in the speech band, by one depth for the whole run of the game, never with a step.
+//! is lowered, by one level that is learned from the fights, never with a step.
 //!
 //! Where it runs: every app audio stream has its own stream APO instance, before the mix, with a
 //! `StreamDucker` (`stream.rs`). Each instance measures its stream's speech-band level and publishes
 //! it in its `StreamSlot`; the service tells each slot its channel (`StreamBus`). A game stream reads
 //! the chat streams' levels straight from the shared `StreamTable` (a few atomic loads per block) and
-//! lowers itself: no daemon in the loop. A chat stream's level counts only while its voice detector
-//! (Silero, run by the APO glue) hears speech, so coughs and room noise never lower the game.
+//! lowers itself, full band: no daemon in the loop. A chat stream's level counts only while its voice
+//! detector (Silero, run by the APO glue) hears speech, so coughs and room noise never lower the game.
 //!
-//! The cut: a band-pass around the speech band subtracted from the signal, `x - c * bp(x)`, is a
-//! bell of gain `1 - c` at its centre: bass and highs stay, and the depth moves per frame without
-//! new coefficients. At depth 0 the buffer is not touched.
-//!
-//! What it decides (`gain.rs`), per 10 ms block:
-//! - Whether, per talk spurt: a spurt is talk with pauses shorter than the hold; its level is a
-//!   leaky mean of its talking blocks. The spurt ducks once the current game level masks it (game -
-//!   spurt + margin above a threshold) and stays ducked until it ends or the game has not masked it
-//!   for a few seconds (a talker who never pauses): a loud talker above the game does not duck it, a
-//!   quiet one does, and a quiet talker answering a loud one does within a second.
-//! - How much, once for the run: the depth comes from a locked difference between two learned
-//!   levels, the loud game level (an upper envelope of the game) and the quiet talker level (the
-//!   quietest of the people who normally talk: a mean of the first talkers, then a lower envelope).
-//!   Once both are settled the lock is a backlash, so the depth stays the same for the whole run.
-//!   Volumes and the user's Strength (the margin) are added live on top.
-//! - The depth moves only at slew rates, slowly for the first words of a spurt, and is frozen in the
+//! What it decides (`gain.rs`), per 10 ms block, between two levels:
+//! - Nobody talks (a talk spurt is talk with pauses shorter than the hold): nothing is lowered.
+//! - Someone talks: the game is lowered by the lowering level. It starts at 0 with every run (nothing
+//!   is stored); a spurt the current game level masks (game - spurt level + margin above a
+//!   threshold) raises it to what that spurt needs, so it grows to what the loudest fight needed and
+//!   never more. It comes down only by 1 dB in 10 minutes (inaudible, `LEVEL_DECAY_DB_PER_S`); it starts over at 0 after a long
+//!   silence of the game, a stream gap, the feature turned off, a new strength and any volume change
+//!   (a channel output's in the settings, a session volume through `StreamSlot::duck_volume_epoch`).
+//! - The depth moves only at slew rates, slowly for the first words of a spurt, and is held in the
 //!   pauses between words.
 //!
-//! The service stores the two settled levels per game exe and seeds the next run of that game, so
-//! it is locked from its first sentence. Every level and time is a starting point to be tuned by
-//! ear and lives in `DuckTuning` (`tuning.rs`), which the service changes while the APO runs; none
-//! of them is measured. `dbg.rs` is the per-slot telemetry the service logs.
+//! Every level and time is a starting point to be tuned by ear and lives in `DuckTuning`
+//! (`tuning.rs`), which the service changes while the APO runs; none of them is measured. `dbg.rs`
+//! is the per-slot telemetry the service logs.
 //!
 //! A game whose stream the APO cannot see (spatial audio objects bypass the per-stream effects) is
-//! ducked by the service instead (`mix.rs`): the same decisions, with the game measured in the
-//! output mix while the chat makes no sound and held while it does, applied to the game's session
-//! volume, full band. `band.rs` is the filter both paths measure with.
+//! ducked by the service instead (`mix.rs`): the same decision, with the game measured in the
+//! output mix (while the chat sounds, with the chat's level taken out: it can only raise the game's
+//! level), applied to the game's session volume, full band. `band.rs` is the filter both paths measure with.
 
 use crate::shm::ShmHeader;
 use crate::streams::StreamBus;

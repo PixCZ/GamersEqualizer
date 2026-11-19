@@ -3265,6 +3265,14 @@ calm game with a stray sound: nothing happens.
   comparison: one shot no longer lowers a calm game for ~25 s (two segments must agree; cost: in a
   chat with few pauses a fight is picked up about 7 s later), and a session volume change moves the
   learned levels (a game turned down 10 dB: next fight 8 dB instead of 16 dB).
+- Replaced later on 2026-11-19 by two levels: 0 dB while nobody talks, a lowering level while someone
+  does. It starts at 0 every run (no store, `duck_level_cache.json` unread), a masked spurt raises it to
+  what that spurt needs, it comes down by only 1 dB in 10 minutes (inaudible; a fight raises it again by that little), and it starts over after 60 s of an
+  unheard game, any volume or strength change, a stream gap or the feature off. The learned loud and
+  quiet levels, the lock, the backlash, the latch and the stored levels above are gone (11 tunables
+  retired). Why: the first fight of a run was not lowered and the depth crept for minutes; on the
+  user's recording (`duck_sim --mix`, strength 50 %) the game is lowered 5-5.5 dB from 10 s on (the
+  fight at 60 s, not lowered before, included), 10 dB from 120 s, 12.4 dB at the end, raised by one spurt. Handoff notes: `docs/handoff-chatmix-atmos.md` 1a.
 
 Tests: `ducking/gain/tests.rs` (who ducks, the quiet and loud levels, the lock, seeding),
 `ducking/stream/tests.rs` (bit-exact idle, slew and per-sample smoothness, band limits, sample rates and
@@ -3447,3 +3455,13 @@ Every line starts with `[Ducking]`; levels and depths are dB with one decimal (`
 - Tuning while everything runs: `%APPDATA%\GamersEqualizer\duck_tuning.json`, a flat object of
   tuning name -> number, polled every 2 s by the service and applied to the running APO; the app
   never writes or moves it.
+
+- Mix mode hears a fight that starts in speech (2026-11-19). Live log 17:13: shooting began while a
+  podcast talked and the game was lowered 5-10 s later, because `MixDucker` measured the game only in
+  chat pauses. Fluent speech has no pause longer than the guard (0.3 s): `duck_sim` with a
+  near-continuous chat never measured the game at all with the default guard, and 1-11 s late with
+  guards down to 0.05 s. Now, while the chat sounds, the mix less 4x the chat's own band level
+  (peak-held 0.5 s) is a lower bound of the game and can raise the held level, never lower it; a
+  fight needs two segments (1 s) in a row, also in speech. Latency in the simulation 0.5-4 s. A first
+  try with 2x let the chat through as game (the stream publishes one 10 ms block per tick). Limit:
+  a fight less than 6 dB above the chat's peaks is noticed only in a pause.

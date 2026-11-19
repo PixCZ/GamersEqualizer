@@ -6,15 +6,13 @@
 //!
 //! Written only when something happened (disk wear: no heartbeat). A window's line is kept when
 //! someone talked (game stream talking or chat speech), the chat carried sound the detector did not
-//! take as speech, the game was lowered, the loud level rose or the quiet talker or the lock moved
-//! by 1 dB or more since the last line written for that
-//! stream, its settled / stored state changed, or it is the stream's first window after its start
-//! line (one baseline per session). The slow fall of the loud level does not count. Otherwise the
-//! window is dropped: an idle evening writes nothing.
+//! take as speech, the game was lowered, the lowering level moved by 1 dB or more or was raised or
+//! started over since the last line written for that stream, or it is the stream's first window
+//! after its start line (one baseline per session). Otherwise the window is dropped: an idle evening
+//! writes nothing.
 
 use gamersequalizer_common::ducking::dbg::{
-  self, BAND_DB, DEPTH_DB, FLAG_LATCHED, FLAG_LOUD_SEEDED, FLAG_LOUD_SETTLED, FLAG_QUIET_SEEDED, FLAG_QUIET_SETTLED,
-  FLAG_TALKING, FLAGS, GAME_DB, LOCKED_DIFF_DB, LOUD_EVIDENCE_S, NEED_DB, QUIET_EVIDENCE_S, TARGET_DEPTH_DB, VAD_PROB,
+  self, BAND_DB, DEPTH_DB, FLAG_LOWERING, FLAG_TALKING, FLAGS, GAME_DB, LEVEL_DB, LEVEL_RAISES, NEED_DB, VAD_PROB,
 };
 use gamersequalizer_common::streams::DUCK_DBG_SLOTS;
 use std::collections::BTreeMap;
@@ -23,8 +21,8 @@ use std::time::{Duration, Instant};
 use super::view::{self, Settings, StreamView};
 
 const SUMMARY_EVERY: Duration = Duration::from_secs(10);
-/// A learned value moving this much (dB x 10) since the last written line keeps a window.
-const LEARNED_MOVE_X10: u32 = 10;
+/// The lowering level moving this much (dB x 10) since the last written line keeps a window.
+const LEVEL_MOVE_X10: u32 = 10;
 
 #[derive(Debug, Default)]
 pub struct DebugLog {
@@ -35,21 +33,19 @@ pub struct DebugLog {
   since: Option<Instant>,
   chat: ChatStats,
   games: BTreeMap<u64, GameStats>,
-  /// Per game stream: its learned values as of the last line written for it. A stream missing
+  /// Per game stream: its lowering level as of the last line written for it. A stream missing
   /// here gets its baseline line.
-  written: BTreeMap<u64, Learned>,
+  written: BTreeMap<u64, Level>,
   /// A start line was written and no window closed since: the chat-only line is a baseline too.
   baseline: bool,
 }
 
-/// What a game stream has learned, compared between written lines.
+/// A game stream's lowering level (dB x 10) and how often it was raised, compared between written
+/// lines. Both are the other process's raw values (`dbg::NA` when missing).
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct Learned {
-  loud: i32,
-  quiet: i32,
-  lock: i32,
-  /// The settled / stored bits of `FLAGS`.
-  states: i32,
+struct Level {
+  level: i32,
+  raises: i32,
 }
 
 /// min/avg/max of dB x 10 samples; `dbg::NA` samples are skipped.
@@ -81,14 +77,14 @@ struct GameStats {
   depth: Stat,
   samples: u32,
   talking: u32,
-  latched: u32,
+  lowering: u32,
   spurts: u32,
-  latches: u32,
+  lowered_spurts: u32,
   /// Some sample had a depth above 0.
   lowered: bool,
   prev_flags: i32,
-  /// The last sample's values and learned levels.
-  last: Option<([i32; DUCK_DBG_SLOTS], (i32, i32))>,
+  /// The last sample's values.
+  last: Option<[i32; DUCK_DBG_SLOTS]>,
   /// Mix mode only: the mix level and the chat band level it used.
   mix_level: Stat,
   chat_band: Stat,
@@ -154,10 +150,10 @@ impl DebugLog {
       }
     } else {
       for (owner, g) in &self.games {
-        let learned = g.learned();
-        let moved = self.written.get(owner).is_none_or(|w| w.moved(&learned));
+        let level = g.level();
+        let moved = self.written.get(owner).is_none_or(|w| w.moved(&level));
         if talked || g.talking > 0 || g.lowered || moved {
-          self.written.insert(*owner, learned);
+          self.written.insert(*owner, level);
           lines.push(format!("{secs} {}: {}{changed}", g.exe, g.text(&chat)));
         }
       }
@@ -170,14 +166,11 @@ impl DebugLog {
   }
 }
 
-impl Learned {
-  /// Something worth a line: the loud level rose (its slow fall is not news), the quiet talker or
-  /// the lock moved, or a level settled or came from the store. The lock is the other process's raw
-  /// value, so nothing here can overflow.
-  fn moved(&self, now: &Learned) -> bool {
-    let rose = |a: i32, b: i32| if a == 0 || b == 0 { a != b } else { b > a && a.abs_diff(b) >= LEARNED_MOVE_X10 };
-    let apart = |a: i32, b: i32| if a == dbg::NA || b == dbg::NA { a != b } else { a.abs_diff(b) >= LEARNED_MOVE_X10 };
-    rose(self.loud, now.loud) || apart(self.quiet, now.quiet) || apart(self.lock, now.lock) || self.states != now.states
+impl Level {
+  /// Something worth a line: the level moved (raised, or started over) or was raised again.
+  fn moved(&self, now: &Level) -> bool {
+    let apart = |a: i32, b: i32| if a == dbg::NA || b == dbg::NA { a != b } else { a.abs_diff(b) >= LEVEL_MOVE_X10 };
+    apart(self.level, now.level) || self.raises != now.raises
   }
 }
 
@@ -241,17 +234,17 @@ impl GameStats {
     self.depth.add(depth);
     self.lowered |= depth != dbg::NA && depth > 0;
     self.samples += 1;
-    let (talking, latched) = (view::flag(&s.dbg, FLAG_TALKING), view::flag(&s.dbg, FLAG_LATCHED));
-    // Rising edges: a spurt or latch that began before the window is not counted again.
+    let (talking, lowering) = (view::flag(&s.dbg, FLAG_TALKING), view::flag(&s.dbg, FLAG_LOWERING));
+    // Rising edges: a spurt that began before the window is not counted again.
     self.spurts += u32::from(talking && self.prev_flags & FLAG_TALKING == 0);
-    self.latches += u32::from(latched && self.prev_flags & FLAG_LATCHED == 0);
+    self.lowered_spurts += u32::from(lowering && self.prev_flags & FLAG_LOWERING == 0);
     self.prev_flags = if view::at(&s.dbg, FLAGS) == dbg::NA { 0 } else { view::at(&s.dbg, FLAGS) };
     self.talking += u32::from(talking);
-    self.latched += u32::from(latched);
+    self.lowering += u32::from(lowering);
     if talking {
       self.need.add(view::at(&s.dbg, NEED_DB));
     }
-    self.last = Some((s.dbg, s.learned));
+    self.last = Some(s.dbg);
     if let Some((mix, chat_band, sounding)) = s.mix {
       self.mix_level.add(mix);
       self.chat_band.add(chat_band);
@@ -259,41 +252,27 @@ impl GameStats {
     }
   }
 
-  fn learned(&self) -> Learned {
-    let (d, (loud, quiet)) = self.last.unwrap_or(([dbg::NA; DUCK_DBG_SLOTS], (0, 0)));
-    let mask = FLAG_LOUD_SETTLED | FLAG_LOUD_SEEDED | FLAG_QUIET_SETTLED | FLAG_QUIET_SEEDED;
-    let flags = view::at(&d, FLAGS);
-    let states = if flags == dbg::NA { 0 } else { flags & mask };
-    Learned { loud, quiet, lock: view::at(&d, LOCKED_DIFF_DB), states }
+  fn level(&self) -> Level {
+    let d = self.last.unwrap_or([dbg::NA; DUCK_DBG_SLOTS]);
+    Level { level: view::at(&d, LEVEL_DB), raises: view::at(&d, LEVEL_RAISES) }
   }
 
   fn text(&self, chat: &str) -> String {
-    let (d, (loud, quiet)) = self.last.unwrap_or(([dbg::NA; DUCK_DBG_SLOTS], (0, 0)));
+    let d = self.last.unwrap_or([dbg::NA; DUCK_DBG_SLOTS]);
+    let raises = view::at(&d, LEVEL_RAISES);
     let line = format!(
-      "game {} (now {}), {chat}, spurts {} ({} latched), talking {} %, latched {} %, need {}, depth {} \
-       (target {}), loud level {}, quiet talker {}, lock {}",
+      "game {} (now {}), {chat}, spurts {} ({} lowered), talking {} %, lowering {} %, need {}, depth {}, \
+       lowering level {} (raised {})",
       self.band.text(),
       one(view::at(&d, GAME_DB)),
       self.spurts,
-      self.latches,
+      self.lowered_spurts,
       share(self.talking, self.samples),
-      share(self.latched, self.samples),
+      share(self.lowering, self.samples),
       self.need.text(),
       self.depth.text(),
-      one(view::at(&d, TARGET_DEPTH_DB)),
-      learned_text(
-        loud,
-        view::at(&d, LOUD_EVIDENCE_S),
-        view::flag(&d, FLAG_LOUD_SETTLED),
-        view::flag(&d, FLAG_LOUD_SEEDED)
-      ),
-      learned_text(
-        quiet,
-        view::at(&d, QUIET_EVIDENCE_S),
-        view::flag(&d, FLAG_QUIET_SETTLED),
-        view::flag(&d, FLAG_QUIET_SEEDED)
-      ),
-      one(view::at(&d, LOCKED_DIFF_DB)),
+      one(view::at(&d, LEVEL_DB)),
+      if raises == dbg::NA { "-".to_string() } else { raises.to_string() },
     );
     if self.mix_level.n == 0 {
       return line;
@@ -311,13 +290,8 @@ fn start_line(streams: &[StreamView], settings: &Settings) -> String {
   let streams: Vec<String> = streams
     .iter()
     .map(|s| {
-      let what = if s.is_game {
-        format!("stored {}", if s.saved == (0, 0) { "none".to_string() } else { super::levels_text(s.saved) })
-      } else {
-        format!("detector {}", view::detector(s))
-      };
-      let kind = if s.is_game { "game" } else { "chat" };
-      format!("{kind} {} {} Hz {} ch, {what}", s.exe, s.sample_rate, s.channels)
+      let format = format!("{} {} Hz {} ch", s.exe, s.sample_rate, s.channels);
+      if s.is_game { format!("game {format}") } else { format!("chat {format}, detector {}", view::detector(s)) }
     })
     .collect();
   let streams = if streams.is_empty() { "no chat or game stream paired".to_string() } else { streams.join("; ") };
@@ -346,34 +320,22 @@ fn one(x10: i32) -> String {
   if x10 == dbg::NA { "-".to_string() } else { format!("{:.1} dB", x10 as f32 / 10.0) }
 }
 
-/// "-20.5 dB (45 s, settled, stored)"
-fn learned_text(x10: i32, evidence_s: i32, settled: bool, stored: bool) -> String {
-  let evidence = if evidence_s == dbg::NA { "-".to_string() } else { evidence_s.to_string() };
-  let mut notes = vec![format!("{evidence} s")];
-  if settled {
-    notes.push("settled".to_string());
-  }
-  if stored {
-    notes.push("stored".to_string());
-  }
-  format!("{} ({})", super::level_text(x10), notes.join(", "))
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::win_audio::ducking::view::tests::stream;
 
-  /// A chat stream (detector on) and a game stream with `flags`; lowered only while talking.
-  fn streams(flags: i32, vad_prob: i32, loud: i32) -> Vec<StreamView> {
+  /// A chat stream (detector on) and a game stream with `flags` and lowering level `level`; lowered
+  /// only while talking.
+  fn streams(flags: i32, vad_prob: i32, level: i32) -> Vec<StreamView> {
     let mut chat = stream(1, false);
     // Under the talk threshold (-50 dB): only the detector decides speech.
     (chat.dbg[BAND_DB], chat.dbg[FLAGS], chat.dbg[VAD_PROB]) = (-600, dbg::FLAG_VAD, vad_prob);
     let mut game = stream(2, true);
     let depth = if flags != 0 { 61 } else { 0 };
     (game.dbg[BAND_DB], game.dbg[FLAGS], game.dbg[GAME_DB]) = (-250, flags, -220);
-    (game.dbg[NEED_DB], game.dbg[DEPTH_DB], game.dbg[TARGET_DEPTH_DB]) = (90, depth, 120);
-    game.learned = (loud, -330);
+    (game.dbg[NEED_DB], game.dbg[DEPTH_DB]) = (90, depth);
+    (game.dbg[LEVEL_DB], game.dbg[LEVEL_RAISES]) = (level, 1);
     vec![chat, game]
   }
 
@@ -400,34 +362,31 @@ mod tests {
 
   #[test]
   fn ten_second_line_counts_rising_edges_and_nothing_is_logged_while_off() {
-    let (talk, latch) = (FLAG_TALKING, FLAG_TALKING | FLAG_LATCHED);
+    let (talk, lower) = (FLAG_TALKING, FLAG_TALKING | FLAG_LOWERING);
     let mut log = DebugLog::default();
     let t0 = Instant::now();
     let s = settings();
-    // Talking, latched, quiet, talking again (not latched): 2 spurts, 1 latch.
+    // Talking, lowered, quiet, talking again (not lowered): 2 spurts, 1 lowered.
     let mut lines = Vec::new();
-    for (i, f) in [0, talk, latch, latch, 0, talk, 0].iter().enumerate() {
-      let v = streams(*f, if *f != 0 { 900 } else { 100 }, -205);
+    for (i, f) in [0, talk, lower, lower, 0, talk, 0].iter().enumerate() {
+      let v = streams(*f, if *f != 0 { 900 } else { 100 }, 120);
       lines.extend(log.tick(t0 + Duration::from_millis(100 * i as u64), Some((v.as_slice(), &s))));
     }
     assert_eq!(lines.len(), 1, "only the start line before 10 s: {lines:?}");
     assert_eq!(
       lines[0],
       "start: strength 50 %, gains game 100 % chat 80 %, master switch on, tuning defaults; chat Discord.exe 48000 Hz \
-       2 ch, detector yes; game game.exe 48000 Hz 2 ch, stored none"
+       2 ch, detector yes; game game.exe 48000 Hz 2 ch"
     );
 
-    let v = streams(0, 100, -205);
+    let v = streams(0, 100, 120);
     let lines = log.tick(t0 + SUMMARY_EVERY, Some((v.as_slice(), &s)));
     assert_eq!(lines.len(), 1, "{lines:?}");
     let line = &lines[0];
     assert!(line.starts_with("10 s game.exe: game -25.0/-25.0/-25.0 dB (now -22.0 dB)"), "{line}");
     assert!(line.contains("sound 0 %, speech 50 % (prob max 0.90) at -60.0/-60.0/-60.0 dB"), "{line}");
-    assert!(line.contains("spurts 2 (1 latched), talking 50 %, latched 25 %"), "{line}");
-    assert!(
-      line.contains("(target 12.0 dB), loud level -20.5 dB (- s), quiet talker -33.0 dB (- s), lock -"),
-      "{line}"
-    );
+    assert!(line.contains("spurts 2 (1 lowered), talking 50 %, lowering 25 %"), "{line}");
+    assert!(line.ends_with("lowering level 12.0 dB (raised 1)"), "{line}");
 
     // Off: nothing, and the next tick on starts over with a start line.
     assert!(log.tick(t0 + SUMMARY_EVERY * 3, None).is_empty());
@@ -442,25 +401,28 @@ mod tests {
     let t0 = Instant::now();
     let at_window = |n: u32| t0 + SUMMARY_EVERY * n;
     let mut tick =
-      |n: u32, flags: i32, loud: i32| log.tick(at_window(n), Some((streams(flags, 100, loud).as_slice(), &s))).len();
-    assert_eq!(tick(0, 0, -205), 1, "the start line");
-    assert_eq!(tick(1, 0, -205), 1, "the first window is the baseline");
-    assert_eq!(tick(2, 0, -205), 0, "game only, nothing learned: dropped");
-    assert_eq!(tick(3, 0, -215), 0, "the loud level's slow fall is not news");
-    assert_eq!(tick(4, 0, -195), 1, "the loud level rose 1 dB");
-    assert_eq!(tick(5, 0, -195), 0);
-    assert_eq!(tick(6, FLAG_TALKING, -195), 1, "someone talked");
-    assert_eq!(tick(7, 0, -195), 0);
-    let mut sound = streams(0, 100, -195);
+      |n: u32, flags: i32, level: i32| log.tick(at_window(n), Some((streams(flags, 100, level).as_slice(), &s))).len();
+    assert_eq!(tick(0, 0, 120), 1, "the start line");
+    assert_eq!(tick(1, 0, 120), 1, "the first window is the baseline");
+    assert_eq!(tick(2, 0, 120), 0, "game only, nothing moved: dropped");
+    assert_eq!(tick(3, 0, 125), 0, "under 1 dB is not news");
+    assert_eq!(tick(4, 0, 0), 1, "the level started over");
+    assert_eq!(tick(5, 0, 0), 0);
+    assert_eq!(tick(6, FLAG_TALKING, 0), 1, "someone talked");
+    assert_eq!(tick(7, 0, 0), 0);
+    let mut sound = streams(0, 100, 0);
     sound[0].dbg[BAND_DB] = -300;
     assert_eq!(log.tick(at_window(8), Some((sound.as_slice(), &s))).len(), 1, "chat sound without speech");
-    assert_eq!(log.tick(at_window(9), Some((streams(0, 100, -195).as_slice(), &s))).len(), 0, "silent chat");
+    assert_eq!(log.tick(at_window(9), Some((streams(0, 100, 0).as_slice(), &s))).len(), 0, "silent chat");
+    let mut raised = streams(0, 100, 0);
+    raised[1].dbg[LEVEL_RAISES] = 2;
+    assert_eq!(log.tick(at_window(10), Some((raised.as_slice(), &s))).len(), 1, "raised again");
   }
 
   #[test]
   fn garbage_from_the_other_process_does_not_overflow() {
-    let wild = Learned { loud: i32::MAX, quiet: i32::MIN + 1, lock: i32::MAX, states: 0 };
-    let other = Learned { loud: i32::MIN + 1, quiet: i32::MAX, lock: i32::MIN + 1, states: 0 };
+    let wild = Level { level: i32::MAX, raises: i32::MIN + 1 };
+    let other = Level { level: i32::MIN + 1, raises: i32::MAX };
     assert!(other.moved(&wild) && wild.moved(&other));
     assert!(!wild.moved(&wild));
   }
@@ -470,7 +432,7 @@ mod tests {
     let s = settings();
     let mut log = DebugLog::default();
     let t0 = Instant::now();
-    let mut v = streams(0, 100, -205);
+    let mut v = streams(0, 100, 120);
     v[0].dbg[FLAGS] = dbg::NA;
     let first = log.tick(t0, Some((v.as_slice(), &s)));
     assert!(first[0].contains("detector ?"), "{first:?}");

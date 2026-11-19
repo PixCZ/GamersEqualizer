@@ -1,4 +1,5 @@
 use super::*;
+use crate::ducking::gain::SILENT_RESET_S;
 use crate::streams::StreamInfo;
 use std::collections::VecDeque;
 
@@ -67,7 +68,7 @@ impl MixRig {
     let sounding = chat.iter().any(|s| s.abs() > 10f32.powf(DuckTuning::DEFAULT.mix_chat_sound_db / 20.0));
     let band_ms = self.chat_band.measure(&mut self.chat_state, &chat, 1);
     let speech_ms = if voice > 0.0 { band_ms } else { 0.0 };
-    self.depth = self.ducker.process(&mix, TICK_S, speech_ms, sounding, &DEFAULT, &self.tuning);
+    self.depth = self.ducker.process(&mix, TICK_S, (speech_ms, band_ms), sounding, &DEFAULT, &self.tuning);
     self.returned.push_back(self.depth);
     self.depth
   }
@@ -90,9 +91,9 @@ impl MixRig {
 }
 
 #[test]
-fn chat_alone_in_the_mix_never_ducks_even_20_db_louder_than_at_its_stream() {
+fn chat_alone_in_the_mix_never_ducks_even_3_db_louder_than_at_its_stream() {
   let mut rig = MixRig::new();
-  rig.chat_in_mix = 10.0;
+  rig.chat_in_mix = 1.4;
   rig.chat_late_ticks = 1;
   for _ in 0..10 {
     let depths: Vec<f32> = [rig.sentence(5.0, 0.0), rig.run(2.0, 0.0, 0.0)].concat();
@@ -101,7 +102,7 @@ fn chat_alone_in_the_mix_never_ducks_even_20_db_louder_than_at_its_stream() {
 }
 
 #[test]
-fn a_fight_running_when_speech_starts_ducks_to_the_locked_depth_and_holds_the_game() {
+fn a_fight_running_when_speech_starts_ducks_to_the_lowering_level_and_holds_the_game() {
   let mut rig = MixRig::new();
   rig.run(20.0, FIGHT, 0.0);
   let game = rig.game_db();
@@ -112,22 +113,24 @@ fn a_fight_running_when_speech_starts_ducks_to_the_locked_depth_and_holds_the_ga
 }
 
 #[test]
-fn a_game_going_calm_in_speech_is_followed_at_the_first_pause_longer_than_the_guard() {
+fn a_game_going_silent_in_speech_lets_go_only_after_the_long_silence() {
   let mut rig = MixRig::new();
   rig.run(20.0, FIGHT, 0.0);
   rig.run(5.0, FIGHT, VOICE);
-  let game = rig.game_db();
-  // Calm, but the talker does not pause: not noticed.
+  let (game, max) = (rig.game_db(), rig.tuning.max_depth_db);
+  // Silent, but the talker does not pause: not noticed.
   let unnoticed = rig.run(10.0, 0.0, VOICE);
-  assert!((rig.game_db() - game).abs() < 0.01 && unnoticed.iter().all(|d| *d == rig.tuning.max_depth_db));
+  assert!((rig.game_db() - game).abs() < 0.01 && unnoticed.iter().all(|d| (d - max).abs() < 0.1));
   // 0.4 s pauses: longer than the guard, shorter than the hold (still one spurt); each one measures
-  // the calm game and the level falls slowly towards it.
-  let after: Vec<f32> = (0..20).flat_map(|_| [rig.run(0.4, 0.0, 0.0), rig.run(3.0, 0.0, VOICE)].concat()).collect();
+  // the silent game and its level falls slowly towards it. The level holds until the game has not
+  // been heard for `SILENT_RESET_S`, then the game comes back slowly.
+  let after: Vec<f32> = (0..50).flat_map(|_| [rig.run(0.4, 0.0, 0.0), rig.run(3.0, 0.0, VOICE)].concat()).collect();
   let slowest = rig.tuning.release_db_per_s * TICK_S + 1e-4;
   assert!(after.windows(2).all(|w| w[0] - w[1] <= slowest), "the whole game comes back slowly");
-  let released = after.iter().position(|d| *d == 0.0).expect("released while the talk goes on");
-  assert!(released as f32 * TICK_S >= rig.tuning.latch_release_s, "{released}");
-  assert!(rig.ducker.status().spurt_talk_s > 20.0, "one spurt throughout");
+  let released = after.iter().position(|d| *d < max - 0.5).expect("released while the talk goes on");
+  assert!(released as f32 * TICK_S >= SILENT_RESET_S, "{released}");
+  assert_eq!(*after.last().unwrap(), 0.0);
+  assert!(rig.ducker.status().spurt_talk_s > 100.0, "one spurt throughout");
 }
 
 #[test]
@@ -146,19 +149,18 @@ fn a_few_quiet_seconds_between_fights_do_not_let_go_of_the_duck_while_the_talk_g
 #[test]
 fn a_lull_between_fights_keeps_the_duck_while_the_talk_goes_on() {
   // Regression (live log 2026-11-19): a podcast ran on, a calm stretch let go of the duck and the
-  // next fight needed two pauses to lower the game again; a sentence was lost. This lull lets go
-  // after about 27 s at the stream ducker's 3 s release.
+  // next fight needed two pauses to lower the game again; a sentence was lost.
   let mut rig = MixRig::new();
   rig.run(20.0, FIGHT, 0.0);
   rig.run(5.0, FIGHT, VOICE);
   let max = rig.tuning.max_depth_db;
   let lull: Vec<f32> = (0..12).flat_map(|_| [rig.run(3.0, 0.0, VOICE), rig.run(0.4, 0.0, 0.0)].concat()).collect();
-  assert!(lull.iter().all(|d| *d == max), "{lull:?}");
-  assert!(rig.run(1.0, FIGHT, VOICE).iter().all(|d| *d == max), "the next fight finds it lowered");
+  assert!(lull.iter().all(|d| (d - max).abs() < 0.2), "{lull:?}");
+  assert!(rig.run(1.0, FIGHT, VOICE).iter().all(|d| (d - max).abs() < 0.2), "the next fight finds it lowered");
 }
 
 #[test]
-fn the_next_talk_starts_at_the_depth_the_last_one_ended_with() {
+fn the_next_talk_starts_at_the_level_while_the_game_is_heard() {
   // The user: when the talk stops the game comes back; when it starts again it goes straight back to
   // the reduction of the talk before (a paused podcast played again in a calm moment of a fight
   // waited for chat pauses to measure the fight again).
@@ -166,25 +168,25 @@ fn the_next_talk_starts_at_the_depth_the_last_one_ended_with() {
   rig.run(20.0, FIGHT, 0.0);
   rig.run(5.0, FIGHT, VOICE);
   let max = rig.tuning.max_depth_db;
-  assert_eq!(*rig.run(120.0, 0.0, 0.0).last().unwrap(), 0.0, "nobody talks: the game comes back");
-  assert_eq!(*rig.run(1.0, 0.0, VOICE).last().unwrap(), max, "talk again: the depth at once");
-  // In talk a calm game lets go after `latch_release_s`; the next talk starts unlowered.
-  assert_eq!(*rig.run(40.0, 0.0, VOICE).last().unwrap(), 0.0);
-  rig.run(10.0, 0.0, 0.0);
+  assert_eq!(*rig.run(60.0, QUIET_GAME, 0.0).last().unwrap(), 0.0, "nobody talks: the game comes back");
+  assert!((rig.run(1.0, QUIET_GAME, VOICE).last().unwrap() - max).abs() < 0.3, "talk again: the level at once");
+  // A game not heard for long (a menu): the level starts over, the next talk is not lowered.
+  rig.run(150.0, 0.0, 0.0);
+  assert_eq!(rig.ducker.status().level_db, 0.0);
   assert!(rig.run(3.0, 0.0, VOICE).iter().all(|d| *d == 0.0));
 }
 
 #[test]
-fn a_fight_starting_in_speech_is_picked_up_at_the_second_pause() {
+fn a_fight_starting_in_speech_is_picked_up_without_any_pause() {
+  // Live log 2026-11-19: a fight that began in the middle of a podcast sentence lowered the game
+  // 5-10 s late, when the next pause let the mix be measured.
   let mut rig = MixRig::new();
-  rig.run(20.0, FIGHT, 0.0); // an earlier fight: the loud level is known
-  rig.run(40.0, 0.0, 0.0); // the level falls slowly: long enough to be gone
+  rig.run(20.0, FIGHT, 0.0); // an earlier fight nobody talked over
+  rig.run(40.0, 0.0, 0.0); // the held game level falls slowly: long enough to be gone
   rig.run(5.0, 0.0, VOICE);
-  assert!(rig.run(5.0, FIGHT, VOICE).iter().all(|d| *d == 0.0), "not while the talk goes on");
-  rig.run(0.4, FIGHT, 0.0);
-  assert!(rig.run(1.0, FIGHT, VOICE).iter().all(|d| *d == 0.0), "one pause could be one shot");
-  rig.run(0.4, FIGHT, 0.0);
-  assert!(*rig.run(3.0, FIGHT, VOICE).last().unwrap() > 5.0);
+  let depths = rig.run(3.0, FIGHT, VOICE);
+  assert!(depths.iter().take(10).all(|d| *d == 0.0), "one shot's time is not a fight: {depths:?}");
+  assert!(*depths.last().unwrap() > 5.0, "{depths:?}");
 }
 
 #[test]
@@ -192,7 +194,7 @@ fn one_shot_in_a_calm_game_does_not_lower_it_while_the_talk_goes_on() {
   // Regression: a pause's mean became the held game level at once, so one shot in a pause of a
   // calm game was held as a fight and lowered the game for about 25 s while the talk went on.
   let mut rig = MixRig::new();
-  rig.run(20.0, FIGHT, 0.0); // the loud level is known
+  rig.run(20.0, FIGHT, 0.0);
   rig.run(40.0, 0.0, 0.0);
   let calm = rig.game_db();
   let mut depths = rig.run(3.0, 0.0, VOICE);
@@ -205,26 +207,19 @@ fn one_shot_in_a_calm_game_does_not_lower_it_while_the_talk_goes_on() {
 }
 
 #[test]
-fn the_guard_keeps_the_chats_tail_out_of_the_game() {
-  // A loud chat arrives in the mix 0.1 s late: its tail is still there after it stopped sounding.
-  let tail = |guard: f32| {
-    let mut rig = MixRig::new();
-    assert!(rig.tuning.set("mix_chat_guard_s", guard));
-    (rig.chat_in_mix, rig.chat_late_ticks) = (10.0, 2);
-    rig.run(20.0, QUIET_GAME, 0.0);
-    rig.run(3.0, QUIET_GAME, VOICE);
-    let before = rig.game_db();
-    // Two pauses: the held level rises only to what two segments in a row read.
-    rig.run(0.1, QUIET_GAME, 0.0);
-    rig.run(1.0, QUIET_GAME, VOICE);
-    rig.run(0.1, QUIET_GAME, 0.0);
-    rig.game_db() - before
-  };
-  assert!(tail(T_GUARD).abs() < 0.01, "{}", tail(T_GUARD));
-  assert!(tail(0.05) > 3.0, "without the guard the tail reads as game: {}", tail(0.05));
+fn the_chats_tail_in_the_mix_does_not_read_as_game() {
+  // A chat 3 dB louder in the mix arrives 0.1 s late: its tail is still there after it stopped
+  // sounding; the guard and the held chat level keep it out of the game.
+  let mut rig = MixRig::new();
+  (rig.chat_in_mix, rig.chat_late_ticks) = (1.4, 2);
+  rig.run(20.0, QUIET_GAME, 0.0);
+  rig.run(3.0, QUIET_GAME, VOICE);
+  let before = rig.game_db();
+  rig.run(0.1, QUIET_GAME, 0.0);
+  rig.run(1.0, QUIET_GAME, VOICE);
+  rig.run(0.1, QUIET_GAME, 0.0);
+  assert!((rig.game_db() - before).abs() < 0.01, "{before} -> {}", rig.game_db());
 }
-
-const T_GUARD: f32 = DuckTuning::DEFAULT.mix_chat_guard_s;
 
 #[test]
 fn its_own_reduction_is_undone_during_the_release_with_the_depth_applied_late() {
@@ -242,20 +237,21 @@ fn its_own_reduction_is_undone_during_the_release_with_the_depth_applied_late() 
 }
 
 #[test]
-fn the_chat_never_teaches_the_loud_level() {
+fn the_chat_in_the_mix_never_raises_the_level() {
+  // The chat 3 dB louder in the mix than at its stream: the level is what the game alone needs.
   let mut rig = MixRig::new();
-  rig.chat_in_mix = 10.0;
-  rig.run(20.0, FIGHT, 0.0);
-  let loud = rig.ducker.status().loud_db.unwrap();
-  rig.run(10.0, FIGHT, VOICE);
-  assert_eq!(rig.ducker.status().loud_db.unwrap(), loud);
+  rig.chat_in_mix = 1.4;
+  rig.run(20.0, QUIET_GAME, 0.0);
+  rig.run(10.0, QUIET_GAME, VOICE);
+  let st = rig.ducker.status();
+  assert!(st.need_db.is_some_and(|need| (st.level_db - need).abs() < 0.5), "{st:?}");
+  assert!(st.level_db > 2.0 && st.level_db < 12.0, "{st:?}");
 }
 
 #[test]
-fn a_fight_heard_only_in_short_pauses_is_learned_after_the_reduction_starts() {
-  // Regression: the loud level learned only with no reduction applied, and one measurement counted
-  // as one tick, so a fight that began with the talk was learned for one tick, then lowered, and
-  // the depth stayed sized for whatever the game was before.
+fn a_fight_heard_only_in_short_pauses_raises_the_level_after_the_reduction_starts() {
+  // Regression: the game was learned only with no reduction applied, so a fight that began with
+  // the talk was heard for one tick, then lowered, and the depth stayed sized for the game before.
   let mut rig = MixRig::new();
   rig.run(20.0, 0.0, 0.0);
   for _ in 0..20 {
@@ -263,15 +259,13 @@ fn a_fight_heard_only_in_short_pauses_is_learned_after_the_reduction_starts() {
     rig.run(0.4, FIGHT, 0.0);
   }
   let st = rig.ducker.status();
-  let loud = st.loud_db.unwrap();
-  assert!(st.depth_db > 5.0 && loud > st.game_db - 3.0, "loud {loud}, game {}, depth {}", st.game_db, st.depth_db);
+  assert!((st.level_db - rig.tuning.max_depth_db).abs() < 0.2 && st.depth_db > 5.0, "{st:?}");
 }
 
 #[test]
-fn a_fight_growing_louder_while_lowered_is_learned() {
-  // Regression (live log 2026-11-19): the loud level learned only up to the level read before the
-  // reduction, so a fight that began moderate and grew louder under it was never learned and the
-  // depth stayed sized for its start.
+fn a_fight_growing_louder_while_lowered_raises_the_level() {
+  // Regression (live log 2026-11-19): a fight that began moderate and grew louder under the
+  // reduction was never learned and the depth stayed sized for its start.
   let mut rig = MixRig::new();
   rig.run(20.0, QUIET_GAME, 0.0);
   rig.run(5.0, QUIET_GAME, VOICE);
@@ -281,9 +275,7 @@ fn a_fight_growing_louder_while_lowered_is_learned() {
     rig.run(0.4, FIGHT, 0.0);
   }
   let st = rig.ducker.status();
-  let loud = st.loud_db.unwrap();
-  assert!(start.depth_db > 0.5 && loud > st.game_db - 3.0, "loud {loud}, game {}", st.game_db);
-  assert!(st.depth_db > start.depth_db + 5.0, "{} -> {}", start.depth_db, st.depth_db);
+  assert!(start.depth_db > 0.5 && st.depth_db > start.depth_db + 5.0, "{} -> {}", start.depth_db, st.depth_db);
 }
 
 #[test]
@@ -318,23 +310,28 @@ fn ticks_without_a_reference_hold_the_estimate() {
   rig.run(10.0, FIGHT, 0.0);
   let before = rig.game_db();
   for _ in 0..40 {
-    rig.ducker.process(&[], TICK_S, 0.0, false, &DEFAULT, &rig.tuning);
+    rig.ducker.process(&[], TICK_S, (0.0, 0.0), false, &DEFAULT, &rig.tuning);
   }
   assert!((rig.game_db() - before).abs() < 0.01);
 }
 
 #[test]
-fn stored_levels_give_the_locked_depth_from_the_first_sentence() {
+fn it_starts_unlowered_and_a_session_volume_change_starts_the_level_over() {
   let mut rig = MixRig::new();
-  rig.run(1.0, QUIET_GAME, 0.0);
-  // The quieter game (-23.0 dB in the band) and a quiet talker stored at -23.2 dB.
-  rig.ducker.seed(Some(-23.0), Some(-23.2));
-  rig.run(3.0, QUIET_GAME, 0.0);
-  let first = rig.sentence(3.0, QUIET_GAME).iter().fold(0.0f32, |m, d| m.max(*d));
-  let target = 0.2 + DEFAULT.strength * rig.tuning.max_margin_db;
-  assert!((first - target).abs() < 0.1, "{first} vs {target}");
+  assert_eq!(rig.ducker.status().level_db, 0.0, "nothing known at the start");
+  rig.run(20.0, FIGHT, 0.0);
+  rig.run(5.0, FIGHT, VOICE);
+  let game = rig.game_db();
+  rig.ducker.shift(-6.0, 0.0);
   let st = rig.ducker.status();
-  assert!(st.loud_seeded && st.quiet_seeded);
+  assert!(st.level_db == 0.0 && (st.game_db - game + 6.0).abs() < 0.01, "{st:?}");
+  // The depth comes back at the release rate, then the talk raises the level again at once.
+  let next = rig.tick(FIGHT, 0.0);
+  assert!((rig.tuning.max_depth_db - next - rig.tuning.release_db_per_s * TICK_S).abs() < 1e-3, "{next}");
+  // The rig does not lower its game by the volume: the held level reads 6 dB low, and so the need.
+  rig.run(3.0, FIGHT, VOICE);
+  let level = rig.ducker.status().level_db;
+  assert!(level > 10.0 && level < rig.tuning.max_depth_db, "{level}");
 }
 
 #[test]

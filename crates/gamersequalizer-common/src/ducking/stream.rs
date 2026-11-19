@@ -8,7 +8,7 @@ use super::gain::DuckGain;
 use super::{DuckRole, DuckSettings, DuckStatus, DuckTuning, FRESH_HNS, GAP_HNS, db, dbg};
 use crate::shm::ShmHeader;
 use crate::streams::{StreamBus, StreamSlot, StreamTable};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------------------
 // Constants
@@ -16,8 +16,6 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Channels with filter state (7.1); a stream with more passes through untouched.
 const MAX_CHANNELS: usize = 8;
-/// A saved level outside this range (dB x 10) is not trusted (another process wrote it).
-const SAVED_DB_X10: std::ops::RangeInclusive<i32> = -1000..=-1;
 // ---------------------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------------------
@@ -35,10 +33,8 @@ pub struct StreamDucker {
   last_hns: Option<u64>,
   /// Not processing, and the slot's level, reduction and telemetry already read "none".
   idle: bool,
-  /// A saved loud / quiet level of an earlier run: None = none seen yet, else whether it was
-  /// adopted (looked at once per instance).
-  loud_seed: Option<bool>,
-  quiet_seed: Option<bool>,
+  /// The slot's `duck_volume_epoch` last seen: a change starts the lowering level over.
+  volume_epoch: i32,
   /// This stream's copy of the tuning and the `duck_tune_version` it was read at.
   tuning: DuckTuning,
   tune_version: Option<u32>,
@@ -60,8 +56,7 @@ impl StreamDucker {
       last_gain: 1.0,
       last_hns: None,
       idle: true,
-      loud_seed: None,
-      quiet_seed: None,
+      volume_epoch: 0,
       tuning: DuckTuning::DEFAULT,
       tune_version: None,
     }
@@ -127,12 +122,15 @@ impl StreamDucker {
       return;
     }
     let (chat_ms, game_ms) = if ducking { levels(table, own_index, level, now_hns) } else { (0.0, 0.0) };
-    if ducking {
-      self.adopt_saved(own);
+    let epoch = own.duck_volume_epoch.load(Ordering::Relaxed);
+    if epoch != self.volume_epoch {
+      // The stream's levels already carry the new session volume: only the level starts over.
+      self.gain.shift(0.0, 0.0);
+      self.volume_epoch = epoch;
     }
     let dt = frames as f32 / self.sample_rate;
     let settings = DuckSettings { enabled: ducking, ..*settings };
-    let depth = self.gain.update(dt, chat_ms, game_ms, dt, &settings, &self.tuning);
+    let depth = self.gain.update(dt, chat_ms, game_ms, &settings, &self.tuning);
     if ducking {
       self.publish(own);
     }
@@ -146,11 +144,7 @@ impl StreamDucker {
 
   /// What a game stream saw and decided in its last block.
   pub fn status(&self) -> DuckStatus {
-    DuckStatus {
-      loud_seeded: self.loud_seed == Some(true),
-      quiet_seeded: self.quiet_seed == Some(true),
-      ..self.gain.status(&self.tuning)
-    }
+    self.gain.status()
   }
 }
 
@@ -159,8 +153,8 @@ impl StreamDucker {
 // ---------------------------------------------------------------------------------------
 
 impl StreamDucker {
-  /// Everything that depends on past audio, in one place (a stream gap, going idle); what was
-  /// learned stays.
+  /// Everything that depends on past audio, in one place (a stream gap, going idle), the lowering
+  /// level included.
   fn restart(&mut self) {
     self.state = [[0.0; 2]; MAX_CHANNELS];
     self.gain.restart();
@@ -178,52 +172,9 @@ impl StreamDucker {
     }
   }
 
-  /// The service writes an earlier run's levels when it pairs the stream, seconds after it started:
-  /// each is looked at once, and adopted unless this stream has settled on its own by then.
-  fn adopt_saved(&mut self, own: &StreamSlot) {
-    if self.loud_seed.is_none()
-      && let Some(db) = saved_db(&own.duck_saved_loud_db_x10)
-    {
-      self.loud_seed = Some(self.gain.seed_loud(db, &self.tuning));
-    }
-    if self.quiet_seed.is_none()
-      && let Some(db) = saved_db(&own.duck_saved_quiet_db_x10)
-    {
-      self.quiet_seed = Some(self.gain.seed_quiet(db, &self.tuning));
-    }
-  }
-
-  /// The settled levels for the per-game store, and the telemetry: plain stores every block.
+  /// The telemetry: plain stores every block.
   fn publish(&self, own: &StreamSlot) {
-    let (loud, quiet) = self.gain.settled_levels(&self.tuning);
-    if let Some(loud) = loud {
-      own.duck_loud_db_x10.store(db_x10(loud), Ordering::Relaxed);
-    }
-    if let Some(quiet) = quiet {
-      own.duck_quiet_db_x10.store(db_x10(quiet), Ordering::Relaxed);
-    }
-    let st = self.status();
-    let flags = [
-      (st.talking, dbg::FLAG_TALKING),
-      (st.latched, dbg::FLAG_LATCHED),
-      (st.loud_settled, dbg::FLAG_LOUD_SETTLED),
-      (st.quiet_settled, dbg::FLAG_QUIET_SETTLED),
-      (st.loud_seeded, dbg::FLAG_LOUD_SEEDED),
-      (st.quiet_seeded, dbg::FLAG_QUIET_SEEDED),
-    ]
-    .iter()
-    .filter(|(on, _)| *on)
-    .fold(0, |bits, (_, flag)| bits | flag);
-    dbg::store(own, dbg::GAME_DB, Some(st.game_db));
-    dbg::store(own, dbg::VOICE_SUM_DB, Some(st.chat_db));
-    dbg::store(own, dbg::SPURT_DB, st.spurt_db);
-    dbg::store(own, dbg::NEED_DB, st.need_db);
-    dbg::store(own, dbg::DEPTH_DB, Some(st.depth_db));
-    dbg::store(own, dbg::TARGET_DEPTH_DB, st.target_db);
-    dbg::store(own, dbg::LOCKED_DIFF_DB, st.lock_db);
-    dbg::set(own, dbg::FLAGS, flags);
-    dbg::set(own, dbg::LOUD_EVIDENCE_S, st.loud_s as i32);
-    dbg::set(own, dbg::QUIET_EVIDENCE_S, st.quiet_s as i32);
+    dbg::publish(own, &self.status());
   }
 
   /// Mean square of the band over the block; advances the filter state.
@@ -260,17 +211,6 @@ fn levels(table: &StreamTable, own_index: usize, own_ms: f32, now_hns: u64) -> (
     }
   }
   (chat, game)
-}
-
-/// dB x 10 for the slot; a real level never reads as 0 ("none").
-fn db_x10(db: f32) -> i32 {
-  ((db * 10.0).round() as i32).min(-1)
-}
-
-/// A saved level from the slot, None when there is none or it is out of range.
-fn saved_db(cell: &AtomicI32) -> Option<f32> {
-  let v = cell.load(Ordering::Relaxed);
-  SAVED_DB_X10.contains(&v).then(|| v as f32 / 10.0)
 }
 
 // ---------------------------------------------------------------------------------------

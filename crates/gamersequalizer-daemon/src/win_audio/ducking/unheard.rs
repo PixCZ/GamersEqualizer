@@ -1,7 +1,7 @@
 //! A game Automatic ChatMix cannot hear. With spatial sound on, a game that renders spatial objects
 //! sends them past the per-app (stream) effects and its session meter (DEVLOG Milestone 19): its
 //! stream plays digital silence. Said only on that evidence, as the live run showed it: a paired
-//! game stream that plays (fresh) and reads silence for 10 s. A game that plays plain stereo / 7.1
+//! game stream that plays (fresh) and reads silence for 3 s. A game that plays plain stereo / 7.1
 //! into the virtualizer still goes through its stream and works; a paused or alt-tabbed game has no
 //! fresh stream and is no case. Known limit: a game with no ordinary stream at all is not seen. The service
 //! logs it (`Ducking::tick`) and the window shows it (`AppState::ducking_unheard`), both with this
@@ -17,7 +17,13 @@ use super::view;
 /// A game stream's band level at or below this (dB x 10) is digital silence (measured: -120.0).
 const SILENT_X10: i32 = -1100;
 /// The evidence must hold this long, so a pause in the game's sound or a game starting up is no case.
-const HOLD: Duration = Duration::from_secs(10);
+/// Short on purpose: until it says so, the stream mode hears nothing of a game on spatial sound and
+/// the mix mode does not run, so the first sentences of a talk go unlowered (live test: 10 s).
+/// A wrong verdict costs little: the mix mode lowers the whole game for a moment.
+const HOLD: Duration = Duration::from_secs(3);
+/// Audio on the stream must last this long to end the verdict; longer than `HOLD` (else the mode
+/// flipped every minute or two).
+const HEARD_HOLD: Duration = Duration::from_secs(10);
 
 /// One look at what decides it.
 #[derive(Debug, Clone, Copy)]
@@ -47,12 +53,12 @@ impl UnheardWatch {
     let evidence = e.enabled && e.spatial_on && !e.game_bands.is_empty() && e.game_bands.iter().all(silent);
     if !evidence {
       // The game's stream sounding in a pause or a menu does not mean it is heard again: while it
-      // plays, audio must last `HOLD` to end the verdict (else the mode flipped every minute or two).
+      // plays, audio must last `HEARD_HOLD` to end the verdict.
       let audible = e.enabled && e.spatial_on && e.game_bands.iter().any(|b| !silent(b) && *b != dbg::NA);
       self.since = None;
       if self.unheard && audible {
         let heard_since = *self.heard_since.get_or_insert(now);
-        if now.saturating_duration_since(heard_since) < HOLD {
+        if now.saturating_duration_since(heard_since) < HEARD_HOLD {
           return true;
         }
       }
@@ -97,17 +103,17 @@ mod tests {
   }
 
   #[test]
-  fn a_silent_game_stream_under_spatial_sound_is_unheard_after_10_s_and_audio_ends_it() {
+  fn a_silent_game_stream_under_spatial_sound_is_unheard_after_3_s_and_10_s_of_audio_end_it() {
     let (mut w, t) = (UnheardWatch::default(), Instant::now());
     let silent = [-1200];
-    assert!(!hold(&mut w, t, 9, &look(true, true, &silent)), "not before 10 s");
+    assert!(!hold(&mut w, t, 2, &look(true, true, &silent)), "not before 3 s");
     assert!(w.observe(t + HOLD, &look(true, true, &silent)));
-    let (a, b) = (t + HOLD * 2, t + HOLD * 3);
+    let (a, b) = (t + HEARD_HOLD * 2, t + HEARD_HOLD * 3);
     assert!(w.observe(a, &look(true, true, &[-500])), "a short sound in a pause does not end it");
-    assert!(w.observe(a + HOLD / 2, &look(true, true, &silent)), "silence again: still unheard");
+    assert!(w.observe(a + HEARD_HOLD / 2, &look(true, true, &silent)), "silence again: still unheard");
     assert!(w.observe(b, &look(true, true, &[-500])), "the sound restarts its count");
-    assert!(!w.observe(b + HOLD, &look(true, true, &[-500])), "audio for 10 s ends it");
-    assert!(!w.observe(b + HOLD * 2, &look(true, true, &silent)), "the 10 s start over");
+    assert!(!w.observe(b + HEARD_HOLD, &look(true, true, &[-500])), "audio for 10 s ends it");
+    assert!(!w.observe(b + HEARD_HOLD * 2, &look(true, true, &silent)), "the 3 s start over");
   }
 
   #[test]

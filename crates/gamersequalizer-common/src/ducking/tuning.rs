@@ -51,12 +51,14 @@ duck_tuning! {
   /// The depth holds this long after the last talking block, over pauses between words and a
   /// podcast's breath between sentences (live test in mix mode: at 0.5 s the game came back up).
   hold_s = 3.0 in 0.05..=5.0,
-  /// A spurt's level (the mean dB of its talking blocks) decides whether it ducks only from this
-  /// much talk on, so a soft syllable onset cannot latch a loud talker's spurt.
+  /// A spurt's level (the mean dB of its talking blocks) may raise the lowering level only from
+  /// this much talk on, so a soft syllable onset of a loud talker cannot.
   spurt_min_s = 0.2 in 0.0..=2.0,
-  /// A spurt teaches the quiet talker level only from this much talk on: a lone "ok" or a cough
-  /// that slipped past the voice detector teaches nothing.
-  spurt_learn_s = 1.0 in 0.1..=10.0,
+  /// Slots of values no longer read, kept at their old default so an APO built before still reads
+  /// what it expects (retired with the learned loud and quiet levels, the lock and the latch when
+  /// the lowering level replaced them, and before). shortcut: they hold slots of an unreleased
+  /// layout; drop them with the next `shm_version!` bump.
+  retired_spurt_learn_s = 1.0 in 1.0..=1.0,
   /// The spurt level is a leaky mean over this much talk (a plain mean until then), so a quiet
   /// talker answering a loud one within the hold is heard at their own level within about this.
   spurt_level_s = 1.0 in 0.05..=30.0,
@@ -72,66 +74,30 @@ duck_tuning! {
   /// a click in a calm game must barely move it, sustained gunfire must.
   game_rise_s = 0.4 in 0.01..=10.0,
   game_fall_s = 1.5 in 0.01..=30.0,
-  /// The learned loud game level is an upper envelope of the current game level: above it, it
-  /// rises with this time constant (dB): the first fight is learned within seconds. Cost: a late
-  /// 2 s explosion 12 dB above the fight moves it about 6 dB, and the depth with it until the slow
-  /// fall brings it back.
-  loud_rise_s = 3.0 in 0.1..=60.0,
-  /// Slots of values no longer read, kept at their old default so an APO built before still reads
-  /// what it expects. shortcut: they hold slots of an unreleased layout; drop them with the next
-  /// `shm_version!` bump.
+  retired_loud_rise_s = 3.0 in 3.0..=3.0,
   retired_loud_rise_max_s = 20.0 in 20.0..=20.0,
   retired_loud_slowdown = 15.0 in 15.0..=15.0,
-  /// Otherwise it falls at this fixed rate per minute of processed audio, however far below the
-  /// game is, and never below the current level: a minute of travel costs 0.5 dB, ten minutes
-  /// 5 dB; a one-off extreme and fights that really got quieter are forgotten over tens of
-  /// minutes, the depth staying within `max_depth_db` meanwhile.
-  loud_fall_db_per_min = 0.5 in 0.0..=60.0,
+  retired_loud_fall_db_per_min = 0.5 in 0.5..=0.5,
   retired_loud_warm_s = 30.0 in 30.0..=30.0,
-  /// The quiet talker level is a lower envelope over spurt levels. A quieter spurt pulls it down
-  /// with this time constant (in seconds of the spurt's talk); once settled, a spurt counts as at
-  /// most `quiet_outlier_db` under it (one whisper or a far-away mic moves it a little, a real
-  /// quiet talker gets there over a few spurts). A louder spurt lets it rise only at
-  /// `quiet_rise_db_per_min` per minute of talk: a quiet person who left is forgotten.
-  /// The fall is fast on purpose: the quiet person usually talks little, so the level must get
-  /// there within a few of their sentences. Cost: one whispered stretch of about 3 s moves the
-  /// depth by roughly 2.5 dB, and it comes back only at the slow rise.
-  quiet_fall_s = 2.5 in 0.1..=60.0,
+  retired_quiet_fall_s = 2.5 in 2.5..=2.5,
   retired_quiet_fall_max_s = 3.0 in 3.0..=3.0,
   retired_quiet_slowdown = 10.0 in 10.0..=10.0,
-  quiet_outlier_db = 6.0 in 0.0..=60.0,
-  quiet_rise_db_per_min = 1.0 in 0.0..=60.0,
+  retired_quiet_outlier_db = 6.0 in 6.0..=6.0,
+  retired_quiet_rise_db_per_min = 1.0 in 1.0..=1.0,
   retired_quiet_warm_s = 10.0 in 10.0..=10.0,
-  /// The depth comes from a locked loud - quiet talker difference. Until the loud level has this
-  /// much fight heard (so: 20 s of masking game after the first voice was heard) and the quiet
-  /// talker level this much talk learned, the lock follows the estimates. A level remembered from
-  /// an earlier run counts as settled at once.
-  loud_settled_s = 20.0 in 0.0..=600.0,
-  quiet_settled_s = 10.0 in 0.0..=600.0,
-  /// Then the lock is a backlash: the estimated difference must rise `hysteresis_up_db` above it
-  /// before the depth grows, and fall `hysteresis_down_db` below it before the depth shrinks; a
-  /// larger shift moves the lock by the excess only, never with a step. Buys one depth for the
-  /// whole run; costs that a real change within the band is ignored. Asymmetric because a depth
-  /// that is too shallow fails (the voice is not understood) while one too deep only makes the
-  /// game a little quieter than needed: small upwards, so the lock never stays short of the
-  /// estimate while the quiet talker level still falls. Both must stay clearly below the margin
-  /// (8.5 dB at the default strength), or the lock could leave the voice no margin at all.
-  hysteresis_up_db = 0.5 in 0.0..=20.0,
-  hysteresis_down_db = 4.0 in 0.0..=20.0,
-  /// A spurt ducks once the current game level would need more than this (game - spurt level +
-  /// margin).
+  retired_loud_settled_s = 20.0 in 20.0..=20.0,
+  retired_quiet_settled_s = 10.0 in 10.0..=10.0,
+  retired_hysteresis_up_db = 0.5 in 0.5..=0.5,
+  retired_hysteresis_down_db = 4.0 in 4.0..=4.0,
+  /// A spurt raises the lowering level once the current game level would need more than this
+  /// (game - spurt level + margin), to what it needs.
   on_threshold_db = 2.0 in -20.0..=20.0,
   /// The voice's margin over the game at full strength (`duck_strength_permille` 1000; 500 = half).
   /// A loud game with a quiet podcast needed about 8.5 dB (live test), which half strength gives.
   max_margin_db = 17.0 in 0.0..=30.0,
-  /// Safety bound of the depth, whatever the levels and the strength.
+  /// Safety bound of the lowering level, whatever the levels and the strength.
   max_depth_db = 18.0 in 0.0..=40.0,
-  /// A ducked talk lets go once the game has not masked the talker for this long in a row while
-  /// someone talks, and may duck again later: a talker who never pauses (a podcast) is not ducked
-  /// for good by one fight. A calm stretch between fights shorter than this keeps the game lowered
-  /// (live test: at 3 s a 20 s lull let go and the next fight needed time to lower it again, a
-  /// sentence lost). The latch outlives the talk: the next talk starts where the last one ended.
-  latch_release_s = 30.0 in 0.5..=600.0,
+  retired_latch_release_s = 30.0 in 30.0..=30.0,
   /// The service's mix ducker (`MixDucker`) measures the game only this long after the chat last
   /// made a sound: it covers the chat's way through the spatial renderer and the tail of a word.
   mix_chat_guard_s = 0.3 in 0.05..=5.0,
@@ -234,8 +200,8 @@ mod tests {
     let version = |h: &ShmHeader| h.duck_tune_version.load(Ordering::Relaxed);
     assert_eq!(DuckTuning::read_from(&daemon), T);
     let mut tuning = T;
-    assert!(tuning.set("hold_s", 0.8) && tuning.set("hysteresis_up_db", 1.0));
-    assert_eq!(tuning.non_default(), vec![("hold_s", 0.8), ("hysteresis_up_db", 1.0)]);
+    assert!(tuning.set("hold_s", 0.8) && tuning.set("on_threshold_db", 1.0));
+    assert_eq!(tuning.non_default(), vec![("hold_s", 0.8), ("on_threshold_db", 1.0)]);
     let before = version(&daemon);
     tuning.write_to(&daemon);
     tuning.write_to(&daemon);
@@ -273,7 +239,7 @@ mod tests {
       "speech_prob",
       "hold_s",
       "spurt_min_s",
-      "spurt_learn_s",
+      "retired_spurt_learn_s",
       "spurt_level_s",
       "short_talk_s",
       "slow_attack_db_per_s",
@@ -281,25 +247,25 @@ mod tests {
       "release_db_per_s",
       "game_rise_s",
       "game_fall_s",
-      "loud_rise_s",
+      "retired_loud_rise_s",
       "retired_loud_rise_max_s",
       "retired_loud_slowdown",
-      "loud_fall_db_per_min",
+      "retired_loud_fall_db_per_min",
       "retired_loud_warm_s",
-      "quiet_fall_s",
+      "retired_quiet_fall_s",
       "retired_quiet_fall_max_s",
       "retired_quiet_slowdown",
-      "quiet_outlier_db",
-      "quiet_rise_db_per_min",
+      "retired_quiet_outlier_db",
+      "retired_quiet_rise_db_per_min",
       "retired_quiet_warm_s",
-      "loud_settled_s",
-      "quiet_settled_s",
-      "hysteresis_up_db",
-      "hysteresis_down_db",
+      "retired_loud_settled_s",
+      "retired_quiet_settled_s",
+      "retired_hysteresis_up_db",
+      "retired_hysteresis_down_db",
       "on_threshold_db",
       "max_margin_db",
       "max_depth_db",
-      "latch_release_s",
+      "retired_latch_release_s",
       "mix_chat_guard_s",
       "retired_mix_max_depth_db",
       "retired_mix_hold_s",

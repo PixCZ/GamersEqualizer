@@ -4,10 +4,10 @@
 //! - which streams are game and which chat: the stream router pairs them (`stream_router`);
 //! - the channel gains: the mixer publishes them (`ChatMixController::write_duck_gains`);
 //! - everything else runs from `Ducking::tick`, called by `apo_link` every 100 ms: the hand-edited
-//!   tuning (`tuning_file`), the levels each game learned in earlier runs (`level_store`), the
-//!   reduction the window shows, and the log: a change-only status line, failures, a game it
-//!   cannot hear (`unheard`, also shown by the window), the per-minute summary (`minute_summary`)
-//!   and, with debug logging on, `debug_log`;
+//!   tuning (`tuning_file`), a Game or Chat session volume change (each game stream then learns its
+//!   lowering level again, `StreamSlot::duck_volume_epoch`), the reduction the window shows, and the
+//!   log: a change-only status line, failures, a game it cannot hear (`unheard`, also shown by the
+//!   window), the per-minute summary (`minute_summary`) and, with debug logging on, `debug_log`;
 //! - a game the APO cannot hear is lowered by the service through its session volume, from the
 //!   output mix (`mix`): `Ducking::tick_mix` at every reference tick, the depth folded into the
 //!   mixer's Game sessions by the service loop.
@@ -15,7 +15,6 @@
 //! Every log line starts with `[Ducking]`; levels and depths are dB with one decimal.
 
 mod debug_log;
-mod level_store;
 mod minute_summary;
 mod mix;
 mod tuning_file;
@@ -37,7 +36,6 @@ use std::time::Instant;
 
 use super::stream_router;
 use debug_log::DebugLog;
-use level_store::LevelStore;
 use minute_summary::MinuteSummary;
 use mix::MixRun;
 use tuning_file::TuningFile;
@@ -49,11 +47,11 @@ static SPATIAL: Mutex<(bool, Option<String>)> = Mutex::new((false, None));
 
 pub struct Ducking {
   tuning: TuningFile,
-  /// Loaded on first use.
-  store: Option<LevelStore>,
-  /// Slot owners already handed the stored levels (or that found none), and whose failure was logged.
-  handed: HashSet<u64>,
+  /// Slot owners whose failure was logged.
   failed: HashSet<u64>,
+  /// The Game and Chat session volumes last seen, and the epoch the game streams were told.
+  session_gains: Option<(f32, f32)>,
+  volume_epoch: i32,
   /// What the status line said last.
   status: Option<Status>,
   summary: MinuteSummary,
@@ -81,9 +79,9 @@ impl Ducking {
   pub fn new() -> Self {
     Self {
       tuning: TuningFile::new(),
-      store: None,
-      handed: HashSet::new(),
       failed: HashSet::new(),
+      session_gains: None,
+      volume_epoch: 0,
       status: None,
       summary: MinuteSummary::default(),
       debug: DebugLog::default(),
@@ -106,8 +104,8 @@ impl Ducking {
     let (unheard, name, key) = self.watch_unheard(h, enabled, table, &streams);
     self.mix.set_unheard(unheard && table.is_some(), key);
     self.log_status(enabled, &streams, &settings);
-    // Mix mode's run joins the log as one more game stream ("(mix)"); the store and the status
-    // line work on the real streams only.
+    // Mix mode's run joins the log as one more game stream ("(mix)"); the status line works on the
+    // real streams only.
     let mut logged = streams.clone();
     logged.extend(self.mix.view(&name));
     h.duck_reduction_permille.store(view::reduction(&logged), Ordering::Relaxed);
@@ -117,14 +115,8 @@ impl Ducking {
     }
     if let Some(table) = table {
       // Owners whose slot is gone are forgotten; a new stream gets a new owner value.
-      let live = |owner: &u64| table.slots.iter().any(|s| s.owner.load(Ordering::Acquire) == *owner);
-      self.handed.retain(live);
-      self.failed.retain(live);
-      let store = self.store.get_or_insert_with(LevelStore::load_default);
-      hand_and_learn(store, &mut self.handed, table, &streams);
-      if let Some(levels) = self.mix.seed_and_learn(store, mix::session_gains()) {
-        info!("[Ducking] {name} (mix) was handed stored levels: {}", levels_text(levels));
-      }
+      self.failed.retain(|owner| table.slots.iter().any(|s| s.owner.load(Ordering::Acquire) == *owner));
+      self.follow_session_gains(table, mix::session_gains());
     }
     for s in streams.iter().filter(|s| view::flag(&s.dbg, FLAG_FAILED)) {
       if self.failed.insert(s.owner) {
@@ -148,6 +140,19 @@ impl Ducking {
   /// the APO's mapping while we drive it.
   pub fn tick_mix(&mut self, h: &ShmHeader, layout: Option<&ShmLayout>) {
     self.mix.step(layout, &DuckSettings::read(h), self.tuning.tuning(), mix::session_gains());
+  }
+
+  /// A Game or Chat session volume moved: the stream APOs see it in their levels, but their lowering
+  /// level must start over, so every slot gets the next epoch (a stream that comes later starts at
+  /// 0 anyway). Mix mode follows the same volumes itself (`MixRun::step`).
+  fn follow_session_gains(&mut self, table: &StreamTable, gains: (f32, f32)) {
+    if self.session_gains.is_some_and(|was| was != gains) {
+      // Positive, so an APO built before (which read a stored level here when negative) ignores it.
+      self.volume_epoch = self.volume_epoch % i32::MAX + 1;
+      table.slots.iter().for_each(|slot| slot.duck_volume_epoch.store(self.volume_epoch, Ordering::Relaxed));
+      debug!("[Ducking] session volumes game {:.2} chat {:.2}: the lowering level starts over", gains.0, gains.1);
+    }
+    self.session_gains = Some(gains);
   }
 
   /// Mix mode needs the speaker reference (`aec_reference` asks the output APO for it).
@@ -251,29 +256,6 @@ impl Status {
   }
 }
 
-/// Hands each new game stream what an earlier run of its game learned, once, at its first tick as
-/// a game stream: later the store holds this run's own values, which the APO would take as
-/// established. Then keeps what the loudest playing stream of each game has learned.
-fn hand_and_learn(store: &mut LevelStore, handed: &mut HashSet<u64>, table: &StreamTable, streams: &[StreamView]) {
-  let games: Vec<(&StreamView, String)> =
-    streams.iter().filter(|s| s.is_game).map(|s| (s, s.exe.to_ascii_lowercase())).collect();
-  for (s, exe) in &games {
-    if !handed.insert(s.owner) {
-      continue;
-    }
-    let slot = table.slots.get(s.index).filter(|slot| slot.owner.load(Ordering::Acquire) == s.owner);
-    let (Some(slot), Some(levels)) = (slot, store.get(exe)) else { continue };
-    slot.duck_saved_loud_db_x10.store(levels.0, Ordering::Relaxed);
-    slot.duck_saved_quiet_db_x10.store(levels.1, Ordering::Relaxed);
-    info!("[Ducking] stream #{} of {exe} was handed stored levels: {}", s.owner as u32, levels_text(levels));
-  }
-  let reports = games.iter().filter(|(s, _)| s.fresh).map(|(s, exe)| (exe.as_str(), s.learned));
-  for (exe, learned) in level_store::loudest_per_game(reports) {
-    store.learn(exe, learned);
-  }
-  store.save_if_due();
-}
-
 /// Who lowers the game, for the status line.
 fn mode_text(mode: Mode, spatial: Option<&str>) -> String {
   match mode {
@@ -300,64 +282,31 @@ fn spatial() -> (bool, Option<String>) {
   SPATIAL.lock().map(|s| s.clone()).unwrap_or_default()
 }
 
-/// "-20.5 dB", or "none" for 0 (not learned).
-fn level_text(x10: i32) -> String {
-  if x10 == 0 { "none".to_string() } else { format!("{:.1} dB", x10 as f32 / 10.0) }
-}
-
-/// "loud level -20.5 dB, quiet talker -33.0 dB"
-fn levels_text((loud, quiet): (i32, i32)) -> String {
-  format!("loud level {}, quiet talker {}", level_text(loud), level_text(quiet))
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  fn zeroed_table() -> Box<StreamTable> {
+  #[test]
+  fn a_session_volume_change_moves_every_slots_epoch_once() {
     let mut mem: Box<std::mem::MaybeUninit<StreamTable>> = Box::new_uninit();
     // SAFETY: all-zero bytes are a valid StreamTable (atomics only), like a fresh mapping.
-    unsafe {
+    let table = unsafe {
       std::ptr::write_bytes(mem.as_mut_ptr(), 0, 1);
       mem.assume_init()
-    }
-  }
-
-  /// A playing game stream in slot `index` that reports `learned`.
-  fn game(table: &StreamTable, index: usize, owner: u64, learned: (i32, i32)) -> StreamView {
-    table.slots[index].owner.store(owner, Ordering::Relaxed);
-    StreamView { index, learned, ..view::tests::stream(owner, true) }
-  }
-
-  #[test]
-  fn a_game_stream_is_handed_stored_levels_once_and_never_its_own() {
-    let dir = std::env::temp_dir().join(format!("geq_ducking_hand_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut store = LevelStore::load(dir.join("duck_level_cache.json"));
-    let table = zeroed_table();
-    let mut handed = HashSet::new();
-    let saved = |i: usize| {
-      let s = &table.slots[i];
-      (s.duck_saved_loud_db_x10.load(Ordering::Relaxed), s.duck_saved_quiet_db_x10.load(Ordering::Relaxed))
     };
-
-    // First run, empty store: the stream's own levels flow back, never into its slot.
-    let first = [game(&table, 0, (7 << 32) | 1, (-200, -300))];
-    for _ in 0..3 {
-      hand_and_learn(&mut store, &mut handed, &table, &first);
-    }
-    assert_eq!(store.get("game.exe"), Some((-200, -300)));
-    assert_eq!(saved(0), (0, 0));
-
-    // Second run: a new stream starts from the record, written once and not after the store moved.
-    let second = [game(&table, 1, (7 << 32) | 2, (0, 0))];
-    hand_and_learn(&mut store, &mut handed, &table, &second);
-    assert_eq!(saved(1), (-200, -300));
-    store.learn("game.exe", (-100, -250));
-    hand_and_learn(&mut store, &mut handed, &table, &second);
-    assert_eq!(saved(1), (-200, -300));
-    let _ = std::fs::remove_dir_all(&dir);
+    let epoch = |i: usize| table.slots[i].duck_volume_epoch.load(Ordering::Relaxed);
+    let mut ducking = Ducking::new();
+    ducking.follow_session_gains(&table, (1.0, 1.0));
+    ducking.follow_session_gains(&table, (1.0, 1.0));
+    assert_eq!(epoch(0), 0, "the first look and no change move nothing");
+    ducking.follow_session_gains(&table, (0.5, 1.0));
+    ducking.follow_session_gains(&table, (0.5, 1.0));
+    assert_eq!((epoch(0), epoch(3)), (1, 1));
+    ducking.follow_session_gains(&table, (0.5, 0.8));
+    assert_eq!(epoch(0), 2);
+    ducking.volume_epoch = i32::MAX;
+    ducking.follow_session_gains(&table, (0.5, 0.7));
+    assert_eq!(epoch(0), 1, "wraps to positive");
   }
 
   #[test]
