@@ -215,7 +215,8 @@ impl TrayHost {
     }
     let tray = self.tray.as_ref()?;
 
-    let mut mic_changed = false;
+    self.level.sample(header);
+    let (mut mic_changed, mut level) = (false, self.level_shown);
     if self.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
       let active = crate::mic_usage::microphone_in_use();
@@ -224,10 +225,9 @@ impl TrayHost {
         info!("[Tray] microphone {}", if active { "in use" } else { "free" });
         mic_changed = true;
       }
-      self.level.check(active, !self.issues.is_empty(), || tray.tray_icon.rect());
+      level = self.level.tick(header, active, !self.issues.is_empty(), || tray.tray_icon.rect());
     }
-    // One icon per step at most: the colour and the bars go out together.
-    let level = self.level.frame(header);
+    // One icon at most: the colour and the bars go out together.
     let level_changed = level != std::mem::replace(&mut self.level_shown, level);
     if mic_changed {
       tray.show_state(self.mic_active, &self.issues, level);

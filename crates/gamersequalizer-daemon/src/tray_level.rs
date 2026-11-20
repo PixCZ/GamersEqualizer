@@ -1,15 +1,21 @@
 //! The tray icon's bars follow the microphone level: "does my mic work, am I heard?" at a glance.
 //! The level is the mic chain's output (what the other side gets), so the bars move only while
 //! our effect processes the microphone. Every change is one icon sent to Explorer, so it is
-//! rationed: a few frames a second, only when the bars change by a step, and not at all while
-//! nobody can see the icon (a full-screen app in front, the icon in the overflow, switched off).
+//! rationed: once a second (the tray's own check of the microphone), only when the bars change
+//! by a step, and not at all while nobody can see the icon (a full-screen app in front, the icon
+//! in the overflow, switched off). Windows has no way to ask an app for its tray icon when it
+//! repaints: Explorer keeps the last icon it was sent, so sending rarely is all there is to save.
+//!
+//! The level costs nothing extra to produce: the mic chain measures it anyway and the service
+//! mirrors its telemetry for the window. Here it is one number read per service-loop step, to
+//! keep the loudest moment of the second (the chain's value covers only the last ~30 ms).
 
 use crate::ui::prefs::{self, UiPrefs};
 use gamersequalizer_common::shm::ShmHeader;
 use log::info;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 use tray_icon::Rect;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext};
@@ -19,20 +25,16 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowRect};
 use windows::core::{PCWSTR, w};
 
-/// The bars change at most this often (the service loop adds up to one of its steps).
-const FRAME_INTERVAL: Duration = Duration::from_millis(1000);
 /// Bar heights the level is rounded to; an icon is sent only when the step changes.
 const STEPS: u8 = 8;
 /// The chain's output level (dBFS, RMS) of the lowest and of the full bars. Full is the voice
 /// leveler's default target, so normal speech draws the icon the way it looks standing still.
 const FLOOR_DB: f32 = -60.0;
 const FULL_DB: f32 = -24.0;
-/// The bars rise at once and fall this many steps per frame.
+/// The bars rise at once and fall this many steps per second.
 const FALL_STEPS: u8 = 4;
 /// Bar height at step 0 as a share of the full one: a silent, working mic still shows bars.
 const MIN_SCALE: f32 = 0.2;
-/// The mic effect counts as running this long after its last telemetry (it comes every ~100 ms).
-const LIVE_WINDOW: Duration = Duration::from_secs(1);
 
 pub struct LevelMeter {
   prefs_dir: PathBuf,
@@ -44,11 +46,10 @@ pub struct LevelMeter {
   follows: bool,
   /// What the last check found, as logged; empty while no app records.
   status: &'static str,
-  seq: u32,
-  live_at: Option<Instant>,
-  /// Highest level since the last frame, dBFS x 10.
+  /// The telemetry sequence at the last tick; None until the bars have followed for one.
+  seq: Option<u32>,
+  /// Highest level since the last tick, dBFS x 10.
   peak_db_x10: i32,
-  frame_at: Option<Instant>,
   step: Option<u8>,
 }
 
@@ -60,17 +61,48 @@ impl LevelMeter {
       off: false,
       follows: false,
       status: "",
-      seq: 0,
-      live_at: None,
+      seq: None,
       peak_db_x10: i32::MIN,
-      frame_at: None,
       step: None,
     }
   }
 
-  /// About once a second: may the bars follow the level right now? `icon_rect` asks Explorer,
-  /// so it is called only when nothing else stops the bars.
-  pub fn check(&mut self, mic_active: bool, warning: bool, icon_rect: impl FnOnce() -> Option<Rect>) {
+  /// Every service-loop step: keeps the loudest moment for the next tick. One atomic read, and
+  /// only while the bars follow.
+  pub fn sample(&mut self, header: Option<&ShmHeader>) {
+    if let Some(h) = header.filter(|_| self.follows) {
+      self.peak_db_x10 = self.peak_db_x10.max(h.aec_out_level_db_x10.load(Ordering::Relaxed));
+    }
+  }
+
+  /// Once a second: the bar step to show, None = the icon as it stands still.
+  pub fn tick(
+    &mut self,
+    header: Option<&ShmHeader>,
+    mic_active: bool,
+    warning: bool,
+    icon_rect: impl FnOnce() -> Option<Rect>,
+  ) -> Option<u8> {
+    self.check(mic_active, warning, icon_rect);
+    let peak = std::mem::replace(&mut self.peak_db_x10, i32::MIN);
+    let Some(h) = header.filter(|_| self.follows) else {
+      self.seq = None;
+      self.step = None;
+      return None;
+    };
+    // The service bumps its copy of the sequence only while the mic effect produces audio
+    // (`ApoLink::sync`). The first tick has nothing to compare it with: it draws no old level.
+    let seq = h.aec_telemetry_seq.load(Ordering::Acquire);
+    let live = self.seq.replace(seq).is_some_and(|before| before != seq);
+    self.step = live.then(|| next_step(self.step, peak as f32 / 10.0));
+    // The full step draws the standing icon, so it is None: no icon is sent when speech at
+    // full level starts or ends.
+    self.step.filter(|&s| s < STEPS)
+  }
+
+  /// May the bars follow the level right now? `icon_rect` asks Explorer, so it is called only
+  /// when nothing else stops the bars.
+  fn check(&mut self, mic_active: bool, warning: bool, icon_rect: impl FnOnce() -> Option<Rect>) {
     if !mic_active {
       // The tray logs "microphone free" itself.
       self.follows = false;
@@ -99,37 +131,6 @@ impl LevelMeter {
       self.status = status;
     }
   }
-
-  /// Every service-loop step: the bar step to show, None = the icon as it stands still.
-  pub fn frame(&mut self, header: Option<&ShmHeader>) -> Option<u8> {
-    let Some(h) = header.filter(|_| self.follows) else {
-      self.frame_at = None;
-      self.live_at = None;
-      self.step = None;
-      return None;
-    };
-    self.peak_db_x10 = self.peak_db_x10.max(h.aec_out_level_db_x10.load(Ordering::Relaxed));
-    if self.frame_at.is_some_and(|at| at.elapsed() < FRAME_INTERVAL) {
-      return self.shown();
-    }
-    let first = self.frame_at.replace(Instant::now()).is_none();
-    let peak = std::mem::replace(&mut self.peak_db_x10, i32::MIN);
-    // The service bumps its copy of the sequence only while the mic effect produces audio
-    // (`ApoLink::sync`). The first frame has nothing to compare it with: it draws no old level.
-    let seq = h.aec_telemetry_seq.load(Ordering::Acquire);
-    if seq != std::mem::replace(&mut self.seq, seq) && !first {
-      self.live_at = Some(Instant::now());
-    }
-    let live = self.live_at.is_some_and(|at| at.elapsed() < LIVE_WINDOW);
-    self.step = live.then(|| next_step(self.step, peak as f32 / 10.0));
-    self.shown()
-  }
-
-  /// `step` for the icon. The full step draws the standing icon, so it is None: no icon is
-  /// sent when speech at full level starts or ends.
-  fn shown(&self) -> Option<u8> {
-    self.step.filter(|&s| s < STEPS)
-  }
 }
 
 /// Bar height for `app_icon::rgba`: 1.0 while the icon stands still.
@@ -137,7 +138,7 @@ pub fn bar_scale(step: Option<u8>) -> f32 {
   step.map_or(1.0, |s| MIN_SCALE + (1.0 - MIN_SCALE) * f32::from(s.min(STEPS)) / f32::from(STEPS))
 }
 
-/// The step for a level: up at once, down `FALL_STEPS` per frame.
+/// The step for a level: up at once, down `FALL_STEPS` per tick.
 fn next_step(shown: Option<u8>, level_db: f32) -> u8 {
   let share = ((level_db - FLOOR_DB) / (FULL_DB - FLOOR_DB)).clamp(0.0, 1.0);
   let target = (share * f32::from(STEPS)).round() as u8;
