@@ -412,13 +412,66 @@ fn test_flush_drops_audio_from_before_and_keeps_the_model() {
     assert_eq!(after, engine, "{model:?}: same engine, not reloaded");
     assert!(isolator.loading.is_none());
     assert_eq!(isolator.active_model(), model);
-    // A model switch right after a flush: the new engine's first output is not the old one's.
+    // A model switch right after a flush: the newcomer is silenced for its own latency only.
     isolator.flush();
     isolator.rescue.hold_left = 4800;
+    isolator.active = DenoiseModel::RnNoise;
     isolator.reset_engines();
     assert_eq!(isolator.mute_left, 0, "{model:?}: a switch still silences the next model");
     assert_eq!(isolator.rescue.hold_left, 0, "{model:?}: the click rescue kept the old engine's hold");
   }
+}
+
+/// Regression: DeepFilterNet keeps its lookahead frames while another model runs, and the switch
+/// back played them (about 40 ms of the speech from before).
+#[test]
+fn test_switch_back_to_deepfilter_plays_nothing_from_before() {
+  let (clean, _) = speech_over_keyboard(-20.0, 0.0);
+  let mut isolator = AiVoiceIsolator::new();
+  isolator.set_gate_threshold_db(GATE_OFF_DB - 1.0); // gate off: everything left would be heard
+  isolator.set_model(DenoiseModel::DeepFilterNet);
+  let mut speech = clean.clone();
+  let mut loud_blocks = 0;
+  for b in speech.chunks_mut(480) {
+    loud_blocks += usize::from(rms(b) > 0.03);
+    isolator.process_samples(b);
+    if loud_blocks >= 30 {
+      break;
+    }
+  }
+  assert_eq!(isolator.active_model(), DenoiseModel::DeepFilterNet, "load error: {:?}", isolator.df_error);
+  isolator.set_model(DenoiseModel::RnNoise);
+  vec![0.0f32; 48_000].chunks_mut(480).for_each(|b| isolator.process_samples(b));
+  isolator.set_model(DenoiseModel::DeepFilterNet);
+  let mut silence = vec![0.0f32; 48_000];
+  silence.chunks_mut(441).for_each(|b| isolator.process_samples(b));
+  assert_eq!(isolator.active_model(), DenoiseModel::DeepFilterNet);
+  let peak = silence.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+  assert!(peak < 1e-4, "audio from before the switch, peak {:.1} dBFS", db(peak));
+}
+
+/// With the leveler off nobody reads the detector: the off state runs no network, and hears
+/// speech again once the leveler is back.
+#[test]
+fn test_bypass_without_a_listener_runs_no_detector() {
+  let (clean, _) = speech_over_keyboard(-30.0, 0.0);
+  let mut isolator = AiVoiceIsolator::new();
+  isolator.set_strength(0.0);
+  isolator.set_voice_wanted(false);
+  let mut x = clean.clone();
+  for b in x.chunks_mut(480) {
+    isolator.process_samples(b);
+    assert!(!isolator.heard_voice() && !isolator.heard_level_voice());
+    assert_eq!(isolator.debug_state().in_prob, -1.0, "the detector ran");
+  }
+  assert_eq!(x, clean, "bypass leaves the audio untouched");
+  isolator.set_voice_wanted(true);
+  let mut speech_blocks = 0;
+  for b in x.chunks_mut(480) {
+    isolator.process_samples(b);
+    speech_blocks += usize::from(isolator.heard_level_voice());
+  }
+  assert!(speech_blocks > clean.len() / 480 / 10, "heard speech in {speech_blocks} blocks");
 }
 
 #[test]
