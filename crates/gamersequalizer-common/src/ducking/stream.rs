@@ -193,6 +193,16 @@ impl StreamDucker {
   }
 }
 
+/// A Game stream played within the last `GAP_HNS`. Without one a chat stream's speech lowers
+/// nothing (mix mode works on a playing game stream too), so its voice detector can rest; the
+/// detector's restart rule uses the same gap.
+pub fn game_playing(table: &StreamTable, now_hns: u64) -> bool {
+  table.slots.iter().any(|slot| {
+    StreamBus::from_u32(slot.bus.load(Ordering::Relaxed)) == StreamBus::Game
+      && now_hns.saturating_sub(slot.last_audio_hns.load(Ordering::Relaxed)) <= GAP_HNS
+  })
+}
+
 /// The summed speech-band levels of the fresh chat and game slots; the own (game) slot counts with
 /// this block's level.
 fn levels(table: &StreamTable, own_index: usize, own_ms: f32, now_hns: u64) -> (f32, f32) {

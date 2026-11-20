@@ -13,7 +13,8 @@ use std::sync::atomic::Ordering;
 /// This block's speech-band level, every stream while the feature is on (a chat stream also when
 /// its detector hears no speech: the log tells "chat silent" from "chat loud but not speech").
 pub const BAND_DB: usize = 0;
-/// Chat streams: the detector's last chunk, probability x 1000; -1 = no detector.
+/// Chat streams: the detector's last chunk, probability x 1000; -1 = no detector, or with
+/// `FLAG_VAD` set the detector rests because no game plays.
 pub const VAD_PROB: usize = 1;
 /// Game streams from here on: the current game level the decision uses.
 pub const GAME_DB: usize = 2;

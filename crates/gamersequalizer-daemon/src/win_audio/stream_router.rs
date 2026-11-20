@@ -203,7 +203,8 @@ impl Router {
     // the 200 Hz metering. Known limit: after one is turned on, new pairings need ~1.5 s of fresh
     // meter history.
     let header = &apo.layout().header;
-    let active = header.stream_eq_active() || header.duck_enabled.load(Ordering::Relaxed);
+    let eq_active = header.stream_eq_active();
+    let active = eq_active || header.duck_enabled.load(Ordering::Relaxed);
     if active != self.routing {
       self.routing = active;
       info!(
@@ -223,8 +224,8 @@ impl Router {
     self.refresh_sessions()?;
     let playing = self.sessions.values().any(|s| matches!(s.bus, StreamBus::Chat | StreamBus::Game));
     CHAT_OR_GAME_PLAYING.store(playing, Ordering::Relaxed);
-    if self.sessions.is_empty() {
-      // Nothing plays: no meter to sample. Sessions are re-read just as often as while sampling,
+    if !meters_needed(!self.sessions.is_empty(), eq_active, playing) {
+      // Nothing to pair: no meter to sample. Sessions are re-read just as often as while sampling,
       // so a stream that starts is found as soon as before; the evaluation still clears the buses
       // and `PAIRED` of streams that ended.
       super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
@@ -435,6 +436,13 @@ impl Router {
   }
 }
 
+/// Whether the sessions' meters are sampled (200 calls a second into the audio service). A stream
+/// EQ pairs every playing session; Automatic ChatMix alone pairs Chat and Game sessions only, so a
+/// lone Media session (a browser) needs no meter then.
+fn meters_needed(any_session: bool, eq_active: bool, chat_or_game_playing: bool) -> bool {
+  any_session && (eq_active || chat_or_game_playing)
+}
+
 /// The silent unpaired Game session the silent unpaired streams belong to: there must be one such
 /// session and at least one stream (a game may open several, and keeps idle ones).
 fn pair_by_elimination<'a>(silent_slots: &[u64], silent_games: &[&'a String]) -> Option<&'a String> {
@@ -501,6 +509,14 @@ mod tests {
     crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", false);
     assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::Media);
     assert_eq!(bus_for_exe(""), StreamBus::Media);
+  }
+
+  #[test]
+  fn a_lone_media_session_is_metered_only_for_a_stream_eq() {
+    assert!(!meters_needed(false, true, false), "nothing plays");
+    assert!(!meters_needed(true, false, false), "Automatic ChatMix alone, only a browser plays");
+    assert!(meters_needed(true, false, true), "a chat or a game plays");
+    assert!(meters_needed(true, true, false), "the media EQ needs the browser's stream paired");
   }
 
   #[test]

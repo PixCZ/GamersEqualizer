@@ -96,6 +96,12 @@ impl Ducking {
   pub fn tick(&mut self, h: &ShmHeader, table: Option<&StreamTable>) {
     self.tuning.tick(h);
     let enabled = h.duck_enabled.load(Ordering::Relaxed);
+    // Off, and an earlier tick has said so, cleared everything below and seen mix mode's last
+    // reduction released: nothing left to read, format or log.
+    let off_logged = self.status.as_ref().is_some_and(|s| !s.enabled);
+    if !enabled && off_logged && h.duck_reduction_permille.load(Ordering::Relaxed) == 0 {
+      return;
+    }
     let streams = match (table.filter(|_| enabled), stream_router::now_hns()) {
       (Some(table), Some(now)) => view::read_streams(table, stream_router::paired_streams(), now),
       _ => Vec::new(),

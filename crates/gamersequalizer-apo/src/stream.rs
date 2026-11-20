@@ -2,7 +2,7 @@
 //! pairing, runs its channel's EQ and Automatic ChatMix (`gamersequalizer_common::ducking`).
 
 use super::*;
-use gamersequalizer_common::ducking::{DuckRole, DuckSettings, GAP_HNS, StreamDucker, dbg};
+use gamersequalizer_common::ducking::{DuckRole, DuckSettings, GAP_HNS, StreamDucker, dbg, game_playing};
 use silero_vad::Vad48k;
 
 /// Records the level envelope into its stream-table slot, runs its channel's EQ once the daemon
@@ -147,19 +147,24 @@ impl StreamProcessor {
     let mut settings = DuckSettings::read(h);
     settings.enabled &= active;
     let role = DuckRole::from_bus(bus);
-    let is_speech = role == DuckRole::Voice && settings.enabled && self.detect_speech(buf, channels, index, now);
+    let listening = role == DuckRole::Voice && settings.enabled;
+    let game_plays = listening && game_playing(&self.shm.layout().streams, now);
+    let is_speech = listening && self.detect_speech(buf, channels, index, now, game_plays);
     self.ducker.process(buf, channels, role, is_speech, &self.shm.layout().streams, index, now, &settings);
   }
 
   /// A chat block through the voice detector: the decision of its last completed chunk at the
   /// tuning's `speech_prob`, plus the two telemetry values the log tells "no speech" from "no
   /// detector" by. `duck_sim` (common crate example) mirrors this: keep the two in line.
-  fn detect_speech(&mut self, buf: &[f32], channels: usize, index: usize, now: u64) -> bool {
+  fn detect_speech(&mut self, buf: &[f32], channels: usize, index: usize, now: u64, game_plays: bool) -> bool {
     let (speech, prob, flags) = match self.vad.as_mut() {
       // shortcut: without the detector (stream not at 48 kHz, weights failed to load) any chat
       // sound above the talk threshold counts as speech, coughs and room noise too;
       // upgrade = feed it through a `RateBridge` to 48 kHz.
       None => (true, -1, 0),
+      // No game plays, so there is nothing to lower: the detector rests (not fed, it starts
+      // over after the gap as below). No probability with the flag set tells the log so.
+      Some(_) if !game_plays => (false, -1, dbg::FLAG_VAD),
       Some(vad) => {
         // The ducker's restart rule. It is not fed while the ducking is off, so turning it on
         // again comes after such a gap too (or within it, from recent audio).

@@ -30,6 +30,8 @@ pub struct Sample {
   pub chat_samples: u32,
   pub chat_speech: u32,
   pub prob: Option<i32>,
+  /// A chat stream has a voice detector; without a probability it rests (no game plays).
+  pub detector: bool,
   /// Chat streams sampled whose band level is above the talk threshold (speech or not).
   pub chat_sound: u32,
   /// The most lowered game is mix mode's (`MixRun::view`), and the chat made sound (its level held).
@@ -64,6 +66,7 @@ pub struct MinuteSummary {
   chat_speech: u32,
   chat_sound: u32,
   prob_max: Option<i32>,
+  detector: bool,
   /// Mix mode lowered the game this minute; its ticks and those with the chat sounding.
   mix: bool,
   mix_ticks: u32,
@@ -94,6 +97,7 @@ impl Sample {
       chat_samples: chats.len() as u32,
       chat_speech: chats.iter().filter(|s| view::at(&s.dbg, VAD_PROB) >= settings.speech_prob_permille).count() as u32,
       prob: probs.max(),
+      detector: chats.iter().any(|s| view::detector(s) == "yes"),
       chat_sound: chats
         .iter()
         .map(|s| view::at(&s.dbg, BAND_DB))
@@ -151,6 +155,7 @@ impl MinuteSummary {
     self.chat_samples += s.chat_samples;
     self.chat_speech += s.chat_speech;
     self.chat_sound += s.chat_sound;
+    self.detector |= s.detector;
     if let Some(p) = s.prob {
       self.prob_max = Some(self.prob_max.map_or(p, |m| m.max(p)));
     }
@@ -182,7 +187,11 @@ impl MinuteSummary {
   /// `span` is what the line covers: longer than `PERIOD` when a spurt held the minute open.
   fn line(&self, chat_gain_permille: u32, span: Duration) -> String {
     let last = if span < PERIOD * 3 / 2 { "minute".to_string() } else { format!("{} s", span.as_secs()) };
-    let prob = self.prob_max.map_or("no voice detector".to_string(), |p| format!("prob max {:.2}", p as f32 / 1000.0));
+    let prob = match self.prob_max {
+      Some(p) => format!("prob max {:.2}", p as f32 / 1000.0),
+      None if self.detector => "voice detector resting: no game plays".to_string(),
+      None => "no voice detector".to_string(),
+    };
     if self.spurts == 0 && self.chat_speech == 0 {
       let sound = share(self.chat_sound, self.chat_samples);
       return format!("last {last}: chat sound without speech {sound} % of samples ({prob}), nothing lowered");
@@ -247,6 +256,7 @@ mod tests {
       chat_samples: 1,
       chat_speech: u32::from(talking),
       prob: Some(if talking { 900 } else { 100 }),
+      detector: true,
       chat_sound: 0,
       mix: false,
       chat_sounding: false,
@@ -315,6 +325,21 @@ mod tests {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(lines[0].ends_with("lowering level 12.0 dB (raised 2)"), "{}", lines[0]);
     assert!(lines[1].ends_with("lowering level 8.0 dB (raised 1, started over)"), "{}", lines[1]);
+  }
+
+  #[test]
+  fn a_resting_detector_is_not_called_missing() {
+    let t0 = Instant::now();
+    let sound = Sample { chat_sound: 1, prob: None, ..sample(false, 0) };
+    let mut s = MinuteSummary::default();
+    let lines: Vec<String> =
+      (0..=600u32).filter_map(|i| s.observe(t0 + Duration::from_millis(100 * u64::from(i)), &sound, 800)).collect();
+    assert_eq!(
+      lines,
+      [
+        "last minute: chat sound without speech 100 % of samples (voice detector resting: no game plays), nothing lowered"
+      ]
+    );
   }
 
   #[test]

@@ -216,7 +216,8 @@ impl ChatStats {
       format!(
         "speech {} % (prob max {}) at {}",
         share(self.speech_samples, self.samples),
-        self.prob_max.map_or("-".to_string(), |p| format!("{:.2}", p as f32 / 1000.0)),
+        // A detector without a probability was not fed: the stream APO rests it while no game plays.
+        self.prob_max.map_or("-, resting: no game plays".to_string(), |p| format!("{:.2}", p as f32 / 1000.0)),
         self.speech.text()
       )
     } else {

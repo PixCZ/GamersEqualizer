@@ -41,7 +41,7 @@ mod tuning;
 
 pub use gain::DuckStatus;
 pub use mix::{MixDucker, chat_levels, chat_sounding};
-pub use stream::StreamDucker;
+pub use stream::{StreamDucker, game_playing};
 pub use tuning::DuckTuning;
 
 // ---------------------------------------------------------------------------------------

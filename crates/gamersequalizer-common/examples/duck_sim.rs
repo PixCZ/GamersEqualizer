@@ -171,7 +171,8 @@ fn simulate(
       slot(chat_slot)?.record(now, peak, count as u32);
       let role = if paired { DuckRole::Voice } else { DuckRole::Other };
       // As `stream.rs::detect_speech`: only a paired chat stream with the feature on feeds the
-      // detector, and a gap restarts it.
+      // detector, and a gap restarts it. (The APO also rests it while no game plays; here one
+      // always does.)
       let speech = role == DuckRole::Voice && settings.enabled && {
         mono.clear();
         mono.extend(chat_block.chunks_exact(chat.channels).map(|f| f.iter().sum::<f32>() / f.len() as f32));
