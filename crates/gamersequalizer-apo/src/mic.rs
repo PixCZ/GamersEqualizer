@@ -146,9 +146,13 @@ impl MicProcessor {
       if let Ok(map) = gamersequalizer_mic_chain::debug_capture::DebugCaptureMap::create(APO_SHM_SDDL) {
         chain.attach_debug_capture(map, rate);
       }
+      let mut sidetone = Box::new(SidetoneTap::new(rate, instance_id));
+      if let Some(layout) = chain.shm_layout() {
+        sidetone.preload(layout);
+      }
       Box::new(MicProcessor {
         chain,
-        sidetone: Box::new(SidetoneTap::new(rate, instance_id)),
+        sidetone,
         mono_in: vec![0.0; 4096],
         mono_out: vec![0.0; 4096],
         bridge,
@@ -196,6 +200,10 @@ impl MicProcessor {
     if self.sidetone.failed {
       let text = format!("{label}: the sidetone tap failed and stayed silent until this stream stopped");
       event_log::note(Level::Warning, &format!("sidetone failed:{id}"), &text);
+    }
+    if self.sidetone.denoiser_failed {
+      let text = format!("{label}: the sidetone noise suppressors could not be built, the band expander ran instead");
+      event_log::note(Level::Warning, &format!("sidetone denoiser failed:{id}"), &text);
     }
   }
 

@@ -44,7 +44,7 @@ fn main() {
 
 /// ICO with one 32-bit BMP image per size (alpha in the pixels, empty AND mask).
 fn ico_bytes() -> Vec<u8> {
-  let images: Vec<Vec<u8>> = ICO_SIZES.iter().map(|&s| bmp_entry(s, &app_icon::rgba(s, false, false))).collect();
+  let images: Vec<Vec<u8>> = ICO_SIZES.iter().map(|&s| bmp_entry(s, &app_icon::rgba(s, false, false, 1.0))).collect();
   let mut out = Vec::new();
   out.extend_from_slice(&[0, 0, 1, 0]); // reserved, type = icon
   out.extend_from_slice(&(ICO_SIZES.len() as u16).to_le_bytes());

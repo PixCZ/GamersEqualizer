@@ -407,6 +407,50 @@ fn connection(buf: &mut [f32], frames: u32, flags: i32) -> APO_CONNECTION_PROPER
   }
 }
 
+/// The frame-based suppressors exist only once a pair uses one: not for the default expander,
+/// at once for a pair that already has one when the stream starts, and after a mode change
+/// from the loader thread while the tap keeps writing.
+#[test]
+fn sidetone_builds_its_suppressors_only_for_a_frame_based_mode() {
+  use gamersequalizer_common::sidetone::SidetoneSettings;
+  const MIC: u32 = 11;
+  let name = format!(r"Local\GamersEqualizer_SidetoneLazyTest_{}", std::process::id());
+  let shm = SharedMemoryClient::create_named(&name, None).unwrap();
+  let layout = shm.layout();
+  let h = &layout.header;
+  h.sidetone_mic_hash.store(MIC, Ordering::Relaxed);
+  h.sidetone_output_hash.store(22, Ordering::Relaxed);
+  let mode = |noise_mode| h.write_sidetone(&SidetoneSettings { enabled: true, noise_mode, ..Default::default() });
+  let mic = [0.1f32; 960];
+
+  mode(NoiseMode::Expander);
+  let mut tap = SidetoneTap::new(48_000, 1);
+  tap.endpoint_hash = MIC;
+  tap.preload(layout);
+  tap.process(layout, &mic, 2, None, 0.0, true);
+  assert!(tap.denoiser.is_none() && tap.loading.is_none(), "the expander needs no suppressor");
+
+  mode(NoiseMode::RnNoise);
+  let writes = || h.sidetone_writer_beat.load(Ordering::Relaxed);
+  let (before, started) = (writes(), Instant::now());
+  tap.process(layout, &mic, 2, None, 0.0, true);
+  assert!(tap.denoiser.is_none() && tap.loading.is_some(), "built on the loader thread, not in the audio block");
+  while tap.denoiser.is_none() {
+    assert!(started.elapsed().as_secs() < 30 && !tap.denoiser_failed, "the suppressors never arrived");
+    tap.process(layout, &mic, 2, None, 0.0, true);
+    std::thread::sleep(std::time::Duration::from_millis(1));
+  }
+  assert!(writes() > before, "the sidetone went on while they were built");
+  assert!(tap.loading.is_none() && !tap.failed);
+
+  let mut tap = SidetoneTap::new(48_000, 1);
+  tap.preload(layout);
+  assert!(tap.denoiser.is_some(), "a pair with a frame-based mode has them before audio starts");
+  let mut tap = SidetoneTap::new(44_100, 1);
+  tap.preload(layout);
+  assert!(tap.denoiser.is_none(), "they run at 48 kHz only");
+}
+
 #[test]
 fn sidetone_plays_on_the_pair_output_only() {
   use gamersequalizer_common::sidetone::SidetoneSettings;

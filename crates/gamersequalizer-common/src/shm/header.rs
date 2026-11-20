@@ -279,8 +279,8 @@ pub struct ShmHeader {
   /// GUI -> stream APOs: lower the game's speech band while someone in the chat talks.
   pub duck_enabled: AtomicBool,
   /// GUI -> stream APOs: how far the voice should stand out from the game in the speech band
-  /// ("Strength"): 0 = as loud as the game, 500 = about twice (6 dB), 1000 = about four times
-  /// (12 dB). The DSP clamps it to 0..=1000.
+  /// ("Strength"): 0 = as loud as the game, 500 = about 8.5 dB, 1000 = 17 dB
+  /// (`DuckTuning::max_margin_db`). The DSP clamps it to 0..=1000.
   pub duck_strength_permille: AtomicU32,
   /// Daemon -> stream APOs: the linear volume the listener hears the game / chat channel at,
   /// relative to the stream the APO sees (1000 = unchanged, 0 = muted). Only a channel on its own

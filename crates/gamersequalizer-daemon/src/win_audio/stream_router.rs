@@ -2,8 +2,9 @@
 //! channel it belongs to, so chat and media apps get their own EQ and Automatic ChatMix knows
 //! which streams are the game and which the chat (`paired_streams`, read by `ducking`).
 //!
-//! The APO runs inside audiodg and can't see the app. This thread samples every audio
-//! session's peak meter on the default output every 5 ms and pairs each instance with the
+//! The APO runs inside audiodg and can't see the app. This thread samples every playing audio
+//! session's peak meter on the default output every 5 ms (with nothing to pair, `meters_needed`, it
+//! only re-reads the session list every 500 ms) and pairs each instance with the
 //! session whose meter its level envelope reproduces (`streams::hold_match`; measured:
 //! the right app 93-100 %, others <= 6 %). The channel then comes from the app's exe, the
 //! same lists the ChatMix volumes use.
@@ -17,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::APO_SHM_NAME;
@@ -45,6 +46,7 @@ use super::console_owner::ConsoleOwner;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(5);
 /// Pairing / bus update cadence; also how often sessions and the default output are re-read.
+/// The waits without sampling end on every second point of the wake grid (`worker::grid_wait`).
 const EVAL_INTERVAL: Duration = Duration::from_millis(500);
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 /// A silent stream is the game's only after this many evaluations (3 s) of the same finding.
@@ -87,6 +89,10 @@ pub struct PairedStream {
 /// thread (`apo_link`) and needs the exe names, which only this thread knows: the table carries the
 /// bus but no names. Held only to copy the list in or out.
 static PAIRED: Mutex<Vec<PairedStream>> = Mutex::new(Vec::new());
+/// A Game session plays on the default output (as of the last session refresh, every 500 ms while
+/// routing): without one Automatic ChatMix has nothing to lower and the service and reference
+/// loops may idle (`game_session_playing`), also while a chat app keeps a stream open.
+static GAME_SESSION_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Max meter peak per envelope block, the last `HISTORY` blocks.
 struct PeakHistory {
@@ -104,6 +110,9 @@ struct Router {
   sessions: HashMap<String, Session>,
   /// Slot owner value -> session key it was paired with.
   pairs: HashMap<u64, String>,
+  /// Slot owner value -> the other session that won the last evaluation of a paired stream
+  /// (`repair_confirmed`).
+  challengers: HashMap<u64, String>,
   /// Some stream EQ or Automatic ChatMix is on, so streams are metered and paired (logged on change).
   routing: bool,
   /// What the last "silent unpaired" line said (silent streams, silent Game sessions, Game sessions).
@@ -135,6 +144,7 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
           // Device gone / audio restarted: start over with fresh COM objects.
           router.manager = None;
           router.sessions.clear();
+          GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
           std::thread::sleep(SLEEP_ON_ERROR);
         }
       }
@@ -149,6 +159,12 @@ pub fn bus_for_exe(exe: &str) -> StreamBus {
     AppChannel::Game => StreamBus::Game,
     AppChannel::Media | AppChannel::Unknown => StreamBus::Media,
   }
+}
+
+/// See `GAME_SESSION_PLAYING`. False while the router does not route (no APO, another console
+/// user, nothing on that needs pairing): no pairing, nothing Automatic ChatMix could lower.
+pub fn game_session_playing() -> bool {
+  GAME_SESSION_PLAYING.load(Ordering::Relaxed)
 }
 
 /// The paired chat and game streams (see `PAIRED`); empty if its lock was poisoned.
@@ -177,18 +193,21 @@ impl Router {
     self.ensure_apo();
     let Some(apo) = self.apo.as_ref() else {
       // No stream APO installed / no audio yet: nothing to route.
+      GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
       std::thread::sleep(OPEN_RETRY);
       return Ok(());
     };
     if !self.console.is_owner() {
-      std::thread::sleep(EVAL_INTERVAL);
+      GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
+      super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       return Ok(());
     }
     // No chat / media EQ and no Automatic ChatMix: the APO passes every stream through, so skip
     // the 200 Hz metering. Known limit: after one is turned on, new pairings need ~1.5 s of fresh
     // meter history.
     let header = &apo.layout().header;
-    let active = header.stream_eq_active() || header.duck_enabled.load(Ordering::Relaxed);
+    let eq_active = header.stream_eq_active();
+    let active = eq_active || header.duck_enabled.load(Ordering::Relaxed);
     if active != self.routing {
       self.routing = active;
       info!(
@@ -201,10 +220,21 @@ impl Router {
       );
     }
     if !active {
-      std::thread::sleep(EVAL_INTERVAL);
+      GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
+      super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       return Ok(());
     }
     self.refresh_sessions()?;
+    let game_playing = self.sessions.values().any(|s| s.bus == StreamBus::Game);
+    GAME_SESSION_PLAYING.store(game_playing, Ordering::Relaxed);
+    if !meters_needed(!self.sessions.is_empty(), eq_active, game_playing) {
+      // Nothing to pair: no meter to sample. Sessions are re-read just as often as while sampling,
+      // so a stream that starts is found as soon as before; the evaluation still clears the buses
+      // and `PAIRED` of streams that ended.
+      super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
+      self.evaluate();
+      return Ok(());
+    }
     let started = Instant::now();
     while started.elapsed() < EVAL_INTERVAL {
       let block = now_block().ok_or("QueryPerformanceCounter failed")?;
@@ -213,7 +243,7 @@ impl Router {
         let peak = unsafe { s.meter.GetPeakValue() }.unwrap_or(0.0);
         s.history.record(block, peak);
       }
-      std::thread::sleep(SAMPLE_INTERVAL);
+      super::worker::sleep(SAMPLE_INTERVAL);
     }
     self.evaluate();
     Ok(())
@@ -244,6 +274,7 @@ impl Router {
         self.manager = Some((id_text, manager));
         self.sessions.clear();
         self.pairs.clear();
+        self.challengers.clear();
       }
       let Some((_, manager)) = self.manager.as_ref() else {
         return Ok(());
@@ -306,7 +337,8 @@ impl Router {
     // A game on spatial sound plays silence at its stream and at its meter, so no level match can
     // pair it (and after a service restart there is no pairing from before): the one silent unpaired
     // stream and the one silent unpaired Game session belong together. Shortcut: a silent stream of
-    // another app looks the same while the game is quiet; any audible match corrects it.
+    // another app looks the same while the game is quiet; an audible match corrects it
+    // (`repair_confirmed`).
     let silent_slots: Vec<u64> = owners
       .iter()
       .filter(|(_, o)| Some((*o >> 32) as u32) == audiodg && !self.pairs.contains_key(o))
@@ -367,11 +399,16 @@ impl Router {
       }
       live.insert(owner);
       slot.envelope(first.saturating_sub(HOLD_PAD_BEFORE as u64), &mut envelope);
-      if envelope.iter().any(|v| *v > SILENCE) {
-        let matches: Vec<(&String, _)> =
-          meters.iter().filter_map(|(key, meter)| hold_match(&envelope, meter).map(|m| (*key, m))).collect();
-        if let Some((key, m, runner_up)) = pick_session(&matches)
-          && self.pairs.get(&owner) != Some(key)
+      // The session that explains this stream better than the one it is paired with, if any.
+      let matches: Vec<(&String, _)> = if envelope.iter().any(|v| *v > SILENCE) {
+        meters.iter().filter_map(|(key, meter)| hold_match(&envelope, meter).map(|m| (*key, m))).collect()
+      } else {
+        Vec::new()
+      };
+      let winner = pick_session(&matches).filter(|(key, ..)| self.pairs.get(&owner) != Some(*key));
+      match winner {
+        Some((key, m, runner_up))
+          if repair_confirmed(self.pairs.contains_key(&owner), self.challengers.get(&owner), key) =>
         {
           if let Some(s) = self.sessions.get(key) {
             info!(
@@ -385,12 +422,20 @@ impl Router {
             );
           }
           self.pairs.insert(owner, key.clone());
+          self.challengers.remove(&owner);
+        }
+        Some((key, ..)) => {
+          self.challengers.insert(owner, key.clone());
+        }
+        None => {
+          self.challengers.remove(&owner);
         }
       }
       let bus = self.pairs.get(&owner).and_then(|k| self.sessions.get(k)).map_or(StreamBus::None, |s| s.bus);
       slot.bus.store(bus.to_u32(), Ordering::Relaxed);
     }
     self.pairs.retain(|owner, _| live.contains(owner));
+    self.challengers.retain(|owner, _| live.contains(owner));
     let paired: Vec<PairedStream> = self
       .pairs
       .iter()
@@ -407,6 +452,23 @@ impl Router {
       *p = paired;
     }
   }
+}
+
+/// Whether the sessions' meters are sampled (200 calls a second into the audio service). A stream
+/// EQ pairs every playing session. Automatic ChatMix alone lowers Game streams only, so without a
+/// Game session it needs no pairing: a browser, or a chat app that keeps its stream open after the
+/// game ended, costs no meter then. Known limit: a chat stream that starts without a game is paired
+/// only once a game plays, from ~1.5 s of its audio after that.
+fn meters_needed(any_session: bool, eq_active: bool, game_session_playing: bool) -> bool {
+  any_session && (eq_active || game_session_playing)
+}
+
+/// Whether the session that won this evaluation gets the stream. An unpaired stream takes its first
+/// match. A paired one changes its app only when the same other session won the evaluation before
+/// as well: in a 2 h log a chat app's sound matched a game's stream by 50 % for one evaluation and
+/// made it a chat stream for 0.5 s, while a pairing that is really wrong keeps losing.
+fn repair_confirmed(paired: bool, challenger_before: Option<&String>, winner: &String) -> bool {
+  !paired || challenger_before == Some(winner)
 }
 
 /// The silent unpaired Game session the silent unpaired streams belong to: there must be one such
@@ -475,6 +537,23 @@ mod tests {
     crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", false);
     assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::Media);
     assert_eq!(bus_for_exe(""), StreamBus::Media);
+  }
+
+  #[test]
+  fn a_paired_stream_changes_its_app_only_after_two_wins_in_a_row() {
+    let (signal, brave) = ("signal".to_string(), "brave".to_string());
+    assert!(repair_confirmed(false, None, &signal), "an unpaired stream takes its first match");
+    assert!(!repair_confirmed(true, None, &signal), "one evaluation against the pairing: not yet");
+    assert!(repair_confirmed(true, Some(&signal), &signal), "the same session again: the pairing was wrong");
+    assert!(!repair_confirmed(true, Some(&brave), &signal), "another session than last time starts over");
+  }
+
+  #[test]
+  fn a_lone_media_session_is_metered_only_for_a_stream_eq() {
+    assert!(!meters_needed(false, true, false), "nothing plays");
+    assert!(!meters_needed(true, false, false), "Automatic ChatMix alone: a browser or a chat app, no game");
+    assert!(meters_needed(true, false, true), "a game plays");
+    assert!(meters_needed(true, true, false), "the media EQ needs the browser's stream paired");
   }
 
   #[test]

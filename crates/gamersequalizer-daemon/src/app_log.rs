@@ -84,7 +84,8 @@ pub fn init(process: &'static str) {
   // The other process may switch it: follow the marker file.
   let spawned = std::thread::Builder::new().name("log-debug-marker".into()).spawn(|| {
     loop {
-      std::thread::sleep(DEBUG_MARKER_CHECK);
+      // On the wake grid with the service's other threads.
+      crate::win_audio::worker::sleep(crate::win_audio::worker::grid_wait(DEBUG_MARKER_CHECK));
       DEBUG_TO_DISK.store(debug_marker().exists(), Ordering::Relaxed);
     }
   });

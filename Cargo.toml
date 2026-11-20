@@ -21,6 +21,8 @@ windows = { version = "0.62", features = [
     # SHA-256 of the elevated scripts (`apo_install/elevated.rs`).
     "Win32_Security_Cryptography",
     "Win32_System_Performance",
+    # Threads of the own process, for the `cpu-stats` diagnostic build (`cpu_stats.rs`).
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
@@ -42,6 +44,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Accessibility",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_Input_KeyboardAndMouse",
     # Toast notifications (`notify.rs`).
@@ -122,12 +125,12 @@ needless_return = "deny"
 redundant_field_names = "deny"
 undocumented_unsafe_blocks = "deny"
 
-# tract 0.23.10 plus fixes not yet upstream: an AVX-512 kernel for f16 model weights, a kernel choice
-# that stops padding small matrix-vector products to 128 rows, and a 16x1 kernel fix (branch
+# tract 0.23.10 plus fixes merged upstream after it: an AVX-512 kernel for f16 model weights, a kernel
+# choice that stops padding small matrix-vector products to 128 rows, and a 16x1 kernel fix (branch
 # gamersequalizer-0.23.10 of github.com/PixCZ/tract). Without it the mic models' f16 weights run
-# slower than f32 on AVX-512 CPUs. Drop it once a tract release carries them (pull requests for
-# sonos/tract: AGENTS.md, "Before a release"). tract-data comes from the same commit because
-# tract-linalg uses it by path there.
+# slower than f32 on AVX-512 CPUs. Drop it once a tract release carries them (how to check:
+# .claude/rules/release.md, "tract version and our fork"). tract-data comes from the same commit
+# because tract-linalg uses it by path there.
 [patch.crates-io]
 tract-linalg = { git = "https://github.com/PixCZ/tract", rev = "a5fe22538b3d442f23796568c35115964e3e2597" }
 tract-data = { git = "https://github.com/PixCZ/tract", rev = "a5fe22538b3d442f23796568c35115964e3e2597" }

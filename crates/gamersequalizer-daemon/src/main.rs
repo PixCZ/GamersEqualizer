@@ -4,6 +4,8 @@ pub mod apo_notes;
 pub mod app_icon;
 pub mod app_log;
 pub mod autostart;
+#[cfg(feature = "cpu-stats")]
+pub mod cpu_stats;
 pub mod health;
 pub mod i18n;
 pub mod i18n_cs;
@@ -16,6 +18,7 @@ pub mod shm_mapping;
 pub mod sonar_importer;
 pub mod takeover;
 pub mod tray;
+pub mod tray_level;
 pub mod ui;
 pub mod uninstall;
 pub mod win_audio;
@@ -89,6 +92,8 @@ fn main() {
     return;
   }
 
+  #[cfg(feature = "cpu-stats")]
+  cpu_stats::start(is_daemon);
   if is_daemon {
     run_background_daemon();
   } else {
@@ -174,7 +179,7 @@ fn run_gui_mode() {
   let mut viewport = egui::ViewportBuilder::default()
     .with_title(tray::WINDOW_TITLE)
     .with_icon(std::sync::Arc::new(egui::IconData {
-      rgba: app_icon::rgba(WINDOW_ICON_SIZE, false, false),
+      rgba: app_icon::rgba(WINDOW_ICON_SIZE, false, false, 1.0),
       width: WINDOW_ICON_SIZE,
       height: WINDOW_ICON_SIZE,
     }))

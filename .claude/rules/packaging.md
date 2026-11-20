@@ -42,7 +42,7 @@ ZIP for testers on other PCs (no setup.exe; the app installs/uninstalls itself a
 - The C runtime is linked statically (`.cargo/config.toml`), so testers need no Visual C++ Redistributable;
   `package.ps1` fails if a binary still imports `VCRUNTIME140.dll`. The same file turns on Control
   Flow Guard for every build; `package.ps1` fails if a binary lacks it or exports `VSTPluginMain`.
-- Never package a `-DebugCapture` APO (`dev-rebuild.ps1` skips `-Package` with it).
+- Never package a `-DebugCapture` APO or a `-CpuStats` build (`dev-rebuild.ps1` skips `-Package` with them).
 - Binaries are unsigned or signed with our self-signed certificate. Testers install no certificate (neither
   SmartScreen nor Smart App Control accepts a local root): SmartScreen "More info > Run anyway"; Smart App
   Control blocks them entirely. `scripts/create-dev-cert.ps1` makes a password-protected end-entity

@@ -41,7 +41,7 @@ mod tuning;
 
 pub use gain::DuckStatus;
 pub use mix::{MixDucker, chat_levels, chat_sounding};
-pub use stream::StreamDucker;
+pub use stream::{StreamDucker, game_playing};
 pub use tuning::DuckTuning;
 
 // ---------------------------------------------------------------------------------------
@@ -77,7 +77,7 @@ pub enum DuckRole {
 pub struct DuckSettings {
   pub enabled: bool,
   /// Strength, 0..=1: how far the voice should sit above the game in the band, as a share of
-  /// `DuckTuning::max_margin_db` (0.5 = 6 dB by default).
+  /// `DuckTuning::max_margin_db` (0.5 = 8.5 dB by default).
   pub strength: f32,
   /// Linear volume the listener hears game / chat at, relative to the stream the APO sees: only a
   /// channel output's volume (after the APO); session volumes are already in the stream.

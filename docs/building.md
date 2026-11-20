@@ -14,7 +14,7 @@ For a build that goes to testers. Needs the Rust MSVC toolchain on Windows; take
    The script always builds from scratch (`cargo clean --profile dist` / `--profile apo-dist`, never
    the dev build or older ZIPs), ignores environment overrides such as `RUSTFLAGS` or `CARGO_PROFILE_*`,
    builds with `--locked`, and then checks the real rustc command lines in the verbose log: it fails
-   unless both binaries were linked with the flags below and without the `debug-capture` feature.
+   unless both binaries were linked with the flags below and without the `debug-capture` and `cpu-stats` features.
 
 3. The result is `target\package\GamersEqualizer-<version>-<yyyyMMdd-HHmmss>-<commit>.zip`; the script prints
    its path, size and SHA256. Next to it: `<name>.build.log` (full cargo output) and `<name>.build.txt`

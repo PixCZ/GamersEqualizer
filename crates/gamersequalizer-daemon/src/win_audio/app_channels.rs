@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,8 @@ static STORE: RwLock<Store> =
   RwLock::new(Store { path: None, modified: None, last_check: None, overrides: BTreeMap::new() });
 static DETECTED: RwLock<Store> =
   RwLock::new(Store { path: None, modified: None, last_check: None, overrides: BTreeMap::new() });
+/// Bumped whenever either store may have changed (`generation`).
+static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------------------
 // Public functions
@@ -220,6 +223,12 @@ pub fn channel_for(exe: &str) -> AppChannel {
   AppChannel::Media
 }
 
+/// Moves when an assignment or a detected game may have changed (set here or the file re-read):
+/// the mixer then puts the sessions on their channels at once (`apply_session_mix`).
+pub fn generation() -> u32 {
+  GENERATION.load(Ordering::Relaxed)
+}
+
 /// What game detection found for an exe that came to the foreground; saved when it changed.
 pub fn set_detected_game(exe: &str, game: bool) {
   if (lookup(&DETECTED, exe) == Some(AppChannel::Game)) != game {
@@ -244,6 +253,7 @@ fn store_set(lock: &RwLock<Store>, exe: &str, channel: Option<AppChannel>) {
     Some(c) => store.overrides.insert(key, c),
     None => store.overrides.remove(&key),
   };
+  GENERATION.fetch_add(1, Ordering::Relaxed);
   let Some(path) = store.path.clone() else { return };
   let saved = serde_json::to_string_pretty(&store.overrides)
     .map_err(std::io::Error::other)
@@ -281,6 +291,7 @@ impl Store {
       }),
       Err(_) => BTreeMap::new(),
     };
+    GENERATION.fetch_add(1, Ordering::Relaxed);
   }
 }
 

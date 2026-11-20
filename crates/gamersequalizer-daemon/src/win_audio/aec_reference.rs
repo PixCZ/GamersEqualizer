@@ -17,15 +17,10 @@ use gamersequalizer_common::sidetone::device_hash;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 
 use super::apo_install::{self, ApoStatus, Flow};
-use super::apo_link::ApoLink;
+use super::apo_link::{ApoLink, SYNC_INTERVAL};
 use super::endpoint_lock::get_endpoint_info;
 use super::{mmdevice, worker};
 
-/// Wait between ticks. Known limit: when an app opens the mic, the echo canceller gets its
-/// reference ~100-200 ms later (first telemetry, then the output effect starts writing).
-const TICK: Duration = Duration::from_millis(50);
-/// While Automatic ChatMix's mix mode moves the game's volume: 25 steps a second, not 20 minus work.
-const MIX_TICK: Duration = Duration::from_millis(40);
 /// How often the Windows default output is resolved again (one RPC).
 const RESOLVE_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the registry is read for the effect on the reference output (or at once on a change).
@@ -74,10 +69,18 @@ pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) ->
       };
       let mut apo = ApoLink::new();
       let mut reference = OutputReference::default();
+      let mut idle_log = worker::IdleLog::default();
       info!("[AecRef] reference thread started");
       while running.load(Ordering::SeqCst) {
-        reference.tick(&shm, &mut apo, &selection);
-        std::thread::sleep(if super::ducking::mix_fast() { MIX_TICK } else { TICK });
+        // The open window shows the mirrored telemetry and its EQ edits reach the APO through
+        // here (one sync per tick at the sync rate): not idle then.
+        let busy = reference.tick(&shm, &mut apo, &selection);
+        let busy = busy.or_else(|| crate::tray::find_window().map(|_| ("window open", SYNC_INTERVAL)));
+        idle_log.idle("reference thread", busy);
+        // Known limit: when an app opens the mic, the echo canceller gets its reference one tick
+        // after the DSP watch sees its telemetry, plus one sync (100 ms): ~100-200 ms, from idle
+        // up to ~350 ms (the idle tick is 250 ms, on the wake grid).
+        worker::sleep(worker::tick_wait(super::ducking::mix_fast(), busy));
       }
       let h = &shm.layout().header;
       h.tap_active.store(false, Ordering::Relaxed);
@@ -90,8 +93,16 @@ pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) ->
 
 impl OutputReference {
   /// One step: resolve the output, check its effect on a timer, publish the result into the
-  /// daemon's mapping (`local`), then let `apo` mirror it into the APO's.
-  pub fn tick(&mut self, local: &SharedMemoryClient, apo: &mut ApoLink, selection: &Mutex<Option<String>>) {
+  /// daemon's mapping (`local`), then let `apo` mirror it into the APO's. Returns why the next
+  /// tick must come soon and how soon, None when idle. Only mix mode reads the reference every
+  /// tick (`tick_mix`); the mic chain's link and Automatic ChatMix's stream mode live in `apo.tick`,
+  /// which runs once per `SYNC_INTERVAL`, so a faster tick would only wake the CPU for nothing.
+  pub fn tick(
+    &mut self,
+    local: &SharedMemoryClient,
+    apo: &mut ApoLink,
+    selection: &Mutex<Option<String>>,
+  ) -> Option<worker::Busy> {
     let now = Instant::now();
     let wanted = selection.lock().ok().and_then(|g| g.clone());
     if wanted != self.selection || self.resolved_at.is_none_or(|t| now.duration_since(t) >= RESOLVE_INTERVAL) {
@@ -117,8 +128,8 @@ impl OutputReference {
     // The output is named while the effect is there and the mic chain runs, also when the
     // instance cannot tell its endpoint: its beat is what tells that case apart.
     let installed = matches!(status, AecRefStatus::OutputEffect | AecRefStatus::EndpointUnknown);
-    // Read by the mic chain's echo canceller and by Automatic ChatMix's mix mode.
-    let wanted = apo.mic_dsp_live() || apo.mix_wants_reference();
+    let aec_on = h.aec_enabled.load(Ordering::Relaxed);
+    let wanted = reference_wanted(apo.mic_dsp_live(), aec_on, apo.mix_wants_reference());
     let hash = self.render_id.as_deref().filter(|_| installed && wanted).map_or(0, device_hash);
     let tap_active = status == AecRefStatus::OutputEffect;
     publish(h, hash, status, tap_active);
@@ -126,6 +137,13 @@ impl OutputReference {
     apo.tick_mix(local);
     apo.tick(local, tap_active);
     self.log_change(status);
+    // After `apo.tick`: a mic chain that just started makes the next wait short.
+    let duck_playing = h.duck_enabled.load(Ordering::Relaxed) && super::stream_router::game_session_playing();
+    worker::busy_reason(&[
+      (apo.mix_wants_reference(), "mix mode needs the speaker reference", worker::TICK),
+      (apo.mic_dsp_live(), "an app records through the mic filter", SYNC_INTERVAL),
+      (duck_playing, "Automatic ChatMix with a game playing", SYNC_INTERVAL),
+    ])
   }
 
   /// One `[AecRef]` line per change of the status or the output, with the reason.
@@ -182,6 +200,13 @@ fn status_of(has_output: bool, install: Option<&ApoStatus>, writer_seen: bool, b
   }
 }
 
+/// Whether the output APO should write the reference ring. Its readers: the mic chain's echo
+/// canceller, which reads it only while it is on (with it off the output effect would fold and
+/// resample every block for nobody), and Automatic ChatMix's mix mode.
+fn reference_wanted(mic_dsp_live: bool, aec_on: bool, mix_wants: bool) -> bool {
+  (mic_dsp_live && aec_on) || mix_wants
+}
+
 /// Into the daemon's mapping; `ApoLink` copies the hash with the controls, and `tap_active`
 /// separately (it writes the APO's on every sync).
 fn publish(h: &ShmHeader, hash: u32, status: AecRefStatus, tap_active: bool) {
@@ -216,6 +241,15 @@ mod tests {
     assert_eq!(status_of(true, Some(&ApoStatus::NotOnThisMic), false, false), AecRefStatus::EffectMissing);
     assert_eq!(status_of(true, Some(&ApoStatus::NotInstalled), false, false), AecRefStatus::EffectMissing);
     assert_eq!(status_of(true, Some(&ApoStatus::Outdated), false, false), AecRefStatus::EffectOutdated);
+  }
+
+  #[test]
+  fn the_reference_is_written_only_for_a_reader() {
+    assert!(reference_wanted(true, true, false), "an app records with echo cancellation on");
+    assert!(!reference_wanted(true, false, false), "echo cancellation off: the mic chain never reads it");
+    assert!(reference_wanted(true, false, true), "mix mode reads it whatever the mic chain does");
+    assert!(reference_wanted(false, false, true));
+    assert!(!reference_wanted(false, true, false), "nobody records");
   }
 
   #[test]

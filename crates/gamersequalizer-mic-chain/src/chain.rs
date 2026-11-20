@@ -289,6 +289,7 @@ impl MicChain {
 
     self.ai_denoiser.set_strength(s.ai_strength_permille as f32 / 1000.0);
     self.ai_denoiser.set_gate_threshold_db(s.gate_db as f32);
+    self.ai_denoiser.set_voice_wanted(s.leveler_on);
     // Never blocks: a heavy model not loaded yet loads on its own thread, RNNoise runs meanwhile.
     if s.model != self.ai_denoiser.selected_model() {
       self.ai_denoiser.request_model(s.model);

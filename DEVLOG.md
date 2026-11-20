@@ -3520,3 +3520,133 @@ Every line starts with `[Ducking]`; levels and depths are dB with one decimal (`
   unpaired without a logged reason (16:59:07, 17:06:21, 17:08:51, 17:15:49, 17:55:15 after silence); a
   bucket gap of 60 s in the log (17:12:06-17:13:06); a mix peak of -32 dB in the bucket 17:13:47 while
   the game's peak was -69.7 dB and the chat band's -42.6 dB.
+
+## Milestone 66: The idle service: fewer, shared wakeups (2026-11-20)
+
+Branch `feat/tray-mic-level`. On a laptop on battery what counts is how long the CPU sleeps, not the share
+of a core. The log of an idle PC (window closed, nothing playing, `-CpuStats` build) read: service 0.7-1.0 %
+of a core in 12-17 threads, `main` 0.4-0.6 %, `StreamRouter` 0.1-0.3 %, the window (when open) 4-5 %, the
+effects in audiodg 0.00 %. About 44 wakeups a second came from the service threads, each on its own timer.
+
+**What changed**
+
+- The service loop and the reference thread (`aec_reference.rs`) wait 250 ms instead of 50 ms while idle:
+  window closed, no app records, no Chat or Game stream plays under Automatic ChatMix. Each reason that
+  keeps them busy has its own cadence (`worker::busy_reason`); one `[Idle]` debug line per change names it.
+  A tray message ends the wait at once (`tray::wait_for_messages`).
+- `StreamRouter` sleeps 500 ms while no Chat or Game session plays (later: no Game session, see the
+  2 h log below) instead of metering every 5 ms. Ducking only lowers streams the router paired, and it pairs Chat and Game sessions
+  only, so a lone Media stream (a browser) counts as idle. With a chat or media EQ on, every playing
+  session is still metered (the EQ needs its stream paired).
+- The tray's mic level keeps its peak where each new value arrives (`apo_link.rs`), so no loop has to tick
+  fast to sample it.
+- The output APO writes the echo reference only for a reader (mic chain live with AEC on, or mix mode).
+  With AEC off the ring was filled every block for nobody. Nothing else in the APO needed a change: the
+  stream VAD, the ducker, stream EQ, AEC3 and the leveler already skip their work when off.
+- Default mic, default output and the Windows volumes are read once a second while idle instead of every
+  250 ms; a device change or turning busy reads them at once. Volumes changed in Windows show up to ~1 s
+  late while the window is closed.
+- New sessions are announced by Windows (`IAudioSessionNotification` on every active output,
+  `chatmix/session_watch.rs`) instead of a pass over all sessions every second. Idle, a full pass runs on an
+  announcement, a channel or device change, and every 15 s as a safety net (registrations are renewed with
+  it, since an audio service restart drops them silently). For 5 s after an announcement the pass stays at
+  1 s: a session is announced when it is created, a pass sees it only once it plays. If registering fails
+  the 1 s pass stays, logged once. A counter of channel assignments forces a pass at once. A new app gets its channel's volume within
+  one idle tick (about 250 ms), before within 1 s.
+- All idle waits end at multiples of 250 ms on one origin (`worker::grid_wait`): service loop, reference
+  thread, sidetone, router (every second point), log marker; `apo-notes` starts from the loop. The CPU wakes
+  once for all of them. The tray wait uses a high-resolution timer, a plain timeout ends on the 15.6 ms
+  system tick and would leave the grid. Checks of 250 ms to 5 s use `worker::due` with 20 ms slack, since
+  passes now come exactly one period apart.
+- `-CpuStats` builds log two more lines a minute: `[Cpu] service loop sections` (the loop thread's time per
+  call, from thread cycle counts) and `[Cpu] wakeups` (wakeups per thread and distinct wake instants).
+
+**Measured** (same PC, service only, window closed, 6-7 idle minutes each)
+
+| What                                      | Before                  | After                            |
+| ----------------------------------------- | ----------------------- | -------------------------------- |
+| `apply_session_mix`, % of a core          | 0.12                    | 0.013-0.031 (average 0.021)      |
+| the three reads at the 1 s idle interval  | 0.073 (~223 calls/min)  | 0.018 (~58 calls/min)            |
+| wakeups a second                          | 12.3                    | 12.5                             |
+| distinct wake instants a second           | 12.1                    | 4.0-4.4                          |
+| service, % of a core                      | 0.29-0.52               | 0.47, 0.31, 0.26, then 0.08-0.16 |
+
+Where the loop thread's ~0.4 % went (sections, % of a core): `health` 0.12, `apply_session_mix` 0.12,
+`tray_poll` 0.08, default mic 0.03, `sync_from_system` 0.03, default output 0.02, the rest under 0.02. The
+wakeups were not the cost: at 4 ticks a second instead of 20 `main` fell only from 0.44 to 0.42 %, because
+the work sits on timers of 250 ms to 5 s. The fall of the service to 0.08-0.16 % in the last minutes of the
+grid run came with the same call counts: the load of the PC changed, it is not credited to the grid. The
+log shows no CPU sleep depth; that needs `powercfg /sleepstudy` or `/energy` on the laptop.
+
+**Decided, and why**
+
+- No scheduler thread or task queue: the threads wait on different things (a WASAPI loop, COM calls that
+  may block, metering at 5 ms) and one stuck call would stall the rest, against the rule that a worker
+  never blocks another. A shared grid gives the same burst without shared state.
+- `health` (1 s mic check, 5 s full check) and the tray's 1 s "is an app recording" check stay as they are,
+  about 0.2 % of a core together: slower would show the muted-mic warning and the red tray icon late.
+- Sidetone still polls every 250 ms when off (two device lookups): slower would delay turning it on by up
+  to 1 s, `BEAT_FRESH` is 1 s.
+- The input voice detector (about 2.8 % of a core per the code comment, `ai_denoiser/mod.rs`) still runs
+  at noise suppression 0 while the leveler is on: the leveler learns from it, and the automatic input gain
+  goes by the leveler's speech time. With the leveler off too it rests (see the audit below).
+
+**After an audit of the whole app (same day, read on macOS, not run)**
+
+- The router's 500 ms sleep above was only taken with no session at all: a lone browser under Automatic
+  ChatMix was still metered 200 times a second. `meters_needed` now decides.
+- A chat stream's voice detector (Silero, stream APO) rests while no Game stream played within 500 ms
+  (`ducking::game_playing`): without a game nothing is lowered, in mix mode neither.
+- Noise suppression off and leveler off: the mic chain runs no network (`set_voice_wanted`). The debug
+  log's voice share reads 0 % then.
+- `Ducking::tick` returns right after the tuning check once "off" is logged and nothing is lowered.
+- Switching back to DeepFilterNet 3 (from another model, or from "Off") played its first 40 ms from the
+  frames it held when it last ran. `reset_engines` now silences the newcomer's first latency, as `flush`
+  did for a pause.
+- The sidetone's three frame-based noise suppressors were built for every mic APO instance. Now only for
+  a pair that uses one: before audio starts (`SidetoneTap::preload`), or after a mode change on a
+  short-lived thread while the expander runs (`poll_denoiser`, as the mic chain loads a model).
+- Left as they are: the sidetone tap writes while no output APO reads (the service opens the output
+  because the tap feeds, so the tap cannot wait for a reader without a new handshake), the 1 s session
+  pass while the window is open, and a window that is covered but not minimized repaints at full rate
+  (egui 0.37 reports no occlusion).
+
+**A 2 h log with a game (The Division 2, mix mode under Dolby Atmos)**
+
+| Period                   | Service wakeups/s | Of that `StreamRouter` |
+| ------------------------ | ----------------- | ---------------------- |
+| Before the game          |              36.7 |                      ~ |
+| Game, mix mode           |             225.0 |                   ~180 |
+| After the game, chat app |             178.2 |                   ~155 |
+| Window closed, idle      |              14.5 |                    2.0 |
+
+- After the game ended the router kept metering every 5 ms and both loops kept their fast ticks: a chat
+  app (Signal) held an active session, silent. Automatic ChatMix lowers Game streams only, so the flag
+  the three go by is now "a Game session plays" (`game_session_playing`), not "a Chat or Game session".
+  Limit: a chat stream that starts without a game is paired once a game plays, from ~1.5 s of its audio.
+- During a game nothing changed: the router's meters only pair streams with apps (`hold_match` needs a
+  sample in every 10 ms block, so no coarser rate), the levels the ducking goes by come from the stream
+  table and the output mix. Stopping the meters once every stream is paired was considered and not done.
+- With a chat or media EQ on, a silent open session is still metered (the EQ needs its stream paired).
+- `[Health] problem: ...` (MicProcessing Outdated, once) had no counterpart when it cleared: a problem
+  that is gone now logs `[Health] resolved: ...`.
+- Of 66 paired streams two changed their app while playing, both for one evaluation (0.5 s) and both to
+  Signal at a 50 % match (the floor; the median match is 94 %): the game's stream at 17:21:08 (it became
+  a chat stream, `[Ducking]` read "game not paired") and Brave's, paired at 100 % a second before. A
+  paired stream now changes its app only when the same other session wins two evaluations in a row
+  (`repair_confirmed`); a first pairing is as fast as before, a really wrong one is corrected after 1 s.
+- Read from the same log and left alone: the 21 service starts have no exit line because the dev script
+  kills the process (no panic line, the hook would have logged one); "Outdated" came 5 s after each
+  start of a build newer than the installed APO DLL; "takeover" is on for one log tick per wake
+  (median 0.26 s); the AEC label flips between Locked and ReferenceSilent with every quiet stretch of
+  the output (1320 debug lines, at worst one per 250 ms tick), a label only.
+- The same log has a 26 min call without a game (18:31-18:57) at 180 router wakeups a second: the case
+  the "Game session" flag above ends, unless a chat or media EQ is on.
+
+**Not tried live:** a chat app open and silent after a game ends (`[Cpu] wakeups` should fall to the idle
+row, `[Idle]` lines should say idle), a game starting while a chat app is already open, a new app
+starting while the service is idle, a device change, an audio service
+restart, the tray icon's reaction on the new timer wait, a busy service, and everything under the audit
+above (a game starting while only a browser plays, the first word in chat after a game starts, a
+sidetone noise mode picked while an app records). The running build has
+`cpu-stats`: rebuild without it before a tester ZIP.

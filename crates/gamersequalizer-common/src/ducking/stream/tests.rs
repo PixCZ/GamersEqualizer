@@ -212,6 +212,18 @@ fn levels_sum_chat_and_game_slots_and_ignore_other_buses() {
 }
 
 #[test]
+fn a_game_plays_only_while_a_game_slot_had_audio_within_the_gap() {
+  let rig = Rig::new();
+  let now = 5_000_000_000;
+  assert!(!game_playing(&rig.table, now), "a game slot that never played");
+  rig.table.slots[CHAT].last_audio_hns.store(now, Ordering::Relaxed);
+  assert!(!game_playing(&rig.table, now), "only the chat plays");
+  rig.table.slots[GAME].last_audio_hns.store(now - GAP_HNS, Ordering::Relaxed);
+  assert!(game_playing(&rig.table, now));
+  assert!(!game_playing(&rig.table, now + 1), "the game stopped longer ago than the gap");
+}
+
+#[test]
 fn default_strength_is_the_8_5_db_margin() {
   assert_eq!(DuckSettings::read(&ShmHeader::default()).strength * T.max_margin_db, 8.5);
 }

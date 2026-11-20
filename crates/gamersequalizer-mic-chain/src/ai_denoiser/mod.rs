@@ -220,6 +220,8 @@ pub struct AiVoiceIsolator {
   no_rescue: bool,
   delay: DelayLine,
   bypassed: bool,
+  /// Someone reads `heard_voice` / `heard_level_voice` while bypassed (`set_voice_wanted`).
+  voice_wanted: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
   heard_voice: bool,
   /// Frames in a row `in_net` rated above `LEVEL_PROB` (the leveler's key, see `level_key`).
@@ -306,6 +308,7 @@ impl AiVoiceIsolator {
       no_rescue: false,
       delay: DelayLine::new(),
       bypassed: false,
+      voice_wanted: true,
       heard_voice: false,
       level_run: 0,
       heard_level_voice: false,
@@ -326,6 +329,13 @@ impl AiVoiceIsolator {
   pub fn set_gate_threshold_db(&mut self, db: f32) {
     self.gate.enabled = db > GATE_OFF_DB;
     self.lookahead = db >= GATE_LOOKAHEAD_DB;
+  }
+
+  /// Whether anyone uses `heard_voice` / `heard_level_voice` while the denoiser is off: the
+  /// leveler (the automatic input gain goes by the leveler's speech time). With nobody, the off
+  /// state runs no network at all.
+  pub fn set_voice_wanted(&mut self, wanted: bool) {
+    self.voice_wanted = wanted;
   }
 
   /// Closed gate `extra_db` (0..=`GATE_FLOOR_EXTRA_MAX_DB`) under `GATE_FLOOR_DB`: the leveler's
@@ -483,14 +493,21 @@ impl AiVoiceIsolator {
     let wanted = if loaded && !self.overloaded { self.selected } else { DenoiseModel::RnNoise };
     if wanted != self.active {
       // Fresh state for the engine taking over; its FIFOs may hold stale audio.
-      self.reset_engines();
       self.active = wanted;
+      self.reset_engines();
     }
 
     if self.strength <= 0.001 {
-      // Audio passes untouched, but a detector (`in_net`, ~2.8 % of a core) keeps running:
-      // the leveler and the automatic input gain learn only from speech it hears.
+      // Audio passes untouched, but a detector (`in_net`, ~2.8 % of a core) keeps running while
+      // someone listens: the leveler and the automatic input gain learn only from speech it hears.
       self.bypassed = true;
+      if !self.voice_wanted {
+        // Its buffered audio and hysteresis are from before once it is wanted again.
+        self.in_net.input.clear();
+        (self.vad, self.level_run) = (VoiceHysteresis::new(), 0);
+        (self.heard_voice, self.heard_level_voice) = (false, false);
+        return;
+      }
       let (vad, in_prob, level_run) = (&mut self.vad, &mut self.in_prob, &mut self.level_run);
       let (mut voice, mut level_voice) = (false, false);
       let (open, keep) = self.in_net.thresholds();
@@ -859,14 +876,16 @@ impl AiVoiceIsolator {
     }
   }
 
-  /// Fresh engines for a model switch: sleep and the click rescue cleared (its hold is the old
-  /// engine's, or from before a bypass), nothing left to silence, RNNoise's network state new, the
-  /// heavy models' buffers emptied.
+  /// Fresh engines for a model switch (`active` is the newcomer): sleep and the click rescue
+  /// cleared (its hold is the old engine's, or from before a bypass), RNNoise's network state new,
+  /// the heavy models' buffers emptied.
   fn reset_engines(&mut self) {
     self.rnnoise_ran = false;
     self.sleep.clear();
     self.rescue.reset();
-    self.mute_left = 0;
+    // As in `flush`: DeepFilterNet keeps the frames it held when it last ran (another model ran
+    // since, or the denoiser was off), and its first latency of output is that old audio.
+    self.mute_left = if self.active.is_heavy() { latency_samples(self.active) } else { 0 };
     self.rnnoise.reset();
     if let Some(df) = self.deepfilter.as_mut() {
       df.reset();

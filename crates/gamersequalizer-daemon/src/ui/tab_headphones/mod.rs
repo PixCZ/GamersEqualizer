@@ -169,8 +169,8 @@ fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
       });
     });
     ui.label(theme::caption(tr(
-      "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about four \
-       times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game \
+      "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about three times. \
+       Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game \
        is part of the game's sound and cannot be told apart from it.",
     )));
   });

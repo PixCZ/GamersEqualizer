@@ -541,8 +541,8 @@ pub static CS: &[(&str, &str)] = &[
     "Jak zřetelně má hlas vyčnívat nad hru. Vyšší nastavení zeslabí hru dřív a víc.",
   ),
   (
-    "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about four times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game is part of the game's sound and cannot be told apart from it.",
-    "Při 50 % bude hlas v rozsahu řeči zhruba dvakrát hlasitější než hra, při 100 % zhruba čtyřikrát. Funguje s chatovacími aplikacemi v kanálu Chat (Discord, TeamSpeak ...); hlasový chat vestavěný ve hře je součástí zvuku hry a nedá se od něj oddělit.",
+    "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about three times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game is part of the game's sound and cannot be told apart from it.",
+    "Při 50 % bude hlas v rozsahu řeči zhruba dvakrát hlasitější než hra, při 100 % zhruba třikrát. Funguje s chatovacími aplikacemi v kanálu Chat (Discord, TeamSpeak ...); hlasový chat vestavěný ve hře je součástí zvuku hry a nedá se od něj oddělit.",
   ),
   (
     "Click to switch. The choice is remembered for the current output device, so a USB headset and headphones on the jack switch by themselves when you change the output.",
@@ -1004,6 +1004,11 @@ pub static CS: &[(&str, &str)] = &[
   ("Startup and background service", "Spouštění a služba na pozadí"),
   ("Starts the background service when you sign in to Windows.", "Spustí službu na pozadí po přihlášení do Windows."),
   ("Start with Windows", "Spouštět s Windows"),
+  ("Show the microphone level in the tray icon", "Ukazovat úroveň mikrofonu v ikoně na hlavním panelu"),
+  (
+    "While an app records, the bars in the icon follow what others hear from you; only with microphone processing on. They stand still behind a full-screen app and while Windows keeps the icon among the hidden icons: drag it to the taskbar.",
+    "Když nějaká aplikace nahrává, čárky v ikoně se hýbou podle toho, co od vás slyší ostatní; jen se zapnutým zpracováním mikrofonu. Stojí, když je v popředí aplikace přes celou obrazovku a když Windows drží ikonu mezi skrytými ikonami: přetáhněte ji na hlavní panel.",
+  ),
   ("Close window", "Zavřít okno"),
   (
     "Closes only this window; the background service keeps processing audio.",
@@ -1183,6 +1188,10 @@ pub static CS: &[(&str, &str)] = &[
   (
     "Running quiet pauses instead: this mode needs the microphone at 48 kHz.",
     "Místo toho běží ztišení pauz: tento režim potřebuje mikrofon na 48 kHz.",
+  ),
+  (
+    "Running quiet pauses instead: this mode has not started. If this stays, restart the recording app.",
+    "Místo toho běží ztišení pauz: tento režim se nespustil. Pokud to trvá, restartujte nahrávající aplikaci.",
   ),
   ("Delete…", "Smazat…"),
   (

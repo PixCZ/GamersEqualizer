@@ -93,7 +93,7 @@ admin or restart Windows audio are never delegated: a human runs them.
 
 ## Dev loop
 
-- `scripts/check.ps1` is the gate: format, clippy at zero warnings (also with `debug-capture`), workspace
+- `scripts/check.ps1` is the gate: format, clippy at zero warnings (also with `debug-capture` and `cpu-stats`), workspace
   tests, the installer self-check (also under Windows PowerShell 5.1, which runs the installer on users'
   PCs) and the vendor crates' tests. `dev-rebuild.ps1 -Test` runs it, and so does CI
   (`.github/workflows/ci.yml`) on every push. Work is done only when it passes.
@@ -104,6 +104,9 @@ admin or restart Windows audio are never delegated: a human runs them.
   `cargo run --release -p gamersequalizer-apo --example debug_capture -- [seconds]` records up to 60 s of
   every mic-chain stage (WAV) plus per-block variables (`vars.tsv`, `info.txt`) into
   `test_data/private/captures/` (git-ignored). Never ship an APO built with it.
+- CPU statistics: `-CpuStats` (with `-Apo` also the APO) builds with the `cpu-stats` feature. With "Save debug to
+  disk" on, the log gets `[Cpu]` lines once a minute: the CPU time of every thread of the service and of the
+  window, and of the mic chain, output EQ and stream effects inside audiodg. Never ship a build with it.
 - Automatic ChatMix offline: `cargo run --release -p gamersequalizer-common --example duck_sim -- game.wav
   chat.wav out_dir [duck_tuning.json] [--strength 0.5] [--pair-delay 3] [--mix]`
   runs two 48 kHz recordings through the stream APOs' ducking path (Silero on the chat, pairing after a
@@ -119,9 +122,9 @@ admin or restart Windows audio are never delegated: a human runs them.
 
 ## Before a release or a push to main
 
-Offer the user the dependency check (GitHub Actions pins, crates and `cargo audit`, the tract and
-egui-wgpu forks, the toolchain) and write release notes as in `.claude/rules/release.md`. Offer it,
-don't run it unasked.
+Offer the user the dependency check (GitHub Actions pins, crates and `cargo audit`, the newest tract
+version against our fork, the egui-wgpu fork, the toolchain) and write release notes as in
+`.claude/rules/release.md`. Offer it, don't run it unasked.
 
 ## General
 

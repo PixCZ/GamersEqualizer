@@ -11,7 +11,7 @@
 
 use log::info;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::{APO_SHM_NAME, AecState, CopiedEqVersions};
@@ -25,7 +25,8 @@ use super::mmdevice::resolve_default_capture_id;
 
 /// How often to look for the APO's mapping while it doesn't exist (cheap OpenFileMapping).
 const OPEN_RETRY: Duration = Duration::from_secs(2);
-const SYNC_INTERVAL: Duration = Duration::from_millis(100);
+/// Settings in, telemetry out and Automatic ChatMix's stream mode (`tick`).
+pub const SYNC_INTERVAL: Duration = Duration::from_millis(100);
 /// How often to re-resolve the default microphone for the cache key (it may change, e.g. a headset).
 const KEY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// Save again only if the confirmed delay moved by more than 1 ms.
@@ -37,6 +38,11 @@ const LEVEL_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const ECHO_SAVE_MIN_CHANGE_X10: i32 = 20;
 /// After "Learn again", the APO still reports the old level for a moment: don't save it back.
 const LEVEL_RESET_QUIET: Duration = Duration::from_secs(2);
+
+/// Loudest mic chain output level copied since `take_out_level_peak` (dBFS x 10, `i32::MIN` =
+/// none). Kept here, where each new value arrives, so the tray's level meter needs no fast loop
+/// of its own to catch it.
+static OUT_LEVEL_PEAK: AtomicI32 = AtomicI32::new(i32::MIN);
 
 pub struct ApoLink {
   shm: Option<SharedMemoryClient>,
@@ -201,6 +207,7 @@ impl ApoLink {
     if seq != self.last_apo_seq {
       self.last_apo_seq = seq;
       local_h.copy_dsp_telemetry_from(apo_h);
+      OUT_LEVEL_PEAK.fetch_max(local_h.aec_out_level_db_x10.load(Ordering::Relaxed), Ordering::Relaxed);
     }
 
     self.sync_delay_cache();
@@ -313,6 +320,11 @@ impl ApoLink {
       self.saved_delay = Some(delay);
     }
   }
+}
+
+/// The loudest mic chain output level since the last call (dBFS x 10, `i32::MIN` = none came).
+pub fn take_out_level_peak() -> i32 {
+  OUT_LEVEL_PEAK.swap(i32::MIN, Ordering::Relaxed)
 }
 
 impl Default for ApoLink {

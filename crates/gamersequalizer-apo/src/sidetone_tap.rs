@@ -1,6 +1,7 @@
 //! The sidetone tap of the mic APO: raw input -> EQ -> noise suppression -> level -> ring.
 
 use super::*;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 /// Sidetone telemetry (peak, gate, mode) is published every this many blocks.
 const SIDETONE_TELEMETRY_BLOCKS: u32 = 10;
@@ -11,8 +12,13 @@ pub(super) struct SidetoneTap {
   chain: Box<SidetoneChain>,
   /// `sidetone_eq_version` the chain's EQ was built from.
   eq_version: Option<u32>,
-  /// Frame-based suppressors (48 kHz only); None at another rate: the expander stands in.
-  denoiser: Option<Box<SidetoneDenoiser>>,
+  /// Frame-based suppressors (48 kHz only), built when a frame-based mode is first wanted
+  /// (`preload`, `poll_denoiser`): most users never pick one. None: the expander stands in.
+  pub(super) denoiser: Option<Box<SidetoneDenoiser>>,
+  /// The suppressors being built on the loader thread.
+  pub(super) loading: Option<Receiver<Box<SidetoneDenoiser>>>,
+  /// The loader thread could not start or died: the expander runs until the stream stops.
+  pub(super) denoiser_failed: bool,
   rate: u32,
   /// `device_hash` of the endpoint this APO sits on; 0 = unknown.
   pub(super) endpoint_hash: u32,
@@ -31,7 +37,9 @@ impl SidetoneTap {
     Self {
       chain: Box::new(SidetoneChain::new(rate as f32)),
       eq_version: None,
-      denoiser: (rate == sidetone_denoise::SAMPLE_RATE).then(|| Box::new(SidetoneDenoiser::new())),
+      denoiser: None,
+      loading: None,
+      denoiser_failed: false,
       rate,
       endpoint_hash: 0,
       instance,
@@ -41,6 +49,15 @@ impl SidetoneTap {
       peak: 0.0,
       blocks: 0,
       failed: false,
+    }
+  }
+
+  /// Before audio starts: builds the suppressors now when the current pair already uses a
+  /// frame-based mode, so its sidetone has no gap at the start of the stream.
+  pub(super) fn preload(&mut self, layout: &ShmLayout) {
+    let settings = layout.header.read_sidetone();
+    if self.rate == sidetone_denoise::SAMPLE_RATE && settings.enabled && settings.noise_mode.is_framed() {
+      self.denoiser = Some(Box::new(SidetoneDenoiser::new()));
     }
   }
 
@@ -113,6 +130,9 @@ impl SidetoneTap {
     let Some(owner) = self.owner else {
       return; // another mic APO instance holds the ring
     };
+    if self.chain.noise_mode().is_framed() {
+      self.poll_denoiser();
+    }
 
     let frames = buf.len() / channels;
     if self.mono.len() < frames {
@@ -159,6 +179,32 @@ impl SidetoneTap {
       let delay = self.denoiser.as_ref().map_or(0, |d| d.delay_samples(active)) as u64;
       h.sidetone_noise_delay_us.store((delay * 1_000_000 / u64::from(sidetone_denoise::SAMPLE_RATE)) as u32, r);
       (self.peak, self.blocks) = (0.0, 0);
+    }
+  }
+
+  /// A frame-based mode is wanted: the suppressors are built on a short-lived thread (never on
+  /// the audio thread) and taken over in the block after they arrive, as the mic chain loads a
+  /// model (`AiVoiceIsolator::request_model`). Until then the expander runs.
+  fn poll_denoiser(&mut self) {
+    if self.denoiser.is_some() || self.denoiser_failed || self.rate != sidetone_denoise::SAMPLE_RATE {
+      return;
+    }
+    let Some(rx) = self.loading.as_ref() else {
+      let (tx, rx) = mpsc::channel();
+      // Receiver gone (stream ended) = the send fails and the suppressors are dropped there.
+      let spawned = std::thread::Builder::new()
+        .name("sidetone-denoise-load".into())
+        .spawn(move || tx.send(Box::new(SidetoneDenoiser::new())));
+      match spawned {
+        Ok(_) => self.loading = Some(rx),
+        Err(_) => self.denoiser_failed = true,
+      }
+      return;
+    };
+    match rx.try_recv() {
+      Ok(denoiser) => (self.denoiser, self.loading) = (Some(denoiser), None),
+      Err(TryRecvError::Empty) => {}
+      Err(TryRecvError::Disconnected) => (self.denoiser_failed, self.loading) = (true, None),
     }
   }
 

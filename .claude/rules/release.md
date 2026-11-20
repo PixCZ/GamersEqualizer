@@ -26,13 +26,18 @@ commands through the `cmd-runner` agent.
   workflow runs it weekly and on every lockfile change, also over the vendor lockfiles). Report what
   would change, which major bumps need code changes, and any advisories. After applying, build, test and
   clippy (`dev-rebuild` agent).
-- **tract from our fork** (`[patch.crates-io]` in the root `Cargo.toml`: `tract-linalg` / `tract-data`
-  from github.com/PixCZ/tract, branch `gamersequalizer-0.23.10`, pinned by commit): it carries an
-  AVX-512 kernel for f16 weights, a kernel choice fix for small matrix-vector products and a 16x1
-  kernel fix. Ready for sonos/tract as branches `avx512-f16-matvec` and `avx512-16x1-partials` of
-  the fork; the pull requests are not opened yet. Report their state and whether a tract release
-  carries them; once one does, move to that release and drop the patch. Moving tract means rebasing
-  the fork branch onto the new version (the patch must match the exact `=0.23.x` pin).
+- **tract version and our fork** (pinned `=0.23.10`; `[patch.crates-io]` in the root `Cargo.toml` takes
+  `tract-linalg` / `tract-data` from github.com/PixCZ/tract, branch `gamersequalizer-0.23.10`, pinned
+  by commit). The fork carries an AVX-512 kernel for f16 weights, a kernel choice fix for small
+  matrix-vector products and a 16x1 kernel fix, all merged into sonos/tract main on 2026-11-20
+  (sonos/tract#3487, #3488, #3489), after 0.23.10 was released. Every time, look up the newest tract
+  version (`cargo search tract-linalg --limit 1`) and report it beside the pinned one. A newer
+  version carries the three changes when
+  `gh api repos/sonos/tract/compare/<its tag>...31a0dc6d2 -q .status` answers `behind` or `identical`
+  (`ahead` or `diverged`: it does not, or it took them as other commits, so read its changelog).
+  Once a release carries them, move every tract crate to it, drop the patch and delete the fork
+  branch. A newer release without them means rebasing the fork branch onto it (the patch must match
+  the exact `=0.23.x` pin).
 - **egui-wgpu fork** (`crates/vendor/egui-wgpu`, `[patch.crates-io]` in the root `Cargo.toml`):
   0.37.0 plus emilk/egui#8784, so the window does not keep the NVIDIA GPU of hybrid laptops awake
   (issue emilk/egui#8704). Report the state of #8784 and whether an egui release carries it; once one

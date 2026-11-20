@@ -30,7 +30,9 @@ use crate::output_eq::settings::write_atomic;
 
 pub const SIDETONE_FILE: &str = "sidetone.json";
 const RELOAD_CHECK: Duration = Duration::from_secs(1);
-const POLL: Duration = Duration::from_millis(250);
+/// On the service's wake grid (`worker::grid_wait`): with `BEAT_FRESH` judged over 1 s, three
+/// polls at least fit in it even after one short first wait.
+const POLL: Duration = super::worker::IDLE_TICK;
 /// A beat (APO counter) that has not moved for this long means that side stopped.
 pub const BEAT_FRESH: Duration = Duration::from_secs(1);
 const SLEEP_ON_ERROR: Duration = Duration::from_secs(1);
@@ -490,7 +492,7 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
           std::thread::sleep(SLEEP_ON_ERROR);
         } else {
           seen.reset();
-          std::thread::sleep(POLL);
+          super::worker::sleep(super::worker::grid_wait(POLL));
         }
       }
     })

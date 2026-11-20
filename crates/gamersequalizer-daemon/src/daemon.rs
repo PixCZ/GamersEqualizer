@@ -7,6 +7,29 @@ use super::*;
 /// that was most of the daemon's CPU. Volume changes are picked up within 250 ms; channel
 /// sliders apply at once, a newly started app gets its channel volume within 1 s.
 const VOLUME_SYNC_INTERVAL: Duration = Duration::from_millis(250);
+/// The same reads (Windows volumes, default devices) while the loop is idle (`worker::busy_reason`):
+/// a volume changed outside the app (Windows mixer, keyboard keys) then shows within ~1 s. A
+/// device or default change still arrives at once (`poll_device_changed`).
+const IDLE_VOLUME_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+
+/// `$e`; with the `cpu-stats` feature its CPU time counts as section `$name` of the loop
+/// (`cpu_stats::LoopSections`). Without the feature it is `$e` alone.
+macro_rules! timed {
+  ($sections:ident, $name:literal, $e:expr) => {{
+    #[cfg(feature = "cpu-stats")]
+    let started = $sections.start();
+    let value = $e;
+    #[cfg(feature = "cpu-stats")]
+    $sections.stop($name, started);
+    value
+  }};
+}
+
+/// Windows volumes and default devices are read again. `since`: time since the last read, None
+/// when there was none or the loop just turned busy (the reads then follow at once).
+fn volume_sync_due(since: Option<Duration>, idle: bool) -> bool {
+  win_audio::worker::due(since, if idle { IDLE_VOLUME_SYNC_INTERVAL } else { VOLUME_SYNC_INTERVAL })
+}
 
 /// `device_ids::heal` over all connected endpoints, then tells the running processes: the
 /// picked mic moves to its new id in shared memory, the output EQ reloads its settings.
@@ -121,6 +144,9 @@ pub(super) fn run_background_daemon() {
 
   let mut last_volume_sync: Option<Instant> = None;
   let mut last_output_check: Option<Instant> = None;
+  let mut last_mic_link: Option<Instant> = None;
+  // Set at the end of each pass: whether the loop was idle (`worker::busy_reason`).
+  let mut idle = false;
   // Windows mic volume as the leveler's input gain, stepped at the extremes only.
   let mut mic_gain = win_audio::mic_gain::MicGainLink::default();
   // Debug lines for every leveler change and its reason (written only with "save debug" on).
@@ -129,17 +155,22 @@ pub(super) fn run_background_daemon() {
   let mut chain_log = win_audio::chain_log::ChainLog::default();
 
   // Notification-area icon: the window "hides to tray" by closing, the service keeps the icon.
-  let mut tray_host = tray::TrayHost::new();
+  let mut tray_host = tray::TrayHost::new(storage.base_dir());
   // Setup problems (default output / spatial sound lost, mic processing) for the tray badge.
   let mut health = health::HealthMonitor::new(storage.base_dir());
   // Automatic ChatMix's mix mode lowers Game sessions; what an earlier run left lowered (a crash,
   // a game that exited) is set back when its sessions appear.
   win_audio.chatmix.game_duck = win_audio::chatmix::GameDuck::for_service(storage.base_dir());
+  let mut idle_log = win_audio::worker::IdleLog::default();
+  #[cfg(feature = "cpu-stats")]
+  let mut sections = crate::cpu_stats::LoopSections::begin();
 
   info!("[GamersEqualizer] Background service running smoothly. Entering audio monitoring loop...");
 
   loop {
-    match tray_host.poll() {
+    // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop); atomics only.
+    let tray_header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
+    match timed!(sections, "tray_poll", tray_host.poll(tray_header)) {
       Some(tray::TrayAction::Exit) => {
         info!("[GamersEqualizer] Exit chosen in the tray. Closing the window and the service.");
         // Close the window first, or its watchdog would start the service again.
@@ -155,14 +186,15 @@ pub(super) fn run_background_daemon() {
     }
     // A device came or went: the picked mic may have been unplugged (the default does not
     // change when it was not the default) or plugged back in, maybe on another USB port.
-    let devices_changed = win_audio.endpoint_lock.poll_device_changed();
+    let devices_changed = timed!(sections, "poll_device_changed", win_audio.endpoint_lock.poll_device_changed());
     if devices_changed {
-      heal_device_ids(&win_audio, storage.base_dir(), shm_ptr);
+      timed!(sections, "heal_device_ids", heal_device_ids(&win_audio, storage.base_dir(), shm_ptr));
+      win_audio.chatmix.outputs_changed();
     }
     // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop);
     // the header is only read through atomics.
     let header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
-    if let Some(issues) = health.tick(&win_audio, header) {
+    if let Some(issues) = timed!(sections, "health", health.tick(&win_audio, header)) {
       tray_host.set_issues(issues);
     }
 
@@ -178,15 +210,18 @@ pub(super) fn run_background_daemon() {
 
       // The mic: the user's pick (from the window) while it is connected, else the Windows
       // default. Re-resolved when the pick or the default changes; the default is polled with
-      // the output check below (one COM call per 250 ms).
+      // the output check below (one COM call per 250 ms, per 1 s idle) and read on a change.
       let cur_mic_ver = header.mic_id_version.load(Ordering::Relaxed);
-      let default_mic = if last_output_check.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL) {
-        win_audio.endpoint_lock.get_default_capture_id()
+      let output_check_due = devices_changed || volume_sync_due(last_output_check.map(|t| t.elapsed()), idle);
+      let default_mic = if output_check_due {
+        timed!(sections, "default_mic", win_audio.endpoint_lock.get_default_capture_id())
       } else {
         last_default_mic.clone()
       };
       // Sonar / VB-Cable installed or started after the service: their channel outputs take
       // over from per-app volumes (and give them back when they go).
+      #[cfg(feature = "cpu-stats")]
+      let started = sections.start();
       if devices_changed {
         let devices = win_audio.endpoint_lock.enumerate_playback_devices();
         let mix = &mut win_audio.chatmix;
@@ -216,15 +251,17 @@ pub(super) fn run_background_daemon() {
           win_audio.chatmix.use_mic(wanted);
         }
       }
+      #[cfg(feature = "cpu-stats")]
+      sections.stop("device_follow", started);
 
       // The Windows default output changed (in Windows, in the window, in another app), or a
       // device came or went (the headset behind Sonar unplugged: Master kept a dead id): the
       // Master channel and the echo reference follow. With the default unchanged, Master stays
       // on its device while that is connected (`master_endpoint_id`). Only the output is
       // re-resolved; the mic choice and levels stay (`bind_endpoints` would reset them).
-      if devices_changed || last_output_check.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL) {
+      if output_check_due {
         last_output_check = Some(Instant::now());
-        let default_out = win_audio.endpoint_lock.get_default_output_id();
+        let default_out = timed!(sections, "default_out", win_audio.endpoint_lock.get_default_output_id());
         if default_out.is_some() && (devices_changed || default_out != last_default_out) {
           let devices = win_audio.endpoint_lock.enumerate_playback_devices();
           let current = win_audio.chatmix.master_device_id.as_deref().filter(|_| default_out == last_default_out);
@@ -237,31 +274,44 @@ pub(super) fn run_background_daemon() {
         }
       }
       // Follow output device changes for the echo reference (reopens only on change).
-      if let Ok(mut reference) = echo_reference.lock() {
-        reference.clone_from(&win_audio.chatmix.master_device_id);
-      }
+      timed!(sections, "echo_reference", {
+        if let Ok(mut reference) = echo_reference.lock() {
+          reference.clone_from(&win_audio.chatmix.master_device_id);
+        }
+      });
 
-      // 1. Sync live Windows master & channel volumes to daemon & SHM
-      let sync_due = last_volume_sync.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL);
-      if sync_due {
-        last_volume_sync = Some(Instant::now());
+      // 1. Sync live Windows master & channel volumes to daemon & SHM (slower while idle). The mic
+      // volume link and the chain logs stay at 250 ms: the gain step counts clips per tick.
+      let mic_link_due = win_audio::worker::due(last_mic_link.map(|t| t.elapsed()), VOLUME_SYNC_INTERVAL);
+      if mic_link_due {
+        last_mic_link = Some(Instant::now());
         // The wish (may be a boost > 100 %) is what the window wrote; Windows only shows <= 100 %.
         win_audio.chatmix.mic.volume = header.mic_volume_permille.load(Ordering::Relaxed) as f32 / 1000.0;
       }
-      if sync_due && win_audio.chatmix.sync_from_system() {
-        win_audio.chatmix.write_levels(header);
+      if volume_sync_due(last_volume_sync.map(|t| t.elapsed()), idle) {
+        last_volume_sync = Some(Instant::now());
+        if timed!(sections, "sync_from_system", win_audio.chatmix.sync_from_system()) {
+          timed!(sections, "write_levels", win_audio.chatmix.write_levels(header));
+        }
       }
-      if sync_due {
-        let mic_id =
-          win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
-        if mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref()) {
+      if mic_link_due {
+        let mic_id = timed!(
+          sections,
+          "mic_id",
+          win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id())
+        );
+        if timed!(sections, "mic_gain", mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref())) {
           audio_settings_saved
             .save_if_changed(ui::audio_settings::AudioSettings::from_header(header), storage.base_dir());
         }
-        leveler_log.tick(header);
-        chain_log.tick(header, || {
-          win_audio::chain_log::read_context(&win_audio.chatmix, &win_audio.endpoint_lock, mic_id.as_deref())
-        });
+        timed!(sections, "leveler_log", leveler_log.tick(header));
+        timed!(
+          sections,
+          "chain_log",
+          chain_log.tick(header, || {
+            win_audio::chain_log::read_context(&win_audio.chatmix, &win_audio.endpoint_lock, mic_id.as_deref())
+          })
+        );
       }
 
       // 2. Read sub-bus levels from SHM for background session scaling
@@ -285,32 +335,59 @@ pub(super) fn run_background_daemon() {
 
       win_audio.chatmix.balance = bal;
       // Atomics only: automatic ChatMix in the APO weighs game against chat as they are heard.
-      win_audio.chatmix.write_duck_gains(header);
+      timed!(sections, "write_duck_gains", win_audio.chatmix.write_duck_gains(header));
       // Mix mode lowers the Game sessions through the one writer of them (`apply_session_mix`).
-      win_audio::ducking::set_session_mode(
-        win_audio.chatmix.owns_session_volumes(),
-        win_audio.chatmix.get_multipliers(),
+      timed!(
+        sections,
+        "set_session_mode",
+        win_audio::ducking::set_session_mode(
+          win_audio.chatmix.owns_session_volumes(),
+          win_audio.chatmix.get_multipliers(),
+        )
       );
       win_audio.chatmix.duck_factor = win_audio::ducking::game_duck_factor();
       win_audio.chatmix.duck_subject = win_audio::ducking::mix_subject();
 
       // Per-app session volumes: fallback mode only, throttled, never against the user's
-      // own mixer changes (`apply_session_mix`).
-      win_audio.chatmix.apply_session_mix();
+      // own mixer changes (`apply_session_mix`). Idle: new sessions come from Windows' own
+      // announcement, the walk over every session is rare.
+      win_audio.chatmix.sessions_idle = idle;
+      timed!(sections, "apply_session_mix", win_audio.chatmix.apply_session_mix());
     }
 
     // SAFETY: still mapped, atomics only (as above).
     let header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
     // Game detection: the daemon is the owner (decides and publishes the active game).
-    if let Some(ref detector) = win_audio.game_detector {
-      while let Some(event) = detector.poll_event() {
-        output_eq.on_foreground(&event, true, header);
+    timed!(sections, "game_detector", {
+      if let Some(ref detector) = win_audio.game_detector {
+        while let Some(event) = detector.poll_event() {
+          output_eq.on_foreground(&event, true, header);
+        }
       }
-    }
-    output_eq.tick(true, win_audio.chatmix.master_device_id.clone(), header);
+    });
+    timed!(sections, "output_eq", output_eq.tick(true, win_audio.chatmix.master_device_id.clone(), header));
 
-    // While mix mode moves a game's volume: 25 steps a second (the fast slew is 40 dB/s).
-    std::thread::sleep(Duration::from_millis(if win_audio::ducking::mix_fast() { 40 } else { 50 }));
+    // Idle: Automatic ChatMix off or without a game's session (session ducking and mix mode run
+    // through here and lower games only; the router finds a new session within 500 ms, and pairing
+    // its stream takes ~1.5 s anyway) and the window closed (its sliders reach the per-app session volumes through here).
+    // An app that records needs no fast pass: the tray's once-a-second check and frame, the mic
+    // volume link and the chain logs (250 ms) fit the idle tick, and the level meter's peak is kept
+    // by the telemetry mirror. The tray icon stays quick: its messages end the wait, and so does
+    // Windows announcing that an app opened or closed a microphone (one pass, the loop stays idle).
+    let duck_playing = header.is_some_and(|h| h.duck_enabled.load(Ordering::Relaxed))
+      && win_audio::stream_router::game_session_playing();
+    let busy = win_audio::worker::busy_reason(&[
+      (timed!(sections, "find_window", tray::find_window().is_some()), "window open", win_audio::worker::TICK),
+      (duck_playing, "Automatic ChatMix with a game playing", win_audio::worker::TICK),
+    ]);
+    let was_idle = std::mem::replace(&mut idle, idle_log.idle("service loop", busy));
+    if was_idle && !idle {
+      // Turned busy (the window opened, ...): read volumes and default devices on the next pass.
+      (last_volume_sync, last_output_check) = (None, None);
+    }
+    let wait = win_audio::worker::tick_wait(win_audio::ducking::mix_fast(), busy);
+    // Idle: on the wake grid with the other service threads (`worker::grid_wait`).
+    timed!(sections, "wait", if idle { tray_host.wait(wait) } else { win_audio::worker::sleep(wait) });
   }
 
   // A game lowered by mix mode gets its volume back before the service goes (or, if that fails,
@@ -340,5 +417,21 @@ pub(super) fn run_background_daemon() {
     unsafe {
       let _ = CloseHandle(m);
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn idle_reads_windows_once_a_second_and_busy_at_once() {
+    let half = Duration::from_millis(500);
+    assert!(volume_sync_due(None, true), "never read, or just turned busy: read now");
+    assert!(volume_sync_due(None, false));
+    assert!(volume_sync_due(Some(half), false), "busy: every 250 ms");
+    assert!(!volume_sync_due(Some(half), true), "idle: not before 1 s");
+    assert!(volume_sync_due(Some(IDLE_VOLUME_SYNC_INTERVAL), true));
+    assert!(!volume_sync_due(Some(Duration::from_millis(100)), false));
   }
 }

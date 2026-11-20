@@ -29,6 +29,11 @@ jiff = "0.2"
 # Already in the tree via eframe (png) and deep_filter; compresses the settings export.
 flate2 = "1"
 
+[features]
+# `scripts/dev-rebuild.ps1 -CpuStats`: once a minute the debug log says where the CPU time went
+# (`cpu_stats.rs`). Never packaged.
+cpu-stats = ["gamersequalizer-mic-chain/cpu-stats"]
+
 [build-dependencies]
 embed-resource = "3.0.12"
 
