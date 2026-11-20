@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::System::Threading::{
   CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer, TIMER_ALL_ACCESS,
 };
@@ -76,9 +76,11 @@ pub struct TrayHost {
   mic_forced_at: Option<Instant>,
   /// Setup problems: badge, tooltip lines and the top of the menu.
   issues: Vec<Issue>,
-  /// The bars follow the microphone level; `level_shown` is the step the icon has now.
+  /// The bars follow the microphone level; `level_shown` is the step the icon has now, read at
+  /// `level_ticked_at` (once a second, however often an announced change checks the microphone).
   level: LevelMeter,
   level_shown: Option<u8>,
+  level_ticked_at: Option<Instant>,
 }
 
 impl TrayManager {
@@ -189,6 +191,7 @@ impl TrayHost {
       issues: Vec::new(),
       level: LevelMeter::new(prefs_dir),
       level_shown: None,
+      level_ticked_at: None,
     }
   }
 
@@ -201,6 +204,7 @@ impl TrayHost {
       }
       // A badge covers the bars: the icon stands still, and the next step decides again.
       self.level_shown = None;
+      self.level_ticked_at = None;
       self.mic_checked_at = None;
       tray.show_state(self.mic_active, &self.issues, None);
     }
@@ -252,7 +256,14 @@ impl TrayHost {
         info!("[Tray] microphone {}", if active { "in use" } else { "free" });
         mic_changed = true;
       }
-      level = self.level.tick(header, active, !self.issues.is_empty(), || tray.tray_icon.rect());
+    }
+    // The level keeps its own second, apart from the microphone check: a check that an announced
+    // change forced can come before the telemetry moved again, which the meter would take for an
+    // effect that stopped, and it moves the next check off that second.
+    let level_due = crate::win_audio::worker::due(self.level_ticked_at.map(|t| t.elapsed()), MIC_CHECK_INTERVAL);
+    if mic_changed || level_due {
+      self.level_ticked_at = Some(Instant::now());
+      level = self.level.tick(header, self.mic_active, !self.issues.is_empty(), || tray.tray_icon.rect());
     }
     // One icon at most: the colour and the bars go out together.
     let level_changed = level != std::mem::replace(&mut self.level_shown, level);
@@ -284,10 +295,11 @@ impl TrayHost {
 
   /// The idle wait of the service loop (`wait_for_messages`); Windows announcing a microphone
   /// opened or closed ends it too, and a change waiting for `MIC_RESCAN_GAP` shortens it.
-  pub fn wait(&self, timeout: Duration) {
+  pub fn wait(&mut self, timeout: Duration) {
     let timeout = rescan_in(self.mic_store_changed, self.mic_forced_at.map(|t| t.elapsed()))
       .map_or(timeout, |left| timeout.min(left));
-    wait_for_messages(timeout, self.mic_watch.as_ref().map(MicStoreWatch::event));
+    // The wait resets the event that ended it, so `follow_mic_store` would never see that change.
+    self.mic_store_changed |= wait_for_messages(timeout, self.mic_watch.as_ref().map(MicStoreWatch::event));
   }
 
   /// A change Windows announced: the mic is checked on this pass, without the scan cache, not on
@@ -393,27 +405,31 @@ fn pump_messages() {
 /// it at once: the long idle wait of the service loop keeps the icon as quick as before. A
 /// high-resolution timer ends the wait: the call's own timeout ends on the system clock tick (up
 /// to 15.6 ms late), off the wake grid the other service threads sleep on (`worker::grid_wait`).
-/// `event`: one more handle that ends the wait when signaled (`MicStoreWatch`).
-fn wait_for_messages(timeout: Duration, event: Option<HANDLE>) {
+/// `event`: one more handle that ends the wait when signaled (`MicStoreWatch`). True when it did:
+/// the wait then reset it (an auto-reset event), so this answer is all that is left of the signal.
+fn wait_for_messages(timeout: Duration, event: Option<HANDLE>) -> bool {
   let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
   // Relative due time in 100 ns units (negative = relative).
   let due = -i64::try_from(timeout.as_nanos() / 100).unwrap_or(i64::MAX);
   // SAFETY: the timer is created, armed with `due` (a local read during the call), waited on and
   // closed here, once; without it the wait falls back to the plain timeout. `event` is owned by the
   // caller's watch, which outlives the call.
-  unsafe {
+  let by_event = unsafe {
     let timer = CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0);
     let armed = timer.as_ref().ok().filter(|t| SetWaitableTimer(**t, &due, 0, None, None, false).is_ok()).copied();
     let handles: Vec<HANDLE> = armed.into_iter().chain(event).collect();
     // With the timer the timeout only backs it up.
     let ms = if armed.is_some() { ms.saturating_add(100) } else { ms };
-    let _ = MsgWaitForMultipleObjects((!handles.is_empty()).then_some(handles.as_slice()), false, ms, QS_ALLINPUT);
+    let ended = MsgWaitForMultipleObjects((!handles.is_empty()).then_some(handles.as_slice()), false, ms, QS_ALLINPUT);
     if let Ok(t) = timer {
       let _ = CloseHandle(t);
     }
-  }
+    // The event is the last handle: behind the timer when there is one.
+    event.is_some() && ended.0 == WAIT_OBJECT_0.0 + u32::from(armed.is_some())
+  };
   #[cfg(feature = "cpu-stats")]
   crate::cpu_stats::woke();
+  by_event
 }
 
 fn tray_icon(mic_active: bool, warning: bool, level: Option<u8>) -> Result<Icon, String> {
@@ -448,6 +464,7 @@ fn truncate_tooltip(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use windows::Win32::System::Threading::CreateEventW;
 
   #[test]
   fn long_tooltip_is_cut_to_the_windows_limit() {
@@ -455,6 +472,20 @@ mod tests {
     assert_eq!(cut.encode_utf16().count(), TOOLTIP_MAX_UNITS);
     assert!(cut.ends_with('…'));
     assert_eq!(truncate_tooltip("short"), "short");
+  }
+
+  #[test]
+  fn the_idle_wait_says_when_the_event_ended_it() {
+    // SAFETY: an unnamed auto-reset event, signaled from the start, owned by this test.
+    let event = unsafe { CreateEventW(None, false, true, PCWSTR::null()) }.unwrap();
+    // The wait resets the event, so only its answer tells the tray that Windows announced a change.
+    assert!(wait_for_messages(Duration::from_secs(5), Some(event)));
+    assert!(!wait_for_messages(Duration::from_millis(1), Some(event)), "reset: the timer ends the next wait");
+    assert!(!wait_for_messages(Duration::ZERO, None));
+    // SAFETY: the event created above, closed once.
+    unsafe {
+      let _ = CloseHandle(event);
+    }
   }
 
   #[test]
