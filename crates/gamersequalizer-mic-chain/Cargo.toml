@@ -13,6 +13,8 @@ name = "gamersequalizer_mic_chain"
 # Debug builds only: the mic chain records every stage for the capture tool
 # (`cargo run -p gamersequalizer-apo --example debug_capture`). Off in normal builds.
 debug-capture = []
+# Diagnostic builds only (`scripts/dev-rebuild.ps1 -CpuStats`): the mapping the APO counts its time in.
+cpu-stats = []
 
 [dependencies]
 gamersequalizer-common = { path = "../gamersequalizer-common" }

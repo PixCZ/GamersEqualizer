@@ -21,6 +21,8 @@ windows = { version = "0.62", features = [
     # SHA-256 of the elevated scripts (`apo_install/elevated.rs`).
     "Win32_Security_Cryptography",
     "Win32_System_Performance",
+    # Threads of the own process, for the `cpu-stats` diagnostic build (`cpu_stats.rs`).
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",

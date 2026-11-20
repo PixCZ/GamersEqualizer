@@ -2,6 +2,8 @@ pub mod aec3;
 pub mod ai_denoiser;
 pub mod chain;
 pub mod clip_detector;
+#[cfg(feature = "cpu-stats")]
+pub mod cpu_stats;
 pub mod debug_capture;
 pub mod delay_estimator;
 mod dpdfnet;

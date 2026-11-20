@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 [features]
 # `scripts/dev-rebuild.ps1 -Apo -DebugCapture`: the APO records the mic chain on request.
 debug-capture = ["gamersequalizer-mic-chain/debug-capture"]
+# `scripts/dev-rebuild.ps1 -Apo -CpuStats`: the APO counts the time of every block for the service's debug log.
+cpu-stats = ["gamersequalizer-mic-chain/cpu-stats"]
 
 [dependencies]
 windows = { workspace = true }

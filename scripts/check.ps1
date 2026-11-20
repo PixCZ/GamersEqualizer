@@ -35,7 +35,10 @@ function Gate([string]$name, [scriptblock]$body) {
 Gate 'fmt' { cargo fmt -- --check }
 Gate 'clippy --workspace' { cargo clippy --workspace --all-targets -- -D warnings }
 Gate 'clippy apo (debug-capture)' { cargo clippy -p gamersequalizer-apo --all-targets --features debug-capture -- -D warnings }
+Gate 'clippy app + apo (cpu-stats)' { cargo clippy -p gamersequalizer -p gamersequalizer-apo --all-targets --features cpu-stats -- -D warnings }
 Gate 'test --workspace' { cargo test --workspace }
+# The diagnostic build's own code is not in the workspace run above.
+Gate 'test app (cpu-stats)' { cargo test -p gamersequalizer --features cpu-stats cpu_stats }
 # Throws when a check fails.
 Gate 'installer self-check' { & (Join-Path $PSScriptRoot 'tests\apo-install.tests.ps1') }
 # The installer runs under Windows PowerShell 5.1 on users' PCs; PowerShell 7 (CI) accepts syntax

@@ -12,6 +12,11 @@ pub(super) const APO_SHM_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)(A;
 
 static APO_INSTANCE_IDS: AtomicU32 = AtomicU32::new(1);
 
+/// Feature `cpu-stats`: where every block's time is counted for the service's debug log. Made
+/// with the first stream; None inside when the mapping could not be created.
+#[cfg(feature = "cpu-stats")]
+static CPU_STATS: OnceLock<Option<gamersequalizer_mic_chain::cpu_stats::CpuStatsMap>> = OnceLock::new();
+
 const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
 
 const MAX_CHANNELS: u32 = 32;
@@ -208,6 +213,8 @@ pub(super) unsafe extern "system" fn rt_apo_process(
       return;
     }
     let st = state::<OFF_RT>(this);
+    #[cfg(feature = "cpu-stats")]
+    let started = Instant::now();
     let channels = st.channels.load(Ordering::Relaxed) as usize;
     let input = *inputs;
     let output = *outputs;
@@ -238,6 +245,16 @@ pub(super) unsafe extern "system" fn rt_apo_process(
     {
       let render_time = if processor.wants_block_time() { render_time_hns(input) } else { None };
       processor.process_silence((*input).u32ValidFrameCount as usize, channels, render_time);
+    }
+    #[cfg(feature = "cpu-stats")]
+    if let Some(Some(map)) = CPU_STATS.get() {
+      let stats = map.stats();
+      let effect = match st.kind {
+        ApoKind::Mic => &stats.mic,
+        ApoKind::Output => &stats.output,
+        ApoKind::Stream => &stats.stream,
+      };
+      effect.add(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
     }
   }
 }
@@ -281,6 +298,11 @@ pub(super) unsafe extern "system" fn cfg_lock_for_process(
         return APOERR_FORMAT_NOT_SUPPORTED;
       };
 
+      #[cfg(feature = "cpu-stats")]
+      CPU_STATS.get_or_init(|| {
+        let made = gamersequalizer_mic_chain::cpu_stats::CpuStatsMap::create(APO_SHM_SDDL);
+        made.map_err(|e| note(Level::Warning, format!("cpu-stats build: no statistics ({e})"))).ok()
+      });
       st.channels.store(format.dwSamplesPerFrame, Ordering::Release);
       let rate = format.fFramesPerSecond;
       st.rate.store(rate as u32, Ordering::Release);

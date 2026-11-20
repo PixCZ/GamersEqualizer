@@ -4,6 +4,8 @@ pub mod apo_notes;
 pub mod app_icon;
 pub mod app_log;
 pub mod autostart;
+#[cfg(feature = "cpu-stats")]
+pub mod cpu_stats;
 pub mod health;
 pub mod i18n;
 pub mod i18n_cs;
@@ -90,6 +92,8 @@ fn main() {
     return;
   }
 
+  #[cfg(feature = "cpu-stats")]
+  cpu_stats::start(is_daemon);
   if is_daemon {
     run_background_daemon();
   } else {

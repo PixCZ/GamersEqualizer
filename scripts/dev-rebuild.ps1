@@ -8,6 +8,9 @@
   3. -Apo: cargo build --profile apo -p gamersequalizer-apo (the microphone APO DLL, unwinding profile).
      -DebugCapture (with -Apo): builds it with the `debug-capture` feature, so the mic chain records
      every stage on request (cargo run --release -p gamersequalizer-apo --example debug_capture).
+     -CpuStats: builds the app (and with -Apo the APO) with the `cpu-stats` feature: once a minute the
+     debug log ("Save debug to disk" on the Log page) gets `[Cpu]` lines with the CPU time of every
+     thread of the service and of the window, and of our effects inside audiodg.
   4. -Test: the quality gate, scripts\check.ps1 (format, clippy at zero warnings, all tests).
   5. -Package: tester ZIP from this release build (scripts\package.ps1 -Fast, a few seconds).
      The final build for testers is scripts\package.ps1 without -Fast (fat LTO, minutes).
@@ -20,11 +23,13 @@
   .\scripts\dev-rebuild.ps1 -Test -Start
   .\scripts\dev-rebuild.ps1 -Apo -Test
   .\scripts\dev-rebuild.ps1 -Apo -DebugCapture
+  .\scripts\dev-rebuild.ps1 -Apo -CpuStats -Start
   .\scripts\dev-rebuild.ps1 -Apo -Test -Package
 #>
 param(
   [switch]$Apo,
   [switch]$DebugCapture,
+  [switch]$CpuStats,
   [switch]$Test,
   [switch]$Package,
   [switch]$Start
@@ -60,23 +65,32 @@ Step 'stop app' {
   $global:LASTEXITCODE = 0
 }
 
-if (-not $failed) { Step 'build app (release)' { cargo build --release -p gamersequalizer } }
+# Diagnostic features: never packaged (below).
+$appFeatures = @()
+$apoFeatures = @()
+if ($CpuStats) { $appFeatures += 'cpu-stats'; $apoFeatures += 'cpu-stats' }
+if ($DebugCapture) { $apoFeatures += 'debug-capture' }
+$appFeatureArgs = if ($appFeatures) { @('--features', ($appFeatures -join ',')) } else { @() }
+$apoFeatureArgs = if ($apoFeatures) { @('--features', ($apoFeatures -join ',')) } else { @() }
+$appBuild = "build app (release) $appFeatures".TrimEnd()
+$apoBuild = "build APO (apo profile) $apoFeatures".TrimEnd()
+
+if (-not $failed) {
+  Step $appBuild { cargo build --release -p gamersequalizer @appFeatureArgs }
+}
 if ($DebugCapture -and -not $Apo) { $summary.Add('INFO  -DebugCapture only applies with -Apo') }
+if ($CpuStats -and -not $Apo) { $summary.Add('INFO  -CpuStats without -Apo: the effects in audiodg report only from an APO built with it') }
 if ($Apo -and -not $failed) {
-  if ($DebugCapture) {
-    Step 'build APO (apo profile, debug capture)' { cargo build --profile apo -p gamersequalizer-apo --features debug-capture }
-  } else {
-    Step 'build APO (apo profile)' { cargo build --profile apo -p gamersequalizer-apo }
-  }
+  Step $apoBuild { cargo build --profile apo -p gamersequalizer-apo @apoFeatureArgs }
 }
 
 if ($Test -and -not $failed) {
   Step 'check (scripts\check.ps1)' { & (Join-Path $PSScriptRoot 'check.ps1') }
 }
 
-if ($Package -and $DebugCapture) {
-  # package.ps1 would rebuild the APO without debug-capture and replace this build.
-  $summary.Add('INFO  -Package skipped: never package a -DebugCapture APO')
+if ($Package -and ($DebugCapture -or $CpuStats)) {
+  # package.ps1 would rebuild without the diagnostic features and replace this build.
+  $summary.Add('INFO  -Package skipped: never package a -DebugCapture or -CpuStats build')
 } elseif ($Package -and -not $failed) {
   Step 'package (tester ZIP, release build)' { & (Join-Path $PSScriptRoot 'package.ps1') -Fast }
 }

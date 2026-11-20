@@ -13,7 +13,7 @@
      Both at the same time: the single-threaded fat-LTO step of one overlaps the other.
      Both: opt-level 3, fat LTO, codegen-units 1, no incremental, stripped, static CRT.
   4. Reads the real rustc command lines from the verbose log and fails unless the exe and the
-     DLL were linked with exactly those flags (and without the debug-capture feature).
+     DLL were linked with exactly those flags (and without the debug-capture and cpu-stats features).
   5. Checks both binaries were written by this build and import no VCRUNTIME140.dll.
   6. Stages gamersequalizer.exe + gamersequalizer_apo.dll + LICENSE.txt and zips them under a new,
      time-stamped name. Next to the ZIP: <name>.build.log (full cargo output) and
@@ -158,7 +158,7 @@ if ($Fast) {
 
   # 4. What rustc was really told to do.
   $forbidden = @('-C incremental', 'debug-assertions=on', 'overflow-checks=on', 'feature="debug-capture"',
-    'feature=\"debug-capture\"')
+    'feature=\"debug-capture\"', 'feature="cpu-stats"', 'feature=\"cpu-stats\"')
   Assert-RustcFlags $log 'gamersequalizer' 'bin' ($commonFlags + '-C panic=abort') $forbidden
   Assert-RustcFlags $log 'gamersequalizer_apo' 'cdylib' $commonFlags ($forbidden + '-C panic=abort')
 }
