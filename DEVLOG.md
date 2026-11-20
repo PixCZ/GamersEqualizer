@@ -3630,6 +3630,18 @@ log shows no CPU sleep depth; that needs `powercfg /sleepstudy` or `/energy` on 
 - With a chat or media EQ on, a silent open session is still metered (the EQ needs its stream paired).
 - `[Health] problem: ...` (MicProcessing Outdated, once) had no counterpart when it cleared: a problem
   that is gone now logs `[Health] resolved: ...`.
+- Of 66 paired streams two changed their app while playing, both for one evaluation (0.5 s) and both to
+  Signal at a 50 % match (the floor; the median match is 94 %): the game's stream at 17:21:08 (it became
+  a chat stream, `[Ducking]` read "game not paired") and Brave's, paired at 100 % a second before. A
+  paired stream now changes its app only when the same other session wins two evaluations in a row
+  (`repair_confirmed`); a first pairing is as fast as before, a really wrong one is corrected after 1 s.
+- Read from the same log and left alone: the 21 service starts have no exit line because the dev script
+  kills the process (no panic line, the hook would have logged one); "Outdated" came 5 s after each
+  start of a build newer than the installed APO DLL; "takeover" is on for one log tick per wake
+  (median 0.26 s); the AEC label flips between Locked and ReferenceSilent with every quiet stretch of
+  the output (1320 debug lines, at worst one per 250 ms tick), a label only.
+- The same log has a 26 min call without a game (18:31-18:57) at 180 router wakeups a second: the case
+  the "Game session" flag above ends, unless a chat or media EQ is on.
 
 **Not tried live:** a chat app open and silent after a game ends (`[Cpu] wakeups` should fall to the idle
 row, `[Idle]` lines should say idle), a game starting while a chat app is already open, a new app

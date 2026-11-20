@@ -110,6 +110,9 @@ struct Router {
   sessions: HashMap<String, Session>,
   /// Slot owner value -> session key it was paired with.
   pairs: HashMap<u64, String>,
+  /// Slot owner value -> the other session that won the last evaluation of a paired stream
+  /// (`repair_confirmed`).
+  challengers: HashMap<u64, String>,
   /// Some stream EQ or Automatic ChatMix is on, so streams are metered and paired (logged on change).
   routing: bool,
   /// What the last "silent unpaired" line said (silent streams, silent Game sessions, Game sessions).
@@ -271,6 +274,7 @@ impl Router {
         self.manager = Some((id_text, manager));
         self.sessions.clear();
         self.pairs.clear();
+        self.challengers.clear();
       }
       let Some((_, manager)) = self.manager.as_ref() else {
         return Ok(());
@@ -333,7 +337,8 @@ impl Router {
     // A game on spatial sound plays silence at its stream and at its meter, so no level match can
     // pair it (and after a service restart there is no pairing from before): the one silent unpaired
     // stream and the one silent unpaired Game session belong together. Shortcut: a silent stream of
-    // another app looks the same while the game is quiet; any audible match corrects it.
+    // another app looks the same while the game is quiet; an audible match corrects it
+    // (`repair_confirmed`).
     let silent_slots: Vec<u64> = owners
       .iter()
       .filter(|(_, o)| Some((*o >> 32) as u32) == audiodg && !self.pairs.contains_key(o))
@@ -394,11 +399,16 @@ impl Router {
       }
       live.insert(owner);
       slot.envelope(first.saturating_sub(HOLD_PAD_BEFORE as u64), &mut envelope);
-      if envelope.iter().any(|v| *v > SILENCE) {
-        let matches: Vec<(&String, _)> =
-          meters.iter().filter_map(|(key, meter)| hold_match(&envelope, meter).map(|m| (*key, m))).collect();
-        if let Some((key, m, runner_up)) = pick_session(&matches)
-          && self.pairs.get(&owner) != Some(key)
+      // The session that explains this stream better than the one it is paired with, if any.
+      let matches: Vec<(&String, _)> = if envelope.iter().any(|v| *v > SILENCE) {
+        meters.iter().filter_map(|(key, meter)| hold_match(&envelope, meter).map(|m| (*key, m))).collect()
+      } else {
+        Vec::new()
+      };
+      let winner = pick_session(&matches).filter(|(key, ..)| self.pairs.get(&owner) != Some(*key));
+      match winner {
+        Some((key, m, runner_up))
+          if repair_confirmed(self.pairs.contains_key(&owner), self.challengers.get(&owner), key) =>
         {
           if let Some(s) = self.sessions.get(key) {
             info!(
@@ -412,12 +422,20 @@ impl Router {
             );
           }
           self.pairs.insert(owner, key.clone());
+          self.challengers.remove(&owner);
+        }
+        Some((key, ..)) => {
+          self.challengers.insert(owner, key.clone());
+        }
+        None => {
+          self.challengers.remove(&owner);
         }
       }
       let bus = self.pairs.get(&owner).and_then(|k| self.sessions.get(k)).map_or(StreamBus::None, |s| s.bus);
       slot.bus.store(bus.to_u32(), Ordering::Relaxed);
     }
     self.pairs.retain(|owner, _| live.contains(owner));
+    self.challengers.retain(|owner, _| live.contains(owner));
     let paired: Vec<PairedStream> = self
       .pairs
       .iter()
@@ -443,6 +461,14 @@ impl Router {
 /// only once a game plays, from ~1.5 s of its audio after that.
 fn meters_needed(any_session: bool, eq_active: bool, game_session_playing: bool) -> bool {
   any_session && (eq_active || game_session_playing)
+}
+
+/// Whether the session that won this evaluation gets the stream. An unpaired stream takes its first
+/// match. A paired one changes its app only when the same other session won the evaluation before
+/// as well: in a 2 h log a chat app's sound matched a game's stream by 50 % for one evaluation and
+/// made it a chat stream for 0.5 s, while a pairing that is really wrong keeps losing.
+fn repair_confirmed(paired: bool, challenger_before: Option<&String>, winner: &String) -> bool {
+  !paired || challenger_before == Some(winner)
 }
 
 /// The silent unpaired Game session the silent unpaired streams belong to: there must be one such
@@ -511,6 +537,15 @@ mod tests {
     crate::win_audio::app_channels::set_detected_game("TheDivision2.exe", false);
     assert_eq!(bus_for_exe("thedivision2.exe"), StreamBus::Media);
     assert_eq!(bus_for_exe(""), StreamBus::Media);
+  }
+
+  #[test]
+  fn a_paired_stream_changes_its_app_only_after_two_wins_in_a_row() {
+    let (signal, brave) = ("signal".to_string(), "brave".to_string());
+    assert!(repair_confirmed(false, None, &signal), "an unpaired stream takes its first match");
+    assert!(!repair_confirmed(true, None, &signal), "one evaluation against the pairing: not yet");
+    assert!(repair_confirmed(true, Some(&signal), &signal), "the same session again: the pairing was wrong");
+    assert!(!repair_confirmed(true, Some(&brave), &signal), "another session than last time starts over");
   }
 
   #[test]
