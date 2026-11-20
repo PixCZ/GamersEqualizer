@@ -35,8 +35,7 @@ choice adds. It should be just as useful outside games.
 - A ChatMix slider balances game against chat.
 - Automatic ChatMix (new in 0.3.0, still needs more testing) lowers the game while someone in the voice
   chat (a chat app on the Chat channel) talks over it, and brings it back when they stop. One Strength
-  slider: at the default 50 % the voice ends up about twice as loud as the game, at 100 % about four
-  times. It is off by default; switch it on in Output & headphones or on Mixer & device, where it
+  slider: at the default 50 % the voice ends up about twice as loud as the game, at 100 % about three times. It is off by default; switch it on in Output & headphones or on Mixer & device, where it
   takes the place of the ChatMix slider while on and a bar shows how far the game is lowered now. It
   also works for games with Dolby Atmos / spatial sound; the app then lowers the game's own volume.
 

@@ -541,8 +541,8 @@ pub static CS: &[(&str, &str)] = &[
     "Jak zřetelně má hlas vyčnívat nad hru. Vyšší nastavení zeslabí hru dřív a víc.",
   ),
   (
-    "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about four times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game is part of the game's sound and cannot be told apart from it.",
-    "Při 50 % bude hlas v rozsahu řeči zhruba dvakrát hlasitější než hra, při 100 % zhruba čtyřikrát. Funguje s chatovacími aplikacemi v kanálu Chat (Discord, TeamSpeak ...); hlasový chat vestavěný ve hře je součástí zvuku hry a nedá se od něj oddělit.",
+    "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about three times. Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game is part of the game's sound and cannot be told apart from it.",
+    "Při 50 % bude hlas v rozsahu řeči zhruba dvakrát hlasitější než hra, při 100 % zhruba třikrát. Funguje s chatovacími aplikacemi v kanálu Chat (Discord, TeamSpeak ...); hlasový chat vestavěný ve hře je součástí zvuku hry a nedá se od něj oddělit.",
   ),
   (
     "Click to switch. The choice is remembered for the current output device, so a USB headset and headphones on the jack switch by themselves when you change the output.",
