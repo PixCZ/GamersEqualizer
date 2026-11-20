@@ -2,8 +2,9 @@
 //! channel it belongs to, so chat and media apps get their own EQ and Automatic ChatMix knows
 //! which streams are the game and which the chat (`paired_streams`, read by `ducking`).
 //!
-//! The APO runs inside audiodg and can't see the app. This thread samples every audio
-//! session's peak meter on the default output every 5 ms and pairs each instance with the
+//! The APO runs inside audiodg and can't see the app. This thread samples every playing audio
+//! session's peak meter on the default output every 5 ms (with none playing it only re-reads the
+//! session list every 500 ms) and pairs each instance with the
 //! session whose meter its level envelope reproduces (`streams::hold_match`; measured:
 //! the right app 93-100 %, others <= 6 %). The channel then comes from the app's exe, the
 //! same lists the ChatMix volumes use.
@@ -17,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gamersequalizer_common::shm::APO_SHM_NAME;
@@ -87,6 +88,10 @@ pub struct PairedStream {
 /// thread (`apo_link`) and needs the exe names, which only this thread knows: the table carries the
 /// bus but no names. Held only to copy the list in or out.
 static PAIRED: Mutex<Vec<PairedStream>> = Mutex::new(Vec::new());
+/// A Chat or Game session plays on the default output (as of the last session refresh, every
+/// 500 ms while routing): without one Automatic ChatMix has nothing to lower and the service and
+/// reference loops may idle (`chat_or_game_playing`).
+static CHAT_OR_GAME_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Max meter peak per envelope block, the last `HISTORY` blocks.
 struct PeakHistory {
@@ -135,6 +140,7 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
           // Device gone / audio restarted: start over with fresh COM objects.
           router.manager = None;
           router.sessions.clear();
+          CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
           std::thread::sleep(SLEEP_ON_ERROR);
         }
       }
@@ -149,6 +155,12 @@ pub fn bus_for_exe(exe: &str) -> StreamBus {
     AppChannel::Game => StreamBus::Game,
     AppChannel::Media | AppChannel::Unknown => StreamBus::Media,
   }
+}
+
+/// See `CHAT_OR_GAME_PLAYING`. False while the router does not route (no APO, another console
+/// user, nothing on that needs pairing): no pairing, nothing Automatic ChatMix could lower.
+pub fn chat_or_game_playing() -> bool {
+  CHAT_OR_GAME_PLAYING.load(Ordering::Relaxed)
 }
 
 /// The paired chat and game streams (see `PAIRED`); empty if its lock was poisoned.
@@ -177,10 +189,12 @@ impl Router {
     self.ensure_apo();
     let Some(apo) = self.apo.as_ref() else {
       // No stream APO installed / no audio yet: nothing to route.
+      CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
       std::thread::sleep(OPEN_RETRY);
       return Ok(());
     };
     if !self.console.is_owner() {
+      CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
       std::thread::sleep(EVAL_INTERVAL);
       return Ok(());
     }
@@ -201,10 +215,21 @@ impl Router {
       );
     }
     if !active {
+      CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
       std::thread::sleep(EVAL_INTERVAL);
       return Ok(());
     }
     self.refresh_sessions()?;
+    let playing = self.sessions.values().any(|s| matches!(s.bus, StreamBus::Chat | StreamBus::Game));
+    CHAT_OR_GAME_PLAYING.store(playing, Ordering::Relaxed);
+    if self.sessions.is_empty() {
+      // Nothing plays: no meter to sample. Sessions are re-read just as often as while sampling,
+      // so a stream that starts is found as soon as before; the evaluation still clears the buses
+      // and `PAIRED` of streams that ended.
+      std::thread::sleep(EVAL_INTERVAL);
+      self.evaluate();
+      return Ok(());
+    }
     let started = Instant::now();
     while started.elapsed() < EVAL_INTERVAL {
       let block = now_block().ok_or("QueryPerformanceCounter failed")?;

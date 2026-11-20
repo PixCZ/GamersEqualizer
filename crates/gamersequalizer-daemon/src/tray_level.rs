@@ -7,8 +7,9 @@
 //! repaints: Explorer keeps the last icon it was sent, so sending rarely is all there is to save.
 //!
 //! The level costs nothing extra to produce: the mic chain measures it anyway and the service
-//! mirrors its telemetry for the window. Here it is one number read per service-loop step, to
-//! keep the loudest moment of the second (the chain's value covers only the last ~30 ms).
+//! mirrors its telemetry for the window. The mirror keeps the loudest value it copied
+//! (`apo_link::take_out_level_peak`; the chain's value covers only the last ~30 ms), so the
+//! service loop need not tick fast while an app records.
 
 use crate::ui::prefs::{self, UiPrefs};
 use gamersequalizer_common::shm::ShmHeader;
@@ -48,8 +49,6 @@ pub struct LevelMeter {
   status: &'static str,
   /// The telemetry sequence at the last tick; None until the bars have followed for one.
   seq: Option<u32>,
-  /// Highest level since the last tick, dBFS x 10.
-  peak_db_x10: i32,
   step: Option<u8>,
 }
 
@@ -62,16 +61,7 @@ impl LevelMeter {
       follows: false,
       status: "",
       seq: None,
-      peak_db_x10: i32::MIN,
       step: None,
-    }
-  }
-
-  /// Every service-loop step: keeps the loudest moment for the next tick. One atomic read, and
-  /// only while the bars follow.
-  pub fn sample(&mut self, header: Option<&ShmHeader>) {
-    if let Some(h) = header.filter(|_| self.follows) {
-      self.peak_db_x10 = self.peak_db_x10.max(h.aec_out_level_db_x10.load(Ordering::Relaxed));
     }
   }
 
@@ -84,7 +74,8 @@ impl LevelMeter {
     icon_rect: impl FnOnce() -> Option<Rect>,
   ) -> Option<u8> {
     self.check(mic_active, warning, icon_rect);
-    let peak = std::mem::replace(&mut self.peak_db_x10, i32::MIN);
+    // Taken on every tick, so a second the bars did not follow is not drawn later.
+    let peak = crate::win_audio::apo_link::take_out_level_peak();
     let Some(h) = header.filter(|_| self.follows) else {
       self.seq = None;
       self.step = None;

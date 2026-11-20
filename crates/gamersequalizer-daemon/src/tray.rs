@@ -16,8 +16,9 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, MSG, PM_REMOVE, PeekMessageW, PostMessageW, SW_RESTORE,
-  SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow, TranslateMessage, WM_CLOSE,
+  DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, MSG, MsgWaitForMultipleObjects, PM_REMOVE,
+  PeekMessageW, PostMessageW, QS_ALLINPUT, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
+  TranslateMessage, WM_CLOSE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -215,7 +216,6 @@ impl TrayHost {
     }
     let tray = self.tray.as_ref()?;
 
-    self.level.sample(header);
     let (mut mic_changed, mut level) = (false, self.level_shown);
     if self.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
@@ -311,6 +311,16 @@ fn pump_messages() {
       let _ = TranslateMessage(&msg);
       DispatchMessageW(&msg);
     }
+  }
+}
+
+/// Sleeps up to `timeout`, but a new message for this thread (a click on the icon, its menu) ends
+/// it at once: the long idle wait of the service loop keeps the icon as quick as before.
+pub fn wait_for_messages(timeout: Duration) {
+  let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+  // SAFETY: no handles; only waits on this thread's message queue.
+  unsafe {
+    let _ = MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT);
   }
 }
 

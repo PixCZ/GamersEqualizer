@@ -2,7 +2,8 @@
 //! where the CPU time went. Each process (service, window) writes one line with the time of
 //! its threads; the service adds one with the time our effects took inside audiodg, which an
 //! APO built with the same feature counts (`gamersequalizer_mic_chain::cpu_stats`). Debug lines
-//! reach the log file only with "Save debug to disk" on. Never ship a build with it.
+//! reach the log file only with "Save debug to disk" on. The service loop adds one line with the
+//! CPU time of each of its sections (`LoopSections`). Never ship a build with it.
 
 use gamersequalizer_mic_chain::cpu_stats::{CpuStatsMap, EffectTime};
 use log::{debug, warn};
@@ -16,8 +17,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
   CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
 };
 use windows::Win32::System::Threading::{
-  GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, GetProcessTimes, GetThreadDescription, GetThreadTimes,
-  OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
+  GetCurrentProcess, GetCurrentProcessId, GetCurrentThread, GetCurrentThreadId, GetProcessTimes, GetThreadDescription,
+  GetThreadTimes, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
 };
 
 const INTERVAL: Duration = Duration::from_secs(60);
@@ -51,6 +52,23 @@ struct Effects {
   seen: [EffectRead; 3],
   /// Why there were no numbers last time; logged when it changes.
   error: String,
+}
+
+/// CPU of each named section of the service loop (`timed!` in `daemon.rs`), on the loop's thread.
+/// Cycles are exact for short sections; they are turned into time with the thread's own CPU time
+/// over the minute, so the line agrees with the `main` share of the `[Cpu] service` line.
+pub struct LoopSections {
+  since: Instant,
+  /// This thread's cycles and CPU time (100 ns) when the minute began.
+  start: (u64, u64),
+  /// Cycles and calls per section.
+  sections: BTreeMap<&'static str, (u64, u32)>,
+}
+
+// The `windows` crate has it behind a feature (`Win32_System_WindowsProgramming`) nothing else needs.
+#[link(name = "kernel32")]
+unsafe extern "system" {
+  fn QueryThreadCycleTime(thread: HANDLE, cycles: *mut u64) -> i32;
 }
 
 /// Call once from the main thread, after the logger is up. `service`: this process is the
@@ -108,6 +126,67 @@ impl Effects {
     }
     self.seen = now;
   }
+}
+
+impl LoopSections {
+  pub fn begin() -> Self {
+    Self { since: Instant::now(), start: (thread_cycles(), own_thread_time()), sections: BTreeMap::new() }
+  }
+
+  /// Where a section begins; hand it to `stop`.
+  pub fn start(&self) -> u64 {
+    thread_cycles()
+  }
+
+  /// Counts the section begun at `started`; once a minute logs the line and starts the next minute.
+  pub fn stop(&mut self, name: &'static str, started: u64) {
+    let (cycles, calls) = self.sections.entry(name).or_default();
+    *cycles += thread_cycles().saturating_sub(started);
+    *calls += 1;
+    if self.since.elapsed() >= INTERVAL {
+      let elapsed = self.since.elapsed();
+      let (cycles, ticks) = (thread_cycles(), own_thread_time());
+      let line =
+        sections_line(&self.sections, cycles.saturating_sub(self.start.0), ticks.saturating_sub(self.start.1), elapsed);
+      debug!("[Cpu] service loop sections, {:.0} s: {line}", elapsed.as_secs_f64());
+      *self = Self::begin();
+    }
+  }
+}
+
+/// Each section's share of a core and its calls, the busiest first. `thread_cycles` and
+/// `thread_ticks` (100 ns): the whole loop thread in `elapsed`, which converts cycles to time.
+fn sections_line(
+  sections: &BTreeMap<&'static str, (u64, u32)>,
+  thread_cycles: u64,
+  thread_ticks: u64,
+  elapsed: Duration,
+) -> String {
+  let thread_percent = thread_ticks as f64 / 1e7 / elapsed.as_secs_f64().max(1e-3) * 100.0;
+  let percent = |cycles: u64| thread_percent * cycles as f64 / thread_cycles.max(1) as f64;
+  let mut sorted: Vec<_> = sections.iter().collect();
+  sorted.sort_by_key(|(_, (cycles, _))| Reverse(*cycles));
+  let timed: u64 = sorted.iter().map(|(_, (cycles, _))| cycles).sum();
+  let mut parts: Vec<String> =
+    sorted.iter().map(|(name, (cycles, calls))| format!("{name} {:.3} % ({calls})", percent(*cycles))).collect();
+  parts.push(format!("untimed {:.3} %", percent(thread_cycles.saturating_sub(timed))));
+  format!("thread {thread_percent:.3} % of a core: {}", parts.join(", "))
+}
+
+/// Cycles this thread ran since it started; 0 when Windows does not say.
+fn thread_cycles() -> u64 {
+  let mut cycles = 0;
+  // SAFETY: the pseudo handle of the current thread is always valid; `cycles` is a local the call fills.
+  let _ = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+  cycles
+}
+
+/// Kernel + user time of this thread since it started, in 100 ns; 0 when Windows does not say.
+fn own_thread_time() -> u64 {
+  let (mut created, mut exited, mut kernel, mut user) = <(FILETIME, FILETIME, FILETIME, FILETIME)>::default();
+  // SAFETY: the pseudo handle of the current thread is always valid; the four locals are filled by the call.
+  let read = unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) };
+  if read.is_ok() { ticks(kernel) + ticks(user) } else { 0 }
 }
 
 fn read(effect: &EffectTime) -> EffectRead {
@@ -276,6 +355,17 @@ mod tests {
       effects_line(&before, &now, MINUTE).as_deref(),
       Some("mic chain 2.00 % of a core (6000 blocks, average 0.200 ms, longest 0.400 ms)")
     );
+  }
+
+  #[test]
+  fn sections_share_the_thread_time_by_cycles() {
+    let sections = BTreeMap::from([("cheap", (100, 240)), ("sync", (600, 240))]);
+    // The thread used 0.6 s (1 %) and 1000 cycles in the minute.
+    assert_eq!(
+      sections_line(&sections, 1000, 6_000_000, MINUTE),
+      "thread 1.000 % of a core: sync 0.600 % (240), cheap 0.100 % (240), untimed 0.300 %"
+    );
+    assert_eq!(sections_line(&BTreeMap::new(), 0, 0, MINUTE), "thread 0.000 % of a core: untimed 0.000 %");
   }
 
   fn thread(id: u32, name: &str, cpu: u64) -> ThreadTime {
