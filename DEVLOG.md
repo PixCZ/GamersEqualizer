@@ -3536,7 +3536,8 @@ effects in audiodg 0.00 %. About 44 wakeups a second came from the service threa
   A tray message ends the wait at once (`tray::wait_for_messages`).
 - `StreamRouter` sleeps 500 ms while no Chat or Game session plays (`CHAT_OR_GAME_PLAYING`) instead of
   metering every 5 ms. Ducking only lowers streams the router paired, and it pairs Chat and Game sessions
-  only, so a lone Media stream (a browser) counts as idle.
+  only, so a lone Media stream (a browser) counts as idle. With a chat or media EQ on, every playing
+  session is still metered (the EQ needs its stream paired).
 - The tray's mic level keeps its peak where each new value arrives (`apo_link.rs`), so no loop has to tick
   fast to sample it.
 - The output APO writes the echo reference only for a reader (mic chain live with AEC on, or mix mode).
@@ -3586,10 +3587,32 @@ log shows no CPU sleep depth; that needs `powercfg /sleepstudy` or `/energy` on 
   about 0.2 % of a core together: slower would show the muted-mic warning and the red tray icon late.
 - Sidetone still polls every 250 ms when off (two device lookups): slower would delay turning it on by up
   to 1 s, `BEAT_FRESH` is 1 s.
-- Not done: the input voice detector still runs at noise suppression 0 (about 2.8 % of a core in the mic
-  chain per the code comment, `ai_denoiser/mod.rs`); the telemetry, the window and maybe the input gain
-  read it, so skipping it needs a look at every reader.
+- The input voice detector (about 2.8 % of a core per the code comment, `ai_denoiser/mod.rs`) still runs
+  at noise suppression 0 while the leveler is on: the leveler learns from it, and the automatic input gain
+  goes by the leveler's speech time. With the leveler off too it rests (see the audit below).
+
+**After an audit of the whole app (same day, read on macOS, not run)**
+
+- The router's 500 ms sleep above was only taken with no session at all: a lone browser under Automatic
+  ChatMix was still metered 200 times a second. `meters_needed` now decides.
+- A chat stream's voice detector (Silero, stream APO) rests while no Game stream played within 500 ms
+  (`ducking::game_playing`): without a game nothing is lowered, in mix mode neither.
+- Noise suppression off and leveler off: the mic chain runs no network (`set_voice_wanted`). The debug
+  log's voice share reads 0 % then.
+- `Ducking::tick` returns right after the tuning check once "off" is logged and nothing is lowered.
+- Switching back to DeepFilterNet 3 (from another model, or from "Off") played its first 40 ms from the
+  frames it held when it last ran. `reset_engines` now silences the newcomer's first latency, as `flush`
+  did for a pause.
+- The sidetone's three frame-based noise suppressors were built for every mic APO instance. Now only for
+  a pair that uses one: before audio starts (`SidetoneTap::preload`), or after a mode change on a
+  short-lived thread while the expander runs (`poll_denoiser`, as the mic chain loads a model).
+- Left as they are: the sidetone tap writes while no output APO reads (the service opens the output
+  because the tap feeds, so the tap cannot wait for a reader without a new handshake), the 1 s session
+  pass while the window is open, and a window that is covered but not minimized repaints at full rate
+  (egui 0.37 reports no occlusion).
 
 **Not tried live:** a new app starting while the service is idle, a device change, an audio service
-restart, the tray icon's reaction on the new timer wait, and a busy service. The running build has
+restart, the tray icon's reaction on the new timer wait, a busy service, and everything under the audit
+above (a game starting while only a browser plays, the first word in chat after a game starts, a
+sidetone noise mode picked while an app records). The running build has
 `cpu-stats`: rebuild without it before a tester ZIP.
