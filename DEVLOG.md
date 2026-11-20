@@ -3650,3 +3650,20 @@ restart, the tray icon's reaction on the new timer wait, a busy service, and eve
 above (a game starting while only a browser plays, the first word in chat after a game starts, a
 sidetone noise mode picked while an app records). The running build has
 `cpu-stats`: rebuild without it before a tester ZIP.
+
+### The tray icon follows a registry notification (2026-11-20)
+
+- Reported: switching a recorder on took far too long to change the icon, but no faster polling.
+  Nothing else tells the service that an app opened a microphone (no events or pipes between the
+  processes, only shared-memory atomics), so the service watches
+  `HKCU\...\CapabilityAccessManager\ConsentStore\microphone` (subtree) with `RegNotifyChangeKeyValue`
+  (`mic_usage::MicStoreWatch`): Windows writes the app's start / stop time there. The idle wait of the
+  service loop (`tray::wait_for_messages`) also waits on that event; a change is read after a 100 ms
+  gap (`MIC_RESCAN_GAP`), without the 400 ms scan cache. Measured: the icon follows in about 100 ms
+  instead of up to ~1.6 s; the 1 s check stays as the fallback.
+- Found in review: the wait resets the auto-reset event that ended it, so the tray never saw the change
+  and never re-armed the watch (back to the 1 s check with the window closed). `wait` now returns
+  whether the event ended it (test `the_idle_wait_says_when_the_event_ended_it`). The microphone level
+  keeps its own second, apart from the check.
+- Not tried: a stop (app closes the microphone) is assumed to write the same key; the release notes
+  promise only the start.
