@@ -138,11 +138,11 @@ impl OutputReference {
     apo.tick(local, tap_active);
     self.log_change(status);
     // After `apo.tick`: a mic chain that just started makes the next wait short.
-    let duck_playing = h.duck_enabled.load(Ordering::Relaxed) && super::stream_router::chat_or_game_playing();
+    let duck_playing = h.duck_enabled.load(Ordering::Relaxed) && super::stream_router::game_session_playing();
     worker::busy_reason(&[
       (apo.mix_wants_reference(), "mix mode needs the speaker reference", worker::TICK),
       (apo.mic_dsp_live(), "an app records through the mic filter", SYNC_INTERVAL),
-      (duck_playing, "Automatic ChatMix with chat or game streams playing", SYNC_INTERVAL),
+      (duck_playing, "Automatic ChatMix with a game playing", SYNC_INTERVAL),
     ])
   }
 

@@ -367,18 +367,18 @@ pub(super) fn run_background_daemon() {
     });
     timed!(sections, "output_eq", output_eq.tick(true, win_audio.chatmix.master_device_id.clone(), header));
 
-    // Idle: Automatic ChatMix off or without a chat / game stream (session ducking and mix mode run
-    // through here; the router finds a new stream within 500 ms, and pairing it takes ~1.5 s
-    // anyway) and the window closed (its sliders reach the per-app session volumes through here).
+    // Idle: Automatic ChatMix off or without a game's session (session ducking and mix mode run
+    // through here and lower games only; the router finds a new session within 500 ms, and pairing
+    // its stream takes ~1.5 s anyway) and the window closed (its sliders reach the per-app session volumes through here).
     // An app that records needs no fast pass: the tray's once-a-second check and frame, the mic
     // volume link and the chain logs (250 ms) fit the idle tick, and the level meter's peak is kept
     // by the telemetry mirror. The tray icon stays quick: its messages end the wait, and so does
     // Windows announcing that an app opened or closed a microphone (one pass, the loop stays idle).
     let duck_playing = header.is_some_and(|h| h.duck_enabled.load(Ordering::Relaxed))
-      && win_audio::stream_router::chat_or_game_playing();
+      && win_audio::stream_router::game_session_playing();
     let busy = win_audio::worker::busy_reason(&[
       (timed!(sections, "find_window", tray::find_window().is_some()), "window open", win_audio::worker::TICK),
-      (duck_playing, "Automatic ChatMix with chat or game streams playing", win_audio::worker::TICK),
+      (duck_playing, "Automatic ChatMix with a game playing", win_audio::worker::TICK),
     ]);
     let was_idle = std::mem::replace(&mut idle, idle_log.idle("service loop", busy));
     if was_idle && !idle {

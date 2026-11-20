@@ -245,7 +245,7 @@ impl Status {
       return "off".to_string();
     }
     let chat = self.chat.as_ref().map_or_else(
-      || "not paired (not on the Chat channel, on another output device, or silent so far)".to_string(),
+      || "not paired (not on the Chat channel, on another output device, silent so far, or no game plays)".to_string(),
       |(exe, detector)| format!("{exe}, detector {detector}"),
     );
     let game = self

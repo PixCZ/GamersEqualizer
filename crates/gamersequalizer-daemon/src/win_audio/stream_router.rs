@@ -3,8 +3,8 @@
 //! which streams are the game and which the chat (`paired_streams`, read by `ducking`).
 //!
 //! The APO runs inside audiodg and can't see the app. This thread samples every playing audio
-//! session's peak meter on the default output every 5 ms (with none playing it only re-reads the
-//! session list every 500 ms) and pairs each instance with the
+//! session's peak meter on the default output every 5 ms (with nothing to pair, `meters_needed`, it
+//! only re-reads the session list every 500 ms) and pairs each instance with the
 //! session whose meter its level envelope reproduces (`streams::hold_match`; measured:
 //! the right app 93-100 %, others <= 6 %). The channel then comes from the app's exe, the
 //! same lists the ChatMix volumes use.
@@ -89,10 +89,10 @@ pub struct PairedStream {
 /// thread (`apo_link`) and needs the exe names, which only this thread knows: the table carries the
 /// bus but no names. Held only to copy the list in or out.
 static PAIRED: Mutex<Vec<PairedStream>> = Mutex::new(Vec::new());
-/// A Chat or Game session plays on the default output (as of the last session refresh, every
-/// 500 ms while routing): without one Automatic ChatMix has nothing to lower and the service and
-/// reference loops may idle (`chat_or_game_playing`).
-static CHAT_OR_GAME_PLAYING: AtomicBool = AtomicBool::new(false);
+/// A Game session plays on the default output (as of the last session refresh, every 500 ms while
+/// routing): without one Automatic ChatMix has nothing to lower and the service and reference
+/// loops may idle (`game_session_playing`), also while a chat app keeps a stream open.
+static GAME_SESSION_PLAYING: AtomicBool = AtomicBool::new(false);
 
 /// Max meter peak per envelope block, the last `HISTORY` blocks.
 struct PeakHistory {
@@ -141,7 +141,7 @@ pub fn spawn() -> Option<std::thread::JoinHandle<()>> {
           // Device gone / audio restarted: start over with fresh COM objects.
           router.manager = None;
           router.sessions.clear();
-          CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
+          GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
           std::thread::sleep(SLEEP_ON_ERROR);
         }
       }
@@ -158,10 +158,10 @@ pub fn bus_for_exe(exe: &str) -> StreamBus {
   }
 }
 
-/// See `CHAT_OR_GAME_PLAYING`. False while the router does not route (no APO, another console
+/// See `GAME_SESSION_PLAYING`. False while the router does not route (no APO, another console
 /// user, nothing on that needs pairing): no pairing, nothing Automatic ChatMix could lower.
-pub fn chat_or_game_playing() -> bool {
-  CHAT_OR_GAME_PLAYING.load(Ordering::Relaxed)
+pub fn game_session_playing() -> bool {
+  GAME_SESSION_PLAYING.load(Ordering::Relaxed)
 }
 
 /// The paired chat and game streams (see `PAIRED`); empty if its lock was poisoned.
@@ -190,12 +190,12 @@ impl Router {
     self.ensure_apo();
     let Some(apo) = self.apo.as_ref() else {
       // No stream APO installed / no audio yet: nothing to route.
-      CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
+      GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
       std::thread::sleep(OPEN_RETRY);
       return Ok(());
     };
     if !self.console.is_owner() {
-      CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
+      GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
       super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       return Ok(());
     }
@@ -217,14 +217,14 @@ impl Router {
       );
     }
     if !active {
-      CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
+      GAME_SESSION_PLAYING.store(false, Ordering::Relaxed);
       super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       return Ok(());
     }
     self.refresh_sessions()?;
-    let playing = self.sessions.values().any(|s| matches!(s.bus, StreamBus::Chat | StreamBus::Game));
-    CHAT_OR_GAME_PLAYING.store(playing, Ordering::Relaxed);
-    if !meters_needed(!self.sessions.is_empty(), eq_active, playing) {
+    let game_playing = self.sessions.values().any(|s| s.bus == StreamBus::Game);
+    GAME_SESSION_PLAYING.store(game_playing, Ordering::Relaxed);
+    if !meters_needed(!self.sessions.is_empty(), eq_active, game_playing) {
       // Nothing to pair: no meter to sample. Sessions are re-read just as often as while sampling,
       // so a stream that starts is found as soon as before; the evaluation still clears the buses
       // and `PAIRED` of streams that ended.
@@ -437,10 +437,12 @@ impl Router {
 }
 
 /// Whether the sessions' meters are sampled (200 calls a second into the audio service). A stream
-/// EQ pairs every playing session; Automatic ChatMix alone pairs Chat and Game sessions only, so a
-/// lone Media session (a browser) needs no meter then.
-fn meters_needed(any_session: bool, eq_active: bool, chat_or_game_playing: bool) -> bool {
-  any_session && (eq_active || chat_or_game_playing)
+/// EQ pairs every playing session. Automatic ChatMix alone lowers Game streams only, so without a
+/// Game session it needs no pairing: a browser, or a chat app that keeps its stream open after the
+/// game ended, costs no meter then. Known limit: a chat stream that starts without a game is paired
+/// only once a game plays, from ~1.5 s of its audio after that.
+fn meters_needed(any_session: bool, eq_active: bool, game_session_playing: bool) -> bool {
+  any_session && (eq_active || game_session_playing)
 }
 
 /// The silent unpaired Game session the silent unpaired streams belong to: there must be one such
@@ -514,8 +516,8 @@ mod tests {
   #[test]
   fn a_lone_media_session_is_metered_only_for_a_stream_eq() {
     assert!(!meters_needed(false, true, false), "nothing plays");
-    assert!(!meters_needed(true, false, false), "Automatic ChatMix alone, only a browser plays");
-    assert!(meters_needed(true, false, true), "a chat or a game plays");
+    assert!(!meters_needed(true, false, false), "Automatic ChatMix alone: a browser or a chat app, no game");
+    assert!(meters_needed(true, false, true), "a game plays");
     assert!(meters_needed(true, true, false), "the media EQ needs the browser's stream paired");
   }
 

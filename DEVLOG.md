@@ -3534,8 +3534,8 @@ effects in audiodg 0.00 %. About 44 wakeups a second came from the service threa
   window closed, no app records, no Chat or Game stream plays under Automatic ChatMix. Each reason that
   keeps them busy has its own cadence (`worker::busy_reason`); one `[Idle]` debug line per change names it.
   A tray message ends the wait at once (`tray::wait_for_messages`).
-- `StreamRouter` sleeps 500 ms while no Chat or Game session plays (`CHAT_OR_GAME_PLAYING`) instead of
-  metering every 5 ms. Ducking only lowers streams the router paired, and it pairs Chat and Game sessions
+- `StreamRouter` sleeps 500 ms while no Chat or Game session plays (later: no Game session, see the
+  2 h log below) instead of metering every 5 ms. Ducking only lowers streams the router paired, and it pairs Chat and Game sessions
   only, so a lone Media stream (a browser) counts as idle. With a chat or media EQ on, every playing
   session is still metered (the EQ needs its stream paired).
 - The tray's mic level keeps its peak where each new value arrives (`apo_link.rs`), so no loop has to tick
@@ -3611,7 +3611,27 @@ log shows no CPU sleep depth; that needs `powercfg /sleepstudy` or `/energy` on 
   pass while the window is open, and a window that is covered but not minimized repaints at full rate
   (egui 0.37 reports no occlusion).
 
-**Not tried live:** a new app starting while the service is idle, a device change, an audio service
+**A 2 h log with a game (The Division 2, mix mode under Dolby Atmos)**
+
+| Period                   | Service wakeups/s | Of that `StreamRouter` |
+| ------------------------ | ----------------- | ---------------------- |
+| Before the game          |              36.7 |                      ~ |
+| Game, mix mode           |             225.0 |                   ~180 |
+| After the game, chat app |             178.2 |                   ~155 |
+| Window closed, idle      |              14.5 |                    2.0 |
+
+- After the game ended the router kept metering every 5 ms and both loops kept their fast ticks: a chat
+  app (Signal) held an active session, silent. Automatic ChatMix lowers Game streams only, so the flag
+  the three go by is now "a Game session plays" (`game_session_playing`), not "a Chat or Game session".
+  Limit: a chat stream that starts without a game is paired once a game plays, from ~1.5 s of its audio.
+- During a game nothing changed: the router's meters only pair streams with apps (`hold_match` needs a
+  sample in every 10 ms block, so no coarser rate), the levels the ducking goes by come from the stream
+  table and the output mix. Stopping the meters once every stream is paired was considered and not done.
+- With a chat or media EQ on, a silent open session is still metered (the EQ needs its stream paired).
+
+**Not tried live:** a chat app open and silent after a game ends (`[Cpu] wakeups` should fall to the idle
+row, `[Idle]` lines should say idle), a game starting while a chat app is already open, a new app
+starting while the service is idle, a device change, an audio service
 restart, the tray icon's reaction on the new timer wait, a busy service, and everything under the audit
 above (a game starting while only a browser plays, the first word in chat after a game starts, a
 sidetone noise mode picked while an app records). The running build has
