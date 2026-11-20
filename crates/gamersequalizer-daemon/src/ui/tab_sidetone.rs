@@ -10,7 +10,7 @@ use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::sidetone::{
   GATE_MARGIN_DB_MAX, GATE_MARGIN_DB_MIN, GATE_RANGE_DB_MAX, NoiseMode, SidetonePair, VOLUME_MAX, device_hash,
 };
-use gamersequalizer_mic_chain::sidetone_denoise::nominal_delay_ms;
+use gamersequalizer_mic_chain::sidetone_denoise::{SAMPLE_RATE, nominal_delay_ms};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -252,12 +252,13 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   // -------------------------------------------------------------------------------------
   // Card 3: Noise suppression
   // -------------------------------------------------------------------------------------
-  let (active_mode_u32, running_delay_us, gate_db) = state.shm_header().map_or((0, 0, 0.0), |h| {
+  let (active_mode_u32, running_delay_us, gate_db, mic_rate) = state.shm_header().map_or((0, 0, 0.0, 0), |h| {
     let r = Ordering::Relaxed;
     (
       h.sidetone_noise_mode_active.load(r),
       h.sidetone_noise_delay_us.load(r),
       h.sidetone_gate_gain_db_x10.load(r) as f32 / 10.0,
+      h.sidetone_mic_rate.load(r),
     )
   });
   let active_mode = NoiseMode::from_u32(active_mode_u32);
@@ -294,11 +295,13 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
 
     if active_mode_u32 != settings.noise_mode.to_u32() {
       if active_mode == NoiseMode::Expander && settings.noise_mode.is_framed() {
-        theme::status_line(
-          ui,
-          Severity::Warning,
-          tr("Running quiet pauses instead: this mode needs the microphone at 48 kHz."),
-        );
+        // At 48 kHz the mode is being built (a moment after it is picked), or could not be.
+        let why = if mic_rate == SAMPLE_RATE {
+          tr("Running quiet pauses instead: this mode has not started. If this stays, restart the recording app.")
+        } else {
+          tr("Running quiet pauses instead: this mode needs the microphone at 48 kHz.")
+        };
+        theme::status_line(ui, Severity::Warning, why);
       } else if settings.noise_mode == NoiseMode::RnNoise2 && active_mode == NoiseMode::RnNoise {
         theme::status_line(ui, Severity::Warning, tr("Running RNNoise: RNNoise 0.2 could not be loaded."));
       }

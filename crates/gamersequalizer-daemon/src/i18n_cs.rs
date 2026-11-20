@@ -1189,6 +1189,10 @@ pub static CS: &[(&str, &str)] = &[
     "Running quiet pauses instead: this mode needs the microphone at 48 kHz.",
     "Místo toho běží ztišení pauz: tento režim potřebuje mikrofon na 48 kHz.",
   ),
+  (
+    "Running quiet pauses instead: this mode has not started. If this stays, restart the recording app.",
+    "Místo toho běží ztišení pauz: tento režim se nespustil. Pokud to trvá, restartujte nahrávající aplikaci.",
+  ),
   ("Delete…", "Smazat…"),
   (
     "Delete this pair? Its whole sidetone setup goes with it, the EQ included, and cannot be restored.",
