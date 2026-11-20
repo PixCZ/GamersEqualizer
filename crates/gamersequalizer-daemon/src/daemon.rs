@@ -372,7 +372,8 @@ pub(super) fn run_background_daemon() {
     // anyway) and the window closed (its sliders reach the per-app session volumes through here).
     // An app that records needs no fast pass: the tray's once-a-second check and frame, the mic
     // volume link and the chain logs (250 ms) fit the idle tick, and the level meter's peak is kept
-    // by the telemetry mirror. The tray icon stays quick: its messages end the wait.
+    // by the telemetry mirror. The tray icon stays quick: its messages end the wait, and so does
+    // Windows announcing that an app opened or closed a microphone (one pass, the loop stays idle).
     let duck_playing = header.is_some_and(|h| h.duck_enabled.load(Ordering::Relaxed))
       && win_audio::stream_router::chat_or_game_playing();
     let busy = win_audio::worker::busy_reason(&[
@@ -386,7 +387,7 @@ pub(super) fn run_background_daemon() {
     }
     let wait = win_audio::worker::tick_wait(win_audio::ducking::mix_fast(), busy);
     // Idle: on the wake grid with the other service threads (`worker::grid_wait`).
-    timed!(sections, "wait", if idle { tray::wait_for_messages(wait) } else { win_audio::worker::sleep(wait) });
+    timed!(sections, "wait", if idle { tray_host.wait(wait) } else { win_audio::worker::sleep(wait) });
   }
 
   // A game lowered by mix mode gets its volume back before the service goes (or, if that fails,

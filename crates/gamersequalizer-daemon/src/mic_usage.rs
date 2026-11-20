@@ -6,10 +6,13 @@
 //! Also: "an app records, but the microphone is muted / at 0 % / gone" (`silenced`), the
 //! classic "I talked for a minute and nobody heard me". The tray and the window warn about it.
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use std::sync::atomic::{AtomicBool, Ordering};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Registry::{
-  HKEY, HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_QWORD, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW,
+  HKEY, HKEY_CURRENT_USER, KEY_NOTIFY, KEY_READ, REG_NOTIFY_CHANGE_LAST_SET, REG_NOTIFY_CHANGE_NAME, REG_SAM_FLAGS,
+  RRF_RT_REG_QWORD, RegCloseKey, RegEnumKeyExW, RegGetValueW, RegNotifyChangeKeyValue, RegOpenKeyExW,
 };
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 const MIC_STORE: &str = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
@@ -26,6 +29,76 @@ pub enum Silenced {
   ZeroVolume,
   /// No active microphone at all (disabled in Windows or unplugged).
   NoMicrophone,
+}
+
+/// Windows' own announcement that something under ConsentStore\microphone changed (an app opened
+/// or closed a microphone, a new app key): the tray waits on `event` with its messages.
+pub struct MicStoreWatch {
+  key: HKEY,
+  /// Auto-reset: `signaled` consumes it.
+  event: HANDLE,
+}
+
+/// Set by `invalidate`: the next scan reads the registry however young the last one is.
+static STALE: AtomicBool = AtomicBool::new(false);
+
+impl MicStoreWatch {
+  /// Opens the key and arms the first notification. Err: the key does not exist yet (no app ever
+  /// used a microphone) or cannot be watched; the caller retries later.
+  pub fn new() -> Result<Self, String> {
+    // SAFETY: no attributes and no name; the handle is owned by the watch (closed in `drop`) or closed below.
+    let event =
+      unsafe { CreateEventW(None, false, false, PCWSTR::null()) }.map_err(|e| format!("CreateEventW: {e}"))?;
+    let Some(key) = open_key_with(HKEY_CURRENT_USER, &HSTRING::from(MIC_STORE), KEY_NOTIFY) else {
+      // SAFETY: the event created above, not shared with anyone yet.
+      unsafe {
+        let _ = CloseHandle(event);
+      }
+      return Err("ConsentStore\\microphone cannot be opened (no app has used a microphone yet?)".to_string());
+    };
+    let watch = Self { key, event };
+    watch.arm()?;
+    Ok(watch)
+  }
+
+  /// RegNotifyChangeKeyValue fires once: arm it again after each signal. Err: the key was deleted
+  /// (or recreated), the watch must be opened anew.
+  pub fn arm(&self) -> Result<(), String> {
+    // SAFETY: key and event are owned by `self` and live until `drop`; asynchronous, so the call
+    // returns at once and Windows signals the event. The service loop thread that arms it lives as
+    // long as the watch (a thread that ends also signals the event, harmlessly).
+    let res = unsafe {
+      RegNotifyChangeKeyValue(
+        self.key,
+        true,
+        REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+        Some(self.event),
+        true,
+      )
+    };
+    if res == ERROR_SUCCESS { Ok(()) } else { Err(format!("RegNotifyChangeKeyValue: {res:?}")) }
+  }
+
+  /// For a wait together with other handles.
+  pub fn event(&self) -> HANDLE {
+    self.event
+  }
+
+  /// True once after each change Windows announced (resets the event).
+  pub fn signaled(&self) -> bool {
+    // SAFETY: the event is owned by `self`; a zero timeout only polls it.
+    unsafe { WaitForSingleObject(self.event, 0) == WAIT_OBJECT_0 }
+  }
+}
+
+impl Drop for MicStoreWatch {
+  fn drop(&mut self) {
+    close_key(self.key);
+    // SAFETY: the event this watch created, closed once here.
+    unsafe {
+      let _ = CloseHandle(self.event);
+    }
+  }
 }
 
 /// Apps recording from the mic in use (`mic_id`: Windows default capture endpoint) while it
@@ -80,6 +153,12 @@ pub fn longest_recording_app() -> Option<String> {
   recording().into_iter().min_by_key(|(since, _)| *since).map(|(_, name)| name)
 }
 
+/// A change was announced (`MicStoreWatch`): the next scan skips the `SCAN_MAX_AGE` cache, so every
+/// caller in this process (tray, health check, sidetone) sees it. The caller bounds how often.
+pub fn invalidate() {
+  STALE.store(true, Ordering::Relaxed);
+}
+
 /// (recording since, display name) of each app that keeps a microphone open; see `SCAN_MAX_AGE`.
 fn recording() -> Vec<(u64, String)> {
   use std::sync::Mutex;
@@ -87,7 +166,8 @@ fn recording() -> Vec<(u64, String)> {
   type Scan = (Instant, Vec<(u64, String)>);
   static LAST: Mutex<Option<Scan>> = Mutex::new(None);
   let Ok(mut last) = LAST.lock() else { return scan_recording_apps() };
-  if let Some((at, apps)) = last.as_ref()
+  if !STALE.swap(false, Ordering::Relaxed)
+    && let Some((at, apps)) = last.as_ref()
     && at.elapsed() < SCAN_MAX_AGE
   {
     return apps.clone();
@@ -161,9 +241,13 @@ fn read_qword(parent: HKEY, subkey: &HSTRING, value: &str) -> Option<u64> {
 }
 
 fn open_key(parent: HKEY, path: &HSTRING) -> Option<HKEY> {
+  open_key_with(parent, path, KEY_READ)
+}
+
+fn open_key_with(parent: HKEY, path: &HSTRING, access: REG_SAM_FLAGS) -> Option<HKEY> {
   let mut key = HKEY::default();
   // SAFETY: a NUL-terminated path that outlives the call; the key is closed by the caller (`close_key`).
-  let res = unsafe { RegOpenKeyExW(parent, PCWSTR(path.as_ptr()), Some(0), KEY_READ, &mut key) };
+  let res = unsafe { RegOpenKeyExW(parent, PCWSTR(path.as_ptr()), Some(0), access, &mut key) };
   (res == ERROR_SUCCESS).then_some(key)
 }
 
