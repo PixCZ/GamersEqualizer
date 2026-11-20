@@ -13,7 +13,10 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{
+  CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer, TIMER_ALL_ACCESS,
+};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
   DispatchMessageW, FindWindowW, GetForegroundWindow, IsIconic, MSG, MsgWaitForMultipleObjects, PM_REMOVE,
@@ -217,7 +220,7 @@ impl TrayHost {
     let tray = self.tray.as_ref()?;
 
     let (mut mic_changed, mut level) = (false, self.level_shown);
-    if self.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_CHECK_INTERVAL) {
+    if crate::win_audio::worker::due(self.mic_checked_at.map(|t| t.elapsed()), MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
       let active = crate::mic_usage::microphone_in_use();
       if active != self.mic_active {
@@ -315,13 +318,29 @@ fn pump_messages() {
 }
 
 /// Sleeps up to `timeout`, but a new message for this thread (a click on the icon, its menu) ends
-/// it at once: the long idle wait of the service loop keeps the icon as quick as before.
+/// it at once: the long idle wait of the service loop keeps the icon as quick as before. A
+/// high-resolution timer ends the wait: the call's own timeout ends on the system clock tick (up
+/// to 15.6 ms late), off the wake grid the other service threads sleep on (`worker::grid_wait`).
 pub fn wait_for_messages(timeout: Duration) {
   let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
-  // SAFETY: no handles; only waits on this thread's message queue.
+  // Relative due time in 100 ns units (negative = relative).
+  let due = -i64::try_from(timeout.as_nanos() / 100).unwrap_or(i64::MAX);
+  // SAFETY: the timer is created, armed with `due` (a local read during the call), waited on and
+  // closed here, once; without it the wait falls back to the plain timeout.
   unsafe {
-    let _ = MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT);
+    let timer = CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0);
+    let armed = timer.as_ref().ok().filter(|t| SetWaitableTimer(**t, &due, 0, None, None, false).is_ok());
+    let _ = match armed {
+      // The timeout only backs the timer up.
+      Some(t) => MsgWaitForMultipleObjects(Some(&[*t]), false, ms.saturating_add(100), QS_ALLINPUT),
+      None => MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT),
+    };
+    if let Ok(t) = timer {
+      let _ = CloseHandle(t);
+    }
   }
+  #[cfg(feature = "cpu-stats")]
+  crate::cpu_stats::woke();
 }
 
 fn tray_icon(mic_active: bool, warning: bool, level: Option<u8>) -> Result<Icon, String> {

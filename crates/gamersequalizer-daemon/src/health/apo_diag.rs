@@ -95,7 +95,10 @@ impl HealthMonitor {
     }
     self.notes_read_at = Some(Instant::now());
     let (tx, rx) = mpsc::channel();
+    // Started from the service loop's pass, so on its wake grid.
     let started = std::thread::Builder::new().name("apo-notes".into()).spawn(move || {
+      #[cfg(feature = "cpu-stats")]
+      crate::cpu_stats::woke();
       let read = apo_notes::newest().zip(apo_notes::windows_events()).map(|(mut notes, windows)| {
         notes.extend(windows);
         // Newest first, like the notes themselves (ISO times sort as text).

@@ -28,7 +28,7 @@ macro_rules! timed {
 /// Windows volumes and default devices are read again. `since`: time since the last read, None
 /// when there was none or the loop just turned busy (the reads then follow at once).
 fn volume_sync_due(since: Option<Duration>, idle: bool) -> bool {
-  since.is_none_or(|s| s >= if idle { IDLE_VOLUME_SYNC_INTERVAL } else { VOLUME_SYNC_INTERVAL })
+  win_audio::worker::due(since, if idle { IDLE_VOLUME_SYNC_INTERVAL } else { VOLUME_SYNC_INTERVAL })
 }
 
 /// `device_ids::heal` over all connected endpoints, then tells the running processes: the
@@ -189,6 +189,7 @@ pub(super) fn run_background_daemon() {
     let devices_changed = timed!(sections, "poll_device_changed", win_audio.endpoint_lock.poll_device_changed());
     if devices_changed {
       timed!(sections, "heal_device_ids", heal_device_ids(&win_audio, storage.base_dir(), shm_ptr));
+      win_audio.chatmix.outputs_changed();
     }
     // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop);
     // the header is only read through atomics.
@@ -281,7 +282,7 @@ pub(super) fn run_background_daemon() {
 
       // 1. Sync live Windows master & channel volumes to daemon & SHM (slower while idle). The mic
       // volume link and the chain logs stay at 250 ms: the gain step counts clips per tick.
-      let mic_link_due = last_mic_link.is_none_or(|t| t.elapsed() >= VOLUME_SYNC_INTERVAL);
+      let mic_link_due = win_audio::worker::due(last_mic_link.map(|t| t.elapsed()), VOLUME_SYNC_INTERVAL);
       if mic_link_due {
         last_mic_link = Some(Instant::now());
         // The wish (may be a boost > 100 %) is what the window wrote; Windows only shows <= 100 %.
@@ -348,7 +349,9 @@ pub(super) fn run_background_daemon() {
       win_audio.chatmix.duck_subject = win_audio::ducking::mix_subject();
 
       // Per-app session volumes: fallback mode only, throttled, never against the user's
-      // own mixer changes (`apply_session_mix`).
+      // own mixer changes (`apply_session_mix`). Idle: new sessions come from Windows' own
+      // announcement, the walk over every session is rare.
+      win_audio.chatmix.sessions_idle = idle;
       timed!(sections, "apply_session_mix", win_audio.chatmix.apply_session_mix());
     }
 
@@ -382,7 +385,8 @@ pub(super) fn run_background_daemon() {
       (last_volume_sync, last_output_check) = (None, None);
     }
     let wait = win_audio::worker::tick_wait(win_audio::ducking::mix_fast(), busy);
-    timed!(sections, "wait", if idle { tray::wait_for_messages(wait) } else { std::thread::sleep(wait) });
+    // Idle: on the wake grid with the other service threads (`worker::grid_wait`).
+    timed!(sections, "wait", if idle { tray::wait_for_messages(wait) } else { win_audio::worker::sleep(wait) });
   }
 
   // A game lowered by mix mode gets its volume back before the service goes (or, if that fails,

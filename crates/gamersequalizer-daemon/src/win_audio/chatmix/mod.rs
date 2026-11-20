@@ -20,14 +20,19 @@ use windows_core::Interface;
 
 mod endpoint_volume;
 mod game_duck;
+mod session_watch;
 
 pub use endpoint_volume::*;
 pub use game_duck::GameDuck;
 use game_duck::Look;
+use session_watch::SessionWatch;
 
 /// Session volumes are re-checked this often for new sessions (an app that starts playing);
 /// a channel change applies at once.
 const SESSION_MIX_INTERVAL: Duration = Duration::from_secs(1);
+/// The same while the service is idle and Windows announces new sessions (`SessionWatch`): only
+/// a safety net for a missed announcement. Also how often the announcements are renewed.
+const IDLE_SESSION_MIX_INTERVAL: Duration = Duration::from_secs(15);
 /// Volume steps smaller than this are "the same" (rounding of the permille values).
 const VOLUME_EPSILON: f32 = 0.005;
 
@@ -90,7 +95,13 @@ pub struct ChatMixController {
   /// Windows mixer stays until they move our channel slider.
   session_set: HashMap<String, f32>,
   last_session_targets: Option<(f32, f32, f32)>,
+  /// `app_channels::generation` at the last full pass: a drag or a detected game moves sessions.
+  last_channels_generation: u32,
   last_session_pass: Option<Instant>,
+  /// Set by the service loop when it is idle: new sessions then come from `session_watch`, and
+  /// the full pass is only a safety net. Never set in the window.
+  pub sessions_idle: bool,
+  session_watch: SessionWatch,
   /// Automatic ChatMix's mix mode: the factor its subject game is lowered by (1 = none) and that
   /// game's exe path, set by the service loop (`ducking::game_duck_factor`, `ducking::mix_subject`),
   /// applied by `game_duck`'s rules.
@@ -175,7 +186,10 @@ impl ChatMixController {
       sessions_enabled: true,
       session_set: HashMap::new(),
       last_session_targets: None,
+      last_channels_generation: app_channels::generation(),
       last_session_pass: None,
+      sessions_idle: false,
+      session_watch: SessionWatch::default(),
       duck_factor: 1.0,
       duck_subject: None,
       game_duck: GameDuck::default(),
@@ -484,12 +498,28 @@ impl ChatMixController {
     }
     let (game_vol, chat_vol) = self.get_multipliers();
     let targets = (game_vol, chat_vol, self.get_media_volume());
-    let changed = self.last_session_targets != Some(targets);
+    let generation = app_channels::generation();
+    let changed = self.last_session_targets != Some(targets) || self.last_channels_generation != generation;
+    if self.sessions_idle && self.session_watch.renew_due(IDLE_SESSION_MIX_INTERVAL) {
+      // SAFETY: the service loop's thread, COM initialized as MTA (`get_all_session_managers`).
+      self.session_watch.renew(unsafe { get_all_session_managers() });
+    }
+    let new_session = self.session_watch.take_new_session();
+    let slow = self.sessions_idle && self.session_watch.watching();
+    let since = self.last_session_pass.map(|t| t.elapsed());
     let mut intents = HashMap::new();
-    if changed || self.last_session_pass.is_none_or(|t| t.elapsed() >= SESSION_MIX_INTERVAL) {
+    if full_pass_due(changed, new_session, since, slow) {
+      self.last_channels_generation = generation;
       intents = self.full_session_pass(targets);
     }
     self.duck_game_sessions(&intents);
+  }
+
+  /// An output came or went, or the default moved: every session is looked at in the next pass,
+  /// and the announcements of new sessions cover the outputs there are now.
+  pub fn outputs_changed(&mut self) {
+    self.last_session_pass = None;
+    self.session_watch.renew_soon();
   }
 
   /// Every session gets its channel's target (`session_action`). For a session Automatic ChatMix
@@ -690,6 +720,14 @@ enum SessionAction {
   Set,
 }
 
+/// Whether `apply_session_mix` walks every session now. `changed`: a target or an app's channel
+/// moved; `new_session`: Windows announced one; `since`: the last full pass; `slow`: idle with
+/// the announcements working, so the interval is only a safety net.
+fn full_pass_due(changed: bool, new_session: bool, since: Option<Duration>, slow: bool) -> bool {
+  let interval = if slow { IDLE_SESSION_MIX_INTERVAL } else { SESSION_MIX_INTERVAL };
+  changed || new_session || since.is_none_or(|d| d >= interval)
+}
+
 /// `last`: the level this process set on the session before (None: never touched it).
 fn session_action(last: Option<f32>, target: f32) -> SessionAction {
   match last {
@@ -828,6 +866,17 @@ mod tests {
     assert_eq!(session_action(Some(0.5), 0.5), SessionAction::Keep(Some(0.5)));
     // Our target moved (also back to 100 %): apply it.
     assert_eq!(session_action(Some(0.5), 1.0), SessionAction::Set);
+  }
+
+  #[test]
+  fn idle_with_announcements_walks_sessions_rarely_but_a_change_or_new_session_at_once() {
+    let two = Some(Duration::from_secs(2));
+    assert!(full_pass_due(false, false, two, false), "busy or not announced: every second");
+    assert!(!full_pass_due(false, false, two, true), "idle and announced: not every second");
+    assert!(full_pass_due(false, false, Some(IDLE_SESSION_MIX_INTERVAL), true), "the safety net");
+    assert!(full_pass_due(false, true, two, true), "a new session at once");
+    assert!(full_pass_due(true, false, two, true), "a channel change at once");
+    assert!(full_pass_due(false, false, None, true), "never walked, or the outputs changed");
   }
 
   #[test]

@@ -46,6 +46,7 @@ use super::console_owner::ConsoleOwner;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(5);
 /// Pairing / bus update cadence; also how often sessions and the default output are re-read.
+/// The waits without sampling end on every second point of the wake grid (`worker::grid_wait`).
 const EVAL_INTERVAL: Duration = Duration::from_millis(500);
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 /// A silent stream is the game's only after this many evaluations (3 s) of the same finding.
@@ -195,7 +196,7 @@ impl Router {
     };
     if !self.console.is_owner() {
       CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
-      std::thread::sleep(EVAL_INTERVAL);
+      super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       return Ok(());
     }
     // No chat / media EQ and no Automatic ChatMix: the APO passes every stream through, so skip
@@ -216,7 +217,7 @@ impl Router {
     }
     if !active {
       CHAT_OR_GAME_PLAYING.store(false, Ordering::Relaxed);
-      std::thread::sleep(EVAL_INTERVAL);
+      super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       return Ok(());
     }
     self.refresh_sessions()?;
@@ -226,7 +227,7 @@ impl Router {
       // Nothing plays: no meter to sample. Sessions are re-read just as often as while sampling,
       // so a stream that starts is found as soon as before; the evaluation still clears the buses
       // and `PAIRED` of streams that ended.
-      std::thread::sleep(EVAL_INTERVAL);
+      super::worker::sleep(super::worker::grid_wait(EVAL_INTERVAL));
       self.evaluate();
       return Ok(());
     }
@@ -238,7 +239,7 @@ impl Router {
         let peak = unsafe { s.meter.GetPeakValue() }.unwrap_or(0.0);
         s.history.record(block, peak);
       }
-      std::thread::sleep(SAMPLE_INTERVAL);
+      super::worker::sleep(SAMPLE_INTERVAL);
     }
     self.evaluate();
     Ok(())

@@ -30,7 +30,7 @@ use crate::output_eq::settings::write_atomic;
 use crate::win_audio::apo_install::{self, ApoStatus, Flow};
 use crate::win_audio::dolby_atmos::{SpatialAudioStatus, SpatialFormat, active_format, spatial_status};
 use crate::win_audio::{AudioEndpointInfo, WinAudioSystem};
-use crate::win_audio::{chatmix, console_owner, shell};
+use crate::win_audio::{chatmix, console_owner, shell, worker};
 use gamersequalizer_common::shm::ShmHeader;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -392,7 +392,7 @@ impl HealthMonitor {
   /// ones). `shm`: the service's own mapping, where the APO link mirrors the effects' heartbeats.
   pub fn tick(&mut self, win_audio: &WinAudioSystem, shm: Option<&ShmHeader>) -> Option<Vec<Issue>> {
     let mut changed = false;
-    if self.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_CHECK_INTERVAL) {
+    if worker::due(self.mic_checked_at.map(|t| t.elapsed()), MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
       let mut found: Vec<Issue> =
         mic_silenced_issue(win_audio.endpoint_lock.get_default_capture_id()).into_iter().collect();
@@ -405,7 +405,7 @@ impl HealthMonitor {
         changed = true;
       }
     }
-    if self.checked_at.is_none_or(|t| t.elapsed() >= CHECK_INTERVAL) {
+    if worker::due(self.checked_at.map(|t| t.elapsed()), CHECK_INTERVAL) {
       self.checked_at = Some(Instant::now());
       changed |= self.full_check(win_audio);
     }

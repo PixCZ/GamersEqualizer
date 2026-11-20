@@ -79,8 +79,8 @@ pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) ->
         idle_log.idle("reference thread", busy);
         // Known limit: when an app opens the mic, the echo canceller gets its reference one tick
         // after the DSP watch sees its telemetry, plus one sync (100 ms): ~100-200 ms, from idle
-        // up to ~350 ms (the idle tick is 250 ms).
-        std::thread::sleep(worker::tick_wait(super::ducking::mix_fast(), busy));
+        // up to ~350 ms (the idle tick is 250 ms, on the wake grid).
+        worker::sleep(worker::tick_wait(super::ducking::mix_fast(), busy));
       }
       let h = &shm.layout().header;
       h.tap_active.store(false, Ordering::Relaxed);
