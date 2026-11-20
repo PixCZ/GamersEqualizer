@@ -3520,3 +3520,75 @@ Every line starts with `[Ducking]`; levels and depths are dB with one decimal (`
   unpaired without a logged reason (16:59:07, 17:06:21, 17:08:51, 17:15:49, 17:55:15 after silence); a
   bucket gap of 60 s in the log (17:12:06-17:13:06); a mix peak of -32 dB in the bucket 17:13:47 while
   the game's peak was -69.7 dB and the chat band's -42.6 dB.
+
+## Milestone 66: The idle service: fewer, shared wakeups (2026-11-20)
+
+Branch `feat/tray-mic-level`. On a laptop on battery what counts is how long the CPU sleeps, not the share
+of a core. The log of an idle PC (window closed, nothing playing, `-CpuStats` build) read: service 0.7-1.0 %
+of a core in 12-17 threads, `main` 0.4-0.6 %, `StreamRouter` 0.1-0.3 %, the window (when open) 4-5 %, the
+effects in audiodg 0.00 %. About 44 wakeups a second came from the service threads, each on its own timer.
+
+**What changed**
+
+- The service loop and the reference thread (`aec_reference.rs`) wait 250 ms instead of 50 ms while idle:
+  window closed, no app records, no Chat or Game stream plays under Automatic ChatMix. Each reason that
+  keeps them busy has its own cadence (`worker::busy_reason`); one `[Idle]` debug line per change names it.
+  A tray message ends the wait at once (`tray::wait_for_messages`).
+- `StreamRouter` sleeps 500 ms while no Chat or Game session plays (`CHAT_OR_GAME_PLAYING`) instead of
+  metering every 5 ms. Ducking only lowers streams the router paired, and it pairs Chat and Game sessions
+  only, so a lone Media stream (a browser) counts as idle.
+- The tray's mic level keeps its peak where each new value arrives (`apo_link.rs`), so no loop has to tick
+  fast to sample it.
+- The output APO writes the echo reference only for a reader (mic chain live with AEC on, or mix mode).
+  With AEC off the ring was filled every block for nobody. Nothing else in the APO needed a change: the
+  stream VAD, the ducker, stream EQ, AEC3 and the leveler already skip their work when off.
+- Default mic, default output and the Windows volumes are read once a second while idle instead of every
+  250 ms; a device change or turning busy reads them at once. Volumes changed in Windows show up to ~1 s
+  late while the window is closed.
+- New sessions are announced by Windows (`IAudioSessionNotification` on every active output,
+  `chatmix/session_watch.rs`) instead of a pass over all sessions every second. Idle, a full pass runs on an
+  announcement, a channel or device change, and every 15 s as a safety net (registrations are renewed with
+  it, since an audio service restart drops them silently). If registering fails the 1 s pass stays, logged
+  once. A counter of channel assignments forces a pass at once. A new app gets its channel's volume within
+  one idle tick (about 250 ms), before within 1 s.
+- All idle waits end at multiples of 250 ms on one origin (`worker::grid_wait`): service loop, reference
+  thread, sidetone, router (every second point), log marker; `apo-notes` starts from the loop. The CPU wakes
+  once for all of them. The tray wait uses a high-resolution timer, a plain timeout ends on the 15.6 ms
+  system tick and would leave the grid. Checks of 250 ms to 5 s use `worker::due` with 20 ms slack, since
+  passes now come exactly one period apart.
+- `-CpuStats` builds log two more lines a minute: `[Cpu] service loop sections` (the loop thread's time per
+  call, from thread cycle counts) and `[Cpu] wakeups` (wakeups per thread and distinct wake instants).
+
+**Measured** (same PC, service only, window closed, 6-7 idle minutes each)
+
+| What                                      | Before                  | After                            |
+| ----------------------------------------- | ----------------------- | -------------------------------- |
+| `apply_session_mix`, % of a core          | 0.12                    | 0.013-0.031 (average 0.021)      |
+| the three reads at the 1 s idle interval  | 0.073 (~223 calls/min)  | 0.018 (~58 calls/min)            |
+| wakeups a second                          | 12.3                    | 12.5                             |
+| distinct wake instants a second           | 12.1                    | 4.0-4.4                          |
+| service, % of a core                      | 0.29-0.52               | 0.47, 0.31, 0.26, then 0.08-0.16 |
+
+Where the loop thread's ~0.4 % went (sections, % of a core): `health` 0.12, `apply_session_mix` 0.12,
+`tray_poll` 0.08, default mic 0.03, `sync_from_system` 0.03, default output 0.02, the rest under 0.02. The
+wakeups were not the cost: at 4 ticks a second instead of 20 `main` fell only from 0.44 to 0.42 %, because
+the work sits on timers of 250 ms to 5 s. The fall of the service to 0.08-0.16 % in the last minutes of the
+grid run came with the same call counts: the load of the PC changed, it is not credited to the grid. The
+log shows no CPU sleep depth; that needs `powercfg /sleepstudy` or `/energy` on the laptop.
+
+**Decided, and why**
+
+- No scheduler thread or task queue: the threads wait on different things (a WASAPI loop, COM calls that
+  may block, metering at 5 ms) and one stuck call would stall the rest, against the rule that a worker
+  never blocks another. A shared grid gives the same burst without shared state.
+- `health` (1 s mic check, 5 s full check) and the tray's 1 s "is an app recording" check stay as they are,
+  about 0.2 % of a core together: slower would show the muted-mic warning and the red tray icon late.
+- Sidetone still polls every 250 ms when off (two device lookups): slower would delay turning it on by up
+  to 1 s, `BEAT_FRESH` is 1 s.
+- Not done: the input voice detector still runs at noise suppression 0 (about 2.8 % of a core in the mic
+  chain per the code comment, `ai_denoiser/mod.rs`); the telemetry, the window and maybe the input gain
+  read it, so skipping it needs a look at every reader.
+
+**Not tried live:** a new app starting while the service is idle, a device change, an audio service
+restart, the tray icon's reaction on the new timer wait, and a busy service. The running build has
+`cpu-stats`: rebuild without it before a tester ZIP.
