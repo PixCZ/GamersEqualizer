@@ -3628,6 +3628,8 @@ log shows no CPU sleep depth; that needs `powercfg /sleepstudy` or `/energy` on 
   sample in every 10 ms block, so no coarser rate), the levels the ducking goes by come from the stream
   table and the output mix. Stopping the meters once every stream is paired was considered and not done.
 - With a chat or media EQ on, a silent open session is still metered (the EQ needs its stream paired).
+- `[Health] problem: ...` (MicProcessing Outdated, once) had no counterpart when it cleared: a problem
+  that is gone now logs `[Health] resolved: ...`.
 
 **Not tried live:** a chat app open and silent after a game ends (`[Cpu] wakeups` should fall to the idle
 row, `[Idle]` lines should say idle), a game starting while a chat app is already open, a new app

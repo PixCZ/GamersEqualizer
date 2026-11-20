@@ -418,8 +418,11 @@ impl HealthMonitor {
     Some(all)
   }
 
-  /// Logs and notifies issues that were not in the last returned list.
+  /// Logs and notifies issues that were not in the last returned list, and logs the ones that are gone.
   fn announce(&mut self, all: &[Issue]) {
+    for issue in self.announced.iter().filter(|i| !all.contains(i)) {
+      info!("[Health] resolved: {issue:?}");
+    }
     let window_in_front = crate::tray::window_in_front();
     for issue in all.iter().filter(|i| !self.announced.contains(i)) {
       info!("[Health] problem: {issue:?}");
