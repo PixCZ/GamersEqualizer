@@ -33,6 +33,11 @@ const SESSION_MIX_INTERVAL: Duration = Duration::from_secs(1);
 /// The same while the service is idle and Windows announces new sessions (`SessionWatch`): only
 /// a safety net for a missed announcement. Also how often the announcements are renewed.
 const IDLE_SESSION_MIX_INTERVAL: Duration = Duration::from_secs(15);
+/// Windows announces a session when it is created, which can be before it plays, and a pass sees
+/// only playing sessions: for this long after an announcement the pass stays at `SESSION_MIX_INTERVAL`.
+/// shortcut: a session that starts or resumes playing later waits for `IDLE_SESSION_MIX_INTERVAL`,
+/// following each session's state (`IAudioSessionEvents::OnStateChanged`) would close that.
+const NEW_SESSION_SETTLE: Duration = Duration::from_secs(5);
 /// Volume steps smaller than this are "the same" (rounding of the permille values).
 const VOLUME_EPSILON: f32 = 0.005;
 
@@ -505,7 +510,8 @@ impl ChatMixController {
       self.session_watch.renew(unsafe { get_all_session_managers() });
     }
     let new_session = self.session_watch.take_new_session();
-    let slow = self.sessions_idle && self.session_watch.watching();
+    let settling = self.session_watch.announced_within(NEW_SESSION_SETTLE);
+    let slow = self.sessions_idle && self.session_watch.watching() && !settling;
     let since = self.last_session_pass.map(|t| t.elapsed());
     let mut intents = HashMap::new();
     if full_pass_due(changed, new_session, since, slow) {

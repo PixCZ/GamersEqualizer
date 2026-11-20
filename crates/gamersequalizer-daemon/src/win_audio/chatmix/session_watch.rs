@@ -25,6 +25,8 @@ pub(super) struct SessionWatch {
   /// Every active output announces its new sessions.
   watching: bool,
   renewed_at: Option<Instant>,
+  /// When `take_new_session` last found one.
+  announced_at: Option<Instant>,
   /// The last outcome logged (outputs watched, or the error): the same one is not logged again.
   logged: Option<Result<usize, String>>,
 }
@@ -40,8 +42,18 @@ impl IAudioSessionNotification_Impl for NewSessionFlag_Impl {
 
 impl SessionWatch {
   /// A session was created since the last call.
-  pub(super) fn take_new_session(&self) -> bool {
-    self.new_session.swap(false, Ordering::Relaxed)
+  pub(super) fn take_new_session(&mut self) -> bool {
+    let new = self.new_session.swap(false, Ordering::Relaxed);
+    if new {
+      self.announced_at = Some(Instant::now());
+    }
+    new
+  }
+
+  /// A session was announced less than `window` ago: it is announced when it is created, which
+  /// can be before it plays, and the caller's pass sees only sessions that play.
+  pub(super) fn announced_within(&self, window: Duration) -> bool {
+    self.announced_at.is_some_and(|t| t.elapsed() < window)
   }
 
   /// Every active output announces its new sessions (else the caller keeps polling).
@@ -103,5 +115,22 @@ impl SessionWatch {
 impl Drop for SessionWatch {
   fn drop(&mut self) {
     self.unregister();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn an_announced_session_is_remembered_for_a_while() {
+    let mut watch = SessionWatch::default();
+    assert!(!watch.take_new_session());
+    assert!(!watch.announced_within(Duration::from_secs(5)), "nothing announced yet");
+    watch.new_session.store(true, Ordering::Relaxed);
+    assert!(watch.take_new_session());
+    assert!(!watch.take_new_session(), "taken once");
+    assert!(watch.announced_within(Duration::from_secs(5)), "it may not play yet");
+    assert!(!watch.announced_within(Duration::ZERO));
   }
 }

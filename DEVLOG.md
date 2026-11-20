@@ -3548,8 +3548,9 @@ effects in audiodg 0.00 %. About 44 wakeups a second came from the service threa
 - New sessions are announced by Windows (`IAudioSessionNotification` on every active output,
   `chatmix/session_watch.rs`) instead of a pass over all sessions every second. Idle, a full pass runs on an
   announcement, a channel or device change, and every 15 s as a safety net (registrations are renewed with
-  it, since an audio service restart drops them silently). If registering fails the 1 s pass stays, logged
-  once. A counter of channel assignments forces a pass at once. A new app gets its channel's volume within
+  it, since an audio service restart drops them silently). For 5 s after an announcement the pass stays at
+  1 s: a session is announced when it is created, a pass sees it only once it plays. If registering fails
+  the 1 s pass stays, logged once. A counter of channel assignments forces a pass at once. A new app gets its channel's volume within
   one idle tick (about 250 ms), before within 1 s.
 - All idle waits end at multiples of 250 ms on one origin (`worker::grid_wait`): service loop, reference
   thread, sidetone, router (every second point), log marker; `apo-notes` starts from the loop. The CPU wakes
