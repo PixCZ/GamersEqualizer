@@ -3687,10 +3687,19 @@ sidetone noise mode picked while an app records). The running build has
   `Arc<Mutex>` is gone) and the APO link read them there, the window reads its own controller.
   `sidetone::active_pair` and `mmdevice::resolve_default_capture_id` are deleted. Health keeps the pick
   apart (`picked_mic`) for the "not the default" issue only, as the window does.
-- Not confirmed: which of these broke the notebook; with one microphone that is also the Windows
-  default all the old rules gave the same id. The notebook's log decides (`[Sidetone] pair ...`,
-  `[Sidetone] <verdict>`, `[Tray] icon ...`, `[Health]`). Checked on the Mac by clippy for the Windows
-  target only; tests run in CI.
+- Confirmed by the notebook's log: the saved pick was a headset microphone chosen on 2026-11-11
+  (`{edc3e59e...}`, "not present" in `[ApoCheck]`; the headset later came back under a new id). An
+  unplugged pick shows as "Default microphone" in the window and the mixer works with the array, but
+  the sidetone worker took the pick as it was: every start logs `[Sidetone] pair {b9182400...}` (the
+  array, before the settings are restored) and then `pair {edc3e59e...} -> speakers: off`, and the
+  verdict never leaves `Off`. The window saved "on" for (array, speakers), a pair the worker never
+  published. Picking the array replaced the stale pick, which is why that helped.
+- The tray is another cause, not touched here: on 0.3.1 the log has `[Mic] microphone processing
+  started` many times and no `[Tray] microphone in use` at all, so the check for a recording app
+  (`mic_usage::microphone_in_use`) never fired and the level had nothing to follow. The later
+  development builds in that log (`c8ffdff`, `93030c4`) log `microphone in use (microphone effect)`
+  and the icon follows; those commits are not in this repository yet.
+- Checked on the Mac by clippy for the Windows target only; tests run in CI.
 - Found in review: the window re-bound Master to the first physical output on every device change,
   the service keeps the one in use behind a virtual default, so the Sidetone tab could edit a pair
   the worker does not play: `bind_endpoints` now keeps it too (`master_endpoint_id`). And `use_mic`
