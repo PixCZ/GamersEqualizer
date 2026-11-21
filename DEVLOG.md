@@ -3742,3 +3742,11 @@ sidetone noise mode picked while an app records). The running build has
   mixer's "Recording now" list, the "recording into a muted mic" warning and sidetone's low-latency
   capture still go by the store alone. Tests: `the_effect_tells_of_a_recording_windows_does_not_name`,
   `a_recording_windows_named_ends_on_windows_word`; not run on the Mac (clippy only).
+- Confirmed on the notebook with build `3f04cf4` (2026-11-21): the icon turns red with the effect
+  (0 to 250 ms after `[Mic] microphone processing started`) and plain 1.5 to 5 s before `[Mic] ...
+  stopped`; sidetone goes `NoRecorder` -> `Starting` -> `Playing` on the array's pair. The store's
+  summary in that log: 7 apps, the last to open a microphone was WindowsSoundRecorder 856347 s
+  before, that is 2026-11-11 19:15:42, closed 53 s later. Windows has written nothing into that
+  user's `ConsentStore\microphone` since, for any app. The log has build 26200.9711 on that day and
+  26200.9974 from 2026-11-16 on, so a Windows update lies between; whether it is the cause is not
+  known. Our registry read is not at fault: there is nothing to read.
