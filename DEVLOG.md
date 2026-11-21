@@ -3667,3 +3667,36 @@ sidetone noise mode picked while an app records). The running build has
   keeps its own second, apart from the check.
 - Not tried: a stop (app closes the microphone) is assumed to write the same key; the release notes
   promise only the start.
+
+## Milestone 67: One microphone and one output in use (2026-11-21)
+
+- Reported on a notebook (0.3.1, maybe older): with "Default microphone" picked in the app, sidetone
+  and the tray icon's level did not work; with the Realtek array picked they did. Recording worked
+  either way. "Default microphone" is the app's own entry (no pick = follow Windows), not a Windows
+  device.
+- Found by reading: every part resolved "the microphone" on its own. The mixer (`use_mic`): the pick
+  while connected, else the Windows default, a virtual default replaced by a physical device. Sidetone:
+  the pick even when unplugged, else the plain Windows default, and the plain default output (so behind
+  a Sonar / VB-Cable default the pair named a device no effect of ours runs on). The APO link's caches
+  (voice level, echo delay): the plain default, never the pick. The window's banner: the pick, else the
+  plain default. Health: the mixer's microphone, but "recording into a muted mic" asked the plain
+  default, and "not the Windows default microphone" compared the resolved microphone, not the pick, so
+  the service could warn (the tray level then stands still) where the window showed nothing.
+- Now one rule, resolved once: `ChatMixController::use_mic` and `master_endpoint_id`. The service loop
+  publishes both ids every pass (`win_audio/in_use.rs`); sidetone, the echo reference (its
+  `Arc<Mutex>` is gone) and the APO link read them there, the window reads its own controller.
+  `sidetone::active_pair` and `mmdevice::resolve_default_capture_id` are deleted. Health keeps the pick
+  apart (`picked_mic`) for the "not the default" issue only, as the window does.
+- Not confirmed: which of these broke the notebook; with one microphone that is also the Windows
+  default all the old rules gave the same id. The notebook's log decides (`[Sidetone] pair ...`,
+  `[Sidetone] <verdict>`, `[Tray] icon ...`, `[Health]`). Checked on the Mac by clippy for the Windows
+  target only; tests run in CI.
+- Found in review: the window re-bound Master to the first physical output on every device change,
+  the service keeps the one in use behind a virtual default, so the Sidetone tab could edit a pair
+  the worker does not play: `bind_endpoints` now keeps it too (`master_endpoint_id`). And `use_mic`
+  keeps the id of an unplugged only microphone, which hid "an app records with no microphone":
+  that check takes the microphone only while it is connected (`WinAudioSystem::connected_mic`).
+- Known limits: a window started after the outputs changed behind a virtual default may still pick
+  another physical output than the running service (it has no way to ask it). Sidetone pairs saved
+  for a virtual default output (they never played) are not found any more: switch sidetone on again.
+- Left as it was: `--install` without a window (`setup_cli.rs`) still ignores a saved pick.

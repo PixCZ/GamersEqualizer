@@ -12,10 +12,7 @@ use gamersequalizer_common::sidetone::{
 };
 use gamersequalizer_mic_chain::sidetone_denoise::{SAMPLE_RATE, nominal_delay_ms};
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
-
-/// The default devices are a Windows audio call: asked twice a second, not every frame.
-const DEVICES_RECHECK: Duration = Duration::from_millis(500);
+use std::time::Instant;
 
 pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   theme::page_header(
@@ -26,17 +23,11 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     Some(tr("Sealed headphones block your own voice. Sidetone plays the microphone back into them.")),
   );
 
-  // 1. The pair the worker follows (same rule: `sidetone::active_pair`), and its names.
+  // 1. The pair the worker follows (the mixer's microphone and Master output, as the service's
+  // `in_use`), and its names.
   let (mut saved_pairs, _) = sidetone::pairs();
-  if state.sidetone_ui.devices_checked.is_none_or(|t| t.elapsed() >= DEVICES_RECHECK) {
-    state.sidetone_ui.devices_checked = Some(Instant::now());
-    state.sidetone_ui.devices = sidetone::active_pair(
-      state.selected_mic_endpoint_id.clone(),
-      || win_audio.endpoint_lock.get_default_capture_id(),
-      win_audio.endpoint_lock.get_default_output_id(),
-    );
-  }
-  let Some(pair_key) = state.sidetone_ui.devices.clone() else {
+  let devices = win_audio.chatmix.mic_device_id.clone().zip(win_audio.chatmix.master_device_id.clone());
+  let Some(pair_key) = devices else {
     state.save_sidetone_pair();
     theme::status_line(ui, Severity::Warning, tr("Sidetone needs a microphone and an output device."));
     return;

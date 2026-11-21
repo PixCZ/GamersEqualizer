@@ -5,7 +5,7 @@
 //! apartment its own libraries pick.
 
 use windows::Win32::Media::Audio::{
-  EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eConsole, eRender,
+  EDataFlow, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, CoTaskMemFree};
 use windows_core::{PCWSTR, Result};
@@ -51,9 +51,4 @@ pub fn resolve_render_id(explicit: Option<&str>) -> Option<String> {
     return Some(id.to_string());
   }
   default_device_id(eRender, eConsole)
-}
-
-/// Id of the Windows default microphone (the endpoint the APO most likely runs on).
-pub fn resolve_default_capture_id() -> Option<String> {
-  default_device_id(eCapture, eConsole)
 }

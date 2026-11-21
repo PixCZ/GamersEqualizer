@@ -88,9 +88,6 @@ pub(super) fn run_background_daemon() {
   if win_audio::stream_router::spawn().is_none() {
     error!("[GamersEqualizer] could not start the stream router: chat/media EQ stays off");
   }
-  if win_audio::sidetone::spawn().is_none() {
-    error!("[GamersEqualizer] could not start the sidetone thread: sidetone stays off");
-  }
 
   // Open or create shared memory for IPC
   let (shm_handle, shm_ptr) = shm_mapping::open_or_create_shm(storage.base_dir());
@@ -120,6 +117,11 @@ pub(super) fn run_background_daemon() {
 
     win_audio.chatmix.write_levels(header);
   }
+  // The microphone and output just bound, for the threads below; the loop republishes them.
+  win_audio::in_use::publish(&win_audio.chatmix.mic_device_id, &win_audio.chatmix.master_device_id);
+  if win_audio::sidetone::spawn().is_none() {
+    error!("[GamersEqualizer] could not start the sidetone thread: sidetone stays off");
+  }
 
   // Of the window's state the service needs the output EQ, the mic EQ and the saved audio
   // settings; `AppState` would also load the window's parts and map the shared memory again.
@@ -139,8 +141,7 @@ pub(super) fn run_background_daemon() {
   // Speaker reference for the echo canceller (our output effect on the Master output writes it),
   // plus the link to the microphone APO.
   let reference_running = Arc::new(AtomicBool::new(true));
-  let echo_reference = Arc::new(Mutex::new(win_audio.chatmix.master_device_id.clone()));
-  let reference_thread = win_audio::aec_reference::spawn(reference_running.clone(), echo_reference.clone());
+  let reference_thread = win_audio::aec_reference::spawn(reference_running.clone());
 
   let mut last_volume_sync: Option<Instant> = None;
   let mut last_output_check: Option<Instant> = None;
@@ -245,8 +246,7 @@ pub(super) fn run_background_daemon() {
         if wanted.is_some() && wanted != win_audio.chatmix.mic_device_id {
           info!("[GamersEqualizer] microphone now {:?}", wanted);
           // The old mic gets its own wish back before `use_mic` loads the new one's volume.
-          let old =
-            win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id());
+          let old = win_audio.chatmix.mic_device_id.clone();
           mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
           win_audio.chatmix.use_mic(wanted);
         }
@@ -273,12 +273,12 @@ pub(super) fn run_background_daemon() {
           last_default_out = default_out;
         }
       }
-      // Follow output device changes for the echo reference (reopens only on change).
-      timed!(sections, "echo_reference", {
-        if let Ok(mut reference) = echo_reference.lock() {
-          reference.clone_from(&win_audio.chatmix.master_device_id);
-        }
-      });
+      // Sidetone, the echo reference and the APO link follow the mic and output resolved above.
+      timed!(
+        sections,
+        "in_use",
+        win_audio::in_use::publish(&win_audio.chatmix.mic_device_id, &win_audio.chatmix.master_device_id)
+      );
 
       // 1. Sync live Windows master & channel volumes to daemon & SHM (slower while idle). The mic
       // volume link and the chain logs stay at 250 ms: the gain step counts clips per tick.
@@ -295,11 +295,7 @@ pub(super) fn run_background_daemon() {
         }
       }
       if mic_link_due {
-        let mic_id = timed!(
-          sections,
-          "mic_id",
-          win_audio.chatmix.mic_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_capture_id())
-        );
+        let mic_id = win_audio.chatmix.mic_device_id.clone();
         if timed!(sections, "mic_gain", mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref())) {
           audio_settings_saved
             .save_if_changed(ui::audio_settings::AudioSettings::from_header(header), storage.base_dir());

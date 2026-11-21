@@ -101,8 +101,8 @@ impl Drop for MicStoreWatch {
   }
 }
 
-/// Apps recording from the mic in use (`mic_id`: Windows default capture endpoint) while it
-/// is muted, at 0 % or missing. None while nobody records or the mic is fine.
+/// Apps recording while the mic in use (`mic_id`) is muted, at 0 % or missing. None while
+/// nobody records or the mic is fine.
 pub fn check_silenced(mic_id: Option<&str>) -> Option<(Vec<String>, Silenced)> {
   let apps = recording_apps();
   if apps.is_empty() {

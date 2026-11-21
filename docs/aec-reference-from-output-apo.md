@@ -51,9 +51,9 @@ go away, and the service loses a permanently open WASAPI stream.
 Facts that shape the design:
 
 - The ring has **one writer**. Nothing protects two writers from interleaving.
-- The reference output is the Master device: `echo_reference` in `daemon.rs` (an
-  `Arc<Mutex<Option<String>>>` the loopback thread reads).
-- `ApoLink::set_render_device` feeds the delay-cache key `(default mic, render id)` and sets
+- The reference output is the Master device: the service loop publishes it in `win_audio/in_use.rs`,
+  which the reference thread reads.
+- `ApoLink::set_render_device` feeds the delay-cache key `(mic in use, render id)` and sets
   `reference_switch_pending`, which makes the APO measure the delay again. Today only `run_loopback`
   calls it.
 - When nothing plays, Windows may not call the output APO at all. "No writer beat" therefore means

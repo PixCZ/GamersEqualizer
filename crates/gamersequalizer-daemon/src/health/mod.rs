@@ -104,8 +104,11 @@ pub struct Snapshot {
   pub spatial_format: Option<SpatialFormat>,
   /// Active microphones.
   pub mics: Vec<AudioEndpointInfo>,
+  /// The microphone in use (`ChatMixController::use_mic`): the pick while it is connected, else
+  /// the Windows default, a virtual default replaced by a physical device.
+  pub mic_in_use: Option<String>,
   /// Microphone picked in the app (None: follows the Windows default).
-  pub selected_mic: Option<String>,
+  pub picked_mic: Option<String>,
   pub default_mic: Option<String>,
   /// Mic processing status and the bundled build (part of the ignore key).
   pub apo: Option<(ApoStatus, String)>,
@@ -286,7 +289,7 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
     && matches!(status, ApoStatus::NotInstalled | ApoStatus::Outdated | ApoStatus::NotOnThisMic)
   {
     // Bundled build in the key: a new app version asks again.
-    let mic = snap.selected_mic.as_deref().or(snap.default_mic.as_deref()).unwrap_or("");
+    let mic = snap.mic_in_use.as_deref().or(snap.default_mic.as_deref()).unwrap_or("");
     let key = format!("apo:{status:?}:{bundled}:{mic}");
     if !memory.ignored.contains(&key) {
       issues.push(Issue::MicProcessing { status: status.clone(), key });
@@ -302,7 +305,9 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
     }
   }
 
-  if let (Some(sel), Some(def)) = (snap.selected_mic.as_deref(), snap.default_mic.as_deref()) {
+  // Only a pick, as in the window (`apo_banner::selected_mic_is_default`): the mic the app chose
+  // itself behind a virtual default is not the user's mistake.
+  if let (Some(sel), Some(def)) = (snap.picked_mic.as_deref(), snap.default_mic.as_deref()) {
     let connected = snap.mics.iter().find(|m| m.id == sel);
     if let Some(mic) = connected.filter(|_| sel != def && !memory.ignored.contains(&not_default_mic_key(sel))) {
       issues.push(Issue::NotDefaultMic { mic_id: mic.id.clone(), mic_name: mic.name.clone() });
@@ -394,8 +399,7 @@ impl HealthMonitor {
     let mut changed = false;
     if worker::due(self.mic_checked_at.map(|t| t.elapsed()), MIC_CHECK_INTERVAL) {
       self.mic_checked_at = Some(Instant::now());
-      let mut found: Vec<Issue> =
-        mic_silenced_issue(win_audio.endpoint_lock.get_default_capture_id()).into_iter().collect();
+      let mut found: Vec<Issue> = mic_silenced_issue(win_audio.connected_mic()).into_iter().collect();
       if let Some(h) = shm {
         found.extend(self.not_running(h));
       }
@@ -407,7 +411,7 @@ impl HealthMonitor {
     }
     if worker::due(self.checked_at.map(|t| t.elapsed()), CHECK_INTERVAL) {
       self.checked_at = Some(Instant::now());
-      changed |= self.full_check(win_audio);
+      changed |= self.full_check(win_audio, shm);
     }
     self.publish_run_status();
     if !changed {
@@ -438,7 +442,7 @@ impl HealthMonitor {
   }
 
   /// The slower checks; true when their shown list changed.
-  fn full_check(&mut self, win_audio: &WinAudioSystem) -> bool {
+  fn full_check(&mut self, win_audio: &WinAudioSystem, shm: Option<&ShmHeader>) -> bool {
     // The window rewrites the file when an output is picked there.
     let on_disk = mtime(&self.path);
     if on_disk != self.file_mtime {
@@ -447,12 +451,12 @@ impl HealthMonitor {
       self.file_mtime = on_disk;
     }
 
-    let snap = snapshot(win_audio);
+    let snap = snapshot(win_audio, shm.and_then(|h| h.get_selected_mic_id()));
     self.log_spatial(&snap);
     // Automatic ChatMix's rule reads it from here, so its own thread never waits on these calls.
     let format = snap.spatial_format.as_ref().map(|f| f.label(&f.id).to_string());
     crate::win_audio::ducking::set_spatial(snap.spatial.is_active(), format);
-    let mic = snap.selected_mic.as_deref().or(snap.default_mic.as_deref());
+    let mic = snap.mic_in_use.as_deref().or(snap.default_mic.as_deref());
     self.mic_run.watch(run_target(snap.apo.as_ref().map(|(s, _)| s), mic, &snap.mics));
     self.out_run.watch(run_target(snap.out_apo.as_ref().map(|(s, _)| s), snap.output.as_deref(), &snap.outputs));
     self.log_apo_state(mic, snap.output.as_deref());
@@ -566,12 +570,12 @@ impl HealthMonitor {
   }
 }
 
-fn snapshot(win_audio: &WinAudioSystem) -> Snapshot {
+fn snapshot(win_audio: &WinAudioSystem, picked_mic: Option<String>) -> Snapshot {
   let endpoints = &win_audio.endpoint_lock;
   let default_output = endpoints.get_default_output_id();
   let default_mic = endpoints.get_default_capture_id();
-  let selected_mic = win_audio.chatmix.mic_device_id.clone();
-  let check = apo_install::check(selected_mic.as_deref().or(default_mic.as_deref()));
+  let mic_in_use = win_audio.chatmix.mic_device_id.clone();
+  let check = apo_install::check(mic_in_use.as_deref());
   // The output EQ runs on the Master output (what reaches the speakers).
   let output = win_audio.chatmix.master_device_id.clone().or_else(|| default_output.clone());
   let out_status = apo_install::check_flow(Flow::Render, output.as_deref()).status;
@@ -584,7 +588,8 @@ fn snapshot(win_audio: &WinAudioSystem) -> Snapshot {
     spatial_format: default_output.as_deref().and_then(active_format),
     default_output,
     mics: endpoints.enumerate_capture_devices(),
-    selected_mic,
+    mic_in_use,
+    picked_mic,
     default_mic,
     apo: Some((check.status, check.bundled_version.unwrap_or_default())),
     out_apo: Some((out_status, out_anywhere)),
@@ -724,13 +729,18 @@ mod tests {
   fn selected_mic_not_default_is_flagged_while_connected() {
     let mut s = snap("hp", &["hp"]);
     s.mics = vec![dev("mic1"), dev("mic2")];
-    s.selected_mic = Some("mic1".into());
+    s.picked_mic = Some("mic1".into());
     s.default_mic = Some("mic2".into());
     let mut memory = HealthMemory::default();
     assert!(matches!(evaluate(&mut memory, &s).0.as_slice(), [Issue::NotDefaultMic { .. }]));
 
     s.mics = vec![dev("mic2")];
     assert!(evaluate(&mut memory, &s).0.is_empty(), "unplugged mic");
+
+    // No pick: the mic the app works with behind a virtual default is not flagged.
+    s.mics = vec![dev("mic1"), dev("mic2")];
+    (s.picked_mic, s.mic_in_use) = (None, Some("mic1".into()));
+    assert!(evaluate(&mut memory, &s).0.is_empty(), "the app's own choice");
   }
 
   #[test]
@@ -868,7 +878,8 @@ mod tests {
       spatial: SpatialAudioStatus::Unsupported,
       spatial_format: None,
       mics: Vec::new(),
-      selected_mic: None,
+      mic_in_use: None,
+      picked_mic: None,
       default_mic: None,
       apo: None,
       out_apo: None,

@@ -6,8 +6,8 @@
 //! link to the APOs.
 
 use log::info;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
@@ -19,9 +19,9 @@ use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use super::apo_install::{self, ApoStatus, Flow};
 use super::apo_link::{ApoLink, SYNC_INTERVAL};
 use super::endpoint_lock::get_endpoint_info;
-use super::{mmdevice, worker};
+use super::{in_use, mmdevice, worker};
 
-/// How often the Windows default output is resolved again (one RPC).
+/// How often the output is resolved again while none is published (the Windows default: one RPC).
 const RESOLVE_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the registry is read for the effect on the reference output (or at once on a change).
 const CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -31,7 +31,8 @@ const BEAT_WINDOW: Duration = Duration::from_secs(3);
 /// State of the reference, ticked by the thread `spawn` starts.
 #[derive(Default)]
 pub struct OutputReference {
-  /// The user's output selection last seen (None = the Windows default) and what it resolved to.
+  /// The output in use last seen (None = not published yet: the Windows default) and what it
+  /// resolved to.
   selection: Option<String>,
   render_id: Option<String>,
   resolved_at: Option<Instant>,
@@ -55,8 +56,9 @@ struct BeatWatch {
 }
 
 /// Spawn the supervised reference thread: it ticks `OutputReference` and the link to the APOs until
-/// `running` is cleared. `selection`: the output the user picked (None = the Windows default).
-pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) -> Option<std::thread::JoinHandle<()>> {
+/// `running` is cleared. The output is the one in use (`in_use`), the Windows default until
+/// the service loop has published it.
+pub fn spawn(running: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
   std::thread::Builder::new()
     .name("GamersEqualizer_AecReference".into())
     .spawn(move || {
@@ -74,7 +76,7 @@ pub fn spawn(running: Arc<AtomicBool>, selection: Arc<Mutex<Option<String>>>) ->
       while running.load(Ordering::SeqCst) {
         // The open window shows the mirrored telemetry and its EQ edits reach the APO through
         // here (one sync per tick at the sync rate): not idle then.
-        let busy = reference.tick(&shm, &mut apo, &selection);
+        let busy = reference.tick(&shm, &mut apo);
         let busy = busy.or_else(|| crate::tray::find_window().map(|_| ("window open", SYNC_INTERVAL)));
         idle_log.idle("reference thread", busy);
         // Known limit: when an app opens the mic, the echo canceller gets its reference one tick
@@ -97,14 +99,9 @@ impl OutputReference {
   /// tick must come soon and how soon, None when idle. Only mix mode reads the reference every
   /// tick (`tick_mix`); the mic chain's link and Automatic ChatMix's stream mode live in `apo.tick`,
   /// which runs once per `SYNC_INTERVAL`, so a faster tick would only wake the CPU for nothing.
-  pub fn tick(
-    &mut self,
-    local: &SharedMemoryClient,
-    apo: &mut ApoLink,
-    selection: &Mutex<Option<String>>,
-  ) -> Option<worker::Busy> {
+  pub fn tick(&mut self, local: &SharedMemoryClient, apo: &mut ApoLink) -> Option<worker::Busy> {
     let now = Instant::now();
-    let wanted = selection.lock().ok().and_then(|g| g.clone());
+    let wanted = in_use::output();
     if wanted != self.selection || self.resolved_at.is_none_or(|t| now.duration_since(t) >= RESOLVE_INTERVAL) {
       self.resolved_at = Some(now);
       let render_id = mmdevice::resolve_render_id(wanted.as_deref());

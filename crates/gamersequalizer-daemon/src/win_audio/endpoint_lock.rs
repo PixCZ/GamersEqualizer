@@ -180,7 +180,7 @@ impl EndpointLockManager {
     }
   }
 
-  fn is_active(&self, device_id: &str) -> bool {
+  pub fn is_active(&self, device_id: &str) -> bool {
     let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: NUL-terminated id owned by this frame.
     unsafe {

@@ -1,7 +1,8 @@
 //! Sidetone background management:
 //! - Store for microphone + output pairs and their settings in `%APPDATA%\GamersEqualizer\profiles\sidetone.json`.
 //! - Background worker thread, the only publisher of the current pair (device hashes, settings,
-//!   EQ) into shared memory. It keeps the capture/render audio streams open when sidetone needs
+//!   EQ) into shared memory. The pair is the microphone and the output in use (`in_use`), the
+//!   same devices the mixer works with. It keeps the capture/render audio streams open when sidetone needs
 //!   them and logs every change of `Verdict` (why sidetone plays or is silent).
 //!   The window writes only live values of the pair the worker has published, while dragging.
 
@@ -21,7 +22,7 @@ use windows::Win32::Media::Audio::{
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::core::Interface;
 
-use super::mmdevice;
+use super::in_use;
 use crate::output_eq::settings::write_atomic;
 
 // ---------------------------------------------------------------------------------------
@@ -123,18 +124,8 @@ fn modified(path: &Path) -> Option<SystemTime> {
 }
 
 // ---------------------------------------------------------------------------------------
-// Pair and verdict (shared by the worker and the window)
+// Verdict (shared by the worker and the window)
 // ---------------------------------------------------------------------------------------
-
-/// Microphone and output ids sidetone follows: the picked microphone, else the Windows default
-/// one, and the Windows default output. None while either is unknown.
-pub fn active_pair(
-  picked_mic: Option<String>,
-  default_mic: impl FnOnce() -> Option<String>,
-  default_output: Option<String>,
-) -> Option<(String, String)> {
-  Some((picked_mic.or_else(default_mic)?, default_output?))
-}
 
 /// Why sidetone plays or is silent, from what the two APOs report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,8 +366,7 @@ impl WorkerState {
 
     // 1. The pair, and publishing it when it or the saved pairs changed. The only writer of
     // the hashes and of `enabled`; hashes, EQ and values before `enabled` (`write_sidetone`).
-    let pair_ids =
-      active_pair(h.get_selected_mic_id(), mmdevice::resolve_default_capture_id, mmdevice::resolve_render_id(None));
+    let pair_ids = in_use::mic().zip(in_use::output());
     let (current_pairs, version) = pairs();
     if pair_ids != self.last_pair || version != self.last_version {
       self.last_version = version;
@@ -505,7 +495,7 @@ mod tests {
   use gamersequalizer_common::sidetone::SidetonePair;
 
   #[test]
-  fn verdict_names_the_first_reason_and_pair_needs_both_devices() {
+  fn verdict_names_the_first_reason() {
     let h = ShmHeader::default();
     let r = Ordering::Relaxed;
     assert_eq!(verdict(&h, false, true, true, false), Verdict::Off);
@@ -519,11 +509,6 @@ mod tests {
     assert_eq!(verdict(&h, true, true, true, false), Verdict::Playing);
     h.mic_muted.store(true, r);
     assert_eq!(verdict(&h, true, true, true, false), Verdict::Muted);
-
-    let picked = Some("mic".to_string());
-    assert_eq!(active_pair(None, || None, Some("out".into())), None);
-    assert_eq!(active_pair(picked.clone(), || None, None), None);
-    assert_eq!(active_pair(picked, || Some("default".into()), Some("out".into())), Some(("mic".into(), "out".into())));
   }
 
   #[test]
