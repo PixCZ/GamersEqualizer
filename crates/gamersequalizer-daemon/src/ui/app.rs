@@ -76,6 +76,11 @@ impl eframe::App for GamersEqualizerApp {
     self.state.active_game_name = self.state.output_eq.active_game.as_ref().map(|g| g.label.clone());
 
     // 3. Refresh endpoints and track Windows system default device changes in real time
+    // An output picked in the tray flyout is the user's choice: the lock moves there. Any other
+    // change of the default is switched back.
+    if let Some(id) = self.state.take_flyout_output(&self.win_audio.endpoint_lock) {
+      super::header::select_output(&mut self.state, &mut self.win_audio, id);
+    }
     self.win_audio.endpoint_lock.enforce_lock();
     let dev_changed = self.win_audio.endpoint_lock.poll_device_changed();
     // The defaults are two more RPCs: read them with the volume sync, or when a device changed.

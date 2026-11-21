@@ -55,6 +55,8 @@ Inside `crates/gamersequalizer-daemon/src/`:
 | `daemon.rs`       | The service loop (`--daemon`)                                                   |
 | `lifecycle.rs`    | Handover to the installed copy, import after the window closes, service mutex   |
 | `shm_mapping.rs`  | The window <-> service shared-memory mapping                                    |
+| `flyout.rs`       | Tray flyout (left click on the icon); layout and drawing in `flyout/paint.rs`   |
+| `mixer_edits.rs`  | What the service changed in the mixer (tray flyout), for the window to adopt    |
 | `win_audio/`      | Windows audio (WASAPI, COM), APO install and link, mixer, routing, sidetone     |
 | `output_eq/`      | Headphone / game / chat / media EQ layers, game and genre detection, AutoEQ     |
 | `sonar_importer/` | Import of SteelSeries Sonar profiles                                            |

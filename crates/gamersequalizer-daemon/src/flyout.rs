@@ -16,7 +16,7 @@
 //!
 //! Along the edge nearest the tray icon a row opens the main window (what the menu's "Open
 //! settings" does). App icons are read once per exe, after the first frame, and kept while the
-//! service runs.
+//! service runs (an exe that gave none is asked again at the next opening).
 
 mod paint;
 
@@ -51,8 +51,8 @@ use windows::Win32::UI::HiDpi::{
   SetThreadDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-  ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN, VK_END, VK_ESCAPE,
-  VK_HOME, VK_LEFT, VK_M, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+  GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN, VK_END,
+  VK_ESCAPE, VK_HOME, VK_LEFT, VK_M, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Shell::SHDefExtractIconW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -201,8 +201,9 @@ struct Flyout {
   paint_failed: bool,
   /// Since when `ui.hover` is what it is (the name tip waits `TIP_DELAY`).
   hovered_at: Instant,
-  /// Icons by lowercase exe name, at `icon_px`; None: the exe has none we could read (asked once).
-  icons: HashMap<String, Option<AppIcon>>,
+  /// Icons by lowercase exe name, at `icon_px`. An exe that gave none is not kept (its process may
+  /// just have ended): the next opening asks again.
+  icons: HashMap<String, AppIcon>,
   icon_px: i32,
   /// What the open list of outputs lists (empty while it is closed).
   outputs: Vec<AudioEndpointInfo>,
@@ -734,7 +735,7 @@ impl Flyout {
   fn attach_icons(&self, rows: &mut [Row]) {
     for row in rows {
       if let Target::App(exe) = &row.target {
-        row.icon = self.icons.get(&exe.to_ascii_lowercase()).and_then(|i| i.as_ref()).map(|i| i.0);
+        row.icon = self.icons.get(&exe.to_ascii_lowercase()).map(|i| i.0);
       }
     }
   }
@@ -747,10 +748,14 @@ impl Flyout {
       if self.icons.contains_key(&key) {
         continue;
       }
-      let icon = AppIcon::load(row.pid, self.icon_px).inspect_err(|e| debug!("[Flyout] {exe}: no icon ({e})")).ok();
-      row.icon = icon.as_ref().map(|i| i.0);
-      loaded |= icon.is_some();
-      self.icons.insert(key, icon);
+      match AppIcon::load(row.pid, self.icon_px) {
+        Ok(icon) => {
+          row.icon = Some(icon.0);
+          self.icons.insert(key, icon);
+          loaded = true;
+        }
+        Err(e) => debug!("[Flyout] {exe}: no icon ({e})"),
+      }
     }
     if loaded {
       self.invalidate();
@@ -783,7 +788,13 @@ impl Flyout {
       WM_MOUSEMOVE => {
         self.track_leave();
         match self.ui.drag {
-          Some(i) => self.set_volume(i, self.layout.value_at(i, x), false),
+          Some(i) => {
+            let volume = self.layout.value_at(i, x);
+            // The pointer moved inside the same percent: nothing new to set.
+            if self.rows.get(i).is_some_and(|r| r.muted || r.volume != volume) {
+              self.set_volume(i, volume, false);
+            }
+          }
           None => self.set_hover(self.layout.hit(x, y)),
         }
         done
@@ -880,7 +891,9 @@ impl Flyout {
       (_, Some(Hit::Name)) if enter => self.open_list(true),
       (_, Some(Hit::Choice(k))) if enter => self.pick(k),
       (VK_DOWN | VK_TAB | VK_UP, _) => {
-        self.ui.focus = next_stop(&stops, focus, key == VK_UP);
+        // SAFETY: reads this thread's key state as of the message being handled.
+        let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
+        self.ui.focus = next_stop(&stops, focus, key == VK_UP || (key == VK_TAB && shift));
         self.ui.tip = match self.ui.focus {
           Some(Hit::Slider(i)) => Some(i),
           _ => None,

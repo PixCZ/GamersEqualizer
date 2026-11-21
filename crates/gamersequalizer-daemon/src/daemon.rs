@@ -246,7 +246,14 @@ pub(super) fn run_background_daemon() {
           win_audio.chatmix.set_app_heard_volume(&exe, volume, save)
         }
         crate::flyout::Change::Mute { exe, muted } => win_audio.chatmix.set_app_mute(&exe, muted),
-        crate::flyout::Change::Output(id) => win_audio.select_output(storage.base_dir(), &id),
+        crate::flyout::Change::Output(id) => {
+          // Told before the switch: a window that locks the output moves its lock there instead of
+          // switching Windows back.
+          if let Some(map) = &mixer_edits {
+            map.edits().publish_output(&id);
+          }
+          win_audio.select_output(storage.base_dir(), &id);
+        }
         crate::flyout::Change::Channel { channel, volume, muted, save } => {
           // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop); atomics only.
           if let Some(header) = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header }) {

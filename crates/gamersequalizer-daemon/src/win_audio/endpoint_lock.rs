@@ -296,6 +296,11 @@ impl EndpointLockManager {
     self.state.lock_enabled.load(Ordering::Relaxed)
   }
 
+  /// The default left the locked output and `enforce_lock` is about to switch it back.
+  pub fn revert_pending(&self) -> bool {
+    self.is_locked() && self.state.revert_pending.load(Ordering::SeqCst)
+  }
+
   pub fn hijack_count(&self) -> u32 {
     self.state.hijack_counter.load(Ordering::Relaxed)
   }

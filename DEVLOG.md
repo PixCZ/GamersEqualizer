@@ -3750,3 +3750,45 @@ sidetone noise mode picked while an app records). The running build has
   user's `ConsentStore\microphone` since, for any app. The log has build 26200.9711 on that day and
   26200.9974 from 2026-11-16 on, so a Windows update lies between; whether it is the cause is not
   known. Our registry read is not at fault: there is nothing to read.
+
+## Milestone 68: The tray flyout (2026-11-21)
+
+- A left click on the tray icon opens a volume panel (before: the main window, now on its "Open
+  settings" row and in the right-click menu): the output with a list to switch it, Game / Chat /
+  Media / Mic, and one row per app with an audio session (volume, mute). It lives in the service
+  (`flyout.rs`): a plain Win32 popup drawn with GDI into one bitmap (`flyout/paint.rs`), made on the
+  first click and then only shown and hidden. A second window process was dropped: it takes ~0.4 s
+  to its first frame.
+- App volume: stored per exe in `app_volumes.json` (100 % is not stored) and multiplied into each
+  session's target, so the mixer stays the one writer of session volumes. The slider shows and sets
+  what Windows has: a drag to `heard` stores `heard / (channel x ChatMix x reduction)`, at most
+  100 %. Above what the channel allows the session gets the most it can, and the slider goes back
+  there on the read-back 250 ms later. Mute is the session's own Windows mute.
+- With Game / Chat outputs of their own (Sonar) the session pass no longer returns early: sessions
+  get the app volume alone. A session the mixer had lowered before those outputs appeared goes back
+  to 100 % x app volume. Not tried live with Sonar.
+- Channel rows: the service writes the level into the header, applies it and saves the audio
+  settings at the end of a change. An open window writes all levels every frame, so it has to adopt
+  the change first: `mixer_edits.rs`, a small `Local\` mapping of its own (a field in `ShmHeader`
+  would bump the layout version and leave an installed mic effect unreachable until reinstalled).
+- Review before the merge, fixed:
+  - A window with "Lock device" on switched Windows back from an output picked in the flyout (the
+    lock lives in the window's process), and the tray then warned of a changed default. The service
+    now names the pick in `mixer_edits` before it switches (a hash of the endpoint id); the window
+    moves its lock there when the default that left the locked output is that pick, within 5 s.
+    The window reads the lock's pending flag before the picks: the other order could miss a pick
+    made during the frame. A pick whose switch failed still counts for those 5 s.
+    Health's remembered output was not used as the signal: a headset just plugged in also becomes
+    the remembered one, and that is exactly what the lock must switch back from.
+  - A drag sent a change on every mouse move, also inside the same percent; each one made the
+    service walk every session twice. Now only a new value is sent.
+  - Shift+Tab went forward. An exe whose icon could not be read (its process just ended) kept the
+    fallback tile until the service restarted; a failure is no longer kept.
+  - The Sonar test of the mixer walked the PC's real sessions through `apply_session_mix`; it now
+    asks `session_targets`.
+- Limits: the popup is drawn by hand and tells screen readers nothing (keyboard: Tab, arrows, Space,
+  M, Enter, Esc). A click on the icon held longer than 300 ms while the flyout is open may close and
+  reopen it (`REOPEN_GUARD`). App volumes go by exe name, as the channels do. The look on Windows 10
+  (no rounded corners, no system border) was not checked.
+- Tests: `mixer_edits.rs`, `flyout.rs`, `flyout/paint.rs`, `app_channels.rs`, `chatmix/mod.rs`; on
+  the Mac only clippy for the Windows target, the tests run in CI.

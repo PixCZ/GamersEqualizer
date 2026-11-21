@@ -1,9 +1,10 @@
+use crate::mixer_edits::{OUTPUT_PICK_VALID, is_picked_output};
 pub use crate::output_eq::{OutputEq, OutputLayer};
 use crate::shm_mapping::open_or_create_shm;
 use crate::sonar_importer::ProfileStorage;
 use crate::win_audio::ducking::{self, UnheardWatch};
 use crate::win_audio::stream_router;
-use crate::win_audio::{AudioEndpointInfo, ChatMixController, SpatialAudioStatus, SpatialFormat};
+use crate::win_audio::{AudioEndpointInfo, ChatMixController, EndpointLockManager, SpatialAudioStatus, SpatialFormat};
 use gamersequalizer_common::biquad::MAX_EQ_BANDS;
 use gamersequalizer_common::profile::ParametricProfile;
 use gamersequalizer_common::shm::{
@@ -15,6 +16,7 @@ use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Memory::UnmapViewOfFile;
 
@@ -125,6 +127,10 @@ pub struct AppState {
   started_at: std::time::Instant,
   /// Channel levels the service changed (tray flyout), and the count adopted last.
   mixer_edits: Option<(crate::mixer_edits::MixerEditsMap, u32)>,
+  /// The count of flyout output picks seen last, and the pick the lock has not met yet (the hash
+  /// of its endpoint id, when this window learned of it).
+  output_picks_seen: u32,
+  output_pick: Option<(u64, Instant)>,
 }
 
 impl AppState {
@@ -142,6 +148,10 @@ impl AppState {
     let autostart_enabled = crate::autostart::is_autostart_enabled();
     let prefs = super::prefs::UiPrefs::load_or_default(storage.base_dir());
     crate::i18n::set_language(prefs.language);
+    let mixer_edits = crate::mixer_edits::MixerEditsMap::open()
+      .inspect_err(|e| log::warn!("[Flyout] no channel edits from the service: {e}"))
+      .ok();
+    let output_picks_seen = mixer_edits.as_ref().map_or(0, |m| m.edits().output_count());
 
     let state = Self {
       active_tab: ActiveTab::Mixer,
@@ -186,13 +196,12 @@ impl AppState {
       denoise_switched_at: None,
       audio_settings_saved,
       started_at: std::time::Instant::now(),
-      mixer_edits: crate::mixer_edits::MixerEditsMap::open()
-        .inspect_err(|e| log::warn!("[Flyout] no channel edits from the service: {e}"))
-        .ok()
-        .map(|m| {
-          let seen = m.edits().count();
-          (m, seen)
-        }),
+      mixer_edits: mixer_edits.map(|m| {
+        let seen = m.edits().count();
+        (m, seen)
+      }),
+      output_picks_seen,
+      output_pick: None,
     };
     state.sync_mic_eq_to_shm();
     state
@@ -317,6 +326,31 @@ impl AppState {
     if let Some((map, seen)) = &mut self.mixer_edits {
       map.edits().adopt(seen, chatmix);
     }
+  }
+
+  /// The output the user just picked in the tray flyout, when this window's lock is about to
+  /// switch Windows back from it: the caller moves the lock there instead (`header::select_output`).
+  /// None without a lock, and for a default that changed for another reason (a monitor took it).
+  pub fn take_flyout_output(&mut self, lock: &EndpointLockManager) -> Option<String> {
+    // The flag before the picks: the service tells of a pick before it switches, so a revert seen
+    // pending here has its pick in the block already (the other order could miss it).
+    let pending = lock.revert_pending();
+    if let Some((map, _)) = &self.mixer_edits
+      && let Some(hash) = map.edits().picked_output(&mut self.output_picks_seen)
+    {
+      self.output_pick = Some((hash, Instant::now()));
+    }
+    let pick = self.output_pick.map(|(hash, at)| (hash, at.elapsed()));
+    if pick.is_some_and(|(_, age)| age > OUTPUT_PICK_VALID) {
+      self.output_pick = None;
+    }
+    if !pending || self.output_pick.is_none() {
+      return None;
+    }
+    // One read of the default, on the change only.
+    let id = lock.get_default_output_id().filter(|id| is_picked_output(pick, id))?;
+    self.output_pick = None;
+    Some(id)
   }
 
   pub fn sync_mixer_to_shm(&self, chatmix: &ChatMixController) {

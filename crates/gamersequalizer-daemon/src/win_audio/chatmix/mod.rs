@@ -1111,9 +1111,9 @@ mod tests {
     );
     // The sessions get no channel level any more (Game 50 % stays on Sonar's Game output), only
     // the apps' own volumes from the flyout (100 % unless set).
+    // Not through `apply_session_mix`: it would walk this PC's real sessions.
     mix.game.volume = 0.5;
-    mix.apply_session_mix();
-    assert_eq!(mix.last_session_targets, Some((1.0, 1.0, 1.0)));
+    assert_eq!(mix.session_targets(), (1.0, 1.0, 1.0));
   }
 
   #[test]

@@ -22,6 +22,8 @@ logged, shown, retried, never unwound.
   - Shared memory (`gamersequalizer-common/src/shm/`): a `Local\` mapping between window and service,
     and a `Global\` mapping the APO creates inside audiodg. The service mirrors settings into it and
     telemetry out of it (`win_audio/apo_link.rs`); the window opens it too.
+  - A second `Local\` mapping (`mixer_edits.rs`) tells the window what the service changed in the
+    mixer (the tray flyout's channel levels and output pick). It is outside the versioned layout.
   - JSON files in `%APPDATA%\GamersEqualizer`, written by both the window and the service.
   - The APO's notes in the Windows Application log, which the service copies into the app log as
     `[ApoNote]` (`health/apo_diag.rs`).

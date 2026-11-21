@@ -3,12 +3,17 @@
 //! the service put there alone would be overwritten; this block is written by the service only and
 //! counted, and the window adopts it once per new count. It never writes back, so nothing bounces.
 //!
+//! It also names the output picked in the flyout (`publish_output`): a window that locks the output
+//! would switch Windows back from it, as from any change it did not make itself.
+//!
 //! A mapping of its own (`Local\`, window and service only): a new field in `ShmHeader` would bump
 //! the layout version and leave an installed microphone effect unreachable until it is reinstalled.
 
 use crate::win_audio::chatmix::ChatMixController;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Memory::{
   CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
@@ -16,7 +21,12 @@ use windows::Win32::System::Memory::{
 use windows::core::HSTRING;
 
 /// A new layout of `MixerEdits` gets a new name (a window of another build then sees none).
-const NAME: &str = r"Local\GamersEqualizer_MixerEdits_v1";
+const NAME: &str = r"Local\GamersEqualizer_MixerEdits_v2";
+/// How long an output picked in the flyout counts as the reason the default changed (the service
+/// switches Windows in the loop pass it tells of the pick).
+/// shortcut: a pick whose switch failed still counts for this long, so the same output becoming
+/// the default by itself within it moves a window's lock; tell of failed switches if that shows.
+pub const OUTPUT_PICK_VALID: Duration = Duration::from_secs(5);
 
 /// Zero in a new mapping: count 0, nothing to adopt.
 #[repr(C)]
@@ -27,6 +37,10 @@ pub struct MixerEdits {
   /// Game, chat, media, mic (the mic's wish may be above 1000).
   permille: [AtomicU32; 4],
   muted: [AtomicBool; 4],
+  /// Bumped after `output` is written.
+  output_count: AtomicU32,
+  /// `id_hash` of the output picked last (an endpoint id does not fit into atomics).
+  output: AtomicU64,
 }
 
 /// The mapped block; unmapped on drop.
@@ -68,6 +82,41 @@ impl MixerEdits {
     }
     true
   }
+
+  /// The service: the user picked the output `id`. Called before Windows is switched to it, so the
+  /// window knows of the pick by the time it sees the default change.
+  pub fn publish_output(&self, id: &str) {
+    self.output.store(id_hash(id), Ordering::Relaxed);
+    self.output_count.fetch_add(1, Ordering::Release);
+  }
+
+  /// What the window saw last; at its start the count as it is (an older pick is not news).
+  pub fn output_count(&self) -> u32 {
+    self.output_count.load(Ordering::Acquire)
+  }
+
+  /// The window: the `id_hash` of the output picked since `seen`.
+  pub fn picked_output(&self, seen: &mut u32) -> Option<u64> {
+    let now = self.output_count();
+    if now == *seen {
+      return None;
+    }
+    *seen = now;
+    Some(self.output.load(Ordering::Relaxed))
+  }
+}
+
+/// An endpoint id as the block carries it. Both processes run the same exe, so the same hasher.
+pub fn id_hash(id: &str) -> u64 {
+  let mut hasher = DefaultHasher::new();
+  id.hash(&mut hasher);
+  hasher.finish()
+}
+
+/// The window: `default`, the output Windows just switched to, is the flyout's pick (its hash and
+/// how long ago the window learned of it), not a change the output lock switches back from.
+pub fn is_picked_output(pick: Option<(u64, Duration)>, default: &str) -> bool {
+  pick.is_some_and(|(hash, age)| age <= OUTPUT_PICK_VALID && id_hash(default) == hash)
 }
 
 impl MixerEditsMap {
@@ -143,6 +192,31 @@ mod tests {
     edits.publish(&service);
     assert!(edits.adopt(&mut seen, &mut window));
     assert_eq!((window.game.volume, window.game.muted), (0.6, true));
+  }
+
+  #[test]
+  fn the_window_learns_of_an_output_picked_in_the_flyout_once() {
+    let edits = MixerEdits::default();
+    let mut seen = edits.output_count();
+    assert_eq!(edits.picked_output(&mut seen), None, "nothing picked yet");
+    edits.publish_output("{0.0.0.00000000}.{headphones}");
+    let picked = edits.picked_output(&mut seen);
+    assert_eq!(picked, Some(id_hash("{0.0.0.00000000}.{headphones}")));
+    assert_ne!(picked, Some(id_hash("{0.0.0.00000000}.{monitor}")), "another output is not the pick");
+    assert_eq!(edits.picked_output(&mut seen), None, "told once");
+    // A channel edit is not an output pick, and the other way round.
+    edits.publish(&ChatMixController::new());
+    assert_eq!(edits.picked_output(&mut seen), None);
+  }
+
+  #[test]
+  fn the_lock_follows_only_a_fresh_pick_of_that_very_output() {
+    let pick = |age| Some((id_hash("headphones"), Duration::from_secs(age)));
+    assert!(is_picked_output(pick(0), "headphones"));
+    assert!(is_picked_output(pick(5), "headphones"));
+    assert!(!is_picked_output(pick(0), "monitor"), "a monitor took the default: switched back");
+    assert!(!is_picked_output(pick(6), "headphones"), "an old pick is not why the default changed now");
+    assert!(!is_picked_output(None, "headphones"));
   }
 
   #[test]
