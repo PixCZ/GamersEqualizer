@@ -152,7 +152,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
   a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
 }
 
-fn image_path(pid: u32) -> Option<PathBuf> {
+/// A process's exe as a Win32 path (`C:\...`), which shell calls take; also used by the flyout.
+pub(crate) fn image_path(pid: u32) -> Option<PathBuf> {
   // SAFETY: the handle is closed before returning; the buffer is local.
   unsafe {
     let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;

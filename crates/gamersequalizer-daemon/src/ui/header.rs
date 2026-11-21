@@ -201,18 +201,11 @@ pub fn output_combo(ui: &mut Ui, state: &AppState, id: &str, width: f32, max_cha
 
 /// Makes `id` the output: Windows default, Master, lock target and spatial sound check.
 pub fn select_output(state: &mut AppState, win_audio: &mut WinAudioSystem, id: String) {
-  state.selected_endpoint_id = Some(id.clone());
-  win_audio.chatmix.master_device_id = Some(id.clone());
-  let _ = win_audio.endpoint_lock.set_as_default_device(&id);
-  // Picked here = intended: the tray must not report it as a lost default.
-  crate::health::remember_output(state.storage.base_dir(), &id);
-  if win_audio.endpoint_lock.is_locked() {
-    win_audio.endpoint_lock.lock_device(id);
-  }
+  win_audio.select_output(state.storage.base_dir(), &id);
+  state.selected_endpoint_id = Some(id);
   state.spatial_checked_at = None;
   state.headphones_ui.recheck_apo();
   super::setup::recheck(state);
-  win_audio.chatmix.sync_from_system();
 }
 
 // --- private helpers ---------------------------------------------------------------------

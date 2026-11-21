@@ -409,11 +409,7 @@ impl ChatMixController {
 
   /// See `app_channels::channel_for`.
   pub fn classify_exe(&self, exe: &str) -> AudioBus {
-    match app_channels::channel_for(exe) {
-      AppChannel::Chat => AudioBus::Chat,
-      AppChannel::Game => AudioBus::Game,
-      AppChannel::Media | AppChannel::Unknown => AudioBus::Media,
-    }
+    classify(exe)
   }
 
   /// Calculate effective multipliers for Game and Chat
@@ -497,13 +493,20 @@ impl ChatMixController {
   /// Automatic ChatMix's mix mode lowers the Game sessions through here too (`duck_game_sessions`,
   /// every call), so this stays the one writer of the session volumes. A session it lowered is
   /// left to those rules (`game_duck`) until it has its level back.
+  ///
+  /// Each target is multiplied by the app's own volume (`app_channels::volume_factor`, 100 % by
+  /// default, set from the tray flyout). With channel outputs bound the channels stay on their
+  /// endpoints and the sessions get the app volume alone. Mute is never touched here: the
+  /// flyout's mute button is the session's own Windows mute (`set_app_mute`).
   pub fn apply_session_mix(&mut self) {
-    if !self.owns_session_volumes() {
+    let owns = self.owns_session_volumes();
+    if !owns {
       self.release_game_sessions();
-      return;
+      if !self.sessions_enabled {
+        return;
+      }
     }
-    let (game_vol, chat_vol) = self.get_multipliers();
-    let targets = (game_vol, chat_vol, self.get_media_volume());
+    let targets = self.session_targets();
     let generation = app_channels::generation();
     let changed = self.last_session_targets != Some(targets) || self.last_channels_generation != generation;
     if self.sessions_idle && self.session_watch.renew_due(IDLE_SESSION_MIX_INTERVAL) {
@@ -519,7 +522,75 @@ impl ChatMixController {
       self.last_channels_generation = generation;
       intents = self.full_session_pass(targets);
     }
-    self.duck_game_sessions(&intents);
+    if owns {
+      self.duck_game_sessions(&intents);
+    }
+  }
+
+  /// (Game, Chat, Media) a session's volume is the app's volume times: channel x ChatMix while
+  /// this process owns the session volumes, else 1 (the channel is on its own output).
+  fn session_targets(&self) -> (f32, f32, f32) {
+    if !self.owns_session_volumes() {
+      return (1.0, 1.0, 1.0);
+    }
+    let (game, chat) = self.get_multipliers();
+    (game, chat, self.get_media_volume())
+  }
+
+  /// The tray flyout: the user dragged `exe` to `heard`, its session volume as Windows (and
+  /// EarTrumpet) shows it. Its sessions get exactly that now, and the app volume becomes
+  /// `heard / factor` (`app_volume_for`), so the passes after this keep it there. Above what its
+  /// channel allows (Game at 50 %: at most 50 %) the session gets the most it can.
+  /// `save`: the end of a change (written to `app_volumes.json`).
+  pub fn set_app_heard_volume(&mut self, exe: &str, heard: f32, save: bool) {
+    if !self.sessions_enabled {
+      return;
+    }
+    let targets = self.session_targets();
+    // SAFETY: the service loop's thread, COM initialized as MTA (`get_all_session_managers`).
+    let sessions: Vec<_> = unsafe { self.enumerate_active_sessions_raw() }
+      .into_iter()
+      .filter(|(_, path, _, _)| exe_name_of(path).eq_ignore_ascii_case(exe))
+      .collect();
+    // One exe is on one channel (`classify`).
+    let Some(channel) = sessions.first().and_then(|(_, _, _, bus)| session_target(*bus, targets, 1.0)) else {
+      return;
+    };
+    let lowered = sessions.iter().any(|(key, _, _, _)| self.game_duck.is_lowered(key));
+    let factor = if lowered { channel * self.duck_factor.clamp(0.0, 1.0) } else { channel };
+    let app = app_volume_for(heard, factor);
+    let mut stored = app_channels::app_volume(exe);
+    stored.volume = app;
+    app_channels::set_app_volume(exe, stored, save);
+    let target = channel * app;
+    for (key, _, volume, _) in sessions {
+      // A lowered session gets `target` as its base on the next pass (the generation moved) and
+      // the reduction on top: `game_duck`'s rules stay the only ones writing it.
+      if self.game_duck.is_lowered(&key) {
+        continue;
+      }
+      // SAFETY: an interface enumerated just now on this thread.
+      match unsafe { volume.SetMasterVolume(target, std::ptr::null()) } {
+        Ok(()) => {
+          self.session_set.insert(key, target);
+        }
+        Err(e) => log::debug!("[ChatMix] SetMasterVolume failed: {e}"),
+      }
+    }
+  }
+
+  /// The tray flyout's mute button: the sessions' own Windows mute, which the mixer never sets.
+  pub fn set_app_mute(&self, exe: &str, muted: bool) {
+    // SAFETY: the service loop's thread, COM initialized as MTA; interfaces enumerated just now.
+    unsafe {
+      for (_, path, volume, _) in self.enumerate_active_sessions_raw() {
+        if exe_name_of(&path).eq_ignore_ascii_case(exe)
+          && let Err(e) = volume.SetMute(muted, std::ptr::null())
+        {
+          log::debug!("[ChatMix] SetMute failed: {e}");
+        }
+      }
+    }
   }
 
   /// An output came or went, or the default moved: every session is looked at in the next pass,
@@ -542,12 +613,8 @@ impl ChatMixController {
     // SAFETY: COM calls on interfaces enumerated just now.
     unsafe {
       for (key, path, session_vol, bus) in self.enumerate_active_sessions_raw() {
-        let target = match bus {
-          AudioBus::Game => targets.0,
-          AudioBus::Chat => targets.1,
-          AudioBus::Media => targets.2,
-          // Master is the hardware endpoint; never touched per app.
-          AudioBus::Master | AudioBus::Mic => continue,
+        let Some(target) = session_target(bus, targets, app_channels::volume_factor(exe_name_of(&path))) else {
+          continue;
         };
         let lowered = self.game_duck.is_lowered(&key);
         if bus == AudioBus::Game {
@@ -645,7 +712,8 @@ impl ChatMixController {
     self.game_duck.end_pass(Instant::now(), None, present);
   }
 
-  pub fn list_active_sessions(&self) -> Vec<AudioSessionInfo> {
+  /// Every app session on every output, one per process (the mixer tab, the tray flyout).
+  pub fn list_active_sessions() -> Vec<AudioSessionInfo> {
     let mut result = Vec::new();
     let mut seen_pids = HashSet::new();
     // SAFETY: COM calls on the session interfaces from `get_all_session_managers` (which initializes COM on this
@@ -666,7 +734,7 @@ impl ChatMixController {
               if is_own_exe(&exe_name) {
                 continue;
               }
-              let bus = self.classify_exe(&exe_name);
+              let bus = classify(&exe_name);
               let mut vol = 1.0;
               let mut muted = false;
               if let Ok(vol_ctl) = control.cast::<ISimpleAudioVolume>() {
@@ -733,6 +801,38 @@ enum SessionAction {
 fn full_pass_due(changed: bool, new_session: bool, since: Option<Duration>, slow: bool) -> bool {
   let interval = if slow { IDLE_SESSION_MIX_INTERVAL } else { SESSION_MIX_INTERVAL };
   changed || new_session || since.is_none_or(|d| d >= interval)
+}
+
+fn classify(exe: &str) -> AudioBus {
+  match app_channels::channel_for(exe) {
+    AppChannel::Chat => AudioBus::Chat,
+    AppChannel::Game => AudioBus::Game,
+    AppChannel::Media | AppChannel::Unknown => AudioBus::Media,
+  }
+}
+
+/// The volume a session on `bus` gets: its channel's target times the app's own volume
+/// (`app`, 1 = unchanged). None: not a per-app channel.
+fn session_target(bus: AudioBus, (game, chat, media): (f32, f32, f32), app: f32) -> Option<f32> {
+  let channel = match bus {
+    AudioBus::Game => game,
+    AudioBus::Chat => chat,
+    AudioBus::Media => media,
+    // Master is the hardware endpoint; never touched per app.
+    AudioBus::Master | AudioBus::Mic => return None,
+  };
+  Some(channel * app)
+}
+
+/// Below this channel factor a session is silent anyway and nothing is divided by it.
+const SILENT_FACTOR: f32 = 0.001;
+
+/// The app volume that makes a session with `factor` (channel x ChatMix x reduction) play at
+/// `heard`: `heard / factor`, at most 100 % (then the session reaches only `factor`). A silent
+/// channel keeps `heard` itself, for when the channel comes back.
+fn app_volume_for(heard: f32, factor: f32) -> f32 {
+  let heard = if heard.is_finite() { heard.clamp(0.0, 1.0) } else { 1.0 };
+  if factor.is_finite() && factor > SILENT_FACTOR { (heard / factor).clamp(0.0, 1.0) } else { heard }
 }
 
 /// `last`: the level this process set on the session before (None: never touched it).
@@ -876,6 +976,35 @@ mod tests {
   }
 
   #[test]
+  fn app_volume_multiplies_the_channel_target_and_100_percent_changes_nothing() {
+    let targets = (0.8, 0.5, 1.0);
+    // Default app volume: exactly the channel's target, so the mixer behaves as before.
+    assert_eq!(session_target(AudioBus::Game, targets, 1.0), Some(0.8));
+    assert_eq!(session_target(AudioBus::Media, targets, 1.0), Some(1.0));
+    assert_eq!(session_action(None, 1.0), SessionAction::Keep(None));
+    // Game 80 % x app 50 %; Chat at 50 % x app 50 %.
+    assert_eq!(session_target(AudioBus::Game, targets, 0.5), Some(0.4));
+    assert_eq!(session_target(AudioBus::Chat, targets, 0.5), Some(0.25));
+    assert_eq!(session_target(AudioBus::Master, targets, 0.5), None);
+  }
+
+  #[test]
+  fn a_flyout_drag_lands_the_session_where_the_user_dragged_it() {
+    // Game at 80 %: dragged to 40 % heard -> app 50 %, and the mixer's own target is 40 % again.
+    let app = app_volume_for(0.4, 0.8);
+    assert_eq!(app, 0.5);
+    assert_eq!(session_target(AudioBus::Game, (0.8, 1.0, 1.0), app), Some(0.4));
+    // Channel at 100 %: the app volume is what was dragged.
+    assert_eq!(app_volume_for(0.75, 1.0), 0.75);
+    // Above what the channel allows (Game 50 %, dragged to 75 %): app 100 %, the session gets 50 %.
+    assert_eq!(app_volume_for(0.75, 0.5), 1.0);
+    // A silent channel (0 % or muted): no division by zero, the drag is kept for when it returns.
+    assert_eq!(app_volume_for(0.3, 0.0), 0.3);
+    assert_eq!(app_volume_for(0.3, f32::NAN), 0.3);
+    assert_eq!(app_volume_for(f32::INFINITY, 0.5), 1.0);
+  }
+
+  #[test]
   fn idle_with_announcements_walks_sessions_rarely_but_a_change_or_new_session_at_once() {
     let two = Some(Duration::from_secs(2));
     assert!(full_pass_due(false, false, two, false), "busy or not announced: every second");
@@ -980,9 +1109,11 @@ mod tests {
       (mix.master_device_id.clone(), mix.mic_device_id.as_deref(), mix.mic.volume),
       (master, Some("mic"), mic_volume)
     );
-    // The guard returns before any session pass (which would stamp `last_session_pass`).
+    // The sessions get no channel level any more (Game 50 % stays on Sonar's Game output), only
+    // the apps' own volumes from the flyout (100 % unless set).
+    mix.game.volume = 0.5;
     mix.apply_session_mix();
-    assert!(mix.last_session_pass.is_none());
+    assert_eq!(mix.last_session_targets, Some((1.0, 1.0, 1.0)));
   }
 
   #[test]

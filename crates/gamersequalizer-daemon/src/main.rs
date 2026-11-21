@@ -6,10 +6,12 @@ pub mod app_log;
 pub mod autostart;
 #[cfg(feature = "cpu-stats")]
 pub mod cpu_stats;
+pub mod flyout;
 pub mod health;
 pub mod i18n;
 pub mod i18n_cs;
 pub mod mic_usage;
+pub mod mixer_edits;
 pub mod notify;
 pub mod output_eq;
 pub mod settings_transfer;

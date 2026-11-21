@@ -131,6 +131,11 @@ const LIGHT: Palette = Palette {
   dark: false,
 };
 
+/// The palette outside egui (the tray flyout draws itself).
+pub fn palette_for(dark: bool) -> Palette {
+  if dark { DARK } else { LIGHT }
+}
+
 // --- setup -------------------------------------------------------------------------------------
 
 /// Fonts and both themes; call once with the egui context before the first frame.
@@ -146,7 +151,12 @@ pub fn palette(ui: &Ui) -> Palette {
 
 /// A bright brand/channel color made readable on the light theme (darkened); unchanged on dark.
 pub fn adapt(ui: &Ui, c: Color32) -> Color32 {
-  if ui.visuals().dark_mode {
+  adapt_for(ui.visuals().dark_mode, c)
+}
+
+/// `adapt` outside egui (the tray flyout).
+pub fn adapt_for(dark: bool, c: Color32) -> Color32 {
+  if dark {
     c
   } else {
     let k = |v: u8| (v as f32 * 0.62) as u8;

@@ -5,8 +5,11 @@
 //! game playing in the background is on Game after a restart too. Same mechanics, values always
 //! Game. `channel_for` decides.
 //!
-//! Process-wide store: the UI process writes the file, the daemon (volume mix + stream
-//! router thread) re-reads it when its modification time changes, checked at most every
+//! A third store holds each app's own volume under its channel, set from the tray flyout
+//! (`app_volumes.json`); the mixer multiplies it into each session's target (`volume_factor`).
+//!
+//! Process-wide stores: one process writes a file (the window the channels, the service the app
+//! volumes), the others re-read it when its modification time changes, checked at most every
 //! `RELOAD_CHECK`. Load is infallible: missing or corrupt file -> no overrides.
 
 use std::collections::BTreeMap;
@@ -15,6 +18,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::output_eq::settings::write_atomic;
@@ -25,6 +29,7 @@ use crate::output_eq::settings::write_atomic;
 
 pub const APP_CHANNELS_FILE: &str = "app_channels.json";
 pub const DETECTED_FILE: &str = "detected_apps.json";
+pub const APP_VOLUMES_FILE: &str = "app_volumes.json";
 const RELOAD_CHECK: Duration = Duration::from_secs(1);
 
 /// Browsers stay on Media (`app_channels::channel_for`), even if game detection or a name match
@@ -160,33 +165,43 @@ pub enum AppChannel {
   Unknown,
 }
 
-#[derive(Default)]
-struct Store {
+/// An app's own volume under its channel: its sessions play at channel x ChatMix x this. The
+/// tray flyout sets it so that the session lands where the user dragged it
+/// (`ChatMixController::set_app_heard_volume`). 100 % is the default and is not stored: the mixer
+/// then behaves as before there were app volumes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppVolume {
+  pub volume: f32,
+  /// Fields a newer version wrote; kept through a load-save round trip.
+  #[serde(flatten)]
+  pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+struct Store<V> {
   path: Option<PathBuf>,
   modified: Option<SystemTime>,
   last_check: Option<Instant>,
-  overrides: BTreeMap<String, AppChannel>,
+  overrides: BTreeMap<String, V>,
 }
 
-static STORE: RwLock<Store> =
-  RwLock::new(Store { path: None, modified: None, last_check: None, overrides: BTreeMap::new() });
-static DETECTED: RwLock<Store> =
-  RwLock::new(Store { path: None, modified: None, last_check: None, overrides: BTreeMap::new() });
-/// Bumped whenever either store may have changed (`generation`).
+static STORE: RwLock<Store<AppChannel>> = RwLock::new(Store::new());
+static DETECTED: RwLock<Store<AppChannel>> = RwLock::new(Store::new());
+static VOLUMES: RwLock<Store<AppVolume>> = RwLock::new(Store::new());
+/// Bumped whenever any store may have changed (`generation`).
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------------------
 // Public functions
 // ---------------------------------------------------------------------------------------
 
-/// Point the stores at `<base_dir>/app_channels.json` / `detected_apps.json` and load them.
-/// Call once per process.
+/// Point the stores at `<base_dir>/app_channels.json` / `detected_apps.json` /
+/// `app_volumes.json` and load them. Call once per process.
 pub fn init(base_dir: &Path) {
   for (lock, file) in [(&STORE, APP_CHANNELS_FILE), (&DETECTED, DETECTED_FILE)] {
-    let mut store = lock.write().unwrap_or_else(|e| e.into_inner());
-    store.path = Some(base_dir.join(file));
-    store.reload();
+    lock.write().unwrap_or_else(|e| e.into_inner()).point_at(base_dir.join(file));
   }
+  VOLUMES.write().unwrap_or_else(|e| e.into_inner()).point_at(base_dir.join(APP_VOLUMES_FILE));
 }
 
 /// The user's channel for this exe, if they assigned one.
@@ -196,7 +211,22 @@ pub fn get(exe: &str) -> Option<AppChannel> {
 
 /// Assign `exe` to `channel`, or back to automatic with `None`; saved at once.
 pub fn set(exe: &str, channel: Option<AppChannel>) {
-  store_set(&STORE, exe, channel);
+  store_set(&STORE, exe, channel, true);
+}
+
+/// This exe's own volume (100 % when none).
+pub fn app_volume(exe: &str) -> AppVolume {
+  lookup(&VOLUMES, exe).unwrap_or_default()
+}
+
+/// Sets an app's volume. `save`: also write the file (at the end of a drag, not on every step).
+pub fn set_app_volume(exe: &str, volume: AppVolume, save: bool) {
+  store_set(&VOLUMES, exe, (volume != AppVolume::default()).then_some(volume), save);
+}
+
+/// What an app's session target is multiplied by (0..=1).
+pub fn volume_factor(exe: &str) -> f32 {
+  app_volume(exe).factor()
 }
 
 /// The channel an app's sound goes to (mixer volumes and stream EQ use this one rule):
@@ -232,7 +262,7 @@ pub fn generation() -> u32 {
 /// What game detection found for an exe that came to the foreground; saved when it changed.
 pub fn set_detected_game(exe: &str, game: bool) {
   if (lookup(&DETECTED, exe) == Some(AppChannel::Game)) != game {
-    store_set(&DETECTED, exe, game.then_some(AppChannel::Game));
+    store_set(&DETECTED, exe, game.then_some(AppChannel::Game), true);
   }
 }
 
@@ -240,21 +270,21 @@ pub fn set_detected_game(exe: &str, game: bool) {
 // Private helpers
 // ---------------------------------------------------------------------------------------
 
-fn lookup(lock: &RwLock<Store>, exe: &str) -> Option<AppChannel> {
+fn lookup<V: Clone + DeserializeOwned>(lock: &RwLock<Store<V>>, exe: &str) -> Option<V> {
   refresh_if_due(lock);
   let store = lock.read().unwrap_or_else(|e| e.into_inner());
-  store.overrides.get(&exe.to_ascii_lowercase()).copied()
+  store.overrides.get(&exe.to_ascii_lowercase()).cloned()
 }
 
-fn store_set(lock: &RwLock<Store>, exe: &str, channel: Option<AppChannel>) {
+fn store_set<V: Serialize>(lock: &RwLock<Store<V>>, exe: &str, value: Option<V>, save: bool) {
   let mut store = lock.write().unwrap_or_else(|e| e.into_inner());
   let key = exe.to_ascii_lowercase();
-  match channel {
-    Some(c) => store.overrides.insert(key, c),
+  match value {
+    Some(v) => store.overrides.insert(key, v),
     None => store.overrides.remove(&key),
   };
   GENERATION.fetch_add(1, Ordering::Relaxed);
-  let Some(path) = store.path.clone() else { return };
+  let Some(path) = store.path.clone().filter(|_| save) else { return };
   let saved = serde_json::to_string_pretty(&store.overrides)
     .map_err(std::io::Error::other)
     .and_then(|text| write_atomic(&path, &text));
@@ -264,7 +294,7 @@ fn store_set(lock: &RwLock<Store>, exe: &str, channel: Option<AppChannel>) {
   }
 }
 
-fn refresh_if_due(lock: &RwLock<Store>) {
+fn refresh_if_due<V: DeserializeOwned>(lock: &RwLock<Store<V>>) {
   let due = {
     let store = lock.read().unwrap_or_else(|e| e.into_inner());
     store.path.is_some() && store.last_check.is_none_or(|t| t.elapsed() >= RELOAD_CHECK)
@@ -279,7 +309,30 @@ fn refresh_if_due(lock: &RwLock<Store>) {
   }
 }
 
-impl Store {
+impl Default for AppVolume {
+  fn default() -> Self {
+    Self { volume: 1.0, extra: BTreeMap::new() }
+  }
+}
+
+impl AppVolume {
+  pub fn factor(&self) -> f32 {
+    if self.volume.is_finite() { self.volume.clamp(0.0, 1.0) } else { 1.0 }
+  }
+}
+
+impl<V> Store<V> {
+  const fn new() -> Self {
+    Self { path: None, modified: None, last_check: None, overrides: BTreeMap::new() }
+  }
+}
+
+impl<V: DeserializeOwned> Store<V> {
+  fn point_at(&mut self, path: PathBuf) {
+    self.path = Some(path);
+    self.reload();
+  }
+
   fn reload(&mut self) {
     let Some(path) = self.path.clone() else { return };
     self.modified = modified(&path);
@@ -295,8 +348,8 @@ impl Store {
   }
 }
 
-fn parse(text: &str) -> serde_json::Result<BTreeMap<String, AppChannel>> {
-  let map: BTreeMap<String, AppChannel> = serde_json::from_str(text)?;
+fn parse<V: DeserializeOwned>(text: &str) -> serde_json::Result<BTreeMap<String, V>> {
+  let map: BTreeMap<String, V> = serde_json::from_str(text)?;
   Ok(map.into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect())
 }
 
@@ -322,7 +375,8 @@ mod tests {
 
   #[test]
   fn parse_lowercases_keys_and_keeps_unknown_channels_out_of_get() {
-    let map = parse(r#"{"Spotify.exe":"chat","x.exe":"game","new.exe":"voice"}"#).unwrap();
+    let map: BTreeMap<String, AppChannel> =
+      parse(r#"{"Spotify.exe":"chat","x.exe":"game","new.exe":"voice"}"#).unwrap();
     assert_eq!(map.get("spotify.exe"), Some(&AppChannel::Chat));
     assert_eq!(map.get("x.exe"), Some(&AppChannel::Game));
     assert_eq!(map.get("new.exe"), Some(&AppChannel::Unknown));
@@ -335,10 +389,36 @@ mod tests {
     set("Spotify.exe", Some(AppChannel::Chat));
     assert_eq!(get("spotify.exe"), Some(AppChannel::Chat));
     let text = std::fs::read_to_string(dir.join(APP_CHANNELS_FILE)).unwrap();
-    assert_eq!(parse(&text).unwrap().get("spotify.exe"), Some(&AppChannel::Chat));
+    assert_eq!(parse::<AppChannel>(&text).unwrap().get("spotify.exe"), Some(&AppChannel::Chat));
     set("spotify.exe", None);
     assert_eq!(get("Spotify.exe"), None);
+
+    // App volumes: the default is not stored, a drag step is not saved until its end.
+    assert_eq!(volume_factor("game.exe"), 1.0);
+    let half = AppVolume { volume: 0.5, ..AppVolume::default() };
+    set_app_volume("Game.exe", half.clone(), false);
+    assert_eq!(volume_factor("game.exe"), 0.5);
+    assert!(!dir.join(APP_VOLUMES_FILE).exists());
+    set_app_volume("game.exe", half, true);
+    assert_eq!(volume_factor("GAME.exe"), 0.5);
+    let text = std::fs::read_to_string(dir.join(APP_VOLUMES_FILE)).unwrap();
+    let saved = parse::<AppVolume>(&text).unwrap();
+    assert_eq!(saved.get("game.exe").map(|v| v.volume), Some(0.5));
+    set_app_volume("game.exe", AppVolume::default(), true);
+    assert_eq!(std::fs::read_to_string(dir.join(APP_VOLUMES_FILE)).unwrap().trim(), "{}");
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn app_volumes_keep_unknown_fields_and_default_what_is_missing() {
+    let map: BTreeMap<String, AppVolume> = parse(r#"{"a.exe":{"volume":0.3,"curve":"log"},"b.exe":{}}"#).unwrap();
+    let a = map.get("a.exe").unwrap();
+    assert_eq!(a.volume, 0.3);
+    assert!(serde_json::to_string(a).unwrap().contains(r#""curve":"log""#));
+    assert_eq!(map.get("b.exe"), Some(&AppVolume::default()));
+    // Out of range or broken values never reach Windows as such.
+    assert_eq!(AppVolume { volume: 7.0, ..AppVolume::default() }.factor(), 1.0);
+    assert_eq!(AppVolume { volume: f32::NAN, ..AppVolume::default() }.factor(), 1.0);
   }
 
   #[test]

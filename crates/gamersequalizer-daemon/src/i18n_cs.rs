@@ -3,9 +3,13 @@
 
 pub static CS: &[(&str, &str)] = &[
   // --- tray ---
-  ("Open GamersEqualizer", "Otevřít GamersEqualizer"),
+  ("Channels", "Kanály"),
+  ("Open settings", "Otevřít nastavení"),
   ("Check for updates (GitHub)...", "Zkontrolovat aktualizace (GitHub)..."),
   ("Exit GamersEqualizer", "Ukončit GamersEqualizer"),
+  // --- tray flyout (flyout.rs) ---
+  ("App volumes", "Hlasitost aplikací"),
+  ("No app is playing sound", "Žádná aplikace nehraje zvuk"),
   // --- tray setup problems (health.rs) ---
   ("Windows default output changed to \"{}\"", "Výchozí výstup Windows se změnil na „{}“"),
   ("Spatial sound ({}) turned off on \"{}\"", "Prostorový zvuk ({}) se vypnul na „{}“"),

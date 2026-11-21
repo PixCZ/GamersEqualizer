@@ -123,6 +123,8 @@ pub struct AppState {
   /// Mic chain + mixer choices as last written to disk (see `save_pending`).
   audio_settings_saved: super::audio_settings::AudioSettings,
   started_at: std::time::Instant,
+  /// Channel levels the service changed (tray flyout), and the count adopted last.
+  mixer_edits: Option<(crate::mixer_edits::MixerEditsMap, u32)>,
 }
 
 impl AppState {
@@ -184,6 +186,13 @@ impl AppState {
       denoise_switched_at: None,
       audio_settings_saved,
       started_at: std::time::Instant::now(),
+      mixer_edits: crate::mixer_edits::MixerEditsMap::open()
+        .inspect_err(|e| log::warn!("[Flyout] no channel edits from the service: {e}"))
+        .ok()
+        .map(|m| {
+          let seen = m.edits().count();
+          (m, seen)
+        }),
     };
     state.sync_mic_eq_to_shm();
     state
@@ -276,10 +285,8 @@ impl AppState {
     self.shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header })
   }
 
-  /// Highest mic volume the sliders offer: the leveler's target sets the loudness, so a boost
-  /// above 100 % would only duplicate it (the chain cuts it too).
   pub fn mic_volume_max(&self) -> f32 {
-    if self.shm_header().is_some_and(|h| h.mic_leveler_enabled.load(Ordering::Relaxed)) { 1.0 } else { 3.0 }
+    mic_volume_max(self.shm_header())
   }
 
   pub fn shm_header_mut(&mut self) -> Option<&mut ShmHeader> {
@@ -301,6 +308,14 @@ impl AppState {
     crate::SERVICE_STOP_ASKED.store(true, Ordering::Relaxed);
     if let Some(h) = self.shm_header() {
       h.shutdown_daemon_signal.store(true, Ordering::SeqCst);
+    }
+  }
+
+  /// Takes the channel levels the service changed since the last frame (the tray flyout); the
+  /// frame's own writes then carry them on (`sync_mixer_to_shm`, `apply_mix`).
+  pub fn adopt_mixer_edits(&mut self, chatmix: &mut ChatMixController) {
+    if let Some((map, seen)) = &mut self.mixer_edits {
+      map.edits().adopt(seen, chatmix);
     }
   }
 
@@ -428,6 +443,12 @@ impl Drop for AppState {
       }
     }
   }
+}
+
+/// Highest mic volume the sliders offer (the window's and the tray flyout's): the leveler's target
+/// sets the loudness, so a boost above 100 % would only duplicate it (the chain cuts it too).
+pub(crate) fn mic_volume_max(h: Option<&ShmHeader>) -> f32 {
+  if h.is_some_and(|h| h.mic_leveler_enabled.load(Ordering::Relaxed)) { 1.0 } else { 3.0 }
 }
 
 /// The output EQ engine as the window and the service start it: first the presets a GG update

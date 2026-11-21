@@ -47,7 +47,9 @@ impl eframe::App for GamersEqualizerApp {
       }
     }
 
-    // 1. Synchronize system master and mic volume from Windows in real time. A mic level the
+    // 1. Channel levels changed in the tray flyout, before this frame writes its own over them.
+    self.state.adopt_mixer_edits(&mut self.win_audio.chatmix);
+    // Synchronize system master and mic volume from Windows in real time. A mic level the
     // service's automatic input gain set is not the user's volume.
     if let Some(h) = self.state.shm_header() {
       let auto = h.mic_auto_gain_permille.load(std::sync::atomic::Ordering::Relaxed);
