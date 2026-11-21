@@ -5,9 +5,9 @@
 //! Driven from the reference thread (`aec_reference::spawn`).
 //!
 //! It also persists the echo delay for the APO path: the APO runs as LOCAL SERVICE and can't
-//! read `%APPDATA%`, so the cached delay of the (default mic, reference output) pair is handed
+//! read `%APPDATA%`, so the cached delay of the (mic in use, reference output) pair is handed
 //! over in `aec_cached_delay_samples`, and a delay the APO confirms is saved back.
-//! Shortcut: the key uses the *default* microphone; the APO's endpoint isn't reported yet.
+//! Shortcut: the key uses the microphone in use (`in_use`); the APO's endpoint isn't reported yet.
 
 use log::info;
 use std::path::PathBuf;
@@ -21,13 +21,13 @@ use super::aec_delay_cache;
 use super::console_owner::ConsoleOwner;
 use super::dsp_watch::DspWatch;
 use super::ducking::Ducking;
-use super::mmdevice::resolve_default_capture_id;
+use super::in_use;
 
 /// How often to look for the APO's mapping while it doesn't exist (cheap OpenFileMapping).
 const OPEN_RETRY: Duration = Duration::from_secs(2);
 /// Settings in, telemetry out and Automatic ChatMix's stream mode (`tick`).
 pub const SYNC_INTERVAL: Duration = Duration::from_millis(100);
-/// How often to re-resolve the default microphone for the cache key (it may change, e.g. a headset).
+/// How often to read the microphone in use for the cache key (it may change, e.g. a headset).
 const KEY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// Save again only if the confirmed delay moved by more than 1 ms.
 const DELAY_SAVE_MIN_CHANGE: usize = 48;
@@ -249,7 +249,7 @@ impl ApoLink {
   fn sync_delay_cache(&mut self) {
     if self.last_key_check.is_none_or(|t| t.elapsed() >= KEY_CHECK_INTERVAL) {
       self.last_key_check = Some(Instant::now());
-      let capture = resolve_default_capture_id();
+      let capture = in_use::mic();
       if capture != self.capture_id {
         self.saved_level = capture.as_deref().and_then(|m| aec_delay_cache::load_level(&self.level_cache_path, m));
         if let Some(l) = self.saved_level {

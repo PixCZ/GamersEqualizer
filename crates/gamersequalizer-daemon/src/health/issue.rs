@@ -211,9 +211,10 @@ impl Issue {
   }
 }
 
-pub fn mic_silenced_issue(default_mic: Option<String>) -> Option<Issue> {
-  let (apps, why) = mic_usage::check_silenced(default_mic.as_deref())?;
-  Some(Issue::MicSilenced { why, apps: join_apps(&apps), mic_id: default_mic })
+/// `mic`: the microphone in use while it is connected (`WinAudioSystem::connected_mic`).
+pub fn mic_silenced_issue(mic: Option<String>) -> Option<Issue> {
+  let (apps, why) = mic_usage::check_silenced(mic.as_deref())?;
+  Some(Issue::MicSilenced { why, apps: join_apps(&apps), mic_id: mic })
 }
 
 /// "Discord.exe", "Discord.exe, obs64.exe", "Discord.exe, obs64.exe +2".

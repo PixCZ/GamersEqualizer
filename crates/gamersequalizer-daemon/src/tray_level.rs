@@ -82,9 +82,9 @@ impl LevelMeter {
       return None;
     };
     // The service bumps its copy of the sequence only while the mic effect produces audio
-    // (`ApoLink::sync`). The first tick has nothing to compare it with: it draws no old level.
+    // (`ApoLink::sync`).
     let seq = h.aec_telemetry_seq.load(Ordering::Acquire);
-    let live = self.seq.replace(seq).is_some_and(|before| before != seq);
+    let live = chain_is_live(self.seq.replace(seq), seq);
     self.step = live.then(|| next_step(self.step, peak as f32 / 10.0));
     // The full step draws the standing icon, so it is None: no icon is sent when speech at
     // full level starts or ends.
@@ -127,6 +127,16 @@ impl LevelMeter {
 /// Bar height for `app_icon::rgba`: 1.0 while the icon stands still.
 pub fn bar_scale(step: Option<u8>) -> f32 {
   step.map_or(1.0, |s| MIN_SCALE + (1.0 - MIN_SCALE) * f32::from(s.min(STEPS)) / f32::from(STEPS))
+}
+
+/// Does the mic effect produce audio? The sequence moved since the last tick. The first tick has
+/// nothing to compare it with and comes the moment the recording starts, before the chain has sent
+/// a level: it counts as live, so a recording starts at 0 % instead of a full icon that drops a
+/// second later.
+/// shortcut: an app that records without our effect shows 0 % for that first second, then the
+/// standing icon; upgrade: wait for the first telemetry before drawing, at the cost of a late icon.
+fn chain_is_live(seq_before: Option<u32>, seq: u32) -> bool {
+  seq_before.is_none_or(|before| before != seq)
 }
 
 /// The step for a level: up at once, down `FALL_STEPS` per tick.
@@ -188,6 +198,13 @@ mod tests {
     // Silence after speech: down by steps, not at once.
     assert_eq!(next_step(Some(STEPS), -120.0), STEPS - FALL_STEPS);
     assert_eq!(next_step(Some(1), -120.0), 0);
+  }
+
+  #[test]
+  fn the_first_tick_counts_as_live_and_a_stuck_sequence_does_not() {
+    assert!(chain_is_live(None, 5), "first tick: the recording just started");
+    assert!(chain_is_live(Some(4), 5), "sequence moved");
+    assert!(!chain_is_live(Some(5), 5), "sequence stuck: the icon stands still");
   }
 
   #[test]

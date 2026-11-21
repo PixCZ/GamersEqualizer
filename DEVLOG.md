@@ -3667,3 +3667,86 @@ sidetone noise mode picked while an app records). The running build has
   keeps its own second, apart from the check.
 - Not tried: a stop (app closes the microphone) is assumed to write the same key; the release notes
   promise only the start.
+
+## Milestone 67: One microphone and one output in use (2026-11-21)
+
+- Reported on a notebook (0.3.1, maybe older): with "Default microphone" picked in the app, sidetone
+  and the tray icon's level did not work; with the Realtek array picked they did. Recording worked
+  either way. "Default microphone" is the app's own entry (no pick = follow Windows), not a Windows
+  device.
+- Found by reading: every part resolved "the microphone" on its own. The mixer (`use_mic`): the pick
+  while connected, else the Windows default, a virtual default replaced by a physical device. Sidetone:
+  the pick even when unplugged, else the plain Windows default, and the plain default output (so behind
+  a Sonar / VB-Cable default the pair named a device no effect of ours runs on). The APO link's caches
+  (voice level, echo delay): the plain default, never the pick. The window's banner: the pick, else the
+  plain default. Health: the mixer's microphone, but "recording into a muted mic" asked the plain
+  default, and "not the Windows default microphone" compared the resolved microphone, not the pick, so
+  the service could warn (the tray level then stands still) where the window showed nothing.
+- Now one rule, resolved once: `ChatMixController::use_mic` and `master_endpoint_id`. The service loop
+  publishes both ids every pass (`win_audio/in_use.rs`); sidetone, the echo reference (its
+  `Arc<Mutex>` is gone) and the APO link read them there, the window reads its own controller.
+  `sidetone::active_pair` and `mmdevice::resolve_default_capture_id` are deleted. Health keeps the pick
+  apart (`picked_mic`) for the "not the default" issue only, as the window does.
+- Confirmed by the notebook's log: the saved pick was a headset microphone chosen on 2026-11-11
+  (`{edc3e59e...}`, "not present" in `[ApoCheck]`; the headset later came back under a new id). An
+  unplugged pick shows as "Default microphone" in the window and the mixer works with the array, but
+  the sidetone worker took the pick as it was: every start logs `[Sidetone] pair {b9182400...}` (the
+  array, before the settings are restored) and then `pair {edc3e59e...} -> speakers: off`, and the
+  verdict never leaves `Off`. The window saved "on" for (array, speakers), a pair the worker never
+  published. Picking the array replaced the stale pick, which is why that helped.
+- The tray is another cause, not touched here: on 0.3.1 the log has `[Mic] microphone processing
+  started` many times and no `[Tray] microphone in use` at all, so the check for a recording app
+  (`mic_usage::microphone_in_use`) never fired and the level had nothing to follow. The later
+  development builds in that log (`c8ffdff`, `93030c4`) log `microphone in use (microphone effect)`
+  and the icon follows; those commits are not in this repository yet.
+- Checked on the Mac by clippy for the Windows target only; tests run in CI.
+- Found in review: the window re-bound Master to the first physical output on every device change,
+  the service keeps the one in use behind a virtual default, so the Sidetone tab could edit a pair
+  the worker does not play: `bind_endpoints` now keeps it too (`master_endpoint_id`). And `use_mic`
+  keeps the id of an unplugged only microphone, which hid "an app records with no microphone":
+  that check takes the microphone only while it is connected (`WinAudioSystem::connected_mic`).
+- Known limits: a window started after the outputs changed behind a virtual default may still pick
+  another physical output than the running service (it has no way to ask it). Sidetone pairs saved
+  for a virtual default output (they never played) are not found any more: switch sidetone on again.
+- Left as it was: `--install` without a window (`setup_cli.rs`) still ignores a saved pick.
+
+### The tray level starts at the lowest bars or the real level (2026-11-21)
+
+- Asked for: the icon measures how well one is heard, so the moment it turns red it must not show
+  full bars. The first tick had no telemetry sequence to compare and drew the standing (full) icon
+  for a second. The first tick now counts as live (`tray_level::chain_is_live`, test
+  `the_first_tick_counts_as_live_and_a_stuck_sequence_does_not`): it draws the level the mirror
+  copied within the last second, else the lowest bars.
+- Limit: a microphone our effect does not run on shows the lowest bars for that first second and
+  the standing icon after it, as before.
+
+### The tray icon also turns red on the effect's word (2026-11-21)
+
+- Reported with build `8ca3da1` on the notebook: the icon did not turn red at all, whatever
+  microphone was picked. The log: sidetone's pair is now the array and stays (the fix above works),
+  `[Mic] microphone processing started` twice for ~3 s with a Store app in front
+  (`applicationframehost.exe`), and no `[Tray] microphone in use`. The window was open, so the 1 s
+  check ran during the recordings: Windows' microphone store named no app. The pick is not involved
+  (mic in use = Windows default = the array). Why the store is silent there is not known; it named
+  apps on that notebook until 2026-11-11.
+- The tray now has a second witness (`tray::EffectWatch`): the mic effect's telemetry sequence in
+  the service's mapping, read on every pass (one atomic). It moves only while the effect produces
+  audio and counts as stopped after 600 ms (`EFFECT_QUIET`). The earlier attempt (b3bb8f5, reverted)
+  went through `DspWatch` and the 1 s check and lagged ~3 s after a recording; here a recording
+  Windows named ends on Windows' word alone, and one only the effect saw ends ~0.6 to 0.85 s late.
+- The log line of such a recording carries what the store held at that moment
+  (`mic_usage::store_summary`: number of apps, the last one to open a microphone, when it opened
+  and closed), so the next log from the notebook says why Windows named nobody.
+- Limits: "Everything off" publishes no telemetry, so only Windows' word counts then. Our own
+  capture (the mic probe at install, sidetone's "Try it") turns the icon red while it runs. The
+  mixer's "Recording now" list, the "recording into a muted mic" warning and sidetone's low-latency
+  capture still go by the store alone. Tests: `the_effect_tells_of_a_recording_windows_does_not_name`,
+  `a_recording_windows_named_ends_on_windows_word`; not run on the Mac (clippy only).
+- Confirmed on the notebook with build `3f04cf4` (2026-11-21): the icon turns red with the effect
+  (0 to 250 ms after `[Mic] microphone processing started`) and plain 1.5 to 5 s before `[Mic] ...
+  stopped`; sidetone goes `NoRecorder` -> `Starting` -> `Playing` on the array's pair. The store's
+  summary in that log: 7 apps, the last to open a microphone was WindowsSoundRecorder 856347 s
+  before, that is 2026-11-11 19:15:42, closed 53 s later. Windows has written nothing into that
+  user's `ConsentStore\microphone` since, for any app. The log has build 26200.9711 on that day and
+  26200.9974 from 2026-11-16 on, so a Windows update lies between; whether it is the cause is not
+  known. Our registry read is not at fault: there is nothing to read.

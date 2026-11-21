@@ -238,8 +238,9 @@ impl ChatMixController {
       self.read_channel_levels();
     }
 
-    // 2. Identify physical Master endpoint
-    self.master_device_id = physical_endpoint_id(devices, default_id);
+    // 2. Identify physical Master endpoint. A re-bind (the window, on every device change) keeps
+    // the one in use behind a virtual default, as the service does: sidetone's pair is keyed by it.
+    self.master_device_id = master_endpoint_id(devices, default_id, self.master_device_id.as_deref());
     self.read_bound_levels();
   }
 

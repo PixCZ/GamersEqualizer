@@ -27,6 +27,9 @@ const MIC_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
 #[derive(Default)]
 pub struct ApoBanner {
   check: Option<ApoCheck>,
+  /// The microphone in use at the last check (`ChatMixController::mic_device_id`): the one the
+  /// processing is checked on.
+  mic_id: Option<String>,
   /// Windows default microphone at the last check (full endpoint id).
   default_mic_id: Option<String>,
   checked_at: Option<Instant>,
@@ -50,8 +53,7 @@ enum Problem {
 /// Re-reads the setup state every few seconds (or right after a fix). Call once per frame.
 pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
   if state.apo_banner.mic_checked_at.is_none_or(|t| t.elapsed() >= MIC_RECHECK_INTERVAL) {
-    let default_mic = win_audio.endpoint_lock.get_default_capture_id();
-    state.apo_banner.mic_silenced = crate::health::mic_silenced_issue(default_mic);
+    state.apo_banner.mic_silenced = crate::health::mic_silenced_issue(win_audio.connected_mic());
     state.apo_banner.mic_checked_at = Some(Instant::now());
     // The service rewrites it only when its verdict changes.
     let mtime = std::fs::metadata(RunStatus::path(state.storage.base_dir())).and_then(|m| m.modified()).ok();
@@ -64,15 +66,16 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
   if banner.checked_at.is_some_and(|t| t.elapsed() < RECHECK_INTERVAL) {
     return;
   }
-  let default_mic = win_audio.endpoint_lock.get_default_capture_id();
-  let mic_id = state.selected_mic_endpoint_id.clone().or_else(|| default_mic.clone());
+  // The same microphone as the mixer, the service's health check and sidetone.
+  let mic_id = win_audio.chatmix.mic_device_id.clone();
   let check = apo_install::check(mic_id.as_deref());
   let banner = &mut state.apo_banner;
   if check.status == ApoStatus::Active {
     banner.message = None;
   }
   banner.check = Some(check);
-  banner.default_mic_id = default_mic;
+  banner.mic_id = mic_id;
+  banner.default_mic_id = win_audio.endpoint_lock.get_default_capture_id();
   banner.checked_at = Some(Instant::now());
 }
 
@@ -87,7 +90,7 @@ pub fn mic_check(state: &AppState) -> Option<&ApoCheck> {
 
 /// Display name of the microphone the processing is checked on.
 pub fn mic_in_use_name(state: &AppState) -> String {
-  let id = state.selected_mic_endpoint_id.as_deref().or(state.apo_banner.default_mic_id.as_deref());
+  let id = state.apo_banner.mic_id.as_deref();
   state
     .capture_endpoints
     .iter()

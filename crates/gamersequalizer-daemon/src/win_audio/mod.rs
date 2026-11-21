@@ -12,6 +12,7 @@ pub mod dsp_watch;
 pub mod ducking;
 pub mod endpoint_lock;
 pub mod game_detector;
+pub mod in_use;
 pub mod leveler_log;
 pub mod mic_gain;
 pub mod mic_probe;
@@ -48,6 +49,12 @@ impl WinAudioSystem {
     chatmix.use_mic(None);
 
     Ok(Self { endpoint_lock, chatmix, game_detector })
+  }
+
+  /// The microphone in use while it is connected. `use_mic` keeps the id of an unplugged one
+  /// when no other is found: for "an app records with no microphone" that is none.
+  pub fn connected_mic(&self) -> Option<String> {
+    self.chatmix.mic_device_id.clone().filter(|id| self.endpoint_lock.is_active(id))
   }
 }
 
