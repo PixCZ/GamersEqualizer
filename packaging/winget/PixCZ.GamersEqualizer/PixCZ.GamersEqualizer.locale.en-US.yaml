@@ -22,6 +22,8 @@ Description: |-
   - Low-latency microphone chain: echo cancellation and AI noise suppression (RNNoise,
     DeepFilterNet 3, DPDFNet), voice EQ and leveler.
   - Sidetone with its own noise suppression and EQ.
+  It works with the headphones and microphone you already use and does not control headset
+  hardware (buttons, lights, firmware): keep the maker's app for that.
 Moniker: gamersequalizer
 Tags:
   - audio

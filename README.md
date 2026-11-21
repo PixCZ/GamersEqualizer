@@ -2,8 +2,14 @@
 
 An audio control center for Windows, built for gamers: per-app mixer with ChatMix and Automatic
 ChatMix, headphone correction EQ, game profiles, sidetone, and a low-latency microphone chain with echo
-cancellation and AI noise suppression. It works in every app, because the processing runs as a Windows
-audio effect (APO) on your real devices: no virtual sound card, no network access.
+cancellation and AI noise suppression. It works in every app. For your peace of mind it has no network
+code at all: it cannot send your voice, or anything else, anywhere.
+
+Sound delay (latency) comes first. That is why the processing runs as a Windows audio effect (APO),
+inside Windows audio and on your real devices, instead of through a virtual sound card: sound takes no
+detour, the EQ changes it in place without adding delay, and the microphone chain adds only what the
+stages you switch on need. That delay is measured, not guessed, and the app shows how much each choice
+costs.
 
 > **Status: in development.** Only a handful of people test it, while Windows setups vary enormously
 > (sound cards, drivers, other audio software, Windows versions and builds). It works on the machines
@@ -15,15 +21,25 @@ audio effect (APO) on your real devices: no virtual sound card, no network acces
 
 ## Why this exists
 
-I have a lot of respect for what SteelSeries built with Sonar, and for the work they keep putting into
-its profiles. But I mainly wanted an EQ for my headphones, and Sonar's headphone correction and game
-profiles don't work together. Pick a headphone profile and the game profiles, Sonar's strongest
-feature, are off the table.
+It started with an app I admire: SteelSeries Sonar. I have a lot of respect for what SteelSeries built,
+and for the work they keep putting into its profiles; the layout of the Mixer & device page is openly
+inspired by it. But some things I wanted were missing. I mainly wanted an EQ for my headphones, and
+Sonar's headphone correction and game profiles don't work together. Pick a headphone profile and the
+game profiles, Sonar's strongest feature, are off the table. I also missed profiles that switch by
+themselves: here the app notices which game is running and picks its profile.
 
-After years of sending improvement suggestions that went nowhere, I decided to build the tool myself,
-with Claude Opus 5.5 as my coding partner. It's software for gamers, so latency was the priority from
-the first line: every stage of the microphone chain is measured, and the UI shows how much delay each
-choice adds. It should be just as useful outside games.
+I reported a few of these, nothing came of it, and over the years the features I was waiting for never
+arrived. So I built my own version, with Claude Opus 5.5 as my coding partner: one that has the things
+I missed and does them on its own. It's software for gamers, so sound delay was the priority from the first
+line: every stage of the microphone chain is measured, and the UI shows how much delay each choice
+adds. That is the idea throughout: the interface is more technical and a little less friendly, but
+every control is named for what it does, so you know where you stand instead of guessing what hides
+behind a marketing name. It should be just as useful outside games.
+
+Since then it has grown features of its own and gone its own way. It is not a replacement for
+SteelSeries GG or any other headset maker's software: it is made for whatever headphones and microphone
+you already use, and it does not control headset hardware (buttons, lights, noise cancelling,
+firmware). Keep the maker's app for that.
 
 ## Features
 
