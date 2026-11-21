@@ -13,6 +13,7 @@ use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
@@ -36,6 +37,9 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// Since Windows announces each change (`MicStoreWatch`) this is the safety net: a missed
 /// announcement, a key that could not be watched or was recreated.
 const MIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Our microphone effect counts as stopped when its telemetry has not moved for this long: more
+/// than two idle ticks of the thread that mirrors it (`ApoLink::sync`), so one late tick is no stop.
+const EFFECT_QUIET: Duration = Duration::from_millis(600);
 /// Announced changes are checked at most this often. Bounds a flood (an app that rewrites its
 /// timestamps all the time): the watch is re-armed only when its change is checked, so at most one
 /// wake from the announcement and one at the end of this gap, each scan at most every 100 ms.
@@ -62,11 +66,39 @@ pub struct TrayManager {
   fix_items: Vec<(muda::MenuId, Fix)>,
 }
 
+/// Who says that an app records from a microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recording {
+  No,
+  /// Windows' microphone store names an app (`mic_usage`).
+  Windows,
+  /// Only our microphone effect: it processes audio, the store names nobody.
+  Effect,
+}
+
+/// Our microphone effect as the second witness of a recording. Windows' microphone store alone is
+/// not enough: a laptop recorded through the effect (a Store app) with no entry in use, so the
+/// icon never turned red. The effect's word comes later than Windows' and ends `EFFECT_QUIET`
+/// after the recording, so a recording Windows named also ends on Windows' word alone.
+/// shortcut: when an app Windows names stops while one it does not name goes on, the icon turns
+/// plain until that one stops too; upgrade: the effect reports its stream's session.
+#[derive(Default)]
+struct EffectWatch {
+  /// The effect's telemetry sequence at the last pass and when it last moved.
+  seq: Option<u32>,
+  moved_at: Option<Instant>,
+  /// Windows named an app while the effect ran: its lingering telemetry is not a recording.
+  windows_led: bool,
+}
+
 /// Keeps the tray icon alive in the service loop, creating it lazily.
 pub struct TrayHost {
   tray: Option<TrayManager>,
   last_attempt: Option<Instant>,
   mic_active: bool,
+  /// Windows' microphone store named a recording app at the last check.
+  mic_windows: bool,
+  effect: EffectWatch,
   mic_checked_at: Option<Instant>,
   /// None while ConsentStore\microphone cannot be watched (reopened on the 1 s check).
   mic_watch: Option<MicStoreWatch>,
@@ -81,6 +113,25 @@ pub struct TrayHost {
   level: LevelMeter,
   level_shown: Option<u8>,
   level_ticked_at: Option<Instant>,
+}
+
+impl EffectWatch {
+  /// `windows`: the store names a recording app; `seq`: the effect's telemetry sequence in the
+  /// service's mapping, which moves only while the effect produces audio.
+  fn recording(&mut self, windows: bool, seq: Option<u32>, now: Instant) -> Recording {
+    if let Some(seq) = seq
+      && self.seq.replace(seq).is_some_and(|last| last != seq)
+    {
+      self.moved_at = Some(now);
+    }
+    let live = seq.is_some() && self.moved_at.is_some_and(|t| now.duration_since(t) < EFFECT_QUIET);
+    self.windows_led = live && (windows || self.windows_led);
+    match (windows, live && !self.windows_led) {
+      (true, _) => Recording::Windows,
+      (false, true) => Recording::Effect,
+      (false, false) => Recording::No,
+    }
+  }
 }
 
 impl TrayManager {
@@ -183,6 +234,8 @@ impl TrayHost {
       tray: None,
       last_attempt: None,
       mic_active: false,
+      mic_windows: false,
+      effect: EffectWatch::default(),
       mic_checked_at: None,
       mic_watch: None,
       watch_error: RepeatFilter::default(),
@@ -250,12 +303,31 @@ impl TrayHost {
     let (mut mic_changed, mut level) = (false, self.level_shown);
     if mic_due {
       self.mic_checked_at = Some(Instant::now());
-      let active = crate::mic_usage::microphone_in_use();
-      if active != self.mic_active {
-        self.mic_active = active;
-        info!("[Tray] microphone {}", if active { "in use" } else { "free" });
-        mic_changed = true;
+      self.mic_windows = crate::mic_usage::microphone_in_use();
+    }
+    // The effect's word on every pass (one atomic), not only on the 1 s check.
+    let seq = header.map(|h| h.aec_telemetry_seq.load(Ordering::Acquire));
+    let now = Instant::now();
+    let mut recording = self.effect.recording(self.mic_windows, seq, now);
+    if recording == Recording::Effect && !self.mic_active {
+      // The effect spoke before the 1 s check: Windows is asked once more before the log says
+      // that it names no app.
+      crate::mic_usage::invalidate();
+      self.mic_windows = crate::mic_usage::microphone_in_use();
+      recording = self.effect.recording(self.mic_windows, seq, now);
+    }
+    if (recording != Recording::No) != self.mic_active {
+      self.mic_active = recording != Recording::No;
+      match recording {
+        Recording::No => info!("[Tray] microphone free"),
+        Recording::Windows => info!("[Tray] microphone in use"),
+        // The store's state goes into the log: it must say why Windows named nobody.
+        Recording::Effect => info!(
+          "[Tray] microphone in use: our microphone effect processes a recording, Windows names no app ({})",
+          crate::mic_usage::store_summary()
+        ),
       }
+      mic_changed = true;
     }
     // The level keeps its own second, apart from the microphone check: a check that an announced
     // change forced can come before the telemetry moved again, which the meter would take for an
@@ -465,6 +537,35 @@ fn truncate_tooltip(text: &str) -> String {
 mod tests {
   use super::*;
   use windows::Win32::System::Threading::CreateEventW;
+
+  #[test]
+  fn the_effect_tells_of_a_recording_windows_does_not_name() {
+    let ms = Duration::from_millis;
+    let t = Instant::now();
+    let mut watch = EffectWatch::default();
+    // The first sequence has nothing to compare with; a standing one is no recording.
+    assert_eq!(watch.recording(false, Some(5), t), Recording::No);
+    assert_eq!(watch.recording(false, Some(5), t + ms(250)), Recording::No);
+    // The laptop: the effect processes audio, the store names nobody.
+    assert_eq!(watch.recording(false, Some(6), t + ms(500)), Recording::Effect);
+    assert_eq!(watch.recording(false, Some(6), t + ms(1000)), Recording::Effect, "one late tick is no stop");
+    assert_eq!(watch.recording(false, Some(6), t + ms(500) + EFFECT_QUIET), Recording::No);
+    assert_eq!(watch.recording(false, None, t), Recording::No, "no shared memory");
+  }
+
+  #[test]
+  fn a_recording_windows_named_ends_on_windows_word() {
+    let ms = Duration::from_millis;
+    let t = Instant::now();
+    let mut watch = EffectWatch::default();
+    assert_eq!(watch.recording(true, Some(1), t), Recording::Windows);
+    assert_eq!(watch.recording(true, Some(2), t + ms(100)), Recording::Windows);
+    // Windows says it ended: the effect's telemetry of a moment ago does not keep the icon red.
+    assert_eq!(watch.recording(false, Some(3), t + ms(200)), Recording::No);
+    // Quiet, then a recording Windows does not name: the effect speaks again.
+    assert_eq!(watch.recording(false, Some(3), t + ms(200) + EFFECT_QUIET), Recording::No);
+    assert_eq!(watch.recording(false, Some(4), t + ms(1000)), Recording::Effect);
+  }
 
   #[test]
   fn long_tooltip_is_cut_to_the_windows_limit() {

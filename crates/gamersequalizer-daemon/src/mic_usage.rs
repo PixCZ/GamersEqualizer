@@ -31,6 +31,16 @@ pub enum Silenced {
   NoMicrophone,
 }
 
+/// One app key of the store.
+struct StoreApp {
+  /// `LastUsedTimeStart` / `LastUsedTimeStop` (FILETIME; a stop of 0 = the microphone is still open).
+  start: u64,
+  stop: u64,
+  name: String,
+  /// This exe (the mic probe, sidetone's own capture).
+  own: bool,
+}
+
 /// Windows' own announcement that something under ConsentStore\microphone changed (an app opened
 /// or closed a microphone, a new app key): the tray waits on `event` with its messages.
 pub struct MicStoreWatch {
@@ -178,29 +188,61 @@ fn recording() -> Vec<(u64, String)> {
 }
 
 fn scan_recording_apps() -> Vec<(u64, String)> {
+  let apps = scan_store().unwrap_or_default();
+  apps.into_iter().filter(|app| app.start != 0 && app.stop == 0 && !app.own).map(|app| (app.start, app.name)).collect()
+}
+
+/// Every app in the store with its times, None when the store cannot be opened.
+fn scan_store() -> Option<Vec<StoreApp>> {
   // Our own mic probe (`--probe-mic`) opens the mic too; it is not "another app recording".
   let own = std::env::current_exe().ok().map(|p| p.to_string_lossy().replace('\\', "#").to_lowercase());
   let is_own = |name: &str| own.as_deref() == Some(name.to_lowercase().as_str());
 
-  let store = HSTRING::from(MIC_STORE);
-  let Some(root) = open_key(HKEY_CURRENT_USER, &store) else { return Vec::new() };
+  let root = open_key(HKEY_CURRENT_USER, &HSTRING::from(MIC_STORE))?;
   let mut apps = Vec::new();
   for name in subkey_names(root) {
     if name == NON_PACKAGED {
       if let Some(np) = open_key(root, &HSTRING::from(NON_PACKAGED)) {
         for app in subkey_names(np) {
-          if let Some(since) = in_use_since(np, &app).filter(|_| !is_own(&app)) {
-            apps.push((since, display_name(&app, true)));
+          if let Some((start, stop)) = used(np, &app) {
+            apps.push(StoreApp { start, stop, name: display_name(&app, true), own: is_own(&app) });
           }
         }
         close_key(np);
       }
-    } else if let Some(since) = in_use_since(root, &name) {
-      apps.push((since, display_name(&name, false)));
+    } else if let Some((start, stop)) = used(root, &name) {
+      apps.push(StoreApp { start, stop, name: display_name(&name, false), own: false });
     }
   }
   close_key(root);
-  apps
+  Some(apps)
+}
+
+/// For the log line of a recording our effect processes while the store names no app: what the
+/// store holds at that moment, so the log alone says why (no entry, an entry already closed, our
+/// own exe, an unreadable store).
+pub fn store_summary() -> String {
+  let Some(apps) = scan_store() else { return "its microphone store cannot be opened".to_string() };
+  let now = filetime_now();
+  let ago = |t: u64| now.saturating_sub(t) as f64 / 1e7;
+  match apps.iter().max_by_key(|app| app.start) {
+    None => "its microphone store holds no app".to_string(),
+    Some(last) => format!(
+      "its microphone store holds {} apps, the last to open a microphone: {}{} {:.1} s ago, {}",
+      apps.len(),
+      last.name,
+      if last.own { " (this app)" } else { "" },
+      ago(last.start),
+      if last.stop == 0 { "still open".to_string() } else { format!("closed {:.1} s ago", ago(last.stop)) }
+    ),
+  }
+}
+
+/// Now as a FILETIME (100 ns since 1601), the unit of the store's times.
+fn filetime_now() -> u64 {
+  const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+  let since_unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+  UNIX_EPOCH_AS_FILETIME + (since_unix.as_nanos() / 100) as u64
 }
 
 /// `C:#Apps#Discord.exe` -> `Discord.exe`; Store package `Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe`
@@ -213,12 +255,11 @@ fn display_name(key: &str, non_packaged: bool) -> String {
   family.rsplit('.').next().filter(|s| !s.is_empty()).unwrap_or(family).to_string()
 }
 
-/// When the app opened the microphone it still holds (FILETIME), None when it holds none.
-fn in_use_since(parent: HKEY, app: &str) -> Option<u64> {
+/// When the app last opened and closed a microphone (FILETIME); a stop of 0 with a start means
+/// it still holds one. None when the key has no such values.
+fn used(parent: HKEY, app: &str) -> Option<(u64, u64)> {
   let key = HSTRING::from(app);
-  let start = read_qword(parent, &key, "LastUsedTimeStart")?;
-  let stop = read_qword(parent, &key, "LastUsedTimeStop")?;
-  (start != 0 && stop == 0).then_some(start)
+  Some((read_qword(parent, &key, "LastUsedTimeStart")?, read_qword(parent, &key, "LastUsedTimeStop")?))
 }
 
 fn read_qword(parent: HKEY, subkey: &HSTRING, value: &str) -> Option<u64> {

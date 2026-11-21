@@ -3709,3 +3709,36 @@ sidetone noise mode picked while an app records). The running build has
   another physical output than the running service (it has no way to ask it). Sidetone pairs saved
   for a virtual default output (they never played) are not found any more: switch sidetone on again.
 - Left as it was: `--install` without a window (`setup_cli.rs`) still ignores a saved pick.
+
+### The tray level starts at the lowest bars or the real level (2026-11-21)
+
+- Asked for: the icon measures how well one is heard, so the moment it turns red it must not show
+  full bars. The first tick had no telemetry sequence to compare and drew the standing (full) icon
+  for a second. The first tick now counts as live (`tray_level::chain_is_live`, test
+  `the_first_tick_counts_as_live_and_a_stuck_sequence_does_not`): it draws the level the mirror
+  copied within the last second, else the lowest bars.
+- Limit: a microphone our effect does not run on shows the lowest bars for that first second and
+  the standing icon after it, as before.
+
+### The tray icon also turns red on the effect's word (2026-11-21)
+
+- Reported with build `8ca3da1` on the notebook: the icon did not turn red at all, whatever
+  microphone was picked. The log: sidetone's pair is now the array and stays (the fix above works),
+  `[Mic] microphone processing started` twice for ~3 s with a Store app in front
+  (`applicationframehost.exe`), and no `[Tray] microphone in use`. The window was open, so the 1 s
+  check ran during the recordings: Windows' microphone store named no app. The pick is not involved
+  (mic in use = Windows default = the array). Why the store is silent there is not known; it named
+  apps on that notebook until 2026-11-11.
+- The tray now has a second witness (`tray::EffectWatch`): the mic effect's telemetry sequence in
+  the service's mapping, read on every pass (one atomic). It moves only while the effect produces
+  audio and counts as stopped after 600 ms (`EFFECT_QUIET`). The earlier attempt (b3bb8f5, reverted)
+  went through `DspWatch` and the 1 s check and lagged ~3 s after a recording; here a recording
+  Windows named ends on Windows' word alone, and one only the effect saw ends ~0.6 to 0.85 s late.
+- The log line of such a recording carries what the store held at that moment
+  (`mic_usage::store_summary`: number of apps, the last one to open a microphone, when it opened
+  and closed), so the next log from the notebook says why Windows named nobody.
+- Limits: "Everything off" publishes no telemetry, so only Windows' word counts then. Our own
+  capture (the mic probe at install, sidetone's "Try it") turns the icon red while it runs. The
+  mixer's "Recording now" list, the "recording into a muted mic" warning and sidetone's low-latency
+  capture still go by the store alone. Tests: `the_effect_tells_of_a_recording_windows_does_not_name`,
+  `a_recording_windows_named_ends_on_windows_word`; not run on the Mac (clippy only).
