@@ -18,6 +18,8 @@ pub struct RunStatus {
   pub mic_not_running: Option<String>,
   /// Same for the output EQ while sound played.
   pub output_not_running: Option<String>,
+  /// The Windows default output is not the one the user had (the tray's `OutputChanged`).
+  pub output_changed: Option<OutputChange>,
   /// Newest notes from inside audiodg (`apo_notes`), newest first, "time text".
   pub apo_notes: Vec<String>,
 }
@@ -124,6 +126,10 @@ impl HealthMonitor {
     let status = RunStatus {
       mic_not_running: not_running(Flow::Capture),
       output_not_running: not_running(Flow::Render),
+      output_changed: self.shown.iter().find_map(|issue| match issue {
+        Issue::OutputChanged(change) => Some(change.clone()),
+        _ => None,
+      }),
       apo_notes: self.notes.iter().take(NOTES_FOR_WINDOW).map(|n| format!("{} {}", n.time, n.text)).collect(),
     };
     if self.run_status.as_ref() != Some(&status) {

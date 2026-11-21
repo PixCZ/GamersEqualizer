@@ -1,6 +1,6 @@
 //! "The app is not working correctly" info bar under the top bar, on every tab, from app start.
 //! Lists each setup problem (mic effect missing / outdated / not on this mic, the output EQ
-//! missing on a new output device, the mic in use is not the Windows default) with the reason
+//! missing on a new output device, the Windows default output moved away, the mic in use is not the Windows default) with the reason
 //! and a one-click fix. Above it, a warning while an app records into a muted microphone.
 //!
 //! Fixes that need administrator rights open the setup card (`setup.rs`): it explains why and
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::state::AppState;
 use super::theme::{self, Severity};
-use crate::health::{Fix, Issue, RunStatus};
+use crate::health::{Fix, Issue, OutputChange, RunStatus};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::WinAudioSystem;
 use crate::win_audio::apo_install::{self, ApoCheck, ApoStatus};
@@ -45,9 +45,18 @@ pub struct ApoBanner {
 }
 
 enum Problem {
-  Apo { title: String, button: &'static str },
-  NewOutput { name: String },
-  NotDefaultMic { mic_name: String },
+  Apo {
+    title: String,
+    button: &'static str,
+  },
+  NewOutput {
+    name: String,
+  },
+  NotDefaultMic {
+    mic_name: String,
+  },
+  /// The Windows default output is not the one the user had: what the tray's badge says too.
+  OutputChanged(OutputChange),
 }
 
 /// Re-reads the setup state every few seconds (or right after a fix). Call once per frame.
@@ -158,6 +167,7 @@ pub fn render_health_bar(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudio
         Problem::Apo { title, button } => apo_row(ui, state, &title, button),
         Problem::NewOutput { name } => new_output_row(ui, state, &name),
         Problem::NotDefaultMic { mic_name } => default_mic_row(ui, state, win_audio, &mic_name),
+        Problem::OutputChanged(change) => output_changed_row(ui, state, win_audio, &change),
       }
     }
     if let Some(msg) = state.apo_banner.message.as_deref() {
@@ -302,6 +312,9 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
 
 fn problems(state: &AppState) -> Vec<Problem> {
   let mut list = Vec::new();
+  if let Some(change) = run_status(state).and_then(|r| r.output_changed.clone()) {
+    list.push(Problem::OutputChanged(change));
+  }
   if let Some(check) = state.apo_banner.check.as_ref() {
     let apo = match check.status {
       ApoStatus::Active | ApoStatus::NoMicrophone => None,
@@ -382,6 +395,32 @@ fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str) {
     }
     ui.label(trf("Echo cancellation and EQ do not work on \"{}\"", &[&name]));
   });
+}
+
+fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, change: &OutputChange) {
+  let mut keep = None;
+  ui.horizontal_wrapped(|ui| {
+    // The same two choices as in the tray menu (`Issue::fixes`).
+    if ui.add(theme::accent_button(ui, &trf("Switch back to \"{}\"", &[&change.expected_name]))).clicked() {
+      keep = Some(false);
+    }
+    if ui.button(trf("Keep \"{}\"", &[&change.current_name])).clicked() {
+      keep = Some(true);
+    }
+    ui.label(trf("Windows default output changed to \"{}\"", &[&change.current_name]));
+  });
+  let Some(keep) = keep else {
+    return;
+  };
+  if keep {
+    crate::health::remember_output(state.storage.base_dir(), &change.current_id);
+  } else if let Err(e) = win_audio.endpoint_lock.set_as_default_device(&change.expected_id) {
+    log::warn!("[Setup] switching the default output back failed: {e}");
+    state.apo_banner.message = Some(trf("Windows refused to change the default output: {}", &[&e.to_string()]));
+    return;
+  }
+  // The service rewrites its verdict within a few seconds; the row goes now.
+  state.apo_banner.run.output_changed = None;
 }
 
 fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, mic_name: &str) {

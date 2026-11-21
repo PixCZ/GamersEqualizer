@@ -75,6 +75,9 @@ const OUTPUT_PLAYING_PEAK: f32 = 0.0005;
 pub struct HealthMemory {
   /// Default output the user had (full endpoint id).
   pub expected_output: Option<String>,
+  /// Outputs seen connected before. One that comes back (a monitor waking from standby) is not
+  /// "just plugged in": Windows switching to it is flagged, not taken for the user's choice.
+  pub known_outputs: BTreeSet<String>,
   /// Outputs on which spatial sound was seen on.
   pub spatial_on: BTreeSet<String>,
   /// Spatial format the user has on each output (first seen, or accepted with "Keep").
@@ -229,8 +232,8 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
   }
 
   if let Some(current) = snap.default_output.as_deref() {
-    let just_plugged_in =
-      memory.first_seen.get(current).is_some_and(|&t| snap.at.saturating_duration_since(t) < PLUGGED_IN_SWITCH);
+    let just_plugged_in = !memory.known_outputs.contains(current)
+      && memory.first_seen.get(current).is_some_and(|&t| snap.at.saturating_duration_since(t) < PLUGGED_IN_SWITCH);
     match memory.expected_output.as_deref() {
       None => {
         memory.expected_output = Some(current.to_string());
@@ -245,12 +248,12 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
         // An unplugged device is not a lost setting; it is flagged only if it comes back and
         // Windows does not switch to it.
         if let Some(e) = snap.outputs.iter().find(|d| d.id == expected) {
-          issues.push(Issue::OutputChanged {
+          issues.push(Issue::OutputChanged(OutputChange {
             expected_id: e.id.clone(),
             expected_name: e.name.clone(),
             current_id: current.to_string(),
             current_name: name_of(&snap.outputs, current),
-          });
+          }));
         }
       }
       Some(_) => {}
@@ -283,6 +286,10 @@ pub fn evaluate(memory: &mut HealthMemory, snap: &Snapshot) -> (Vec<Issue>, bool
       // Unsupported = could not ask (device busy, COM error): no verdict.
       _ => {}
     }
+  }
+
+  for d in &snap.outputs {
+    changed |= memory.known_outputs.insert(d.id.clone());
   }
 
   if let Some((status, bundled)) = &snap.apo
@@ -640,6 +647,18 @@ mod tests {
     assert_eq!(memory.expected_output.as_deref(), Some("usb"));
     // An app moving the default to an output that was there all along is still flagged.
     assert_eq!(evaluate(&mut memory, &snap("hp", &["hp", "usb"])).0.len(), 1);
+  }
+
+  /// Notebook report: a monitor waking from standby counted as plugged in, became the expected
+  /// output, and the user's switch back to the headphones was flagged for 13 minutes.
+  #[test]
+  fn output_that_comes_back_is_not_taken_for_a_new_one() {
+    let mut memory = HealthMemory { expected_output: Some("hp".into()), ..Default::default() };
+    assert!(evaluate(&mut memory, &snap("hp", &["hp", "tv"])).0.is_empty());
+    assert!(evaluate(&mut memory, &snap("hp", &["hp"])).0.is_empty(), "the monitor goes away");
+    // It returns, Windows switches to it: flagged, and the headphones stay expected.
+    assert_eq!(evaluate(&mut memory, &snap("tv", &["hp", "tv"])).0.len(), 1);
+    assert_eq!(memory.expected_output.as_deref(), Some("hp"));
   }
 
   #[test]

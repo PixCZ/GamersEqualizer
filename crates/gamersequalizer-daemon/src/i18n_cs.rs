@@ -75,6 +75,7 @@ pub static CS: &[(&str, &str)] = &[
     "Nastaví ho jako výchozí a komunikační mikrofon Windows. Práva správce nejsou potřeba.",
   ),
   ("Windows refused to change the default microphone: {}", "Windows odmítl změnit výchozí mikrofon: {}"),
+  ("Windows refused to change the default output: {}", "Windows odmítl změnit výchozí výstup: {}"),
   (
     "The mic effect does NOT work on this microphone (build {}): apps get the raw microphone",
     "Efekt mikrofonu na tomto mikrofonu NEFUNGUJE (sestavení {}): aplikace dostávají neupravený mikrofon",

@@ -5,14 +5,18 @@ use super::*;
 /// Recording apps named in a title; more become "+N".
 const MAX_APPS_IN_TITLE: usize = 2;
 
+/// The default output moved away from the expected one; also in `run_status.json`, for the window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputChange {
+  pub expected_id: String,
+  pub expected_name: String,
+  pub current_id: String,
+  pub current_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Issue {
-  OutputChanged {
-    expected_id: String,
-    expected_name: String,
-    current_id: String,
-    current_name: String,
-  },
+  OutputChanged(OutputChange),
   /// `format`: name of the format that was on, if known.
   SpatialOff {
     device_id: String,
@@ -77,7 +81,9 @@ impl Issue {
   /// One line for the menu and tooltip.
   pub fn title(&self) -> String {
     match self {
-      Issue::OutputChanged { current_name, .. } => trf("Windows default output changed to \"{}\"", &[current_name]),
+      Issue::OutputChanged(OutputChange { current_name, .. }) => {
+        trf("Windows default output changed to \"{}\"", &[current_name])
+      }
       Issue::SpatialOff { device_name, format: Some(format), .. } if !format.is_empty() => {
         trf("Spatial sound ({}) turned off on \"{}\"", &[format, device_name])
       }
@@ -116,7 +122,7 @@ impl Issue {
   /// Second line of the Windows notification: what it means for the user.
   pub fn detail(&self) -> &'static str {
     match self {
-      Issue::OutputChanged { .. } => tr("Sound plays on another device now. The tray menu switches it back."),
+      Issue::OutputChanged(_) => tr("Sound plays on another device now. The tray menu switches it back."),
       Issue::SpatialOff { .. } => tr("Turn it back on in the sound settings; the tray menu opens them."),
       Issue::SpatialChanged { .. } => {
         tr("Switch it back in the sound settings, or keep the new one; the tray menu has both.")
@@ -146,7 +152,7 @@ impl Issue {
   /// One notification per problem and cooldown, whatever names it carries.
   pub(super) fn notify_key(&self) -> String {
     match self {
-      Issue::OutputChanged { current_id, .. } => format!("output:{current_id}"),
+      Issue::OutputChanged(OutputChange { current_id, .. }) => format!("output:{current_id}"),
       Issue::SpatialOff { device_id, .. } => format!("spatial:{device_id}"),
       Issue::SpatialChanged { device_id, current, .. } => format!("spatial_format:{device_id}:{}", current.id),
       Issue::MicProcessing { key, .. } | Issue::OutputProcessing { key, .. } | Issue::NotRunning { key, .. } => {
@@ -160,7 +166,7 @@ impl Issue {
   /// Menu items under the title: (label, action), the fix first.
   pub fn fixes(&self) -> Vec<(String, Fix)> {
     match self {
-      Issue::OutputChanged { expected_id, expected_name, current_id, current_name } => vec![
+      Issue::OutputChanged(OutputChange { expected_id, expected_name, current_id, current_name }) => vec![
         (trf("Switch back to \"{}\"", &[expected_name]), Fix::SwitchOutput(expected_id.clone())),
         (trf("Keep \"{}\"", &[current_name]), Fix::KeepOutput(current_id.clone())),
       ],
