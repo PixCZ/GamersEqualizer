@@ -37,6 +37,8 @@ windows = { version = "0.62", features = [
     # Console session check (`console_owner.rs`).
     "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",
+    # A packaged app's ID, for its logo in the tray flyout (`flyout.rs`).
+    "Win32_Storage_Packaging_Appx",
     "Win32_UI_Controls_Dialogs",
     # The tray flyout draws itself into a plain popup (`flyout/paint.rs`): GDI, rounded corners from DWM.
     "Win32_Graphics_Gdi",

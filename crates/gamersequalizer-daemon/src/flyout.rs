@@ -37,17 +37,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{
+  CloseHandle, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, RECT, S_FALSE, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Dwm::{
   DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-  BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-  PAINTSTRUCT, ScreenToClient, UpdateWindow,
+  BeginPaint, CreateBitmap, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+  MONITORINFO, MonitorFromPoint, PAINTSTRUCT, ScreenToClient, UpdateWindow,
 };
 use windows::Win32::Media::Audio::{eConsole, eRender};
+use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::HiDpi::{
   DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
   SetThreadDpiAwarenessContext,
@@ -56,14 +60,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
   GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN, VK_END,
   VK_ESCAPE, VK_HOME, VK_LEFT, VK_M, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Shell::SHDefExtractIconW;
-use windows::Win32::UI::WindowsAndMessaging::{
-  CreateWindowExW, DefWindowProcW, DestroyIcon, GetCursorPos, GetForegroundWindow, HICON, HWND_TOPMOST, IDC_ARROW,
-  LoadCursorW, RegisterClassExW, SW_HIDE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, WA_INACTIVE,
-  WM_ACTIVATE, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-  WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+use windows::Win32::UI::Shell::{
+  IShellItemImageFactory, SHCreateItemFromParsingName, SHDefExtractIconW, SHGSI_ICONLOCATION, SHGetStockIconInfo,
+  SHSTOCKICONINFO, SIID_APPLICATION, SIIGBF_ICONONLY,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+  CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon, GetCursorPos, GetForegroundWindow, HICON,
+  HWND_TOPMOST, ICONINFO, IDC_ARROW, LoadCursorW, RegisterClassExW, SW_HIDE, SWP_SHOWWINDOW, SetForegroundWindow,
+  SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+  WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+};
+use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
 /// While open: how often the list and the device volume are read again.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -1217,22 +1224,97 @@ fn queue_change(queue: &mut Vec<Change>, change: Change) {
 }
 
 impl AppIcon {
-  /// The icon of `pid`'s exe at `size` pixels.
+  /// The icon of `pid`'s exe at `size` pixels: its own icon resource, else the shell's image (a
+  /// packaged app's logo, or the shell's icon for the file), else Windows' stock application icon.
   fn load(pid: u32, size: i32) -> Result<Self, String> {
     // A Win32 path: shell calls fail (E_FAIL) on the `\Device\...` form `get_exe_path_from_pid` gives.
-    let path = crate::takeover::image_path(pid).ok_or("no exe path")?;
-    Self::from_exe(&path.to_string_lossy(), size)
+    let path = crate::takeover::image_path(pid).map(|p| p.to_string_lossy().into_owned());
+    let mut why = match &path {
+      Some(p) => match Self::from_exe(p, size) {
+        Ok(icon) => return Ok(icon),
+        Err(e) => format!("{p}: {e}"),
+      },
+      None => "no exe path".to_owned(),
+    };
+    // Packaged apps (an AUMID) have no icon in their exe; their logo is the Start menu entry's.
+    let shell_name = app_user_model_id(pid).map(|id| format!(r"shell:AppsFolder\{id}")).or(path);
+    if let Some(name) = shell_name {
+      match Self::from_shell(&name, size) {
+        Ok(icon) => {
+          debug!("[Flyout] {why}; the shell's image of {name}");
+          return Ok(icon);
+        }
+        Err(e) => why = format!("{why}; shell image of {name}: {e}"),
+      }
+    }
+    let icon = Self::stock(size).map_err(|e| format!("{why}; stock icon: {e}"))?;
+    debug!("[Flyout] {why}; the stock application icon");
+    Ok(icon)
   }
 
   fn from_exe(path: &str, size: i32) -> Result<Self, String> {
+    Self::from_resource(path, 0, size)
+  }
+
+  fn from_resource(path: &str, index: i32, size: i32) -> Result<Self, String> {
     let mut icon = HICON::default();
     // SAFETY: a local path string and a local out handle; the icon is owned by the returned value.
     let hr =
-      unsafe { SHDefExtractIconW(&HSTRING::from(path), 0, 0, Some(&mut icon), None, size.clamp(16, 256) as u32) };
+      unsafe { SHDefExtractIconW(&HSTRING::from(path), index, 0, Some(&mut icon), None, size.clamp(16, 256) as u32) };
+    if hr == S_FALSE {
+      return Err("no icon resource".to_owned());
+    }
     if hr.is_err() || icon.is_invalid() {
       return Err(format!("SHDefExtractIconW: {hr:?}"));
     }
     Ok(Self(icon))
+  }
+
+  /// What Explorer shows for the parsing name `name`, as an icon of `size` pixels.
+  fn from_shell(name: &str, size: i32) -> Result<Self, String> {
+    let size = size.clamp(16, 256);
+    // Mask rows are WORD-aligned; all zero, so the color bitmap's alpha decides.
+    let mask_bits = vec![0u8; ((size as usize).div_ceil(16) * 2) * size as usize];
+    // SAFETY: COM is initialized on this thread (the service's main thread, or the test); the bitmaps
+    // made here are deleted here once `CreateIconIndirect` copied them; the icon is owned by the result.
+    unsafe {
+      let factory: IShellItemImageFactory =
+        SHCreateItemFromParsingName(&HSTRING::from(name), None).map_err(|e| format!("{e}"))?;
+      // shortcut: the bitmap's alpha is premultiplied and taken as straight, so soft edges come out a
+      // little dark; convert it if that shows.
+      let color = factory.GetImage(SIZE { cx: size, cy: size }, SIIGBF_ICONONLY).map_err(|e| format!("{e}"))?;
+      let mask = CreateBitmap(size, size, 1, 1, Some(mask_bits.as_ptr().cast()));
+      let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+      let icon = CreateIconIndirect(&info);
+      let _ = DeleteObject(color.into());
+      let _ = DeleteObject(mask.into());
+      icon.map(Self).map_err(|e| format!("{e}"))
+    }
+  }
+
+  /// Windows' generic application icon.
+  fn stock(size: i32) -> Result<Self, String> {
+    let mut info = SHSTOCKICONINFO { cbSize: size_of::<SHSTOCKICONINFO>() as u32, ..Default::default() };
+    // SAFETY: a local struct with its size set; only its location fields are filled (no handle).
+    unsafe { SHGetStockIconInfo(SIID_APPLICATION, SHGSI_ICONLOCATION, &mut info) }.map_err(|e| format!("{e}"))?;
+    let len = info.szPath.iter().position(|&c| c == 0).unwrap_or(info.szPath.len());
+    let path = String::from_utf16_lossy(info.szPath.get(..len).unwrap_or_default());
+    Self::from_resource(&path, info.iIcon, size)
+  }
+}
+
+/// A packaged app's Application User Model ID; `None` for a plain exe.
+fn app_user_model_id(pid: u32) -> Option<String> {
+  let mut buf = [0u16; 256]; // APPLICATION_USER_MODEL_ID_MAX_LENGTH is 130
+  let mut len = buf.len() as u32;
+  // SAFETY: the handle is closed before returning; the buffer is local and `len` is its length.
+  unsafe {
+    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    let err = GetApplicationUserModelId(handle, &mut len, Some(PWSTR(buf.as_mut_ptr())));
+    let _ = CloseHandle(handle);
+    // `len` counts the terminating zero.
+    let id = buf.get(..(len as usize).saturating_sub(1)).filter(|id| err == ERROR_SUCCESS && !id.is_empty())?;
+    Some(String::from_utf16_lossy(id))
   }
 }
 
@@ -1381,6 +1463,19 @@ mod tests {
     let _ = child.kill();
     let _ = child.wait();
     assert!(icon.is_ok(), "{:?}", icon.err());
+  }
+
+  #[test]
+  fn an_exe_without_an_icon_resource_gets_the_shells_or_the_stock_icon() {
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
+    // Regression: audiodg.exe has no icon resource (S_FALSE), so its row showed the placeholder.
+    // SAFETY: COM for this test thread, as the service's main thread has it.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+    let path = format!(r"{windir}\System32\audiodg.exe");
+    assert_eq!(AppIcon::from_exe(&path, 30).err().as_deref(), Some("no icon resource"));
+    assert!(AppIcon::from_shell(&path, 30).is_ok());
+    assert!(AppIcon::stock(30).is_ok());
   }
 
   #[test]
