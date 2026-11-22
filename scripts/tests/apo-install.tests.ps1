@@ -6,8 +6,10 @@ $scripts = 'apo-common.ps1', 'apo-install.ps1' | ForEach-Object { Join-Path (Spl
 # The script installs when it is run, so only the pieces under test are taken out of it.
 $functions = 'Get-EndpointBlocker', 'Read-FxList', 'Test-ApoNoteStarted', 'Get-Targets', 'Test-SlotHadDriverEffects',
   'ConvertTo-FxJson', 'Get-MigrationSlots', 'Resolve-ProbeOpen', 'Restore-FxSnapshot', 'Test-BackupCreated',
-  'Remove-OurEffects', 'Restore-InstallStart', 'Get-RollbackTarget'
-$variables = '$FxGuid', '$NullGuid', '$DefaultProcessingMode', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource'
+  'Remove-OurEffects', 'Restore-InstallStart', 'Get-RollbackTarget', 'Set-DoesNotOpen', 'Select-OpenableJobs',
+  'Install-AppFiles', 'Install-WithoutDevices'
+$variables = '$FxGuid', '$NullGuid', '$DefaultProcessingMode', '$Classes', '$CompositeValues', '$LegacyValues', '$RestoreKeySource',
+  '$ProbeExitDeviceInvalidated', '$ProbeTimeoutMs'
 $parsed = @{}
 # A script that does not parse would fail first on a user's PC, elevated. The uninstaller has no
 # pieces under test here, so it is at least parsed. Windows PowerShell 5.1 runs them there: the
@@ -230,7 +232,10 @@ foreach ($case in $migrationCases) {
 
 # --- Resolve-ProbeOpen (registry, audio and probe replaced by stand-ins) ----------------------
 # Only the line the app reads matters here (apo_install::rolled_back_endpoint).
-function Say([string]$text, [string]$color) { if ($text -match 'rollback-line') { $script:calls.Add('rollback-line') } }
+function Say([string]$text, [string]$color) {
+  if ($text -match 'rollback-line') { $script:calls.Add('rollback-line') }
+  if ($color) { $script:warned = $true }
+}
 function Get-RollbackLine($job) { 'rollback-line' }
 function Rollback-Job($job, [datetime]$since) { $script:calls.Add('rollback'); $script:t1 }
 function Set-JobFx($snapshot) {
@@ -256,24 +261,186 @@ $openCases = @(
   @{ Name = 'opens without ours: stays out'; Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'opens'; Want = 'set before|probe|rollback-line' }
   @{ Name = 'crash without ours: stays out'; Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'crash'; Want = 'set before|probe|rollback-line' }
   @{ Name = 'fails without ours: back in';   Crashed = $false; Migrated = $false; Snap = $true;  Read = $true;  Base = 'fails'; Want = 'set before|probe|set installed' }
+  # Windows reports the device invalidated (Realtek Digital Output switched off in the driver): no
+  # second probe, no audio restart, ours stay in, one neutral line.
+  @{ Name = 'invalidated: no retry';         Inv = $true;      Migrated = $false; Snap = $true;  Read = $true;  Base = 'opens'; Want = ''; DoesNotOpen = $true; NoRestart = $true }
+  @{ Name = 'invalidated, drivers moved';    Inv = $true;      Migrated = $true;  Snap = $true;  Read = $true;  Base = 'opens'; Want = ''; DoesNotOpen = $true; NoRestart = $true }
+  @{ Name = 'other failure, invalidated without ours'; Migrated = $false; Snap = $true; Read = $true; Base = 'invalid'; Want = 'set before|probe|set installed' }
 )
 foreach ($case in $openCases) {
   $calls = New-Object System.Collections.Generic.List[string]
   $readFails = -not $case.Read
   $restoreFails = [bool]$case.RestoreFails
-  $baseline = [pscustomobject]@{ OpenOk = $case.Base -eq 'opens'; Crashed = $case.Base -eq 'crash' }
+  $warned = $false
+  $baseline = [pscustomobject]@{ OpenOk = $case.Base -eq 'opens'; Crashed = $case.Base -eq 'crash'; Invalidated = $case.Base -eq 'invalid' }
   if ($case.Base -eq 'notrun') { $baseline | Add-Member Ran $false }
   $RollbackTargets = @{}
   if ($case.Snap) { $RollbackTargets['Capture:{id}'] = [pscustomobject]@{ Tag = 'before' } }
-  $job = [pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Word = 'microphone'; Migrated = $case.Migrated }
-  $res = [pscustomobject]@{ OpenOk = $false; Crashed = [bool]$case.Crashed }
+  $job = [pscustomobject]@{ Flow = 'Capture'; Id = '{id}'; Word = 'microphone'; Migrated = $case.Migrated; DoesNotOpen = $false }
+  $res = [pscustomobject]@{ OpenOk = $false; Crashed = [bool]$case.Crashed; Invalidated = [bool]$case.Inv }
   if ($case.NotRun) { $res | Add-Member Ran $false }
   $threw = $false
   try { $started = Resolve-ProbeOpen $job $res $t0 } catch { $threw = $true; $started = $t1 }
   $got = $calls -join '|'
-  $ok = $got -eq $case.Want -and $started -eq $t1 -and $threw -eq [bool]$case.RestoreFails
-  Check "probe open: $($case.Name)" $ok "expected '$($case.Want)', got '$got' (started $started, threw $threw)"
+  $wantStarted = if ($case.NoRestart) { $t0 } else { $t1 }
+  $ok = $got -eq $case.Want -and $started -eq $wantStarted -and $threw -eq [bool]$case.RestoreFails -and
+    $job.DoesNotOpen -eq [bool]$case.DoesNotOpen -and (-not $case.DoesNotOpen -or -not $warned)
+  Check "probe open: $($case.Name)" $ok "expected '$($case.Want)', got '$got' (started $started, threw $threw, does not open $($job.DoesNotOpen), warned $warned)"
 }
+
+# --- Select-OpenableJobs: the check before installing (probe replaced by a stand-in) ------------
+# Only exit 2 drops a device. Everything that could change an endpoint records 'changed': the check
+# must call none of it.
+foreach ($f in 'Stop-Audio', 'Start-Audio', 'Set-JobFx', 'Set-FxValue', 'New-FxKey', 'Restore-FxSnapshot', 'Migrate-LegacySlots', 'Set-EffectSlot') {
+  Set-Item "function:$f" { $script:calls.Add('changed') }
+}
+function Say([string]$text, [string]$color) {
+  $script:said.Add($text)
+  if ($color) { $script:warned = $true }
+}
+# Exit codes of the stand-in probe processes; '{hangs}' never exits.
+$probeExit = @{ '{never}' = $ProbeExitDeviceInvalidated; '{opens}' = 0; '{fails}' = 1; '{hangs}' = $ProbeExitDeviceInvalidated }
+$crashes = @()
+function Get-AudiodgCrashesSince([datetime]$since) { , @($script:crashes) }
+function Start-EndpointProbe($job, [switch]$OpenOnly) {
+  $script:calls.Add("start $($job.Id) open-only=$OpenOnly")
+  $probe = [pscustomobject]@{ Id = $job.Id; ExitCode = $probeExit[$job.Id] }
+  $probe | Add-Member ScriptMethod WaitForExit { param($ms) $script:calls.Add("wait $($this.Id)"); $this.Id -ne '{hangs}' }
+  $probe | Add-Member ScriptMethod Kill { $script:calls.Add("kill $($this.Id)") }
+  $probe
+}
+function TestJob([string]$id) { [pscustomobject]@{ Flow = 'Render'; Id = $id; Name = "dev $id"; Word = 'output device'; DoesNotOpen = $false } }
+function Reset-Check {
+  $script:calls = New-Object System.Collections.Generic.List[string]
+  $script:said = New-Object System.Collections.Generic.List[string]
+  $script:warned = $false
+}
+
+$ProbeCopy = 'probe.exe'
+Reset-Check
+$never, $opens, $fails, $hangs = (TestJob '{never}'), (TestJob '{opens}'), (TestJob '{fails}'), (TestJob '{hangs}')
+$kept = Select-OpenableJobs @($never, $opens, $fails, $hangs)
+$keptIds = @($kept | ForEach-Object { $_.Id }) -join ','
+$neutral = @($said | Where-Object { $_ -match 'nothing to check' })
+Check 'pre-check: exit 2 is dropped, exit 0, 1 and a hung check stay' ($keptIds -eq '{opens},{fails},{hangs}') "kept '$keptIds'"
+Check 'pre-check: only the dropped device does not open' ($never.DoesNotOpen -and -not $opens.DoesNotOpen -and -not $fails.DoesNotOpen -and -not $hangs.DoesNotOpen) ''
+$wantCalls = 'start {never} open-only=True|start {opens} open-only=True|start {fails} open-only=True|start {hangs} open-only=True|' +
+  'wait {never}|wait {opens}|wait {fails}|wait {hangs}|kill {hangs}'
+Check 'pre-check: nothing changed, all open-only probes start before the first wait' (($calls -join '|') -eq $wantCalls) "got '$($calls -join '|')'"
+Check 'pre-check: a hung check is named' (@($said | Where-Object { $_ -match 'did not finish in time' }).Count -eq 1) "said '$($said -join '|')'"
+# No `[Render:{guid}]`: the app would read it as rolled back (apo_install::rolled_back_endpoint).
+Check 'pre-check: one neutral line, no warning' ($neutral.Count -eq 1 -and $neutral[0] -match 'leaves it as it is' -and $neutral[0] -notmatch '\[Render:' -and -not $warned) "said '$($said -join '|')', warned $warned"
+$null = Resolve-ProbeOpen $never ([pscustomobject]@{ OpenOk = $false; Invalidated = $true }) $t0
+Check 'pre-check: the line is not said twice for one device' (@($said | Where-Object { $_ -match 'nothing to check' }).Count -eq 1) "said '$($said -join '|')'"
+
+Reset-Check
+$none = Select-OpenableJobs @((TestJob '{never}'))
+Check 'pre-check: none left' (@($none).Count -eq 0 -and $calls.Count -eq 2) "kept $(@($none).Count), calls '$($calls -join '|')'"
+
+# An audiodg crash during the check: exit 2 may be its effect, so nothing is dropped.
+Reset-Check
+$crashes = @('crash')
+$crashJob = TestJob '{never}'
+$kept = Select-OpenableJobs @($crashJob)
+Check 'pre-check: after an audiodg crash nothing is dropped' (@($kept).Count -eq 1 -and -not $crashJob.DoesNotOpen) "kept $(@($kept).Count)"
+$crashes = @()
+
+$ProbeCopy = $null
+Reset-Check
+$unprobed = TestJob '{never}'
+$kept = Select-OpenableJobs @($unprobed, (TestJob '{opens}'))
+Check 'pre-check: without a probe exe nothing is probed or dropped' (@($kept).Count -eq 2 -and $calls.Count -eq 0 -and -not $unprobed.DoesNotOpen -and $said.Count -eq 0) "kept $(@($kept).Count), calls '$($calls -join '|')'"
+
+# --- Install-WithoutDevices: every device dropped, the shared DLL and app still go in -----------
+# Real files in a temp folder; the endpoint-changing stand-ins above still record 'changed'.
+function Register-App { $script:calls.Add('register') }
+function Unblock-File($path) { }
+function Get-Process { }
+function Start-Sleep { }
+# Windows audio around the swap; endpoint changes still record 'changed'.
+function Stop-Audio { $script:calls.Add('stop-audio') }
+function Start-Audio { $script:calls.Add('start-audio') }
+$appDir = Join-Path ([IO.Path]::GetTempPath()) "ge-apo-app-tests-$PID"
+New-Item -ItemType Directory -Force $appDir | Out-Null
+try {
+  $InstallDir = Join-Path $appDir 'installed'
+  $InstalledDll = Join-Path $InstallDir 'gamersequalizer_apo.dll'
+  $InstalledExe = Join-Path $InstallDir 'gamersequalizer.exe'
+  $ProbeTemp = Join-Path $appDir 'probe.exe'
+  $SourceDll = Join-Path $appDir 'new.dll'
+  $AppExe = Join-Path $appDir 'new.exe'
+  Set-Content $SourceDll 'dll v2'
+  Set-Content $AppExe 'exe v2'
+  $SourceDllSha256 = (Get-FileHash $SourceDll -Algorithm SHA256).Hash
+  $AppExeSha256 = (Get-FileHash $AppExe -Algorithm SHA256).Hash
+  # The app compares file times (apo_install::check_flow): the installed copies must keep the source's.
+  $stamp = Get-Date '2026-11-20T08:00:00'
+  (Get-Item $SourceDll).LastWriteTime = $stamp
+  (Get-Item $AppExe).LastWriteTime = $stamp
+
+  $NoAppInstall = $false
+  Set-Content $ProbeTemp 'probe'
+  Reset-Check
+  Install-WithoutDevices @()
+  # Copy-Item keeps the time on Windows (CopyFile), where the app runs; not asserted elsewhere.
+  $timesKept = { param($path) $IsWindows -eq $false -or (Get-Item $path).LastWriteTime -eq $stamp }
+  $installedDllOk = (Get-Content $InstalledDll) -eq 'dll v2' -and (& $timesKept $InstalledDll)
+  $installedExeOk = (Get-Content $InstalledExe) -eq 'exe v2' -and (& $timesKept $InstalledExe)
+  Check 'all dropped: DLL and app installed with the source file times' ($installedDllOk -and $installedExeOk) ''
+  Check 'all dropped: entry made, no endpoint or audio change' (($calls -join '|') -eq 'register') "got '$($calls -join '|')'"
+  Check 'all dropped: one neutral line, no warning, probe copy gone' (($said -join '|') -eq 'The effects were updated; no device could be changed.' -and -not $warned -and -not (Test-Path $ProbeTemp)) "said '$($said -join '|')', warned $warned"
+
+  # A developer's build runs in place: the DLL only.
+  Remove-Item -Recurse -Force $InstallDir
+  $NoAppInstall = $true
+  Reset-Check
+  Install-WithoutDevices @()
+  Check 'all dropped, developer build: DLL only, no entry' ((Test-Path $InstalledDll) -and -not (Test-Path $InstalledExe) -and $calls.Count -eq 0) "got '$($calls -join '|')'"
+
+  # An installed DLL may be loaded in audiodg: audio is stopped around the swap and started again.
+  $NoAppInstall = $false
+  Set-Content $SourceDll 'dll v3'
+  $SourceDllSha256 = (Get-FileHash $SourceDll -Algorithm SHA256).Hash
+  Reset-Check
+  Install-WithoutDevices @()
+  Check 'all dropped over an installed DLL: replaced with audio stopped, then started' ((Get-Content $InstalledDll) -eq 'dll v3' -and ($calls -join '|') -eq 'stop-audio|start-audio|register') "got '$($calls -join '|')'"
+
+  # A swap that keeps failing (the DLL stays held) fails the run, leaves the installed DLL whole and
+  # still starts audio again.
+  Set-Content $SourceDll 'dll v4'
+  $SourceDllSha256 = (Get-FileHash $SourceDll -Algorithm SHA256).Hash
+  function Move-Item { $script:calls.Add('move'); throw 'Cannot create a file when that file already exists.' }
+  Reset-Check
+  $threw = $false
+  try { Install-WithoutDevices @() } catch { $threw = $_ -match 'could not be replaced' }
+  Remove-Item function:Move-Item
+  $moves = @($calls | Where-Object { $_ -eq 'move' }).Count
+  $audio = ($calls | Where-Object { $_ -ne 'move' }) -join '|'
+  Check 'all dropped, DLL held: fails after retries, old DLL whole, audio started again' ($threw -and $moves -eq 10 -and $audio -eq 'stop-audio|start-audio' -and (Get-Content $InstalledDll) -eq 'dll v3') "threw $threw, moves $moves, got '$audio'"
+
+  # A device skipped for its driver effects keeps the run a failure, and nothing is installed.
+  Remove-Item -Recurse -Force $InstallDir
+  $NoAppInstall = $false
+  Reset-Check
+  $threw = $false
+  try { Install-WithoutDevices @('Skipped dev: GFX.') } catch { $threw = $_ -match '^Skipped dev: GFX\. Nothing was changed\.$' }
+  Check 'all dropped next to a skipped device: fails, nothing installed' ($threw -and -not (Test-Path $InstallDir) -and $calls.Count -eq 0) ''
+
+  # A DLL that changed after the app hashed it is not installed.
+  $SourceDllSha256 = '0' * 64
+  Reset-Check
+  $threw = $false
+  try { Install-WithoutDevices @() } catch { $threw = $true }
+  Check 'all dropped: a changed DLL is refused' ($threw -and -not (Test-Path $InstalledDll) -and -not (Test-Path "$InstalledDll.new") -and $calls.Count -eq 0) "got '$($calls -join '|')'"
+}
+finally { Remove-Item -Recurse -Force $appDir }
+
+# Only with no device left: with some left the run installs on them as before.
+$main = $parsed[($scripts | Where-Object { $_ -like '*apo-install.ps1' })]
+$call = $main.Find({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Install-WithoutDevices' }, $true)
+$guard = $call
+while ($guard -and $guard -isnot [System.Management.Automation.Language.IfStatementAst]) { $guard = $guard.Parent }
+Check 'Install-WithoutDevices runs only when no job is left' ($guard -and $guard.Clauses[0].Item1.Extent.Text -eq '-not $jobs' -and $guard.Clauses[0].Item2.Extent.Text -match 'return') "guard '$($guard.Clauses[0].Item1.Extent.Text)'"
 
 # --- The trap says why the run failed also without -FromApp (a silent run has only the log) -----
 foreach ($script in $parsed.Keys | Where-Object { $_ -notlike '*apo-common.ps1' }) {

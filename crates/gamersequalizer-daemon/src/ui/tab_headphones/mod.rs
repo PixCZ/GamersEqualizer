@@ -291,7 +291,8 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
       Some(tr("Install")),
     ),
     ApoStatus::Outdated => {
-      (tr("The installed output EQ is older than this app.").to_string(), Severity::Warning, Some(tr("Update")))
+      let text = tr("Sound effects need an update. Newer features do not work until you update them.");
+      (text.to_string(), Severity::Warning, Some(tr("Update")))
     }
     ApoStatus::NotOnThisMic => (
       tr("Output EQ is not installed on this output device.").to_string(),

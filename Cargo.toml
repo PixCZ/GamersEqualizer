@@ -37,7 +37,12 @@ windows = { version = "0.62", features = [
     # Console session check (`console_owner.rs`).
     "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",
+    # A packaged app's ID, for its logo in the tray flyout (`flyout.rs`).
+    "Win32_Storage_Packaging_Appx",
     "Win32_UI_Controls_Dialogs",
+    # The tray flyout draws itself into a plain popup (`flyout/paint.rs`): GDI, rounded corners from DWM.
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Media_Audio_Apo",
@@ -61,8 +66,9 @@ egui = "0.37"
 # Same wgpu eframe 0.37 uses (egui-wgpu turns its default features off); only adds the DX12 backend.
 wgpu = { version = "30", default-features = false, features = ["dx12"] }
 egui_plot = "0.38"
-tray-icon = "0.26"
-muda = "0.21"
+# Default features only add the Linux GTK 3 / libappindicator backend (glib 0.18, RUSTSEC-2024-0429).
+tray-icon = { version = "0.26", default-features = false }
+muda = { version = "0.21", default-features = false }
 log = "0.4"
 # Own format (app_log.rs) to a pipe: no colors, no regex filters, no humantime.
 env_logger = { version = "0.11", default-features = false }

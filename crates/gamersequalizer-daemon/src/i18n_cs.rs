@@ -3,9 +3,13 @@
 
 pub static CS: &[(&str, &str)] = &[
   // --- tray ---
-  ("Open GamersEqualizer", "Otevřít GamersEqualizer"),
+  ("Channels", "Kanály"),
+  ("Open settings", "Otevřít nastavení"),
   ("Check for updates (GitHub)...", "Zkontrolovat aktualizace (GitHub)..."),
   ("Exit GamersEqualizer", "Ukončit GamersEqualizer"),
+  // --- tray flyout (flyout.rs) ---
+  ("App volumes", "Hlasitost aplikací"),
+  ("No app is playing sound", "Žádná aplikace nehraje zvuk"),
   // --- tray setup problems (health.rs) ---
   ("Windows default output changed to \"{}\"", "Výchozí výstup Windows se změnil na „{}“"),
   ("Spatial sound ({}) turned off on \"{}\"", "Prostorový zvuk ({}) se vypnul na „{}“"),
@@ -19,7 +23,7 @@ pub static CS: &[(&str, &str)] = &[
   ("another format", "jiný formát"),
   ("your format", "váš formát"),
   ("the new format", "nový formát"),
-  ("Microphone processing is outdated", "Zpracování mikrofonu je zastaralé"),
+  ("Sound effects need an update", "Zvukové efekty potřebují aktualizaci"),
   ("Microphone processing is not on the microphone in use", "Zpracování mikrofonu není na používaném mikrofonu"),
   ("Microphone processing is not installed", "Zpracování mikrofonu není nainstalované"),
   ("Microphone processing does not work on \"{}\"", "Zpracování mikrofonu na „{}“ nefunguje"),
@@ -37,6 +41,31 @@ pub static CS: &[(&str, &str)] = &[
   ("Open sound settings...", "Otevřít nastavení zvuku..."),
   ("Ignore", "Ignorovat"),
   ("Fix in GamersEqualizer...", "Opravit v GamersEqualizer..."),
+  (
+    "Update the sound effects (administrator, restarts Windows audio)...",
+    "Aktualizovat zvukové efekty (správce, restartuje zvuk Windows)...",
+  ),
+  // --- tray flyout: short issue texts and fix buttons ---
+  ("Default output changed", "Výchozí výstup se změnil"),
+  ("Spatial sound is off", "Prostorový zvuk je vypnutý"),
+  ("Spatial sound changed", "Prostorový zvuk se změnil"),
+  ("Mic processing is on another mic", "Zpracování mikrofonu je na jiném mikrofonu"),
+  ("Mic is not the default", "Mikrofon není výchozí"),
+  ("Output is not set up", "Výstup není nastavený"),
+  ("Microphone is muted", "Mikrofon je ztlumený"),
+  ("Microphone volume is 0 %", "Hlasitost mikrofonu je 0 %"),
+  ("No microphone is on", "Žádný mikrofon není zapnutý"),
+  ("Mic processing does not run", "Zpracování mikrofonu neběží"),
+  ("Output effect does not run", "Efekt výstupu neběží"),
+  ("Switch back", "Přepnout zpět"),
+  ("Keep", "Ponechat"),
+  ("Make default", "Nastavit výchozí"),
+  ("Other slot", "Jiný slot"),
+  ("Unmute", "Zapnout"),
+  ("Set 100 %", "Nastavit 100 %"),
+  ("Fix", "Opravit"),
+  ("Set up", "Nastavit"),
+  ("+{} more", "+{} další"),
   ("Unknown device", "Neznámé zařízení"),
   // --- setup problems bar ---
   ("GamersEqualizer is not working correctly", "GamersEqualizer nefunguje správně"),
@@ -112,12 +141,12 @@ pub static CS: &[(&str, &str)] = &[
     "Efekt mikrofonu ve Windows je nainstalovaný na tomto mikrofonu (sestavení {}); běží, když mikrofon používá nějaká aplikace",
   ),
   (
-    "Windows mic effect outdated (build {}, see the message at the top)",
-    "Efekt mikrofonu ve Windows je zastaralý (sestavení {}, viz zpráva nahoře)",
+    "Sound effects need an update (build {}, see the message at the top)",
+    "Zvukové efekty potřebují aktualizaci (sestavení {}, viz zpráva nahoře)",
   ),
   (
-    "The effect in Windows is out of date. Newer features do not work until you update it.",
-    "Efekt ve Windows je zastaralý. Novější funkce nefungují, dokud ho neaktualizujete.",
+    "Sound effects need an update. Newer features do not work until you update them.",
+    "Zvukové efekty potřebují aktualizaci. Novější funkce nefungují, dokud je neaktualizujete.",
   ),
   (
     "\"{}\" is not the Windows default microphone: Discord and games use the default one, not this one.",
@@ -671,7 +700,6 @@ pub static CS: &[(&str, &str)] = &[
     "Výstupní EQ zatím není nainstalovaný: profily se zobrazují, ale neslyšíte je. Jde o zvukový efekt Windows na tomto zařízení (žádná virtuální zvuková karta).",
   ),
   ("Install", "Nainstalovat"),
-  ("The installed output EQ is older than this app.", "Nainstalovaný výstupní EQ je starší než tato aplikace."),
   ("Update", "Aktualizovat"),
   ("Output EQ is not installed on this output device.", "Výstupní EQ není na tomto výstupním zařízení nainstalovaný."),
   ("Enable on this device", "Zapnout na tomto zařízení"),
@@ -834,8 +862,8 @@ pub static CS: &[(&str, &str)] = &[
     "Chybí reference reproduktorů: na „{}“ není nainstalovaný výstupní EQ. Nainstalujte ho tam (Výstup a sluchátka) a ozvěna se bude potlačovat.",
   ),
   (
-    "No speaker reference: the output EQ on \"{}\" is older than this app. Update it in Output & headphones.",
-    "Chybí reference reproduktorů: výstupní EQ na „{}“ je starší než tato aplikace. Aktualizujte ho na kartě Výstup a sluchátka.",
+    "No speaker reference: the sound effects on \"{}\" need an update. Update them in Output & headphones.",
+    "Chybí reference reproduktorů: zvukové efekty na „{}“ potřebují aktualizaci. Aktualizujte je na kartě Výstup a sluchátka.",
   ),
   (
     "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. The app log ([ApoNote]) says more.",
@@ -1109,7 +1137,7 @@ pub static CS: &[(&str, &str)] = &[
     "Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds.",
     "Otevře nastavení: jeden dotaz správce, pak se zvuk Windows na pár sekund restartuje.",
   ),
-  ("Newer features do not work until you update it.", "Novější funkce nefungují, dokud ho neaktualizujete."),
+  ("Newer features do not work until you update them.", "Novější funkce nefungují, dokud je neaktualizujete."),
   // --- AutoEQ file check ---
   (
     "no filters found (expected lines like \"Filter 1: ON PK Fc 100 Hz Gain -3.0 dB Q 1.41\")",

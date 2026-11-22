@@ -47,7 +47,9 @@ impl eframe::App for GamersEqualizerApp {
       }
     }
 
-    // 1. Synchronize system master and mic volume from Windows in real time. A mic level the
+    // 1. Channel levels changed in the tray flyout, before this frame writes its own over them.
+    self.state.adopt_mixer_edits(&mut self.win_audio.chatmix);
+    // Synchronize system master and mic volume from Windows in real time. A mic level the
     // service's automatic input gain set is not the user's volume.
     if let Some(h) = self.state.shm_header() {
       let auto = h.mic_auto_gain_permille.load(std::sync::atomic::Ordering::Relaxed);
@@ -74,6 +76,11 @@ impl eframe::App for GamersEqualizerApp {
     self.state.active_game_name = self.state.output_eq.active_game.as_ref().map(|g| g.label.clone());
 
     // 3. Refresh endpoints and track Windows system default device changes in real time
+    // An output picked in the tray flyout is the user's choice: the lock moves there. Any other
+    // change of the default is switched back.
+    if let Some(id) = self.state.take_flyout_output(&self.win_audio.endpoint_lock) {
+      super::header::select_output(&mut self.state, &mut self.win_audio, id);
+    }
     self.win_audio.endpoint_lock.enforce_lock();
     let dev_changed = self.win_audio.endpoint_lock.poll_device_changed();
     // The defaults are two more RPCs: read them with the volume sync, or when a device changed.

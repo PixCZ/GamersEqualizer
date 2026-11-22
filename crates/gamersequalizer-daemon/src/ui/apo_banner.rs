@@ -262,7 +262,7 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
       (tr("Windows mic effect not installed (see the message at the top)").to_string(), Severity::Warning)
     }
     ApoStatus::Outdated => {
-      (trf("Windows mic effect outdated (build {}, see the message at the top)", &[&version]), Severity::Warning)
+      (trf("Sound effects need an update (build {}, see the message at the top)", &[&version]), Severity::Warning)
     }
     ApoStatus::NotOnThisMic => {
       (tr("Windows mic effect not on this microphone (see the message at the top)").to_string(), Severity::Warning)
@@ -327,7 +327,7 @@ fn problems(state: &AppState) -> Vec<Problem> {
         tk("Install…"),
       )),
       ApoStatus::Outdated => Some((
-        tr("The effect in Windows is out of date. Newer features do not work until you update it.").to_string(),
+        tr("Sound effects need an update. Newer features do not work until you update them.").to_string(),
         tk("Update…"),
       )),
       ApoStatus::NotOnThisMic => Some((
@@ -399,6 +399,9 @@ fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str) {
 
 fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, change: &OutputChange) {
   let mut keep = None;
+  // What happened on its own line, the choices below it: both device names are long, and in one
+  // row the text and the two buttons ran into each other.
+  ui.label(trf("Windows default output changed to \"{}\"", &[&change.current_name]));
   ui.horizontal_wrapped(|ui| {
     // The same two choices as in the tray menu (`Issue::fixes`).
     if ui.add(theme::accent_button(ui, &trf("Switch back to \"{}\"", &[&change.expected_name]))).clicked() {
@@ -407,7 +410,6 @@ fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSys
     if ui.button(trf("Keep \"{}\"", &[&change.current_name])).clicked() {
       keep = Some(true);
     }
-    ui.label(trf("Windows default output changed to \"{}\"", &[&change.current_name]));
   });
   let Some(keep) = keep else {
     return;

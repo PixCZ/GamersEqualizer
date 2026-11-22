@@ -63,7 +63,7 @@ pub fn init(process: &'static str) {
   let file_ok = file.is_some();
   let inner = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_FILTER))
     .format(move |buf, record| {
-      let ts = jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S%.3f");
+      let ts = jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S%.3f");
       writeln!(buf, "{ts} {:<5} {process:<7} {}", record.level(), record.args())
     })
     .target(env_logger::Target::Pipe(Box::new(TeeWriter { file })))

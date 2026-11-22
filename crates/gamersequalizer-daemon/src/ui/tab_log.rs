@@ -281,7 +281,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
 /// file that does not change and sits where upload dialogs start.
 fn save_copy() -> Result<PathBuf, String> {
   let dir = downloads_dir().ok_or("no Downloads folder")?;
-  let name = format!("GamersEqualizer-log-{}.txt", jiff::Zoned::now().strftime("%Y%m%d-%H%M%S"));
+  let name = format!("GamersEqualizer-log-{}.txt", jiff::ZonedDateTime::now().strftime("%Y%m%d-%H%M%S"));
   let target = dir.join(name);
   std::fs::copy(app_log::log_path(), &target).map_err(|e| e.to_string())?;
   let select: Vec<u16> = format!("/select,\"{}\"", target.display()).encode_utf16().chain(std::iter::once(0)).collect();

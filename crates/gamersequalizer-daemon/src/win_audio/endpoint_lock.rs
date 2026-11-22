@@ -228,24 +228,7 @@ impl EndpointLockManager {
 
   /// Enumerate active capture recording devices (microphones)
   pub fn enumerate_capture_devices(&self) -> Vec<AudioEndpointInfo> {
-    let mut list = Vec::new();
-    // SAFETY: COM calls on `self.enumerator` (MTA, alive with `self`) and the interfaces it returns;
-    // `get_endpoint_info` frees the strings it reads.
-    unsafe {
-      let default_id = self.get_default_capture_id().unwrap_or_default();
-      if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
-        && let Ok(count) = collection.GetCount()
-      {
-        for i in 0..count {
-          if let Ok(dev) = collection.Item(i)
-            && let Ok(info) = get_endpoint_info(&dev, &default_id)
-          {
-            list.push(info);
-          }
-        }
-      }
-    }
-    list
+    active_devices(&self.enumerator, eCapture)
   }
 
   pub fn get_default_capture_id(&self) -> Option<String> {
@@ -261,23 +244,7 @@ impl EndpointLockManager {
 
   /// Enumerate active output playback devices
   pub fn enumerate_playback_devices(&self) -> Vec<AudioEndpointInfo> {
-    let mut list = Vec::new();
-    // SAFETY: as `enumerate_capture_devices`.
-    unsafe {
-      let default_id = self.get_default_output_id().unwrap_or_default();
-      if let Ok(collection) = self.enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
-        && let Ok(count) = collection.GetCount()
-      {
-        for i in 0..count {
-          if let Ok(dev) = collection.Item(i)
-            && let Ok(info) = get_endpoint_info(&dev, &default_id)
-          {
-            list.push(info);
-          }
-        }
-      }
-    }
-    list
+    active_devices(&self.enumerator, eRender)
   }
 
   pub fn get_default_output_id(&self) -> Option<String> {
@@ -329,6 +296,11 @@ impl EndpointLockManager {
     self.state.lock_enabled.load(Ordering::Relaxed)
   }
 
+  /// The default left the locked output and `enforce_lock` is about to switch it back.
+  pub fn revert_pending(&self) -> bool {
+    self.is_locked() && self.state.revert_pending.load(Ordering::SeqCst)
+  }
+
   pub fn hijack_count(&self) -> u32 {
     self.state.hijack_counter.load(Ordering::Relaxed)
   }
@@ -341,6 +313,33 @@ impl Drop for EndpointLockManager {
       let _ = self.enumerator.UnregisterEndpointNotificationCallback(&self.client);
     }
   }
+}
+
+/// The active devices of `flow` in Windows' order, the default one flagged: what the window's
+/// device lists and the tray flyout show.
+pub fn active_devices(enumerator: &IMMDeviceEnumerator, flow: EDataFlow) -> Vec<AudioEndpointInfo> {
+  let mut list = Vec::new();
+  // SAFETY: COM calls on a live enumerator (COM is initialized on the threads that hold one) and
+  // the interfaces it returns; `device_id` and `get_endpoint_info` free the strings they read.
+  unsafe {
+    let default_id = enumerator
+      .GetDefaultAudioEndpoint(flow, eConsole)
+      .ok()
+      .and_then(|device| super::mmdevice::device_id(&device))
+      .unwrap_or_default();
+    if let Ok(collection) = enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)
+      && let Ok(count) = collection.GetCount()
+    {
+      for i in 0..count {
+        if let Ok(dev) = collection.Item(i)
+          && let Ok(info) = get_endpoint_info(&dev, &default_id)
+        {
+          list.push(info);
+        }
+      }
+    }
+  }
+  list
 }
 
 /// # Safety

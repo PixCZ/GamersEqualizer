@@ -1,6 +1,9 @@
 //! The background service (`--daemon`): devices, mixer, game detection, health, sidetone.
 
 use super::*;
+use gamersequalizer_common::shm::ShmHeader;
+use log::warn;
+use std::sync::atomic::AtomicU32;
 
 /// Reading Windows volumes and re-applying per-app session volumes walks devices and every
 /// audio session over COM (opening each app's process for its name). At the loop's 20 Hz
@@ -45,6 +48,53 @@ fn heal_device_ids(win_audio: &WinAudioSystem, profiles_dir: &Path, shm_ptr: Opt
     header.set_selected_mic_id(new);
   }
   header.out_settings_version.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Game, chat, media and mic as the window's mixer shows them, for the tray flyout's rows.
+fn flyout_channels(h: &ShmHeader) -> [crate::flyout::ChannelLevel; 4] {
+  let level = |v: &AtomicU32, m: &AtomicBool, max: f32| crate::flyout::ChannelLevel {
+    volume: v.load(Ordering::Relaxed) as f32 / 1000.0,
+    muted: m.load(Ordering::Relaxed),
+    max,
+  };
+  [
+    level(&h.game_volume_permille, &h.game_muted, 1.0),
+    level(&h.chat_volume_permille, &h.chat_muted, 1.0),
+    level(&h.media_volume_permille, &h.media_muted, 1.0),
+    level(&h.mic_volume_permille, &h.mic_muted, ui::state::mic_volume_max(Some(h))),
+  ]
+}
+
+/// A channel row of the tray flyout moved: what the window's slider does, with the window open or
+/// closed. The other channels start from the header (the window may have moved one since this
+/// loop read it), so the window, adopting all four, loses nothing. The service's own loop then
+/// applies the levels to the sessions; channels with an output of their own and the mic are set
+/// here (`apply_mix`, as the window does).
+fn set_channel(
+  mix: &mut win_audio::ChatMixController,
+  h: &ShmHeader,
+  channel: crate::flyout::MixChannel,
+  volume: f32,
+  muted: bool,
+) {
+  use crate::flyout::MixChannel;
+  let r = Ordering::Relaxed;
+  let level = |v: &AtomicU32| v.load(r) as f32 / 1000.0;
+  (mix.game.volume, mix.game.muted) = (level(&h.game_volume_permille), h.game_muted.load(r));
+  (mix.chat.volume, mix.chat.muted) = (level(&h.chat_volume_permille), h.chat_muted.load(r));
+  (mix.media.volume, mix.media.muted) = (level(&h.media_volume_permille), h.media_muted.load(r));
+  (mix.mic.volume, mix.mic.muted) = (level(&h.mic_volume_permille), h.mic_muted.load(r));
+  let max = if channel == MixChannel::Mic { ui::state::mic_volume_max(Some(h)) } else { 1.0 };
+  let (c, volume_at, muted_at) = match channel {
+    MixChannel::Game => (&mut mix.game, &h.game_volume_permille, &h.game_muted),
+    MixChannel::Chat => (&mut mix.chat, &h.chat_volume_permille, &h.chat_muted),
+    MixChannel::Media => (&mut mix.media, &h.media_volume_permille, &h.media_muted),
+    MixChannel::Mic => (&mut mix.mic, &h.mic_volume_permille, &h.mic_muted),
+  };
+  (c.volume, c.muted) = (if volume.is_finite() { volume.clamp(0.0, max) } else { c.volume }, muted);
+  c.write_to(volume_at, muted_at);
+  debug!("[Flyout] {channel:?} at {:.0} %, muted {muted}", c.volume * 100.0);
+  mix.apply_mix();
 }
 
 /// Headless background audio service (runs on Windows boot or detached)
@@ -163,6 +213,10 @@ pub(super) fn run_background_daemon() {
   // a game that exited) is set back when its sessions appear.
   win_audio.chatmix.game_duck = win_audio::chatmix::GameDuck::for_service(storage.base_dir());
   let mut idle_log = win_audio::worker::IdleLog::default();
+  // The tray flyout's channel changes, for the window to adopt.
+  let mixer_edits = crate::mixer_edits::MixerEditsMap::open()
+    .inspect_err(|e| warn!("[Flyout] the window will not see channel changes from the tray: {e}"))
+    .ok();
   #[cfg(feature = "cpu-stats")]
   let mut sections = crate::cpu_stats::LoopSections::begin();
 
@@ -171,6 +225,7 @@ pub(super) fn run_background_daemon() {
   loop {
     // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop); atomics only.
     let tray_header = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header });
+    crate::flyout::set_mixer(win_audio.chatmix.master_device_id.as_deref(), tray_header.map(flyout_channels));
     match timed!(sections, "tray_poll", tray_host.poll(tray_header)) {
       Some(tray::TrayAction::Exit) => {
         info!("[GamersEqualizer] Exit chosen in the tray. Closing the window and the service.");
@@ -184,6 +239,35 @@ pub(super) fn run_background_daemon() {
       }
       Some(tray::TrayAction::Fix(fix)) => health.apply(&fix, &win_audio),
       None => {}
+    }
+    for change in crate::flyout::take_changes() {
+      match change {
+        crate::flyout::Change::Volume { exe, volume, save } => {
+          win_audio.chatmix.set_app_heard_volume(&exe, volume, save)
+        }
+        crate::flyout::Change::Mute { exe, muted } => win_audio.chatmix.set_app_mute(&exe, muted),
+        crate::flyout::Change::Output(id) => {
+          // Told before the switch: a window that locks the output moves its lock there instead of
+          // switching Windows back.
+          if let Some(map) = &mixer_edits {
+            map.edits().publish_output(&id);
+          }
+          win_audio.select_output(storage.base_dir(), &id);
+        }
+        crate::flyout::Change::Channel { channel, volume, muted, save } => {
+          // SAFETY: the mapping stays mapped until the service exits (unmapped after this loop); atomics only.
+          if let Some(header) = shm_ptr.map(|ptr| unsafe { &ptr.as_ref().header }) {
+            set_channel(&mut win_audio.chatmix, header, channel, volume, muted);
+            if let Some(map) = &mixer_edits {
+              map.edits().publish(&win_audio.chatmix);
+            }
+            if save {
+              audio_settings_saved
+                .save_if_changed(ui::audio_settings::AudioSettings::from_header(header), storage.base_dir());
+            }
+          }
+        }
+      }
     }
     // A device came or went: the picked mic may have been unplugged (the default does not
     // change when it was not the default) or plugged back in, maybe on another USB port.
@@ -383,7 +467,9 @@ pub(super) fn run_background_daemon() {
     }
     let wait = win_audio::worker::tick_wait(win_audio::ducking::mix_fast(), busy);
     // Idle: on the wake grid with the other service threads (`worker::grid_wait`).
-    timed!(sections, "wait", if idle { tray_host.wait(wait) } else { win_audio::worker::sleep(wait) });
+    // The open flyout too: its drags and keys must not wait for a plain sleep.
+    let on_messages = idle || crate::flyout::is_open();
+    timed!(sections, "wait", if on_messages { tray_host.wait(wait) } else { win_audio::worker::sleep(wait) });
   }
 
   // A game lowered by mix mode gets its volume back before the service goes (or, if that fails,

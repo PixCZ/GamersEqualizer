@@ -38,7 +38,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 mod apo_diag;
 mod issue;
@@ -60,6 +62,11 @@ const CONFIRM_CHECKS: u32 = 2;
 const MIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 /// The same problem notifies again only after this long (a mic muted on purpose mid-call).
 const NOTIFY_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+/// After an update started, another click starts none for this long: the installer (an audio
+/// restart, the microphone check) runs well under it.
+/// shortcut: a guess at the installer's run time, and the window's own Update does not see it, so
+/// two installers can still run at once; give `apo-install.ps1` a named mutex if that shows.
+const UPDATE_GUARD: Duration = Duration::from_secs(90);
 
 /// "Installed but not running" after this many more mic checks (1 s apart) with the device in
 /// use than idle, and no heartbeat from our effect. Room for the APO link to find the mapping (2 s).
@@ -168,6 +175,9 @@ pub struct HealthMonitor {
   run_status: Option<RunStatus>,
   /// Spatial sound on the default output and its format, as last logged.
   spatial_logged: Option<(SpatialAudioStatus, Option<String>)>,
+  /// When `Fix::UpdateEffects` started an installer (`claim_update`); its thread clears it when
+  /// the installer did not start.
+  update_started: Arc<Mutex<Option<Instant>>>,
 }
 
 impl HealthMemory {
@@ -191,6 +201,17 @@ impl HealthMemory {
     if let Err(e) = result {
       warn!("[Health] could not save {}: {e}", path.display());
     }
+  }
+}
+
+/// Runs a fix that only shows a window (`Fix::shows_window`). The tray flyout calls it inside the
+/// click, when Windows still lets a window come to the front.
+pub fn show_window(fix: &Fix) {
+  match fix {
+    Fix::OpenSoundSettings => shell::open_sound_settings(),
+    Fix::OpenSpatialSettings => shell::open_spatial_sound_settings(),
+    Fix::OpenWindow => crate::tray::show_or_launch_window(),
+    _ => {}
   }
 }
 
@@ -396,6 +417,7 @@ impl HealthMonitor {
       notes_reading: None,
       run_status: None,
       spatial_logged: None,
+      update_started: Arc::default(),
     }
   }
 
@@ -533,8 +555,7 @@ impl HealthMonitor {
         self.memory.expected_output = Some(id.clone());
         self.save();
       }
-      Fix::OpenSoundSettings => shell::open_sound_settings(),
-      Fix::OpenSpatialSettings => shell::open_spatial_sound_settings(),
+      Fix::OpenSoundSettings | Fix::OpenSpatialSettings | Fix::OpenWindow => show_window(fix),
       Fix::IgnoreSpatial(id) => {
         self.memory.spatial_on.remove(id);
         self.memory.spatial_formats.remove(id);
@@ -552,12 +573,15 @@ impl HealthMonitor {
       Fix::SwitchMicSlot(id) => {
         let guid = apo_install::endpoint_guid_of(id).ok_or_else(|| format!("no device GUID in {id}"));
         if let Err(e) = guid.and_then(|guid| apo_install::launch_switch_mic_slot(&guid)) {
+          // A cancelled UAC prompt lands here too. As for the update: the window explains and
+          // offers it again (Mic tab), and a flyout that waited for the prompt closes.
           warn!("[Health] moving the mic effect could not start: {e}");
+          crate::tray::show_or_launch_window();
         }
       }
       Fix::UnmuteMic(id) => crate::win_audio::chatmix::set_endpoint_mute(id, false),
       Fix::RaiseMicVolume(id) => crate::win_audio::chatmix::set_endpoint_volume(id, 1.0),
-      Fix::OpenWindow => crate::tray::show_or_launch_window(),
+      Fix::UpdateEffects => self.start_update(),
       Fix::Ignore(key) => {
         self.memory.ignored.insert(key.clone());
         self.save();
@@ -565,6 +589,49 @@ impl HealthMonitor {
     }
     self.checked_at = None;
     self.mic_checked_at = None;
+  }
+
+  /// The outdated effects installed again only where ours already are (active endpoints); never a
+  /// first install: with none, the window opens and its setup card decides. The installer itself
+  /// ends the installed copy it replaces, as for the window's Update. The UAC prompt waits on a
+  /// thread of its own: the service loop keeps publishing `owner_beat` meanwhile, so the running
+  /// effects never fall back to pass-through.
+  fn start_update(&self) {
+    let release = |slot: &Mutex<Option<Instant>>| *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    if !claim_update(&mut self.update_started.lock().unwrap_or_else(PoisonError::into_inner), Instant::now()) {
+      // Not a click without an answer: the window's banner shows where the update stands.
+      info!("[Setup] the update was started moments ago; no second installer, opening the window");
+      crate::tray::show_or_launch_window();
+      return;
+    }
+    let targets = apo_install::endpoints_with_effects();
+    if targets.is_empty() {
+      warn!("[Setup] no active device carries our effects, nothing to update; opening the window");
+      release(&self.update_started);
+      crate::tray::show_or_launch_window();
+      return;
+    }
+    info!("[Setup] updating the installed effects from the tray on {targets:?}");
+    let slot = Arc::clone(&self.update_started);
+    let spawned = std::thread::Builder::new().name("effects-update".into()).spawn(move || {
+      // SAFETY: no pointers; the shell call below may use COM, in the service's apartment kind.
+      let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+      let refs: Vec<(Flow, &str)> = targets.iter().map(|(flow, guid)| (*flow, guid.as_str())).collect();
+      match apo_install::launch_install_many(&refs) {
+        Ok(()) => info!("[Setup] installer started for {} device(s)", refs.len()),
+        // A cancelled UAC prompt lands here too; the window's banner explains and offers it again.
+        Err(e) => {
+          warn!("[Setup] update could not start: {e}");
+          release(&slot);
+          crate::tray::show_or_launch_window();
+        }
+      }
+    });
+    if let Err(e) = spawned {
+      warn!("[Setup] update could not start: {e}");
+      release(&self.update_started);
+      crate::tray::show_or_launch_window();
+    }
   }
 
   fn dir(&self) -> &Path {
@@ -575,6 +642,16 @@ impl HealthMonitor {
     self.memory.save(self.dir());
     self.file_mtime = mtime(&self.path);
   }
+}
+
+/// Takes the right to start an update at `now`: no start yet, or the last one `UPDATE_GUARD` ago
+/// (an installer running, or its UAC prompt open, is not started twice).
+fn claim_update(started: &mut Option<Instant>, now: Instant) -> bool {
+  if started.is_some_and(|t| now.saturating_duration_since(t) < UPDATE_GUARD) {
+    return false;
+  }
+  *started = Some(now);
+  true
 }
 
 fn snapshot(win_audio: &WinAudioSystem, picked_mic: Option<String>) -> Snapshot {
@@ -615,6 +692,18 @@ fn mtime(path: &Path) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_second_update_click_starts_no_second_installer() {
+    let (mut started, t0) = (None, Instant::now());
+    assert!(claim_update(&mut started, t0), "the first click starts it");
+    assert!(!claim_update(&mut started, t0 + Duration::from_secs(5)), "a double click does not");
+    assert!(!claim_update(&mut started, t0 + UPDATE_GUARD - Duration::from_millis(1)));
+    assert!(claim_update(&mut started, t0 + UPDATE_GUARD), "much later it may run again");
+    // A start that failed (cancelled UAC prompt) is released: the next click tries again.
+    started = None;
+    assert!(claim_update(&mut started, t0 + UPDATE_GUARD + Duration::from_secs(1)));
+  }
 
   #[test]
   fn first_default_output_is_learned_not_flagged() {

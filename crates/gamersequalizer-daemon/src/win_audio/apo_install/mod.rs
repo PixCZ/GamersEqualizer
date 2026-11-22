@@ -198,21 +198,26 @@ pub fn install_and_wait(targets: &[(Flow, &str)], silent: bool) -> Result<u32, S
     .ok_or_else(|| "the installer gave no exit code".to_string())
 }
 
-/// Connected endpoints that carry our effects: an update installs on them again, so the effects
-/// stay where the user put them.
+/// Active (connected and enabled) endpoints that carry our effects: an update installs on them
+/// again, so the effects stay where the user put them. Disabled or unplugged ones are left out:
+/// the installer refuses them (`Resolve-Job` takes only active endpoints and its throw would stop
+/// the whole update). They still run the new code, since every endpoint loads the one installed DLL.
 pub fn endpoints_with_effects() -> Vec<(Flow, String)> {
   let mut out = Vec::new();
   for flow in [Flow::Capture, Flow::Render] {
     let root = endpoints_root(flow);
     for guid in hklm_subkeys(&root) {
-      let active = read_dword_value(&format!("{root}\\{guid}"), "DeviceState")
-        .is_some_and(|s| s & DEVICE_STATE_MASK == DEVICE_STATE_ACTIVE);
-      if active && endpoint_has_any_clsid(flow, &guid) {
+      if is_active(read_dword_value(&format!("{root}\\{guid}"), "DeviceState")) && endpoint_has_any_clsid(flow, &guid) {
         out.push((flow, guid));
       }
     }
   }
   out
+}
+
+/// `DeviceState` of an endpoint means connected and enabled; the high bits are flags, not state.
+fn is_active(device_state: Option<u32>) -> bool {
+  device_state.is_some_and(|s| s & DEVICE_STATE_MASK == DEVICE_STATE_ACTIVE)
 }
 
 /// Moves the mic effect on microphone `guid` to its other slot (EFX <-> MFX), elevated. Some
@@ -459,7 +464,7 @@ impl Flow {
 
 fn format_time(t: SystemTime) -> String {
   jiff::Timestamp::try_from(t)
-    .map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()).strftime("%d.%m.%Y %H:%M").to_string())
+    .map(|ts| ts.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%d.%m.%Y %H:%M").to_string())
     .unwrap_or_else(|_| "?".to_string())
 }
 
@@ -496,6 +501,19 @@ mod tests {
       assert!(has(&install, &format!("'{text}'")), "{text}");
     }
     assert!(has(&install, &format!("DeviceState -band {DEVICE_STATE_MASK:#X}) -eq {DEVICE_STATE_ACTIVE}")));
+    let invalidated = crate::win_audio::mic_probe::EXIT_DEVICE_INVALIDATED;
+    assert!(has(&install, &format!("$ProbeExitDeviceInvalidated = {invalidated}")));
+    assert!(has(&install, &format!("$ProbeOpenOnlyArg = '{}'", crate::win_audio::mic_probe::OPEN_ONLY_ARG)));
+  }
+
+  /// The update targets only what the installer accepts: active endpoints (its `Get-ActiveEndpoints`).
+  #[test]
+  fn only_active_endpoints_are_update_targets() {
+    assert!(is_active(Some(1)));
+    assert!(is_active(Some(0x1000_0001)), "high flag bits do not change the state");
+    for state in [None, Some(0), Some(2), Some(4), Some(8), Some(0x1000_0002)] {
+      assert!(!is_active(state), "{state:?}");
+    }
   }
 
   #[test]

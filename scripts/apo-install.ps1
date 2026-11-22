@@ -37,6 +37,10 @@
   - Needs Windows 10 version 1803 or newer (composite effect lists): an older Windows stops it before
     anything changes. An endpoint whose driver effects would be lost (Get-EndpointBlocker) is never
     touched: with -Endpoint it is skipped and named, and when none is left nothing changes at all.
+  - Before anything changes, each endpoint is opened once (audio running): one that Windows reports
+    invalidated (probe exit 2, a digital output with nothing behind it) is left as it is and dropped,
+    without a warning; when none is left only the DLL and the app are installed (as -AppOnly), with
+    exit code 0.
 
   Undo: scripts\apo-uninstall.ps1.
 #>
@@ -194,6 +198,13 @@ $LegacyValues = @{ SFX = @("$FxGuid,5", "$FxGuid,1"); MFX = @("$FxGuid,6"); EFX 
 $NameProp = '{a45c254e-df1c-4efd-8020-67d146a850e0},2'
 $DeviceDescProp = '{b3f8fa53-0004-438e-9003-51a46e139bfc},6'
 $DisableSysFxProp = '{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5'
+# Exit code of `--probe-mic` / `--probe-render`: Windows reports the endpoint invalidated
+# (AUDCLNT_E_DEVICE_INVALIDATED; mic_probe::EXIT_DEVICE_INVALIDATED).
+$ProbeExitDeviceInvalidated = 2
+# Trailing probe argument: open the endpoint only, no stream (mic_probe::OPEN_ONLY_ARG).
+$ProbeOpenOnlyArg = '--open-only'
+# How long one probe (or the parallel check before installing) may take before it is ended.
+$ProbeTimeoutMs = 20000
 
 # FxProperties grants Administrators only SetValue + QueryValues (ReadKey); subkeys (Volatile /
 # Default / User) are owned by TrustedInstaller / Audiosrv. Open only with these exact rights.
@@ -486,9 +497,10 @@ function Set-EffectSlot($job, [string]$class, [string]$slot, [switch]$RemoveFrom
   }
 }
 
-# The exe that opens endpoints for the self-test, or nothing (check skipped). Elevated, so
+# The exe that opens endpoints (the check before installing and the self-test), or nothing (both
+# skipped). Elevated, so
 # never the exe in the user's folder: the installed app when it is the build the app hashed
-# (installed just now, or the app runs from there), else a temporary copy made where only
+# (the app runs from there), else a temporary copy made where only
 # administrators write, used when it hashes as the app said.
 # shortcut: the app hashes its exe file when it starts this script; same-user malware that had
 # swapped that file before passes. Upgrade: sign the exe and check the signature here.
@@ -497,11 +509,13 @@ function Get-ProbeExe {
     Say "`nEndpoint check skipped: the app did not pass its exe."
     return
   }
-  # The install is done: a failure here only skips the check, it is not "Install failed".
+  # A failure here only skips the checks, it is not "Install failed".
   try {
     if ((Test-Path $InstalledExe) -and (Get-FileHash $InstalledExe -Algorithm SHA256).Hash -eq $AppExeSha256) {
       return $InstalledExe
     }
+    # Called before the install made it.
+    New-Item -ItemType Directory -Force $InstallDir | Out-Null
     Copy-Item $AppExe $ProbeTemp -Force
     if ((Get-FileHash $ProbeTemp -Algorithm SHA256).Hash -ne $AppExeSha256) {
       Remove-Item $ProbeTemp -Force
@@ -566,16 +580,24 @@ function Rollback-Job($job, [datetime]$sinceRestart) {
 # Otherwise they come out and it is opened again: when it opens now, ours were the cause and stay
 # out. When it fails without them too (another app holds it in exclusive mode, privacy settings
 # block the microphone), ours go back in, unchecked; not where the driver's effects were moved
-# for them (Migrated): nothing then shows that this device runs the moved effects. Returns when
-# audio last started.
+# for them (Migrated): nothing then shows that this device runs the moved effects. When Windows
+# reports it invalidated (probe exit 2: switched off in the driver, a digital output with nothing
+# behind it), no effect can be the cause: no retry, no warning, ours stay in unchecked and
+# $job.DoesNotOpen tells the caller. Returns when audio last started.
 function Resolve-ProbeOpen($job, $res, [datetime]$sinceRestart) {
+  if ($res.Invalidated) {
+    Set-DoesNotOpen $job 'GamersEqualizer stays on it.'
+    return $sinceRestart
+  }
   $snap = $script:RollbackTargets["$($job.Flow):$($job.Id)"]
   $installed = $null
   if (-not $res.Crashed -and $res.Ran -ne $false -and -not $job.Migrated -and $snap) {
     try { $installed = Get-FxSnapshot $job.Flow $job.Id } catch { Say "  Reading the effect settings failed: $_" Yellow }
   }
   if (-not $installed) { return Rollback-Job $job $sinceRestart }
-  Say "  Opening the $($job.Word) again without GamersEqualizer, to see whether it is the cause..."
+  Say "  Opening the $($job.Word) $($job.Id) again without GamersEqualizer, to see whether it is the cause..."
+  # The pre-install effect values (ours removed, values not in it deleted), audio restarted: the
+  # probe below opens the endpoint as it was before GamersEqualizer.
   $started = Set-JobFx $snap
   $baseline = Invoke-EndpointProbe $job $started
   if ($baseline.OpenOk -or $baseline.Crashed -or $baseline.Ran -eq $false) {
@@ -590,6 +612,64 @@ function Resolve-ProbeOpen($job, $res, [datetime]$sinceRestart) {
   }
   Say "  The $($job.Word) does not open without GamersEqualizer either (another app may use it exclusively, or privacy settings block it): GamersEqualizer stays on it, unchecked. Try again when it is free." Yellow
   $started
+}
+
+# Windows reports the endpoint invalidated (probe exit 2): one neutral line per device, no warning.
+# No `[Flow:{guid}]` in it: the app does not count it as rolled back.
+function Set-DoesNotOpen($job, [string]$outcome) {
+  if ($job.DoesNotOpen) { return }
+  $job.DoesNotOpen = $true
+  Say "  $($job.Name): nothing to check: Windows cannot open this $($job.Word) (nothing connected to it, or it is switched off in the sound driver). $outcome"
+}
+
+# Before anything changes, while Windows audio runs: each endpoint is opened once (open only, no
+# stream; all at once, so the wait is the slowest one). One that Windows reports invalidated is left
+# exactly as it is (no backup, no effect list changed, ours stay if they are in) and dropped from
+# the install; any other result installs as usual (the self-test judges it). Without a probe exe,
+# or when audiodg crashed meanwhile, nothing is dropped. Its lines are said without the red: nothing
+# is wrong yet.
+function Select-OpenableJobs($jobs) {
+  if (-not $ProbeCopy) { return , @($jobs) }
+  Say 'Checking that Windows opens each device...'
+  $since = Get-Date
+  $probes = @(foreach ($job in @($jobs)) {
+      $probe = $null
+      try { $probe = Start-EndpointProbe $job -OpenOnly }
+      catch { Say "  The $($job.Word) check could not start: $_" }
+      [pscustomobject]@{ Job = $job; Probe = $probe }
+    })
+  $deadline = (Get-Date).AddMilliseconds($ProbeTimeoutMs)
+  foreach ($p in $probes) {
+    if (-not $p.Probe) { continue }
+    $left = [math]::Max(0, [int]($deadline - (Get-Date)).TotalMilliseconds)
+    if (-not $p.Probe.WaitForExit($left)) {
+      try { $p.Probe.Kill() } catch { }
+      Say "  The $($p.Job.Word) check did not finish in time."
+      $p.Probe = $null
+    }
+  }
+  $crashed = (Get-AudiodgCrashesSince $since).Count -gt 0
+  $openable = @()
+  foreach ($p in $probes) {
+    if (-not $crashed -and $p.Probe -and $p.Probe.ExitCode -eq $ProbeExitDeviceInvalidated) {
+      Set-DoesNotOpen $p.Job 'GamersEqualizer leaves it as it is.'
+    }
+    else { $openable += $p.Job }
+  }
+  , $openable
+}
+
+# Starts `--probe-mic` / `--probe-render` for one endpoint and returns the process; throws when it
+# cannot start.
+function Start-EndpointProbe($job, [switch]$OpenOnly) {
+  $flag = if ($job.Flow -eq 'Capture') { '--probe-mic' } else { '--probe-render' }
+  $probeArgs = @($flag, $job.Id)
+  if ($OpenOnly) { $probeArgs += $ProbeOpenOnlyArg }
+  # -NoNewWindow starts it directly (no shell, so no SmartScreen prompt for the unsigned exe).
+  $probe = Start-Process -FilePath $ProbeCopy -ArgumentList $probeArgs -NoNewWindow -PassThru
+  # Windows PowerShell loses ExitCode unless the handle is opened before the process ends.
+  $null = $probe.Handle
+  $probe
 }
 
 # The app reads `[Flow:{guid}]` from this line (apo_install::rolled_back_endpoint) and stops
@@ -611,13 +691,9 @@ function Invoke-EndpointProbe($job, [datetime]$sinceRestart) {
   }
   $preNotes = Get-ApoNotesSince $sinceRestart
   $probeSince = Get-Date
-  $flag = if ($job.Flow -eq 'Capture') { '--probe-mic' } else { '--probe-render' }
   try {
-    # -NoNewWindow starts it directly (no shell, so no SmartScreen prompt for the unsigned exe).
-    $probe = Start-Process -FilePath $ProbeCopy -ArgumentList $flag, $job.Id -NoNewWindow -PassThru
-    # Windows PowerShell loses ExitCode unless the handle is opened before the process ends.
-    $null = $probe.Handle
-    if (-not $probe.WaitForExit(20000)) {
+    $probe = Start-EndpointProbe $job
+    if (-not $probe.WaitForExit($ProbeTimeoutMs)) {
       $probe.Kill()
       Say "  The $($job.Word) check did not finish in time." Red
       return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Ran = $false; Notes = @(); PreNotes = $preNotes }
@@ -633,8 +709,12 @@ function Invoke-EndpointProbe($job, [datetime]$sinceRestart) {
     Say "  audiodg.exe crashed during $($job.Word) test." Red
     return [pscustomobject]@{ OpenOk = $false; Crashed = $true; Notes = $notes; PreNotes = $preNotes }
   }
+  # No line here: Set-DoesNotOpen says it calmly (a switched-off output is nothing to fear).
+  if ($probe.ExitCode -eq $ProbeExitDeviceInvalidated) {
+    return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Invalidated = $true; Notes = $notes; PreNotes = $preNotes }
+  }
   if ($probe.ExitCode -ne 0) {
-    Say "  The $($job.Word) could not be opened cleanly (exit $($probe.ExitCode); details in the app log)." Red
+    Say "  The $($job.Word) $($job.Id) could not be opened cleanly (exit $($probe.ExitCode); details in the app log)." Red
     return [pscustomobject]@{ OpenOk = $false; Crashed = $false; Notes = $notes; PreNotes = $preNotes }
   }
   [pscustomobject]@{ OpenOk = $true; Crashed = $false; Notes = $notes; PreNotes = $preNotes }
@@ -694,6 +774,8 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
     Targets = Get-Targets $flow $slot $noStreamEq
     # Set by Migrate-LegacySlots: the driver's own effects were moved into composite lists.
     Migrated = $false
+    # Set by Set-DoesNotOpen: Windows reports it invalidated (probe exit 2; no warning).
+    DoesNotOpen = $false
     # No effect list yet (inbox "High Definition Audio Device", VMs): the install makes one (New-FxKey).
     NoFx = -not (Test-Path $fxKey)
     # Why this endpoint must stay as it is, or nothing; the callers below never install such a job.
@@ -701,24 +783,63 @@ function Resolve-Job([string]$flow, [string]$endpointId, [string]$slot, [bool]$n
   }
 }
 
-# --- App only (no audio device): exe, DLL, entry; no endpoint, no audio restart -----------
-if ($AppOnly) {
-  if (-not ($AppExe -and $AppExeSha256 -and (Test-Path $AppExe))) { throw '-AppOnly needs -AppExe and -AppExeSha256.' }
+# --- App only (no audio device): exe, DLL, entry; no endpoint change ----------------------
+# The DLL, and with $withExe the app and its entry.
+function Install-AppFiles([bool]$withExe) {
   New-Item -ItemType Directory -Force $InstallDir | Out-Null
-  # Staged and hash-checked like the full install below: both come from a user-writable folder.
-  foreach ($copy in @(@($SourceDll, $InstalledDll, $SourceDllSha256), @($AppExe, $InstalledExe, $AppExeSha256))) {
+  $copies = @(, @($SourceDll, $InstalledDll, $SourceDllSha256))
+  if ($withExe) { $copies += , @($AppExe, $InstalledExe, $AppExeSha256) }
+  # Staged and hash-checked like the full install below, all before anything is replaced: both
+  # come from a user-writable folder.
+  $staged = @($copies | Where-Object { [IO.Path]::GetFullPath($_[0]) -ine $_[1] })
+  foreach ($copy in $staged) {
     $source, $target, $hash = $copy
-    if ([IO.Path]::GetFullPath($source) -ieq $target) { continue }
     Copy-Item $source "$target.new" -Force
     if ($hash -and (Get-FileHash "$target.new" -Algorithm SHA256).Hash -ne $hash) {
-      Remove-Item "$target.new" -Force
+      foreach ($c in $staged) { Remove-Item "$($c[1]).new" -Force -ErrorAction SilentlyContinue }
       throw "$source changed after the app checked it; nothing installed."
     }
-    Get-Process gamersequalizer -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $target } | Stop-Process -Force
-    Move-Item "$target.new" $target -Force
-    Unblock-File $target
   }
-  Register-App
+  # Audio stopped around the swap as in the full install: audiodg may hold the installed DLL loaded
+  # (ours on a device outside this run), and a restart loads the new build (a rename would not).
+  $stopAudio = (Test-Path $InstalledDll) -and @($staged | Where-Object { $_[1] -eq $InstalledDll }).Count -gt 0
+  if ($stopAudio) { Stop-Audio }
+  try {
+    foreach ($copy in $staged) {
+      $target = $copy[1]
+      # An installed copy of the app (its service, its window) holds the exe open.
+      Get-Process gamersequalizer -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $target } | Stop-Process -Force
+      # A process just ended (the app, audiodg) can hold the file a moment longer.
+      for ($try = 1; ; $try++) {
+        try { Move-Item "$target.new" $target -Force; break }
+        catch {
+          if ($try -ge 10) { throw "$target could not be replaced: $_" }
+          Start-Sleep -Milliseconds 500
+        }
+      }
+      Unblock-File $target
+    }
+  }
+  finally {
+    if ($stopAudio) { $null = Start-Audio }
+  }
+  if ($withExe) { Register-App }
+}
+
+# The check before installing dropped every device (none opens). The DLL and the app are shared by
+# all devices, so they are still installed, as with -AppOnly; otherwise the app would offer the
+# update forever. A device skipped for its driver effects keeps the run a failure.
+function Install-WithoutDevices($skipped) {
+  if (Test-Path $ProbeTemp) { Remove-Item $ProbeTemp -Force -ErrorAction SilentlyContinue }
+  if ($skipped) { throw "$($skipped -join ' ') Nothing was changed." }
+  Install-AppFiles (-not $NoAppInstall)
+  # Not a failure: every device was left as it is on purpose (the lines above say why).
+  Say 'The effects were updated; no device could be changed.'
+}
+
+if ($AppOnly) {
+  if (-not ($AppExe -and $AppExeSha256 -and (Test-Path $AppExe))) { throw '-AppOnly needs -AppExe and -AppExeSha256.' }
+  Install-AppFiles $true
   Say "App: $InstalledExe (no audio device: the effects are added from the app later)"
   return
 }
@@ -753,6 +874,14 @@ if (-not (Test-Path $SourceDll)) {
   throw "DLL not found: $SourceDll. Build it first: cargo build --profile apo -p gamersequalizer-apo"
 }
 Say 'Do not click inside this window: a click pauses it until you press Enter.'
+# The exe that opens endpoints: for the check below and the self-test after installing.
+$ProbeTemp = Join-Path $InstallDir 'gamersequalizer-probe.exe'
+$ProbeCopy = Get-ProbeExe
+$jobs = Select-OpenableJobs $jobs
+if (-not $jobs) {
+  Install-WithoutDevices $skipped
+  return
+}
 foreach ($job in $jobs) {
   $what = ($job.Targets | ForEach-Object { "$($Classes[$_[0]].Name) ($($_[1]))" }) -join ', '
   Say "Target: $($job.Name) $($job.Id)`: $what"
@@ -909,8 +1038,6 @@ foreach ($job in $jobs) {
 # --- Self-test & safe automatic rollback on open failure or audiodg crash -----------------
 # A skipped device also keeps the window open at the end.
 $selfTestFailed = [bool]$skipped
-$ProbeTemp = Join-Path $InstallDir 'gamersequalizer-probe.exe'
-$ProbeCopy = Get-ProbeExe
 
 # Immediate startup crash check (also without the probe exe): if audiodg crashed as audio
 # started, undo everything at once.
@@ -956,7 +1083,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   $res = Invoke-EndpointProbe $job $audioStarted
   if (-not $res.OpenOk) {
     $audioStarted = Resolve-ProbeOpen $job $res $audioStarted
-    $selfTestFailed = $true
+    if (-not $job.DoesNotOpen) { $selfTestFailed = $true }
     continue
   }
   if (Test-ApoNoteStarted $res 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)' $onlyOfFlow) {
@@ -969,7 +1096,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Capture' })) {
   $res2 = Invoke-EndpointProbe $job $audioStarted
   if (-not $res2.OpenOk) {
     $audioStarted = Resolve-ProbeOpen $job $res2 $audioStarted
-    $selfTestFailed = $true
+    if (-not $job.DoesNotOpen) { $selfTestFailed = $true }
     continue
   }
   if (Test-ApoNoteStarted $res2 'GamersEqualizer Mic Chain' $job.Id '(stream |refused a stream)' $onlyOfFlow) {
@@ -1001,7 +1128,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
   $res = Invoke-EndpointProbe $job $audioStarted
   if (-not $res.OpenOk) {
     $audioStarted = Resolve-ProbeOpen $job $res $audioStarted
-    $selfTestFailed = $true
+    if (-not $job.DoesNotOpen) { $selfTestFailed = $true }
     continue
   }
   $outOk = -not $hasOut -or (Test-ApoNoteStarted $res 'GamersEqualizer Output EQ' $job.Id 'stream .* started' $onlyOfFlow)
@@ -1017,7 +1144,7 @@ foreach ($job in ($jobs | Where-Object { $_.Flow -eq 'Render' })) {
     $res2 = Invoke-EndpointProbe $job $audioStarted
     if (-not $res2.OpenOk) {
       $audioStarted = Resolve-ProbeOpen $job $res2 $audioStarted
-      $selfTestFailed = $true
+      if (-not $job.DoesNotOpen) { $selfTestFailed = $true }
       continue
     }
     $outOk2 = Test-ApoNoteStarted $res2 'GamersEqualizer Output EQ' $job.Id 'stream .* started' $onlyOfFlow

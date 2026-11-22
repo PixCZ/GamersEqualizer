@@ -28,6 +28,7 @@ pub use dolby_atmos::{SpatialAudioStatus, SpatialFormat};
 pub use endpoint_lock::{AudioEndpointInfo, EndpointLockManager, EndpointLockState};
 pub use game_detector::{GameDetector, GameForegroundEvent};
 
+use std::path::Path;
 use std::sync::Arc;
 
 pub struct WinAudioSystem {
@@ -49,6 +50,21 @@ impl WinAudioSystem {
     chatmix.use_mic(None);
 
     Ok(Self { endpoint_lock, chatmix, game_detector })
+  }
+
+  /// The user picked `id` as the output (the window's device list, the tray flyout): Windows
+  /// default, Master, the lock target (this process's lock) and the levels follow, and the pick is
+  /// remembered so the tray does not report it as a lost default.
+  pub fn select_output(&mut self, base_dir: &Path, id: &str) {
+    self.chatmix.master_device_id = Some(id.to_string());
+    if let Err(e) = self.endpoint_lock.set_as_default_device(id) {
+      log::warn!("[EndpointLock] switching the default output to {id} failed: {e}");
+    }
+    crate::health::remember_output(base_dir, id);
+    if self.endpoint_lock.is_locked() {
+      self.endpoint_lock.lock_device(id.to_string());
+    }
+    self.chatmix.sync_from_system();
   }
 
   /// The microphone in use while it is connected. `use_mic` keeps the id of an unplugged one

@@ -1,5 +1,6 @@
 //! Notification-area icon, owned by the background service (it runs whenever the app does).
-//! Closing the window therefore "hides to tray"; the icon reopens it or exits everything.
+//! Closing the window therefore "hides to tray"; the menu reopens it or exits everything, a left
+//! click opens the volume flyout (`flyout`).
 //! Setup problems (`health`) put a badge on the icon and list themselves, with fixes, at the
 //! top of the menu.
 
@@ -9,14 +10,16 @@ use crate::tray_level::{self, LevelMeter};
 use crate::win_audio::worker::RepeatFilter;
 use gamersequalizer_common::shm::ShmHeader;
 use log::{info, warn};
-use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use muda::{IconMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
+use windows::Win32::Graphics::Gdi::{COLOR_MENUTEXT, GetSysColor};
 use windows::Win32::System::Threading::{
   CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer, TIMER_ALL_ACCESS,
 };
@@ -113,6 +116,8 @@ pub struct TrayHost {
   level: LevelMeter,
   level_shown: Option<u8>,
   level_ticked_at: Option<Instant>,
+  /// Where `ui_prefs.json` is (the flyout's light or dark theme).
+  prefs_dir: PathBuf,
 }
 
 impl EffectWatch {
@@ -137,7 +142,7 @@ impl EffectWatch {
 impl TrayManager {
   pub fn new() -> Result<Self, String> {
     let tray_icon = TrayIconBuilder::new()
-      // Left click opens the window; the menu is on right click.
+      // Left click opens the volume flyout; the menu (with "Open") is on right click.
       .with_menu_on_left_click(false)
       .with_tooltip(TOOLTIP)
       .with_icon(tray_icon(false, false, None)?)
@@ -169,7 +174,8 @@ impl TrayManager {
       menu.append(&PredefinedMenuItem::separator()).map_err(menu_err)?;
     }
 
-    let item_open = MenuItem::new(crate::i18n::tr("Open GamersEqualizer"), true, None);
+    // The flyout's gear button, the same words and glyph.
+    let item_open = IconMenuItem::new(crate::i18n::tr("Open settings"), true, settings_icon(), None);
     let item_updates = MenuItem::new(crate::i18n::tr("Check for updates (GitHub)..."), true, None);
     let item_quit = MenuItem::new(crate::i18n::tr("Exit GamersEqualizer"), true, None);
     menu
@@ -245,12 +251,14 @@ impl TrayHost {
       level: LevelMeter::new(prefs_dir),
       level_shown: None,
       level_ticked_at: None,
+      prefs_dir: prefs_dir.to_path_buf(),
     }
   }
 
   /// New list of setup problems (from `HealthMonitor::tick`).
   pub fn set_issues(&mut self, issues: Vec<Issue>) {
     self.issues = issues;
+    crate::flyout::set_issues(&self.issues);
     if let Some(tray) = self.tray.as_mut() {
       if let Err(e) = tray.set_menu(&self.issues) {
         warn!("[Tray] {e}");
@@ -347,9 +355,18 @@ impl TrayHost {
 
     let mut action = None;
     while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-      if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+      if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event
+        && let Err(e) = crate::flyout::toggle(|| tray.tray_icon.rect(), &self.prefs_dir)
+      {
+        // The click still does something.
+        warn!("[Flyout] {e}; opening the window instead");
         show_or_launch_window();
       }
+    }
+    crate::flyout::tick();
+    // The flyout's fix button: the same fix as the menu item under that issue.
+    if let Some(fix) = crate::flyout::take_fix() {
+      action = Some(TrayAction::Fix(fix));
     }
     while let Ok(event) = MenuEvent::receiver().try_recv() {
       if event.id == tray.item_open_id {
@@ -507,6 +524,22 @@ fn wait_for_messages(timeout: Duration, event: Option<HANDLE>) -> bool {
 fn tray_icon(mic_active: bool, warning: bool, level: Option<u8>) -> Result<Icon, String> {
   let rgba = crate::app_icon::rgba(TRAY_ICON_SIZE, mic_active, warning, tray_level::bar_scale(level));
   Icon::from_rgba(rgba, TRAY_ICON_SIZE, TRAY_ICON_SIZE).map_err(|e| format!("Icon creation failed: {}", e))
+}
+
+/// The gear (Segoe MDL2 E713) in the menu's text color, drawn once; None when it cannot be drawn
+/// (the item then has no icon).
+fn settings_icon() -> Option<muda::Icon> {
+  static GEAR: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+  const SIZE: u32 = 16; // muda draws menu icons at 16 x 16
+  let rgba = GEAR.get_or_init(|| {
+    // SAFETY: a plain system color lookup.
+    let c = unsafe { GetSysColor(COLOR_MENUTEXT) };
+    let color = egui::Color32::from_rgb(c as u8, (c >> 8) as u8, (c >> 16) as u8);
+    crate::flyout::glyph_rgba(crate::ui::theme::icons::SETTINGS.glyph, SIZE as i32, color)
+      .inspect_err(|e| warn!("[Tray] no gear icon for the menu: {e}"))
+      .ok()
+  });
+  muda::Icon::from_rgba(rgba.clone()?, SIZE, SIZE).inspect_err(|e| warn!("[Tray] menu icon: {e}")).ok()
 }
 
 /// When an announced change is checked: None = none waiting, ZERO = now, else after that long, so
