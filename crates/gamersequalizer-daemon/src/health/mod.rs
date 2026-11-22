@@ -577,27 +577,25 @@ impl HealthMonitor {
     self.mic_checked_at = None;
   }
 
-  /// The outdated effects installed again where ours are, as `--install` picks them (else on the
-  /// devices in use). The installer itself ends the installed copy it replaces, as for the
-  /// window's Update. The UAC prompt waits on a thread of its own: the service loop keeps
-  /// publishing `owner_beat` meanwhile, so the running effects never fall back to pass-through.
+  /// The outdated effects installed again only where ours already are (active endpoints); never a
+  /// first install: with none, the window opens and its setup card decides. The installer itself
+  /// ends the installed copy it replaces, as for the window's Update. The UAC prompt waits on a
+  /// thread of its own: the service loop keeps publishing `owner_beat` meanwhile, so the running
+  /// effects never fall back to pass-through.
   fn start_update(&self) {
     let release = |slot: &Mutex<Option<Instant>>| *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
     if !claim_update(&mut self.update_started.lock().unwrap_or_else(PoisonError::into_inner), Instant::now()) {
       info!("[Setup] the update was started moments ago; not starting another installer");
       return;
     }
-    let mut targets = apo_install::endpoints_with_effects();
+    let targets = apo_install::endpoints_with_effects();
     if targets.is_empty() {
-      targets = crate::setup_cli::devices_in_use();
-    }
-    if targets.is_empty() {
-      warn!("[Setup] no device to update the effects on; opening the window");
+      warn!("[Setup] no active device carries our effects, nothing to update; opening the window");
       release(&self.update_started);
       crate::tray::show_or_launch_window();
       return;
     }
-    info!("[Setup] updating the effects from the tray on {targets:?}");
+    info!("[Setup] updating the installed effects from the tray on {targets:?}");
     let slot = Arc::clone(&self.update_started);
     let spawned = std::thread::Builder::new().name("effects-update".into()).spawn(move || {
       // SAFETY: no pointers; the shell call below may use COM, in the service's apartment kind.
