@@ -79,6 +79,20 @@ pub enum Fix {
   Ignore(String),
 }
 
+impl Fix {
+  /// Only shows a window (ours, a Windows settings page) and needs nothing from the monitor
+  /// (`show_window` runs it).
+  pub fn shows_window(&self) -> bool {
+    matches!(self, Fix::OpenSoundSettings | Fix::OpenSpatialSettings | Fix::OpenWindow)
+  }
+
+  /// Starts an elevated script: Windows shows its UAC prompt in front only while this process
+  /// has the foreground.
+  pub fn asks_admin(&self) -> bool {
+    matches!(self, Fix::UpdateEffects | Fix::SwitchMicSlot(_))
+  }
+}
+
 impl Issue {
   /// One line for the menu and tooltip.
   pub fn title(&self) -> String {
@@ -129,7 +143,9 @@ impl Issue {
       Issue::SpatialChanged { .. } => {
         tr("Switch it back in the sound settings, or keep the new one; the tray menu has both.")
       }
-      Issue::MicProcessing { status: ApoStatus::Outdated, .. } => tr("Newer features do not work until you update it."),
+      Issue::MicProcessing { status: ApoStatus::Outdated, .. } => {
+        tr("Newer features do not work until you update them.")
+      }
       Issue::MicProcessing { .. } => {
         tr("Apps get your microphone without echo cancellation, noise suppression and EQ.")
       }

@@ -13,6 +13,9 @@ paths:
 
 - The APO is installed via the app's banner or `scripts/apo-install.ps1`. Both need admin and restart
   Windows audio, so a human runs them.
+- A third start, for an update only: the tray menu's and the tray flyout's fix for outdated effects
+  (`HealthMonitor::start_update`) runs the same installer on the active endpoints that already carry
+  our effects, never a first install. A second start within `UPDATE_GUARD` opens the window instead.
 - "Installed but does nothing": the app log alone must tell why; testers send only the log, no extra
   tools. `[ApoCheck]`: Windows build, DLL, COM registration, every device with our effects (slots, state)
   and the devices in use. `[ApoNote]`: the APO's own notes from inside audiodg (Application log, source

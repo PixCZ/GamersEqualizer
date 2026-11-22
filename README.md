@@ -49,8 +49,9 @@ firmware). Keep the maker's app for that.
   device.
 - Drag an app onto a channel to move it there. Right-click undoes the move.
 - A left click on the tray icon opens a small volume panel: the output (click its name to switch), the
-  channels, and every app that plays sound, each with its own volume and mute. The main window opens
-  from its "Open settings" row or from the icon's right-click menu.
+  channels, and every app that plays sound, each with its own volume and mute. A setup problem shows
+  there too, with a button for its fix. The main window opens from its "Open settings" row or from the
+  icon's right-click menu.
 - A ChatMix slider balances game against chat.
 - Automatic ChatMix (new in 0.3.0, still needs more testing) lowers the game while someone in the voice
   chat (a chat app on the Chat channel) talks over it, and brings it back when they stop. One Strength

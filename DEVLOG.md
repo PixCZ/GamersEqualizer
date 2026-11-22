@@ -3786,6 +3786,25 @@ sidetone noise mode picked while an app records). The running build has
     fallback tile until the service restarted; a failure is no longer kept.
   - The Sonar test of the mixer walked the PC's real sessions through `apply_session_mix`; it now
     asks `session_targets`.
+- Setup problems in the flyout (`fb2eafd`, `47abdd4`): the first problem the tray menu lists, as a
+  short text and its first fix as a button; "+N more" opens the window. Outdated effects are worded
+  "Sound effects need an update" everywhere (one DLL does the microphone, the output and the per-app
+  effects), and their fix starts the installer itself, from the menu and the flyout: one UAC prompt,
+  on the active endpoints that already carry our effects, never a first install. The UAC prompt
+  waits on a thread of its own, so the service loop keeps running.
+- Review of that, fixed:
+  - A fix from the flyout ran a loop pass after the flyout hid, when this process no longer has the
+    foreground: `OpenWindow` was already moved into the click for that reason, the two settings
+    pages and the UAC prompts (update, mic slot) were not. A fix that only shows a window now runs
+    inside the click (`Fix::shows_window`); for one that asks for administrator (`Fix::asks_admin`)
+    the flyout stays open and in front until the prompt, the script's window or the main window
+    takes the foreground. Its button answers no second press until the flyout opens anew or
+    shows another problem; a mic-slot move that could not start (cancelled prompt) now opens the
+    window, as the update does. Written from that reasoning on the Mac, not tried on Windows.
+  - A second "Update" within `UPDATE_GUARD` (90 s) closed the flyout and did nothing; it now opens
+    the window. The guard is a guess at the installer's run time and the window's own Update does
+    not see it: two installers can still run at once (`shortcut:` at the constant).
+  - The notification's second line still said "update it" under the plural title.
 - Limits: the popup is drawn by hand and tells screen readers nothing (keyboard: Tab, arrows, Space,
   M, Enter, Esc). A click on the icon held longer than 300 ms while the flyout is open may close and
   reopen it (`REOPEN_GUARD`). App volumes go by exe name, as the channels do. The look on Windows 10

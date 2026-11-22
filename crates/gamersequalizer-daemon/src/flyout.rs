@@ -16,8 +16,8 @@
 //!
 //! Along the edge nearest the tray icon a row opens the main window (what the menu's "Open
 //! settings" does); next to it the first setup problem the tray menu lists, with its first fix
-//! as a button that goes the menu item's way (`take_fix` -> `TrayAction::Fix`). App icons are read once per exe, after the first frame, and kept while the
-//! service runs (an exe that gave none is asked again at the next opening).
+//! as a button (`Flyout::fix`). App icons are read once per exe, after the first frame, and kept
+//! while the service runs (an exe that gave none is asked again at the next opening).
 
 mod paint;
 
@@ -215,6 +215,9 @@ struct Flyout {
   outputs: Vec<AudioEndpointInfo>,
   /// The first setup problem shown (`layout.issues()` counts them all).
   notice: Option<Notice>,
+  /// The fix button was pressed for a fix that asks for administrator: the flyout stays open for
+  /// its prompt (`fix`) and the button answers no second press.
+  fix_sent: bool,
 }
 
 /// What a message handler leaves to do once the state is released (these calls send messages
@@ -222,21 +225,26 @@ struct Flyout {
 struct Reply {
   result: LRESULT,
   hide: bool,
-  /// Open the main window (after hiding).
-  open: bool,
+  /// A fix that only shows a window (the main one, a settings page), run after hiding.
+  open: Option<Fix>,
 }
 
 impl Reply {
   fn done() -> Self {
-    Self { result: LRESULT(0), hide: false, open: false }
+    Self { result: LRESULT(0), hide: false, open: None }
   }
 
   fn hide() -> Self {
     Self { hide: true, ..Self::done() }
   }
 
+  /// The main window.
   fn open() -> Self {
-    Self { hide: true, open: true, ..Self::done() }
+    Self::show(Fix::OpenWindow)
+  }
+
+  fn show(fix: Fix) -> Self {
+    Self { hide: true, open: Some(fix), ..Self::done() }
   }
 }
 
@@ -437,6 +445,10 @@ fn show(anchor: RECT, dark: bool) -> Result<(), String> {
     f.rows = rows;
     f.outputs = outputs;
     f.layout = layout;
+    // Another problem's button answers again.
+    if f.notice != notice {
+      f.fix_sent = false;
+    }
     f.notice = notice;
     f.palette = palette_for(dark);
     f.dark = dark;
@@ -444,6 +456,7 @@ fn show(anchor: RECT, dark: bool) -> Result<(), String> {
     // A new layout while open keeps a read-back that is due (`pick`).
     if !std::mem::replace(&mut f.visible, true) {
       f.refreshed_at = Instant::now();
+      f.fix_sent = false;
     }
     f.tracking_leave = false;
     f.ui.hover = None;
@@ -747,8 +760,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
       if hide {
         hide_window(hwnd);
       }
-      if open {
-        crate::tray::show_or_launch_window();
+      if let Some(fix) = open {
+        crate::health::show_window(&fix);
       }
       result
     }
@@ -778,6 +791,7 @@ impl Flyout {
       icon_px: 0,
       outputs: Vec::new(),
       notice: None,
+      fix_sent: false,
     }
   }
 
@@ -996,28 +1010,34 @@ impl Flyout {
     })
   }
 
-  /// The fix button: hides the flyout and hands the menu's fix to the service loop
-  /// (`TrayAction::Fix`). A fix that only opens the window does it like the gear row, inside the
-  /// click: Windows lets a window come to the front then, not a loop pass later (an already open
-  /// window stayed behind the others and nothing seemed to happen).
+  /// The fix button. A fix that only shows a window runs inside the click, like the gear row:
+  /// Windows lets a window come to the front then, not a loop pass later (an already open window
+  /// stayed behind the others and nothing seemed to happen). The others go to the service loop as
+  /// the menu's (`take_fix` -> `TrayAction::Fix`). One that asks for administrator leaves the
+  /// flyout open and in front meanwhile: the UAC prompt of a process that gave up the foreground
+  /// only flashes on the taskbar. The prompt, the script's window or the main window then take
+  /// the foreground, which closes the flyout.
   fn fix(&mut self) -> Reply {
-    let fix = self.notice.as_ref().map(|n| n.fix.clone());
-    if let Some(fix) = &fix {
-      info!("[Flyout] fix picked: {fix:?}");
+    let Some(fix) = self.notice.as_ref().map(|n| n.fix.clone()).filter(|_| !self.fix_sent) else {
+      return Reply::done();
+    };
+    info!("[Flyout] fix picked: {fix:?}");
+    if fix.shows_window() {
+      self.close();
+      return Reply::show(fix);
+    }
+    let admin = fix.asks_admin();
+    FIX.with(|q| {
+      if let Ok(mut q) = q.try_borrow_mut() {
+        *q = Some(fix);
+      }
+    });
+    if admin {
+      self.fix_sent = true;
+      return Reply::done();
     }
     self.close();
-    match fix {
-      Some(Fix::OpenWindow) => Reply::open(),
-      Some(fix) => {
-        FIX.with(|q| {
-          if let Ok(mut q) = q.try_borrow_mut() {
-            *q = Some(fix);
-          }
-        });
-        Reply::hide()
-      }
-      None => Reply::hide(),
-    }
+    Reply::hide()
   }
 
   /// Output `k` of the list picked: the service switches to it, the list closes.
@@ -1456,28 +1476,35 @@ mod tests {
   }
 
   #[test]
-  fn the_fix_button_hands_over_the_menus_first_fix_and_hides() {
+  fn the_fix_button_hands_over_the_menus_first_fix() {
     let issues = sample_issues();
-    let mut f = Flyout::new(HWND::default());
-    f.visible = true;
-    // A mic without our effect: its fix only opens the window.
+    // A mic without our effect and spatial sound off: their fixes only show a window.
     let not_here =
       Issue::MicProcessing { status: crate::win_audio::apo_install::ApoStatus::NotOnThisMic, key: "k".into() };
-    for issue in issues.iter().chain([&not_here]) {
+    let spatial = Issue::SpatialOff { device_id: "o".into(), device_name: "Out".into(), format: None };
+    for issue in issues.iter().chain([&not_here, &spatial]) {
+      let mut f = Flyout::new(HWND::default());
+      f.visible = true;
       f.notice = notice(std::slice::from_ref(issue));
       let reply = f.fix();
-      assert!(reply.hide && !f.visible);
-      let menu = issue.fixes().into_iter().next().map(|(_, fix)| fix);
-      if menu == Some(Fix::OpenWindow) {
-        // Opened inside the click, like the gear row; nothing is left for the service loop.
-        assert!(reply.open);
-        assert_eq!(take_fix(), None);
+      let menu = issue.fixes().into_iter().next().map(|(_, fix)| fix).unwrap();
+      if menu.shows_window() {
+        // Shown inside the click, like the gear row; nothing is left for the service loop.
+        assert!(reply.hide && !f.visible, "{issue:?}");
+        assert_eq!((reply.open, take_fix()), (Some(menu), None));
         continue;
       }
-      assert!(!reply.open);
-      assert_eq!(take_fix(), menu, "the same fix as the tray menu's item");
+      assert_eq!(reply.open, None);
+      assert_eq!(take_fix(), Some(menu.clone()), "the same fix as the tray menu's item");
       assert_eq!(take_fix(), None, "taken once");
+      // A fix that asks for administrator keeps the flyout in front for its prompt, and a second
+      // press starts nothing; any other hides it.
+      assert_eq!((reply.hide, f.visible), (!menu.asks_admin(), menu.asks_admin()), "{issue:?}");
+      if menu.asks_admin() {
+        assert!(!f.fix().hide && take_fix().is_none());
+      }
     }
+    assert!(Fix::UpdateEffects.asks_admin() && Fix::SwitchMicSlot("m".into()).asks_admin());
     // The block shows the first problem, its count all of them; none without problems.
     set_issues(&issues);
     let (shown, count) = load_notice();

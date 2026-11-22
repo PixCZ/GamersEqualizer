@@ -117,9 +117,10 @@ admin or restart Windows audio are never delegated: a human runs them.
   before the detector or more than one chat and one game stream. The service reads the same
   `duck_tuning.json` from `%APPDATA%\GamersEqualizer` and hands it to the running APOs (names and ranges:
   `ducking::DuckTuning`), so tuning never needs a new APO install.
-- The APO is installed via the app's banner or `scripts/apo-install.ps1`; both need admin and restart
-  Windows audio, so a human runs them. When it is installed but does nothing, the app log alone must say
-  why (`[ApoCheck]`, `[ApoNote]`, `[ApoLink]`); installer and diagnostics rules: `.claude/rules/installer.md`.
+- The APO is installed via the app's banner or `scripts/apo-install.ps1` (an update of installed effects
+  also from the tray menu and flyout); all need admin and restart Windows audio, so a human runs them.
+  When it is installed but does nothing, the app log alone must say why (`[ApoCheck]`, `[ApoNote]`,
+  `[ApoLink]`); installer and diagnostics rules: `.claude/rules/installer.md`.
 - Tester ZIP, installed layout, versions and signing: `.claude/rules/packaging.md`.
 
 ## Before a release or a push to main

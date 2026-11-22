@@ -64,6 +64,8 @@ const MIC_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const NOTIFY_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 /// After an update started, another click starts none for this long: the installer (an audio
 /// restart, the microphone check) runs well under it.
+/// shortcut: a guess at the installer's run time, and the window's own Update does not see it, so
+/// two installers can still run at once; give `apo-install.ps1` a named mutex if that shows.
 const UPDATE_GUARD: Duration = Duration::from_secs(90);
 
 /// "Installed but not running" after this many more mic checks (1 s apart) with the device in
@@ -199,6 +201,17 @@ impl HealthMemory {
     if let Err(e) = result {
       warn!("[Health] could not save {}: {e}", path.display());
     }
+  }
+}
+
+/// Runs a fix that only shows a window (`Fix::shows_window`). The tray flyout calls it inside the
+/// click, when Windows still lets a window come to the front.
+pub fn show_window(fix: &Fix) {
+  match fix {
+    Fix::OpenSoundSettings => shell::open_sound_settings(),
+    Fix::OpenSpatialSettings => shell::open_spatial_sound_settings(),
+    Fix::OpenWindow => crate::tray::show_or_launch_window(),
+    _ => {}
   }
 }
 
@@ -542,8 +555,7 @@ impl HealthMonitor {
         self.memory.expected_output = Some(id.clone());
         self.save();
       }
-      Fix::OpenSoundSettings => shell::open_sound_settings(),
-      Fix::OpenSpatialSettings => shell::open_spatial_sound_settings(),
+      Fix::OpenSoundSettings | Fix::OpenSpatialSettings | Fix::OpenWindow => show_window(fix),
       Fix::IgnoreSpatial(id) => {
         self.memory.spatial_on.remove(id);
         self.memory.spatial_formats.remove(id);
@@ -561,12 +573,14 @@ impl HealthMonitor {
       Fix::SwitchMicSlot(id) => {
         let guid = apo_install::endpoint_guid_of(id).ok_or_else(|| format!("no device GUID in {id}"));
         if let Err(e) = guid.and_then(|guid| apo_install::launch_switch_mic_slot(&guid)) {
+          // A cancelled UAC prompt lands here too. As for the update: the window explains and
+          // offers it again (Mic tab), and a flyout that waited for the prompt closes.
           warn!("[Health] moving the mic effect could not start: {e}");
+          crate::tray::show_or_launch_window();
         }
       }
       Fix::UnmuteMic(id) => crate::win_audio::chatmix::set_endpoint_mute(id, false),
       Fix::RaiseMicVolume(id) => crate::win_audio::chatmix::set_endpoint_volume(id, 1.0),
-      Fix::OpenWindow => crate::tray::show_or_launch_window(),
       Fix::UpdateEffects => self.start_update(),
       Fix::Ignore(key) => {
         self.memory.ignored.insert(key.clone());
@@ -585,7 +599,9 @@ impl HealthMonitor {
   fn start_update(&self) {
     let release = |slot: &Mutex<Option<Instant>>| *slot.lock().unwrap_or_else(PoisonError::into_inner) = None;
     if !claim_update(&mut self.update_started.lock().unwrap_or_else(PoisonError::into_inner), Instant::now()) {
-      info!("[Setup] the update was started moments ago; not starting another installer");
+      // Not a click without an answer: the window's banner shows where the update stands.
+      info!("[Setup] the update was started moments ago; no second installer, opening the window");
+      crate::tray::show_or_launch_window();
       return;
     }
     let targets = apo_install::endpoints_with_effects();

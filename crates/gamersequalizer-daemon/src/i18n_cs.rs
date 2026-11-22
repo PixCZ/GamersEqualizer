@@ -1137,7 +1137,7 @@ pub static CS: &[(&str, &str)] = &[
     "Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds.",
     "Otevře nastavení: jeden dotaz správce, pak se zvuk Windows na pár sekund restartuje.",
   ),
-  ("Newer features do not work until you update it.", "Novější funkce nefungují, dokud ho neaktualizujete."),
+  ("Newer features do not work until you update them.", "Novější funkce nefungují, dokud je neaktualizujete."),
   // --- AutoEQ file check ---
   (
     "no filters found (expected lines like \"Filter 1: ON PK Fc 100 Hz Gain -3.0 dB Q 1.41\")",
