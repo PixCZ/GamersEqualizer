@@ -399,6 +399,9 @@ fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str) {
 
 fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, change: &OutputChange) {
   let mut keep = None;
+  // What happened on its own line, the choices below it: both device names are long, and in one
+  // row the text and the two buttons ran into each other.
+  ui.label(trf("Windows default output changed to \"{}\"", &[&change.current_name]));
   ui.horizontal_wrapped(|ui| {
     // The same two choices as in the tray menu (`Issue::fixes`).
     if ui.add(theme::accent_button(ui, &trf("Switch back to \"{}\"", &[&change.expected_name]))).clicked() {
@@ -407,7 +410,6 @@ fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSys
     if ui.button(trf("Keep \"{}\"", &[&change.current_name])).clicked() {
       keep = Some(true);
     }
-    ui.label(trf("Windows default output changed to \"{}\"", &[&change.current_name]));
   });
   let Some(keep) = keep else {
     return;
