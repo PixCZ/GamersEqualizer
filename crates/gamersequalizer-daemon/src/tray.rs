@@ -258,6 +258,7 @@ impl TrayHost {
   /// New list of setup problems (from `HealthMonitor::tick`).
   pub fn set_issues(&mut self, issues: Vec<Issue>) {
     self.issues = issues;
+    crate::flyout::set_issues(&self.issues);
     if let Some(tray) = self.tray.as_mut() {
       if let Err(e) = tray.set_menu(&self.issues) {
         warn!("[Tray] {e}");
@@ -363,6 +364,10 @@ impl TrayHost {
       }
     }
     crate::flyout::tick();
+    // The flyout's fix button: the same fix as the menu item under that issue.
+    if let Some(fix) = crate::flyout::take_fix() {
+      action = Some(TrayAction::Fix(fix));
+    }
     while let Ok(event) = MenuEvent::receiver().try_recv() {
       if event.id == tray.item_open_id {
         show_or_launch_window();

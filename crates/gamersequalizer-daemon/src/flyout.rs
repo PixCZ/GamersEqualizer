@@ -15,13 +15,15 @@
 //! `WinAudioSystem::select_output`, what the window's device list does.
 //!
 //! Along the edge nearest the tray icon a row opens the main window (what the menu's "Open
-//! settings" does). App icons are read once per exe, after the first frame, and kept while the
+//! settings" does); next to it the first setup problem the tray menu lists, with its first fix
+//! as a button that goes the menu item's way (`take_fix` -> `TrayAction::Fix`). App icons are read once per exe, after the first frame, and kept while the
 //! service runs (an exe that gave none is asked again at the next opening).
 
 mod paint;
 
 pub(crate) use paint::glyph_rgba;
 
+use crate::health::{Fix, Issue};
 use crate::i18n::tr;
 use crate::ui::prefs::{ThemePref, UiPrefs};
 use crate::ui::theme::{Palette, palette_for};
@@ -30,7 +32,7 @@ use crate::win_audio::chatmix::{ChatMixController, get_endpoint_volume, set_endp
 use crate::win_audio::endpoint_lock::{active_devices, get_endpoint_info};
 use crate::win_audio::mmdevice;
 use log::{debug, info, warn};
-use paint::Layout;
+use paint::{Layout, Notice, Texts};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
@@ -157,6 +159,10 @@ pub(crate) enum Hit {
   Choice(usize),
   /// The "Open settings" row (the main window).
   Open,
+  /// The setup problem's text (its tip only), its fix button, its "+N more" (the main window).
+  Issue,
+  Fix,
+  More,
 }
 
 /// Pointer and keyboard state the drawing shows.
@@ -166,8 +172,8 @@ pub(crate) struct Interaction {
   pub drag: Option<usize>,
   /// One of `Layout::stops`; a row's is its `Hit::Slider`.
   pub focus: Option<Hit>,
-  /// The row whose app name shows in a tip.
-  pub tip: Option<usize>,
+  /// What shows a tip: a row's `Mute` / `Slider` (the app's name), `Issue` or `Fix`.
+  pub tip: Option<Hit>,
 }
 
 /// An exe's icon, destroyed with it.
@@ -207,6 +213,8 @@ struct Flyout {
   icon_px: i32,
   /// What the open list of outputs lists (empty while it is closed).
   outputs: Vec<AudioEndpointInfo>,
+  /// The first setup problem shown (`layout.issues()` counts them all).
+  notice: Option<Notice>,
 }
 
 /// What a message handler leaves to do once the state is released (these calls send messages
@@ -241,6 +249,9 @@ thread_local! {
   static CHANGES: RefCell<Vec<Change>> = const { RefCell::new(Vec::new()) };
   /// The mixer as the service loop last handed it (`set_mixer`).
   static MIXER: RefCell<Mixer> = const { RefCell::new(Mixer { master: None, channels: None }) };
+  /// The tray's setup problems (`set_issues`) and the fix its button picked (`take_fix`).
+  static ISSUES: RefCell<Vec<Issue>> = const { RefCell::new(Vec::new()) };
+  static FIX: RefCell<Option<Fix>> = const { RefCell::new(None) };
 }
 
 /// The window mixer's Master output (the device behind a virtual default) and channel levels.
@@ -292,6 +303,39 @@ pub fn set_mixer(master: Option<&str>, channels: Option<[ChannelLevel; 4]>) {
   });
 }
 
+/// The tray's new list of setup problems; an open flyout shows it on its next refresh.
+pub fn set_issues(issues: &[Issue]) {
+  ISSUES.with(|i| {
+    if let Ok(mut i) = i.try_borrow_mut() {
+      *i = issues.to_vec();
+    }
+  });
+  with(|f| {
+    if f.visible {
+      f.read_back_soon();
+    }
+  });
+}
+
+/// The fix the flyout's button picked, for the service loop to apply as the menu's.
+pub fn take_fix() -> Option<Fix> {
+  FIX.with(|q| q.try_borrow_mut().ok()?.take())
+}
+
+/// The first problem's short form and how many there are (0: no block).
+fn load_notice() -> (Option<Notice>, usize) {
+  let (notice, count) = ISSUES.with(|i| i.try_borrow().map(|i| (notice(&i), i.len())).unwrap_or((None, 0)));
+  let count = if notice.is_some() { count } else { 0 };
+  (notice, count)
+}
+
+/// Every issue has a fix today; one without would show no block rather than a dead button.
+fn notice(issues: &[Issue]) -> Option<Notice> {
+  let issue = issues.first()?;
+  let (button, label, fix) = issue.first_fix()?;
+  Some(Notice { short: issue.short_title(), title: issue.title(), button, label, fix })
+}
+
 /// The changes since the last call, oldest first.
 pub fn take_changes() -> Vec<Change> {
   CHANGES.with(|q| q.try_borrow_mut().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default())
@@ -315,13 +359,13 @@ pub fn tick() {
       f.close();
       return Next::Hide(f.hwnd);
     }
-    // The name tip once the pointer rests on an app's row (a tooltip's delay).
-    if let Some(Hit::Mute(i) | Hit::Slider(i)) = f.ui.hover
+    // A tip once the pointer rests on an app's row or the problem (a tooltip's delay).
+    if let Some(hit @ (Hit::Mute(_) | Hit::Slider(_) | Hit::Issue | Hit::Fix)) = f.ui.hover
       && f.ui.drag.is_none()
-      && f.ui.tip != Some(i)
+      && f.ui.tip != Some(hit)
       && f.hovered_at.elapsed() >= TIP_DELAY
     {
-      f.ui.tip = Some(i);
+      f.ui.tip = Some(hit);
       f.invalidate();
     }
     if f.ui.drag.is_some() || f.refreshed_at.elapsed() < REFRESH {
@@ -330,7 +374,8 @@ pub fn tick() {
     f.refreshed_at = Instant::now();
     let mut rows = load_rows();
     let same = rows.len() == f.rows.len() && rows.iter().zip(&f.rows).all(|(a, b)| a.target == b.target);
-    if !same {
+    let (notice, issues) = load_notice();
+    if !same || issues != f.layout.issues() || notice != f.notice {
       return Next::Relayout(f.anchor, f.dark);
     }
     // An output plugged in or out while its list is open: the panel changes, the window does not.
@@ -375,8 +420,10 @@ fn show(anchor: RECT, dark: bool) -> Result<(), String> {
   let list_first = with(|f| f.layout.list_open().then_some(f.layout.list_first())).flatten();
   let outputs = if list_first.is_some() { load_outputs() } else { Vec::new() };
   let max_h = work.bottom - work.top - 2 * margin;
-  let layout =
-    Layout::new(scale, device, channels, apps, open_top, max_h).with_list(outputs.len(), list_first.unwrap_or(0));
+  let (notice, issues) = load_notice();
+  let layout = Layout::new(scale, device, channels, apps, open_top, max_h)
+    .with_issues(issues, max_h)
+    .with_list(outputs.len(), list_first.unwrap_or(0));
   let (w, h) = (layout.width(), layout.height());
   let (x, y) = place(&anchor, &work, &monitor, (w, h), margin);
   let count = rows.len();
@@ -390,6 +437,7 @@ fn show(anchor: RECT, dark: bool) -> Result<(), String> {
     f.rows = rows;
     f.outputs = outputs;
     f.layout = layout;
+    f.notice = notice;
     f.palette = palette_for(dark);
     f.dark = dark;
     f.anchor = anchor;
@@ -729,6 +777,7 @@ impl Flyout {
       icons: HashMap::new(),
       icon_px: 0,
       outputs: Vec::new(),
+      notice: None,
     }
   }
 
@@ -813,10 +862,12 @@ impl Flyout {
           return done;
         }
         match hit {
-          Some(Hit::Open) => {
+          Some(Hit::Open | Hit::More) => {
             self.close();
             return Some(Reply::open());
           }
+          Some(Hit::Fix) => return Some(self.fix()),
+          Some(Hit::Issue) => {}
           Some(Hit::Name) => self.open_list(false),
           Some(Hit::Choice(k)) => self.pick(k),
           Some(Hit::Mute(i)) => {
@@ -884,20 +935,18 @@ impl Flyout {
         self.close();
         return Some(Reply::hide());
       }
-      (_, Some(Hit::Open)) if enter => {
+      (_, Some(Hit::Open | Hit::More)) if enter => {
         self.close();
         return Some(Reply::open());
       }
+      (_, Some(Hit::Fix)) if enter => return Some(self.fix()),
       (_, Some(Hit::Name)) if enter => self.open_list(true),
       (_, Some(Hit::Choice(k))) if enter => self.pick(k),
       (VK_DOWN | VK_TAB | VK_UP, _) => {
         // SAFETY: reads this thread's key state as of the message being handled.
         let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
         self.ui.focus = next_stop(&stops, focus, key == VK_UP || (key == VK_TAB && shift));
-        self.ui.tip = match self.ui.focus {
-          Some(Hit::Slider(i)) => Some(i),
-          _ => None,
-        };
+        self.ui.tip = self.ui.focus.filter(|f| matches!(f, Hit::Slider(_) | Hit::Fix));
         if let Some(Hit::Choice(k)) = self.ui.focus {
           self.layout = self.layout.scrolled_to(k);
         }
@@ -945,6 +994,30 @@ impl Flyout {
       Target::Device(id) => Some(id.as_str()),
       Target::App(_) | Target::Channel(_) => None,
     })
+  }
+
+  /// The fix button: hides the flyout and hands the menu's fix to the service loop
+  /// (`TrayAction::Fix`). A fix that only opens the window does it like the gear row, inside the
+  /// click: Windows lets a window come to the front then, not a loop pass later (an already open
+  /// window stayed behind the others and nothing seemed to happen).
+  fn fix(&mut self) -> Reply {
+    let fix = self.notice.as_ref().map(|n| n.fix.clone());
+    if let Some(fix) = &fix {
+      info!("[Flyout] fix picked: {fix:?}");
+    }
+    self.close();
+    match fix {
+      Some(Fix::OpenWindow) => Reply::open(),
+      Some(fix) => {
+        FIX.with(|q| {
+          if let Ok(mut q) = q.try_borrow_mut() {
+            *q = Some(fix);
+          }
+        });
+        Reply::hide()
+      }
+      None => Reply::hide(),
+    }
   }
 
   /// Output `k` of the list picked: the service switches to it, the list closes.
@@ -1043,7 +1116,8 @@ impl Flyout {
     // only between them.
     unsafe {
       let hdc = BeginPaint(self.hwnd, &mut ps);
-      let painted = paint::paint(hdc, &self.layout, &self.rows, &self.outputs, self.ui, &self.palette, note);
+      let texts = Texts { note, issue: self.notice.as_ref() };
+      let painted = paint::paint(hdc, &self.layout, &self.rows, &self.outputs, self.ui, &self.palette, &texts);
       let _ = EndPaint(self.hwnd, &ps);
       // Once, not on every frame.
       if let Err(e) = painted
@@ -1168,6 +1242,17 @@ mod tests {
 
   /// The flyout as `paint` draws it, as 0x00RRGGBB pixels (top-down) of `layout`'s size.
   fn render(layout: &Layout, rows: &[Row], outputs: &[AudioEndpointInfo], ui: Interaction, dark: bool) -> Vec<u32> {
+    render_with(layout, rows, outputs, ui, dark, &Texts::default())
+  }
+
+  fn render_with(
+    layout: &Layout,
+    rows: &[Row],
+    outputs: &[AudioEndpointInfo],
+    ui: Interaction,
+    dark: bool,
+    texts: &Texts,
+  ) -> Vec<u32> {
     use windows::Win32::Graphics::Gdi::{
       BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC,
       DeleteObject, GdiFlush, HGDIOBJ, SelectObject,
@@ -1191,7 +1276,7 @@ mod tests {
       let dc = CreateCompatibleDC(None);
       let bmp = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
       let old = SelectObject(dc, HGDIOBJ(bmp.0));
-      paint::paint(dc, layout, rows, outputs, ui, &palette_for(dark), None).unwrap();
+      paint::paint(dc, layout, rows, outputs, ui, &palette_for(dark), texts).unwrap();
       let _ = GdiFlush();
       let px = std::slice::from_raw_parts(bits.cast::<u32>(), (w * h) as usize).iter().map(|p| p & 0xFF_FFFF).collect();
       SelectObject(dc, old);
@@ -1320,12 +1405,26 @@ mod tests {
     }
     rows.push(app_row("noicon.exe", None, false));
     let outputs = outputs();
-    for (name, dark, choices) in
-      [("dark", true, 0), ("light", false, 0), ("dark_list", true, 3), ("light_list", false, 3)]
-    {
-      let layout = Layout::new(1.5, true, 4, 4, false, 10_000).with_list(choices, 0);
-      let ui = Interaction { tip: Some(6), focus: (choices > 0).then_some(Hit::Choice(2)), ..Default::default() };
-      let px = render(&layout, &rows, &outputs, ui, dark);
+    let issues = sample_issues();
+    for (name, dark, choices, shown) in [
+      ("dark", true, 0, 0),
+      ("light", false, 0, 0),
+      ("dark_list", true, 3, 0),
+      ("light_list", false, 3, 0),
+      ("dark_issue", true, 0, 1),
+      ("light_issue", false, 0, 1),
+      ("dark_issues", true, 0, 2),
+      ("light_issues", false, 0, 2),
+    ] {
+      let layout = Layout::new(1.5, true, 4, 4, false, 10_000).with_issues(shown, 10_000).with_list(choices, 0);
+      let tip = match shown {
+        0 => Hit::Mute(6),
+        1 => Hit::Fix,
+        _ => Hit::Issue,
+      };
+      let ui = Interaction { tip: Some(tip), focus: (choices > 0).then_some(Hit::Choice(2)), ..Default::default() };
+      let notice = notice(issues.get(..shown).unwrap());
+      let px = render_with(&layout, &rows, &outputs, ui, dark, &Texts { note: None, issue: notice.as_ref() });
       let (w, h) = (layout.width(), layout.height());
       let mut bmp = Vec::new();
       let size = 54 + px.len() as u32 * 4;
@@ -1345,6 +1444,63 @@ mod tests {
       std::fs::write(&path, bmp).unwrap();
       println!("{}", path.display());
     }
+  }
+
+  /// The outdated effect (its fix starts the update), then a mic that is not the default.
+  fn sample_issues() -> Vec<Issue> {
+    use crate::win_audio::apo_install::ApoStatus;
+    vec![
+      Issue::MicProcessing { status: ApoStatus::Outdated, key: "apo".into() },
+      Issue::NotDefaultMic { mic_id: "m".into(), mic_name: "Headset Microphone (Arctis Nova)".into() },
+    ]
+  }
+
+  #[test]
+  fn the_fix_button_hands_over_the_menus_first_fix_and_hides() {
+    let issues = sample_issues();
+    let mut f = Flyout::new(HWND::default());
+    f.visible = true;
+    // A mic without our effect: its fix only opens the window.
+    let not_here =
+      Issue::MicProcessing { status: crate::win_audio::apo_install::ApoStatus::NotOnThisMic, key: "k".into() };
+    for issue in issues.iter().chain([&not_here]) {
+      f.notice = notice(std::slice::from_ref(issue));
+      let reply = f.fix();
+      assert!(reply.hide && !f.visible);
+      let menu = issue.fixes().into_iter().next().map(|(_, fix)| fix);
+      if menu == Some(Fix::OpenWindow) {
+        // Opened inside the click, like the gear row; nothing is left for the service loop.
+        assert!(reply.open);
+        assert_eq!(take_fix(), None);
+        continue;
+      }
+      assert!(!reply.open);
+      assert_eq!(take_fix(), menu, "the same fix as the tray menu's item");
+      assert_eq!(take_fix(), None, "taken once");
+    }
+    // The block shows the first problem, its count all of them; none without problems.
+    set_issues(&issues);
+    let (shown, count) = load_notice();
+    assert_eq!((shown.map(|n| n.fix), count), (Some(Fix::UpdateEffects), 2), "the update goes to the service loop");
+    set_issues(&[]);
+    assert_eq!(load_notice(), (None, 0));
+  }
+
+  #[test]
+  fn the_problem_block_is_drawn_with_its_button() {
+    let issues = sample_issues();
+    let notice = notice(&issues);
+    let texts = Texts { note: None, issue: notice.as_ref() };
+    let rows = [device_row("b", "Headphones")];
+    let layout = Layout::new(1.5, true, 0, 0, false, 10_000).with_issues(2, 10_000);
+    let px = render_with(&layout, &rows, &[], Interaction::default(), true, &texts);
+    let f = layout.fix_rect();
+    let area = ((f.right - f.left) * (f.bottom - f.top)) as usize;
+    assert!(drawn(&px, layout.width(), f) > area / 2, "the accent button is filled");
+    assert!(drawn(&px, layout.width(), layout.more_rect()) > 10, "\"+1 more\" is written");
+    // Without the texts (no problem) nothing is drawn there.
+    let bare = render(&layout, &rows, &[], Interaction::default(), true);
+    assert!(drawn(&bare, layout.width(), layout.more_rect()) == 0);
   }
 
   fn icon(x: i32, y: i32) -> RECT {

@@ -74,6 +74,8 @@ pub enum Fix {
   RaiseMicVolume(String),
   /// The window's banner explains the admin prompt before installing.
   OpenWindow,
+  /// Install the bundled effects again where ours already are (admin prompt, audio restart).
+  UpdateEffects,
   Ignore(String),
 }
 
@@ -92,7 +94,7 @@ impl Issue {
         "Spatial sound on \"{}\" is {} instead of {}",
         &[device_name, &current.label(tr("another format")), &expected.label(tr("your format"))],
       ),
-      Issue::MicProcessing { status: ApoStatus::Outdated, .. } => tr("Microphone processing is outdated").to_string(),
+      Issue::MicProcessing { status: ApoStatus::Outdated, .. } => tr("Sound effects need an update").to_string(),
       Issue::MicProcessing { status: ApoStatus::NotOnThisMic, .. } => {
         tr("Microphone processing is not on the microphone in use").to_string()
       }
@@ -181,6 +183,10 @@ impl Issue {
           Fix::KeepSpatial(device_id.clone(), current.clone()),
         ),
       ],
+      Issue::MicProcessing { status: ApoStatus::Outdated, key } => vec![
+        (tr("Update the sound effects (administrator, restarts Windows audio)...").to_string(), Fix::UpdateEffects),
+        (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
+      ],
       Issue::MicProcessing { key, .. } => vec![
         (tr("Fix in GamersEqualizer...").to_string(), Fix::OpenWindow),
         (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
@@ -215,6 +221,47 @@ impl Issue {
       },
     }
   }
+
+  /// A few words for the tray flyout, which has one line per issue; `title` goes in its tooltip.
+  pub fn short_title(&self) -> &'static str {
+    match self {
+      Issue::OutputChanged(_) => tr("Default output changed"),
+      Issue::SpatialOff { .. } => tr("Spatial sound is off"),
+      Issue::SpatialChanged { .. } => tr("Spatial sound changed"),
+      // One DLL runs the mic chain, the output EQ and the stream EQ: not "microphone".
+      Issue::MicProcessing { status: ApoStatus::Outdated, .. } => tr("Sound effects need an update"),
+      Issue::MicProcessing { status: ApoStatus::NotOnThisMic, .. } => tr("Mic processing is on another mic"),
+      Issue::MicProcessing { .. } => tr("Microphone processing is not installed"),
+      Issue::NotDefaultMic { .. } => tr("Mic is not the default"),
+      Issue::OutputProcessing { .. } => tr("Output is not set up"),
+      Issue::MicSilenced { why: Silenced::Muted, .. } => tr("Microphone is muted"),
+      Issue::MicSilenced { why: Silenced::ZeroVolume, .. } => tr("Microphone volume is 0 %"),
+      Issue::MicSilenced { why: Silenced::NoMicrophone, .. } => tr("No microphone is on"),
+      Issue::NotRunning { flow: Flow::Capture, .. } => tr("Mic processing does not run"),
+      Issue::NotRunning { flow: Flow::Render, .. } => tr("Output effect does not run"),
+    }
+  }
+
+  /// The first of `fixes` with a button-sized label: (short label, full menu label, fix).
+  pub fn first_fix(&self) -> Option<(&'static str, String, Fix)> {
+    let (label, fix) = self.fixes().into_iter().next()?;
+    let short = match &fix {
+      Fix::SwitchOutput(_) => tr("Switch back"),
+      Fix::KeepOutput(_) | Fix::KeepSpatial(..) => tr("Keep"),
+      Fix::OpenSoundSettings | Fix::OpenSpatialSettings => tr("Settings"),
+      Fix::IgnoreSpatial(_) | Fix::Ignore(_) => tr("Ignore"),
+      Fix::MakeMicDefault(_) => tr("Make default"),
+      Fix::SwitchMicSlot(_) => tr("Other slot"),
+      Fix::UnmuteMic(_) => tr("Unmute"),
+      Fix::RaiseMicVolume(_) => tr("Set 100 %"),
+      Fix::UpdateEffects => tr("Update"),
+      Fix::OpenWindow => match self {
+        Issue::MicProcessing { status: ApoStatus::NotOnThisMic, .. } => tr("Fix"),
+        _ => tr("Set up"),
+      },
+    };
+    Some((short, label, fix))
+  }
 }
 
 /// `mic`: the microphone in use while it is connected (`WinAudioSystem::connected_mic`).
@@ -232,4 +279,56 @@ pub fn join_apps(apps: &[String]) -> String {
 
 pub(super) fn not_default_mic_key(mic_id: &str) -> String {
   format!("mic_not_default:{mic_id}")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// Every variant and every branch of `short_title` and of the first fix.
+  fn every_issue() -> Vec<Issue> {
+    let s = String::from;
+    let format = SpatialFormat { id: s("{a}"), name: s("Dolby Atmos") };
+    let change = OutputChange { expected_id: s("a"), expected_name: s("A"), current_id: s("b"), current_name: s("B") };
+    let mut list = vec![
+      Issue::OutputChanged(change),
+      Issue::SpatialOff { device_id: s("o"), device_name: s("Out"), format: None },
+      Issue::SpatialChanged { device_id: s("o"), device_name: s("Out"), expected: format.clone(), current: format },
+      Issue::NotDefaultMic { mic_id: s("m"), mic_name: s("Mic") },
+      Issue::OutputProcessing { device_name: s("Out"), key: s("k") },
+    ];
+    for status in [ApoStatus::Outdated, ApoStatus::NotOnThisMic, ApoStatus::NotInstalled] {
+      list.push(Issue::MicProcessing { status, key: s("k") });
+    }
+    for why in [Silenced::Muted, Silenced::ZeroVolume, Silenced::NoMicrophone] {
+      for mic_id in [Some(s("m")), None] {
+        list.push(Issue::MicSilenced { why, apps: s("Discord.exe"), mic_id });
+      }
+    }
+    for flow in [Flow::Capture, Flow::Render] {
+      list.push(Issue::NotRunning { flow, device_id: s("d"), device_name: s("Dev"), key: s("k") });
+    }
+    list
+  }
+
+  #[test]
+  fn every_issue_has_a_short_form_whose_button_is_the_menus_first_fix() {
+    for issue in every_issue() {
+      let short = issue.short_title();
+      assert!(!short.is_empty() && short.len() <= 40, "{issue:?}: {short}");
+      let (button, label, fix) = issue.first_fix().unwrap();
+      assert!(!button.is_empty() && button.len() <= 14, "{issue:?}: {button}");
+      assert_eq!(issue.fixes().into_iter().next(), Some((label, fix)), "{issue:?}");
+    }
+    // The outdated effect is one DLL for mic, output and stream EQ: no "microphone" in its words.
+    let outdated = Issue::MicProcessing { status: ApoStatus::Outdated, key: String::new() };
+    assert_eq!((outdated.short_title(), outdated.first_fix().unwrap().0), ("Sound effects need an update", "Update"));
+    assert!(!outdated.title().to_lowercase().contains("mic"));
+    // Its first fix starts the update itself (menu and flyout alike); the label says it asks for admin.
+    let (label, fix) = outdated.fixes().into_iter().next().unwrap();
+    assert_eq!(fix, Fix::UpdateEffects);
+    assert!(label.contains("administrator") && label.contains("restarts Windows audio"), "{label}");
+    let other = Issue::MicProcessing { status: ApoStatus::NotOnThisMic, key: String::new() };
+    assert_eq!(other.fixes().first().map(|f| f.1.clone()), Some(Fix::OpenWindow));
+  }
 }

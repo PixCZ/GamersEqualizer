@@ -262,7 +262,7 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
       (tr("Windows mic effect not installed (see the message at the top)").to_string(), Severity::Warning)
     }
     ApoStatus::Outdated => {
-      (trf("Windows mic effect outdated (build {}, see the message at the top)", &[&version]), Severity::Warning)
+      (trf("Sound effects need an update (build {}, see the message at the top)", &[&version]), Severity::Warning)
     }
     ApoStatus::NotOnThisMic => {
       (tr("Windows mic effect not on this microphone (see the message at the top)").to_string(), Severity::Warning)
@@ -327,7 +327,7 @@ fn problems(state: &AppState) -> Vec<Problem> {
         tk("Install…"),
       )),
       ApoStatus::Outdated => Some((
-        tr("The effect in Windows is out of date. Newer features do not work until you update it.").to_string(),
+        tr("Sound effects need an update. Newer features do not work until you update them.").to_string(),
         tk("Update…"),
       )),
       ApoStatus::NotOnThisMic => Some((

@@ -6,7 +6,8 @@
 //! ClearType, icons are the apps' own, the bitmap goes to the window in one copy (no flicker).
 
 use super::{Hit, Interaction, Row, Target};
-use crate::i18n::tr;
+use crate::health::Fix;
+use crate::i18n::{tr, trf};
 use crate::ui::theme::{Palette, adapt_for, icons};
 use crate::win_audio::AudioEndpointInfo;
 use egui::Color32;
@@ -43,6 +44,11 @@ const LIST_PAD: i32 = 4;
 /// Segoe MDL2 Assets ChevronDown / ChevronUp.
 const CHEVRON_DOWN: char = '\u{E70D}';
 const CHEVRON_UP: char = '\u{E70E}';
+/// The setup problem next to the open row: its line of text, then "+N more" and the fix button.
+const ISSUE_TEXT_H: i32 = 30;
+const FIX_W: i32 = 132;
+const FIX_H: i32 = 32;
+const ISSUE_H: i32 = ISSUE_TEXT_H + FIX_H + 4;
 const BUTTON: i32 = 36;
 const GAP: i32 = 8;
 const PERCENT_W: i32 = 44;
@@ -75,6 +81,28 @@ pub struct Layout {
   outputs: usize,
   list_first: usize,
   list_rows: usize,
+  /// Setup problems the tray lists (0: no block); the first is shown, the rest as "+N more".
+  issues: usize,
+}
+
+/// What the flyout writes besides the rows.
+#[derive(Default)]
+pub struct Texts<'a> {
+  /// In the apps group ("no app plays").
+  pub note: Option<&'a str>,
+  pub issue: Option<&'a Notice>,
+}
+
+/// The first setup problem as the flyout shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Notice {
+  pub short: &'static str,
+  /// The tray menu's title, in the text's tip.
+  pub title: String,
+  pub button: &'static str,
+  /// The tray menu's label of the fix, in the button's tip.
+  pub label: String,
+  pub fix: Fix,
 }
 
 /// One horizontal band of the flyout, top to bottom (`Layout::slots`).
@@ -88,6 +116,7 @@ enum Slot {
   Name,
   Row(usize),
   Note,
+  Issue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,12 +136,38 @@ impl Layout {
   /// open row always stay.
   pub fn new(scale: f32, device: bool, channels: usize, apps: usize, open_top: bool, max_height: i32) -> Self {
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
-    let mut layout =
-      Self { scale, device, channels, apps, note: apps == 0, open_top, outputs: 0, list_first: 0, list_rows: 0 };
-    while layout.apps > 1 && layout.height() > max_height {
-      layout.apps -= 1;
-    }
+    let mut layout = Self {
+      scale,
+      device,
+      channels,
+      apps,
+      note: apps == 0,
+      open_top,
+      outputs: 0,
+      list_first: 0,
+      list_rows: 0,
+      issues: 0,
+    };
+    layout.cut_to(max_height);
     layout
+  }
+
+  /// With the block of `issues` setup problems (0: none), the apps cut again to `max_height`: the
+  /// block is never cut. Before `with_list` (the list's room depends on it).
+  pub fn with_issues(mut self, issues: usize, max_height: i32) -> Self {
+    self.issues = issues;
+    self.cut_to(max_height);
+    self
+  }
+
+  fn cut_to(&mut self, max_height: i32) {
+    while self.apps > 1 && self.height() > max_height {
+      self.apps -= 1;
+    }
+  }
+
+  pub fn issues(&self) -> usize {
+    self.issues
   }
 
   /// With the list of `outputs` open (0: closed), scrolled to start at `first` as far as it can.
@@ -161,13 +216,15 @@ impl Layout {
         list.chain(std::iter::once(Hit::Name)).collect()
       };
     }
-    let stop = |slot| match slot {
-      Slot::Open => Some(Hit::Open),
-      Slot::Name => Some(Hit::Name),
-      Slot::Row(i) => Some(Hit::Slider(i)),
-      _ => None,
+    let stops = |slot| match slot {
+      Slot::Open => vec![Hit::Open],
+      Slot::Name => vec![Hit::Name],
+      Slot::Row(i) => vec![Hit::Slider(i)],
+      Slot::Issue if self.issues > 1 => vec![Hit::More, Hit::Fix],
+      Slot::Issue => vec![Hit::Fix],
+      _ => Vec::new(),
     };
-    self.slots().into_iter().filter_map(|(slot, ..)| stop(slot)).collect()
+    self.slots().into_iter().flat_map(|(slot, ..)| stops(slot)).collect()
   }
 
   /// The open list's panel holds the point.
@@ -224,6 +281,10 @@ impl Layout {
     match slot {
       Slot::Open => Some(Hit::Open),
       Slot::Name if inside => Some(Hit::Name),
+      Slot::Issue => [(self.fix_rect(), Hit::Fix), (self.more_rect(), Hit::More), (self.issue_line(), Hit::Issue)]
+        .into_iter()
+        .find(|&(r, _)| contains(r, x, y))
+        .map(|(_, hit)| hit),
       Slot::Row(i) => {
         let (x0, x1, _) = self.track(i);
         let b = self.button_rect(i);
@@ -269,8 +330,9 @@ impl Layout {
       device.push(Slot::Name);
       device.push(Slot::Row(0));
     }
-    // The output next to the open row, the apps farthest from the tray icon.
-    let mut groups = [apps, channels, device];
+    let issue = if self.issues > 0 { vec![Slot::Issue] } else { Vec::new() };
+    // A setup problem next to the open row, then the output, the apps farthest from the tray icon.
+    let mut groups = [apps, channels, device, issue];
     if self.open_top {
       groups.reverse();
     }
@@ -299,6 +361,7 @@ impl Layout {
           Slot::Name => NAME_H,
           Slot::Row(_) => CONTROL_H,
           Slot::Note => NOTE_H,
+          Slot::Issue => ISSUE_H,
         };
         top += height;
         (slot, top - height, top)
@@ -401,12 +464,14 @@ impl Layout {
     RECT { left, top, right: left + s, bottom: top + s }
   }
 
-  /// The name tip of row `i` for a text `text_w` pixels wide: above its icon, or below it when
-  /// there is no room above.
-  fn tip_rect(&self, i: usize, text_w: i32) -> RECT {
-    let b = self.button_rect(i);
+  /// The tip for a text `text_w` pixels wide at `b` (a row's icon, the issue's line): above it,
+  /// or below it when there is no room above.
+  fn tip_rect(&self, b: RECT, text_w: i32) -> RECT {
     let (w, h, gap) = (text_w + 2 * self.px(TIP_PAD), self.px(TIP_H), self.px(2));
-    let w = w.min(self.width() - b.left - self.px(PAD));
+    // Moved left as far as it needs to fit (the fix button's sits at the right edge).
+    let w = w.min(self.width() - 2 * self.px(PAD));
+    let left = b.left.min(self.width() - self.px(PAD) - w);
+    let b = RECT { left, ..b };
     let top = if b.top - gap - h >= 0 { b.top - gap - h } else { b.bottom + gap };
     RECT { left: b.left, top, right: b.left + w, bottom: top + h }
   }
@@ -417,6 +482,41 @@ impl Layout {
 
   fn note_rect(&self) -> RECT {
     self.band(Slot::Note)
+  }
+
+  /// The issue's first line: the warning glyph and the short text (its tip: the full title).
+  fn issue_line(&self) -> RECT {
+    let band = self.band(Slot::Issue);
+    RECT { bottom: band.top + self.px(ISSUE_TEXT_H), ..band }
+  }
+
+  fn issue_glyph_rect(&self) -> RECT {
+    let line = self.issue_line();
+    RECT { right: line.left + self.px(BUTTON), ..line }
+  }
+
+  fn issue_text_rect(&self) -> RECT {
+    let line = self.issue_line();
+    RECT { left: line.left + self.px(BUTTON + GAP), ..line }
+  }
+
+  /// The fix button, right under the text (empty without an issue).
+  pub(super) fn fix_rect(&self) -> RECT {
+    if self.issues == 0 {
+      return RECT::default();
+    }
+    let line = self.issue_line();
+    let top = line.bottom;
+    RECT { left: line.right - self.px(FIX_W), top, right: line.right, bottom: top + self.px(FIX_H) }
+  }
+
+  /// "+N more" left of the fix button (empty with one issue): it opens the main window.
+  pub(super) fn more_rect(&self) -> RECT {
+    if self.issues < 2 {
+      return RECT::default();
+    }
+    let fix = self.fix_rect();
+    RECT { left: self.issue_line().left + self.px(BUTTON), right: fix.left - self.px(GAP), ..fix }
   }
 }
 
@@ -429,7 +529,7 @@ pub fn paint(
   outputs: &[AudioEndpointInfo],
   ui: Interaction,
   p: &Palette,
-  note: Option<&str>,
+  texts: &Texts,
 ) -> Result<(), String> {
   let (w, h) = (layout.width(), layout.height());
   if w <= 0 || h <= 0 {
@@ -458,7 +558,7 @@ pub fn paint(
     let pixels = std::slice::from_raw_parts_mut(bits.cast::<u32>(), (w * h) as usize);
     draw_shapes(&mut Canvas { px: pixels, w, h }, layout, rows, ui, p);
     let _ = GdiFlush();
-    draw_text(mem, layout, rows, p, note, &fonts);
+    draw_text(mem, layout, rows, p, texts, &fonts);
     for (i, row) in rows.iter().enumerate().take(layout.rows()) {
       if let Some(icon) = row.icon {
         let r = layout.icon_rect(i);
@@ -482,14 +582,24 @@ pub fn paint(
       draw_list_text(mem, layout, rows, outputs, p, &fonts);
       let _ = GdiFlush();
     }
-    let tip = ui.tip.filter(|_| layout.list_rows == 0);
-    let tip = tip.and_then(|i| rows.get(i).filter(|_| i < layout.rows()).map(|r| (i, r)));
-    let tip = tip.filter(|(_, r)| !matches!(r.target, Target::Device(_))).map(|(i, r)| {
+    let issue = texts.issue.filter(|_| layout.issues > 0);
+    // An app's name at its icon, the issue's full title at its line, the menu's fix label at the
+    // button (it says "administrator" where the fix asks).
+    let tip = match ui.tip.filter(|_| layout.list_rows == 0) {
+      Some(Hit::Mute(i) | Hit::Slider(i)) => rows
+        .get(i)
+        .filter(|r| i < layout.rows() && !matches!(r.target, Target::Device(_)))
+        .map(|r| (layout.button_rect(i), r.name.as_str())),
+      Some(Hit::Issue) => issue.map(|n| (layout.issue_line(), n.title.as_str())),
+      Some(Hit::Fix) => issue.map(|n| (layout.fix_rect(), n.label.as_str())),
+      _ => None,
+    };
+    let tip = tip.map(|(at, s)| {
       SelectObject(mem, HGDIOBJ(fonts.regular.0));
-      let wide: Vec<u16> = r.name.encode_utf16().collect();
+      let wide: Vec<u16> = s.encode_utf16().collect();
       let mut size = SIZE::default();
       let _ = GetTextExtentPoint32W(mem, &wide, &mut size);
-      (layout.tip_rect(i, size.cx), r.name.as_str())
+      (layout.tip_rect(at, size.cx), s)
     });
     if let Some((rect, _)) = tip {
       let b = (rect.left as f32, rect.top as f32, (rect.right - rect.left) as f32, (rect.bottom - rect.top) as f32);
@@ -586,6 +696,17 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
     let inset = px(3.0);
     c.round_stroke((inset, oy + inset, full_w - 2.0 * inset, oh - 2.0 * inset), px(RADIUS), px(2.0), p.text);
   }
+  // The fix: an accent button as the window's (`theme::accent_button`); "+N more" a plain one.
+  if layout.issues > 0 {
+    let f = layout.fix_rect();
+    let fill = if ui.hover == Some(Hit::Fix) { mix(p.accent, p.card, 0.15) } else { p.accent };
+    let (fw, fh) = ((f.right - f.left) as f32, (f.bottom - f.top) as f32);
+    c.round_rect(f.left as f32, f.top as f32, fw, fh, px(RADIUS), fill);
+    if ui.focus == Some(Hit::Fix) {
+      focus_ring(c, layout, f, p);
+    }
+    button_state(c, layout, Hit::More, layout.more_rect(), ui, p);
+  }
   let hover_bg = hover_color(p);
   // The output's name: a button.
   if layout.device {
@@ -677,7 +798,7 @@ fn focus_ring(c: &mut Canvas, layout: &Layout, r: RECT, p: &Palette) {
 ///
 /// # Safety
 /// `dc` is a live memory DC with the flyout's bitmap selected.
-unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, note: Option<&str>, fonts: &Fonts) {
+unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: &Texts, fonts: &Fonts) {
   // SAFETY: `dc` and the fonts are live (the contract); the caller puts its own font back.
   unsafe {
     SetBkMode(dc, TRANSPARENT);
@@ -717,8 +838,21 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, note: O
       let level = format!("{:.0} %", row.volume * row.max * 100.0);
       text(dc, &level, layout.percent_rect(i), fonts.regular, percent, DT_RIGHT);
     }
-    if let Some(note) = note {
+    if let Some(note) = texts.note {
       text(dc, note, layout.note_rect(), fonts.regular, p.text_secondary, DT_CENTER);
+    }
+    if let Some(issue) = texts.issue.filter(|_| layout.issues > 0) {
+      // The warning color, as the window's status lines and the tray icon's badge have it.
+      let glyph = icons::WARNING.glyph.to_string();
+      text(dc, &glyph, layout.issue_glyph_rect(), fonts.glyphs, p.warn, DT_CENTER);
+      text(dc, issue.short, layout.issue_text_rect(), fonts.regular, p.text, DT_LEFT);
+      text(dc, issue.button, layout.fix_rect(), fonts.semibold, p.on_accent, DT_CENTER);
+      if layout.issues > 1 {
+        let mut more = layout.more_rect();
+        more.left += layout.px(GAP);
+        let label = trf("+{} more", &[&(layout.issues - 1)]);
+        text(dc, &label, more, fonts.caption, p.text_secondary, DT_LEFT);
+      }
     }
     let mut open = layout.open_rect();
     open.left += layout.px(PAD);
@@ -1027,14 +1161,18 @@ mod tests {
   #[test]
   fn the_name_tip_stays_inside_the_flyout() {
     let l = Layout::new(2.0, true, 0, 3, false, 10_000);
-    let tip = l.tip_rect(2, 5_000);
+    let tip = l.tip_rect(l.button_rect(2), 5_000);
     assert!(tip.bottom <= l.button_rect(2).top && tip.top >= 0, "above the icon");
     assert!(tip.right <= l.width());
+    // The fix button's tip at the right edge: moved left, still inside.
+    let l = l.with_issues(1, 10_000);
+    let tip = l.tip_rect(l.fix_rect(), 200);
+    assert!(tip.left >= 0 && tip.right <= l.width() - l.px(PAD) && tip.bottom <= l.fix_rect().top);
     // Nothing above the first row but the top padding: below it.
     let l = Layout::new(1.0, false, 0, 2, true, 10_000);
-    assert!(l.tip_rect(1, 50).top >= 0);
+    assert!(l.tip_rect(l.button_rect(1), 50).top >= 0);
     let first = l.button_rect(0);
-    let tip = l.tip_rect(0, 50);
+    let tip = l.tip_rect(first, 50);
     assert!(tip.top >= 0 && (tip.bottom <= first.top || tip.top >= first.bottom));
   }
 
@@ -1052,6 +1190,57 @@ mod tests {
     // The gaps and captions count: what is left fits, one more app would not.
     let more = Layout { apps: cut.apps + 1, ..cut };
     assert!(more.height() > 900);
+  }
+
+  #[test]
+  fn a_setup_problem_sits_next_to_the_open_row_and_its_buttons_answer() {
+    for open_top in [false, true] {
+      let none = full(open_top, 0);
+      let one = Layout::new(1.5, true, 2, 3, open_top, 10_000).with_issues(1, 10_000);
+      let two = one.with_issues(2, 10_000);
+      assert_eq!(none.fix_rect(), RECT::default());
+      assert_eq!(one.height(), none.height() + one.px(ISSUE_H + GROUP_GAP), "one band and its line");
+      assert_eq!(one.lines().len(), 3);
+      // Between the output's group and the open row, mirrored for a top taskbar.
+      let (line, open, name, output) = (one.issue_line(), one.open_rect(), one.name_line(), one.button_rect(0));
+      if open_top {
+        assert!(open.bottom <= line.top && one.fix_rect().bottom <= name.top);
+      } else {
+        assert!(output.bottom <= line.top && one.fix_rect().bottom <= open.top);
+      }
+      // The button, the text (a tip, no action) and with more problems "+N more".
+      let f = one.fix_rect();
+      assert_eq!(one.hit(f.left + 2, f.top + 2), Some(Hit::Fix));
+      assert_eq!(one.hit(f.right - 2, f.bottom - 2), Some(Hit::Fix));
+      assert_eq!(one.hit(one.issue_text_rect().left + 2, line.top + 2), Some(Hit::Issue));
+      assert_eq!(one.hit(f.left - 20, f.top + 2), None, "no \"+N more\" with one problem");
+      let m = two.more_rect();
+      assert!(m.right <= f.left && m.left > 0);
+      assert_eq!(two.hit(m.left + 2, m.top + 2), Some(Hit::More));
+      // Keys: in the order drawn, the block next to the open row.
+      let stops = two.stops();
+      let at = |h| stops.iter().position(|s| *s == h).unwrap();
+      assert!(at(Hit::More) + 1 == at(Hit::Fix));
+      if open_top {
+        assert_eq!(stops.get(..3), Some(&[Hit::Open, Hit::More, Hit::Fix][..]));
+      } else {
+        assert_eq!(stops.get(stops.len() - 3..), Some(&[Hit::More, Hit::Fix, Hit::Open][..]));
+      }
+      assert_eq!(one.stops().iter().filter(|s| **s == Hit::More).count(), 0);
+      // The open list keeps its room beyond the output's group, over the apps.
+      let list = two.with_list(3, 0).list_rect();
+      assert!(list.top >= 0 && list.bottom <= two.height());
+      assert!(!contains(list, f.left + 2, f.top + 2), "the list never covers the fix");
+    }
+  }
+
+  #[test]
+  fn a_short_screen_cuts_apps_for_the_problem_block_never_the_block() {
+    let plain = Layout::new(1.0, true, 4, 30, false, 900);
+    let with = plain.with_issues(2, 900);
+    assert!(with.issues() == 2 && with.apps < plain.apps && with.height() <= 900);
+    let tiny = Layout::new(1.0, true, 4, 30, false, 10).with_issues(1, 10);
+    assert_eq!((tiny.apps, tiny.issues()), (1, 1));
   }
 
   #[test]

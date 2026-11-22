@@ -429,7 +429,7 @@ fn no_reference_text(status: Option<AecRefStatus>, output: Option<&str>) -> Stri
       &[&output],
     ),
     Some(AecRefStatus::EffectOutdated) => trf(
-      "No speaker reference: the output EQ on \"{}\" is older than this app. Update it in Output & headphones.",
+      "No speaker reference: the sound effects on \"{}\" need an update. Update them in Output & headphones.",
       &[&output],
     ),
     Some(AecRefStatus::EndpointUnknown) => trf(
