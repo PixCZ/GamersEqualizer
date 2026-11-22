@@ -41,7 +41,19 @@ paths:
 - It moves the driver's legacy effect values into composite lists only in the slots ours go into (a
   legacy value shadows only its own slot). A device that does not open during the self-test is opened
   once more without our effects: if it opens then, ours stay out; if not (exclusive use, privacy), ours
-  go back in unchecked, unless driver effects were moved for them. An endpoint without `FxProperties`
+  go back in unchecked, unless driver effects were moved for them. Before anything changes (audio
+  still running) each endpoint is opened once, all in parallel and open only (`--open-only`: no
+  stream, so the check takes about the slowest single open, ~3 s for a never-opening one): when Windows reports it invalidated (probe exit 2,
+  `AUDCLNT_E_DEVICE_INVALIDATED`: switched off in the driver, a digital output with nothing behind
+  it), it is left exactly as it is (no backup, ours stay if they are in) and dropped, with one neutral
+  line and no warning, and the app does not count it as rolled back. With nothing left, the DLL and
+  the app (with its entry) are still installed as with `-AppOnly` (shared by every device; else the
+  app would offer the update forever): no endpoint change; when a DLL is installed already, Windows
+  audio is stopped around its replacement as in a full install (audiodg may hold it loaded, and the
+  restart loads the new build; output held, audio started again on every path), "The effects were
+  updated; no device could be changed." and exit 0. With a `Get-EndpointBlocker` skip as well it
+  still fails with "Nothing was changed.". Exit 2 during the self-test (it opened before): no second
+  probe or audio restart, ours stay in unchecked, the same line. An endpoint without `FxProperties`
   (inbox "High Definition Audio Device", VMs; Administrators may not create subkeys there) gets the key,
   made with the backup/restore privileges so no owner or ACL changes; its backup is marked `Created`,
   and rollback and uninstall delete the key.

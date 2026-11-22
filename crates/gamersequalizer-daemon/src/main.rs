@@ -74,13 +74,14 @@ const WINDOW_ICON_SIZE: u32 = 64;
 fn main() {
   let args: Vec<String> = std::env::args().collect();
   // The installer (elevated) opens endpoints briefly to see whether Windows starts our effects.
+  let open_only = args.iter().any(|a| a == win_audio::mic_probe::OPEN_ONLY_ARG);
   if let Some(guid) = args.iter().position(|a| a == "--probe-mic").and_then(|i| args.get(i + 1)) {
     app_log::init("probe");
-    std::process::exit(win_audio::mic_probe::run(guid));
+    std::process::exit(win_audio::mic_probe::run(guid, open_only));
   }
   if let Some(guid) = args.iter().position(|a| a == "--probe-render").and_then(|i| args.get(i + 1)) {
     app_log::init("probe");
-    std::process::exit(win_audio::mic_probe::run_render(guid));
+    std::process::exit(win_audio::mic_probe::run_render(guid, open_only));
   }
   let is_daemon = args.iter().any(|a| a == "--daemon");
   app_log::init(if is_daemon { "service" } else { "ui" });

@@ -501,6 +501,9 @@ mod tests {
       assert!(has(&install, &format!("'{text}'")), "{text}");
     }
     assert!(has(&install, &format!("DeviceState -band {DEVICE_STATE_MASK:#X}) -eq {DEVICE_STATE_ACTIVE}")));
+    let invalidated = crate::win_audio::mic_probe::EXIT_DEVICE_INVALIDATED;
+    assert!(has(&install, &format!("$ProbeExitDeviceInvalidated = {invalidated}")));
+    assert!(has(&install, &format!("$ProbeOpenOnlyArg = '{}'", crate::win_audio::mic_probe::OPEN_ONLY_ARG)));
   }
 
   /// The update targets only what the installer accepts: active endpoints (its `Get-ActiveEndpoints`).
