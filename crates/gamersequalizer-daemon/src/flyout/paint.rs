@@ -49,6 +49,9 @@ const ISSUE_TEXT_H: i32 = 30;
 const FIX_W: i32 = 132;
 const FIX_H: i32 = 32;
 const ISSUE_H: i32 = ISSUE_TEXT_H + FIX_H + 4;
+/// The issue's second choice ("Keep ...", "Ignore"): a plain button on a line of its own under the
+/// fix, wide enough for a device name.
+const OTHER_FIX_H: i32 = FIX_H + 4;
 const BUTTON: i32 = 36;
 const GAP: i32 = 8;
 const PERCENT_W: i32 = 44;
@@ -83,6 +86,8 @@ pub struct Layout {
   list_rows: usize,
   /// Setup problems the tray lists (0: no block); the first is shown, the rest as "+N more".
   issues: usize,
+  /// The first problem has a second choice (`Notice::other`): its button under the fix.
+  other_fix: bool,
 }
 
 /// What the flyout writes besides the rows.
@@ -103,6 +108,8 @@ pub struct Notice {
   /// The tray menu's label of the fix, in the button's tip.
   pub label: String,
   pub fix: Fix,
+  /// The tray menu's second item (label, fix), when the problem has one.
+  pub other: Option<(String, Fix)>,
 }
 
 /// One horizontal band of the flyout, top to bottom (`Layout::slots`).
@@ -147,15 +154,18 @@ impl Layout {
       list_first: 0,
       list_rows: 0,
       issues: 0,
+      other_fix: false,
     };
     layout.cut_to(max_height);
     layout
   }
 
-  /// With the block of `issues` setup problems (0: none), the apps cut again to `max_height`: the
-  /// block is never cut. Before `with_list` (the list's room depends on it).
-  pub fn with_issues(mut self, issues: usize, max_height: i32) -> Self {
+  /// With the block of `issues` setup problems (0: none), `other_fix`: the first has a second
+  /// choice. The apps are cut again to `max_height`: the block is never cut. Before `with_list`
+  /// (the list's room depends on it).
+  pub fn with_issues(mut self, issues: usize, other_fix: bool, max_height: i32) -> Self {
     self.issues = issues;
+    self.other_fix = other_fix && issues > 0;
     self.cut_to(max_height);
     self
   }
@@ -220,8 +230,10 @@ impl Layout {
       Slot::Open => vec![Hit::Open],
       Slot::Name => vec![Hit::Name],
       Slot::Row(i) => vec![Hit::Slider(i)],
-      Slot::Issue if self.issues > 1 => vec![Hit::More, Hit::Fix],
-      Slot::Issue => vec![Hit::Fix],
+      Slot::Issue => {
+        let more = (self.issues > 1).then_some(Hit::More);
+        more.into_iter().chain([Hit::Fix]).chain(self.other_fix.then_some(Hit::OtherFix)).collect()
+      }
       _ => Vec::new(),
     };
     self.slots().into_iter().flat_map(|(slot, ..)| stops(slot)).collect()
@@ -281,10 +293,15 @@ impl Layout {
     match slot {
       Slot::Open => Some(Hit::Open),
       Slot::Name if inside => Some(Hit::Name),
-      Slot::Issue => [(self.fix_rect(), Hit::Fix), (self.more_rect(), Hit::More), (self.issue_line(), Hit::Issue)]
-        .into_iter()
-        .find(|&(r, _)| contains(r, x, y))
-        .map(|(_, hit)| hit),
+      Slot::Issue => [
+        (self.fix_rect(), Hit::Fix),
+        (self.other_fix_rect(), Hit::OtherFix),
+        (self.more_rect(), Hit::More),
+        (self.issue_line(), Hit::Issue),
+      ]
+      .into_iter()
+      .find(|&(r, _)| contains(r, x, y))
+      .map(|(_, hit)| hit),
       Slot::Row(i) => {
         let (x0, x1, _) = self.track(i);
         let b = self.button_rect(i);
@@ -361,6 +378,7 @@ impl Layout {
           Slot::Name => NAME_H,
           Slot::Row(_) => CONTROL_H,
           Slot::Note => NOTE_H,
+          Slot::Issue if self.other_fix => ISSUE_H + OTHER_FIX_H,
           Slot::Issue => ISSUE_H,
         };
         top += height;
@@ -510,6 +528,17 @@ impl Layout {
     RECT { left: line.right - self.px(FIX_W), top, right: line.right, bottom: top + self.px(FIX_H) }
   }
 
+  /// The second choice under the fix button, from under the text to the right edge (empty without
+  /// one).
+  pub(super) fn other_fix_rect(&self) -> RECT {
+    if !self.other_fix {
+      return RECT::default();
+    }
+    let fix = self.fix_rect();
+    let top = fix.bottom + self.px(4);
+    RECT { left: self.issue_text_rect().left, top, right: fix.right, bottom: top + self.px(FIX_H) }
+  }
+
   /// "+N more" left of the fix button (empty with one issue): it opens the main window.
   pub(super) fn more_rect(&self) -> RECT {
     if self.issues < 2 {
@@ -592,6 +621,10 @@ pub fn paint(
         .map(|r| (layout.button_rect(i), r.name.as_str())),
       Some(Hit::Issue) => issue.map(|n| (layout.issue_line(), n.title.as_str())),
       Some(Hit::Fix) => issue.map(|n| (layout.fix_rect(), n.label.as_str())),
+      // The full label: a long device name is cut on the button.
+      Some(Hit::OtherFix) => {
+        issue.and_then(|n| n.other.as_ref()).map(|(label, _)| (layout.other_fix_rect(), label.as_str()))
+      }
       _ => None,
     };
     let tip = tip.map(|(at, s)| {
@@ -696,8 +729,16 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
     let inset = px(3.0);
     c.round_stroke((inset, oy + inset, full_w - 2.0 * inset, oh - 2.0 * inset), px(RADIUS), px(2.0), p.text);
   }
-  // The fix: an accent button as the window's (`theme::accent_button`); "+N more" a plain one.
+  // The fix: an accent button as the window's (`theme::accent_button`); the second choice a plain
+  // filled one; "+N more" a flat one.
   if layout.issues > 0 {
+    let o = layout.other_fix_rect();
+    let shade = if ui.hover == Some(Hit::OtherFix) { 0.14 } else { 0.07 };
+    let (ow, oh) = ((o.right - o.left) as f32, (o.bottom - o.top) as f32);
+    c.round_rect(o.left as f32, o.top as f32, ow, oh, px(RADIUS), mix(p.card, p.text, shade));
+    if layout.other_fix && ui.focus == Some(Hit::OtherFix) {
+      focus_ring(c, layout, o, p);
+    }
     let f = layout.fix_rect();
     let fill = if ui.hover == Some(Hit::Fix) { mix(p.accent, p.card, 0.15) } else { p.accent };
     let (fw, fh) = ((f.right - f.left) as f32, (f.bottom - f.top) as f32);
@@ -847,6 +888,12 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
       text(dc, &glyph, layout.issue_glyph_rect(), fonts.glyphs, p.warn, DT_CENTER);
       text(dc, issue.short, layout.issue_text_rect(), fonts.regular, p.text, DT_LEFT);
       text(dc, issue.button, layout.fix_rect(), fonts.semibold, p.on_accent, DT_CENTER);
+      if let Some((label, _)) = issue.other.as_ref().filter(|_| layout.other_fix) {
+        let mut r = layout.other_fix_rect();
+        r.left += layout.px(GAP);
+        r.right -= layout.px(GAP);
+        text(dc, label, r, fonts.regular, p.text, DT_CENTER);
+      }
       if layout.issues > 1 {
         let mut more = layout.more_rect();
         more.left += layout.px(GAP);
@@ -1165,7 +1212,7 @@ mod tests {
     assert!(tip.bottom <= l.button_rect(2).top && tip.top >= 0, "above the icon");
     assert!(tip.right <= l.width());
     // The fix button's tip at the right edge: moved left, still inside.
-    let l = l.with_issues(1, 10_000);
+    let l = l.with_issues(1, false, 10_000);
     let tip = l.tip_rect(l.fix_rect(), 200);
     assert!(tip.left >= 0 && tip.right <= l.width() - l.px(PAD) && tip.bottom <= l.fix_rect().top);
     // Nothing above the first row but the top padding: below it.
@@ -1196,9 +1243,11 @@ mod tests {
   fn a_setup_problem_sits_next_to_the_open_row_and_its_buttons_answer() {
     for open_top in [false, true] {
       let none = full(open_top, 0);
-      let one = Layout::new(1.5, true, 2, 3, open_top, 10_000).with_issues(1, 10_000);
-      let two = one.with_issues(2, 10_000);
+      let one = Layout::new(1.5, true, 2, 3, open_top, 10_000).with_issues(1, false, 10_000);
+      let two = one.with_issues(2, false, 10_000);
       assert_eq!(none.fix_rect(), RECT::default());
+      assert_eq!(one.other_fix_rect(), RECT::default(), "no second choice: one button");
+      assert!(!one.stops().contains(&Hit::OtherFix));
       assert_eq!(one.height(), none.height() + one.px(ISSUE_H + GROUP_GAP), "one band and its line");
       assert_eq!(one.lines().len(), 3);
       // Between the output's group and the open row, mirrored for a top taskbar.
@@ -1237,10 +1286,38 @@ mod tests {
   #[test]
   fn a_short_screen_cuts_apps_for_the_problem_block_never_the_block() {
     let plain = Layout::new(1.0, true, 4, 30, false, 900);
-    let with = plain.with_issues(2, 900);
+    let with = plain.with_issues(2, true, 900);
     assert!(with.issues() == 2 && with.apps < plain.apps && with.height() <= 900);
-    let tiny = Layout::new(1.0, true, 4, 30, false, 10).with_issues(1, 10);
+    let tiny = Layout::new(1.0, true, 4, 30, false, 10).with_issues(1, true, 10);
     assert_eq!((tiny.apps, tiny.issues()), (1, 1));
+  }
+
+  #[test]
+  fn a_second_choice_gets_its_own_button_under_the_fix() {
+    for open_top in [false, true] {
+      let one = Layout::new(1.5, true, 2, 3, open_top, 10_000).with_issues(2, false, 10_000);
+      let two = one.with_issues(2, true, 10_000);
+      assert_eq!(two.height(), one.height() + two.px(OTHER_FIX_H), "one more line in the block");
+      let (f, o) = (two.fix_rect(), two.other_fix_rect());
+      // Under the fix, from under the text to the right edge: room for a device name.
+      assert!(o.top >= f.bottom && o.left == two.issue_text_rect().left && o.right == f.right);
+      assert!(o.right - o.left > f.right - f.left);
+      assert_eq!(two.hit(o.left + 2, o.top + 2), Some(Hit::OtherFix));
+      assert_eq!(two.hit(o.right - 2, o.bottom - 2), Some(Hit::OtherFix));
+      assert_eq!(two.hit(f.left + 2, f.top + 2), Some(Hit::Fix));
+      // Still inside the block, before the next band (the output's name or the open row).
+      let next = if open_top { two.name_line().top } else { two.open_rect().top };
+      assert!(o.bottom <= next);
+      // Keys as drawn: "+N more", the fix, then the second choice.
+      let stops = two.stops();
+      let at = |h| stops.iter().position(|s| *s == h).unwrap();
+      assert!(at(Hit::More) + 1 == at(Hit::Fix) && at(Hit::Fix) + 1 == at(Hit::OtherFix));
+      // Its tip stays inside the flyout.
+      let tip = two.tip_rect(o, 5_000);
+      assert!(tip.left >= 0 && tip.right <= two.width() && tip.top >= 0);
+      // Without a problem the flag does nothing.
+      assert_eq!(full(open_top, 0).with_issues(0, true, 10_000).height(), full(open_top, 0).height());
+    }
   }
 
   #[test]

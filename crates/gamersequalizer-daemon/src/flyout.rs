@@ -159,9 +159,11 @@ pub(crate) enum Hit {
   Choice(usize),
   /// The "Open settings" row (the main window).
   Open,
-  /// The setup problem's text (its tip only), its fix button, its "+N more" (the main window).
+  /// The setup problem's text (its tip only), its fix button, its second choice ("Keep ...",
+  /// "Ignore"), its "+N more" (the main window).
   Issue,
   Fix,
+  OtherFix,
   More,
 }
 
@@ -172,7 +174,7 @@ pub(crate) struct Interaction {
   pub drag: Option<usize>,
   /// One of `Layout::stops`; a row's is its `Hit::Slider`.
   pub focus: Option<Hit>,
-  /// What shows a tip: a row's `Mute` / `Slider` (the app's name), `Issue` or `Fix`.
+  /// What shows a tip: a row's `Mute` / `Slider` (the app's name), `Issue`, `Fix` or `OtherFix`.
   pub tip: Option<Hit>,
 }
 
@@ -341,7 +343,10 @@ fn load_notice() -> (Option<Notice>, usize) {
 fn notice(issues: &[Issue]) -> Option<Notice> {
   let issue = issues.first()?;
   let (button, label, fix) = issue.first_fix()?;
-  Some(Notice { short: issue.short_title(), title: issue.title(), button, label, fix })
+  // Only the output change shows its second choice ("Keep"): people who use the new output on
+  // purpose are otherwise only offered to go back. Other issues keep their one button here.
+  let other = issue.fixes().into_iter().nth(1).filter(|_| matches!(issue, Issue::OutputChanged(_)));
+  Some(Notice { short: issue.short_title(), title: issue.title(), button, label, fix, other })
 }
 
 /// The changes since the last call, oldest first.
@@ -368,7 +373,7 @@ pub fn tick() {
       return Next::Hide(f.hwnd);
     }
     // A tip once the pointer rests on an app's row or the problem (a tooltip's delay).
-    if let Some(hit @ (Hit::Mute(_) | Hit::Slider(_) | Hit::Issue | Hit::Fix)) = f.ui.hover
+    if let Some(hit @ (Hit::Mute(_) | Hit::Slider(_) | Hit::Issue | Hit::Fix | Hit::OtherFix)) = f.ui.hover
       && f.ui.drag.is_none()
       && f.ui.tip != Some(hit)
       && f.hovered_at.elapsed() >= TIP_DELAY
@@ -429,8 +434,9 @@ fn show(anchor: RECT, dark: bool) -> Result<(), String> {
   let outputs = if list_first.is_some() { load_outputs() } else { Vec::new() };
   let max_h = work.bottom - work.top - 2 * margin;
   let (notice, issues) = load_notice();
+  let other_fix = notice.as_ref().is_some_and(|n| n.other.is_some());
   let layout = Layout::new(scale, device, channels, apps, open_top, max_h)
-    .with_issues(issues, max_h)
+    .with_issues(issues, other_fix, max_h)
     .with_list(outputs.len(), list_first.unwrap_or(0));
   let (w, h) = (layout.width(), layout.height());
   let (x, y) = place(&anchor, &work, &monitor, (w, h), margin);
@@ -880,7 +886,8 @@ impl Flyout {
             self.close();
             return Some(Reply::open());
           }
-          Some(Hit::Fix) => return Some(self.fix()),
+          Some(Hit::Fix) => return Some(self.fix(false)),
+          Some(Hit::OtherFix) => return Some(self.fix(true)),
           Some(Hit::Issue) => {}
           Some(Hit::Name) => self.open_list(false),
           Some(Hit::Choice(k)) => self.pick(k),
@@ -953,14 +960,15 @@ impl Flyout {
         self.close();
         return Some(Reply::open());
       }
-      (_, Some(Hit::Fix)) if enter => return Some(self.fix()),
+      (_, Some(Hit::Fix)) if enter => return Some(self.fix(false)),
+      (_, Some(Hit::OtherFix)) if enter => return Some(self.fix(true)),
       (_, Some(Hit::Name)) if enter => self.open_list(true),
       (_, Some(Hit::Choice(k))) if enter => self.pick(k),
       (VK_DOWN | VK_TAB | VK_UP, _) => {
         // SAFETY: reads this thread's key state as of the message being handled.
         let shift = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
         self.ui.focus = next_stop(&stops, focus, key == VK_UP || (key == VK_TAB && shift));
-        self.ui.tip = self.ui.focus.filter(|f| matches!(f, Hit::Slider(_) | Hit::Fix));
+        self.ui.tip = self.ui.focus.filter(|f| matches!(f, Hit::Slider(_) | Hit::Fix | Hit::OtherFix));
         if let Some(Hit::Choice(k)) = self.ui.focus {
           self.layout = self.layout.scrolled_to(k);
         }
@@ -1016,9 +1024,10 @@ impl Flyout {
   /// the menu's (`take_fix` -> `TrayAction::Fix`). One that asks for administrator leaves the
   /// flyout open and in front meanwhile: the UAC prompt of a process that gave up the foreground
   /// only flashes on the taskbar. The prompt, the script's window or the main window then take
-  /// the foreground, which closes the flyout.
-  fn fix(&mut self) -> Reply {
-    let Some(fix) = self.notice.as_ref().map(|n| n.fix.clone()).filter(|_| !self.fix_sent) else {
+  /// the foreground, which closes the flyout. `other`: the second choice's button, the same way.
+  fn fix(&mut self, other: bool) -> Reply {
+    let picked = self.notice.as_ref().and_then(|n| if other { n.other.as_ref().map(|o| &o.1) } else { Some(&n.fix) });
+    let Some(fix) = picked.cloned().filter(|_| !self.fix_sent) else {
       return Reply::done();
     };
     info!("[Flyout] fix picked: {fix:?}");
@@ -1436,14 +1445,15 @@ mod tests {
       ("dark_issues", true, 0, 2),
       ("light_issues", false, 0, 2),
     ] {
-      let layout = Layout::new(1.5, true, 4, 4, false, 10_000).with_issues(shown, 10_000).with_list(choices, 0);
+      let notice = notice(issues.get(..shown).unwrap());
+      let other = notice.as_ref().is_some_and(|n| n.other.is_some());
+      let layout = Layout::new(1.5, true, 4, 4, false, 10_000).with_issues(shown, other, 10_000).with_list(choices, 0);
       let tip = match shown {
         0 => Hit::Mute(6),
         1 => Hit::Fix,
         _ => Hit::Issue,
       };
       let ui = Interaction { tip: Some(tip), focus: (choices > 0).then_some(Hit::Choice(2)), ..Default::default() };
-      let notice = notice(issues.get(..shown).unwrap());
       let px = render_with(&layout, &rows, &outputs, ui, dark, &Texts { note: None, issue: notice.as_ref() });
       let (w, h) = (layout.width(), layout.height());
       let mut bmp = Vec::new();
@@ -1486,7 +1496,7 @@ mod tests {
       let mut f = Flyout::new(HWND::default());
       f.visible = true;
       f.notice = notice(std::slice::from_ref(issue));
-      let reply = f.fix();
+      let reply = f.fix(false);
       let menu = issue.fixes().into_iter().next().map(|(_, fix)| fix).unwrap();
       if menu.shows_window() {
         // Shown inside the click, like the gear row; nothing is left for the service loop.
@@ -1501,7 +1511,7 @@ mod tests {
       // press starts nothing; any other hides it.
       assert_eq!((reply.hide, f.visible), (!menu.asks_admin(), menu.asks_admin()), "{issue:?}");
       if menu.asks_admin() {
-        assert!(!f.fix().hide && take_fix().is_none());
+        assert!(!f.fix(false).hide && take_fix().is_none());
       }
     }
     assert!(Fix::UpdateEffects.asks_admin() && Fix::SwitchMicSlot("m".into()).asks_admin());
@@ -1514,16 +1524,45 @@ mod tests {
   }
 
   #[test]
+  fn a_changed_output_offers_both_switch_back_and_keep() {
+    let change = Issue::OutputChanged(crate::health::OutputChange {
+      expected_id: "hp".into(),
+      expected_name: "Headphones".into(),
+      current_id: "tv".into(),
+      current_name: "TV (a very long HDMI display name that does not fit)".into(),
+    });
+    let n = notice(std::slice::from_ref(&change)).unwrap();
+    assert_eq!(n.fix, Fix::SwitchOutput("hp".into()));
+    assert_eq!(n.other, change.fixes().into_iter().nth(1), "the menu's second item");
+    assert_eq!(n.other.as_ref().map(|o| &o.1), Some(&Fix::KeepOutput("tv".into())));
+    // The keep button goes to the service loop as the menu's item (it remembers the output).
+    let mut f = Flyout::new(HWND::default());
+    f.visible = true;
+    f.notice = Some(n);
+    let reply = f.fix(true);
+    assert_eq!((reply.open, take_fix()), (None, Some(Fix::KeepOutput("tv".into()))));
+    assert!(reply.hide && !f.visible);
+    // A problem with one fix has no second button, and pressing where it would be does nothing.
+    let silenced =
+      Issue::MicSilenced { why: crate::mic_usage::Silenced::NoMicrophone, apps: "Discord".into(), mic_id: None };
+    let one = notice(std::slice::from_ref(&silenced)).unwrap();
+    assert_eq!(one.other, None);
+    f.notice = Some(one);
+    assert_eq!((f.fix(true).open, take_fix()), (None, None));
+  }
+
+  #[test]
   fn the_problem_block_is_drawn_with_its_button() {
     let issues = sample_issues();
     let notice = notice(&issues);
     let texts = Texts { note: None, issue: notice.as_ref() };
     let rows = [device_row("b", "Headphones")];
-    let layout = Layout::new(1.5, true, 0, 0, false, 10_000).with_issues(2, 10_000);
+    let layout = Layout::new(1.5, true, 0, 0, false, 10_000).with_issues(2, true, 10_000);
     let px = render_with(&layout, &rows, &[], Interaction::default(), true, &texts);
     let f = layout.fix_rect();
     let area = ((f.right - f.left) * (f.bottom - f.top)) as usize;
     assert!(drawn(&px, layout.width(), f) > area / 2, "the accent button is filled");
+    assert!(drawn(&px, layout.width(), layout.other_fix_rect()) > 10, "the second choice is drawn");
     assert!(drawn(&px, layout.width(), layout.more_rect()) > 10, "\"+1 more\" is written");
     // Without the texts (no problem) nothing is drawn there.
     let bare = render(&layout, &rows, &[], Interaction::default(), true);
