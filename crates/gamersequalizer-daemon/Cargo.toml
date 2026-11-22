@@ -24,8 +24,8 @@ tray-icon = { workspace = true }
 muda = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
-# Already in the tree via env_logger; local-time formatting of the APO build stamp.
-jiff = "0.2"
+# Local-time formatting (system time zone) for log lines, file names and the APO build stamp.
+jiff = "1"
 # Already in the tree via eframe (png) and deep_filter; compresses the settings export.
 flate2 = "1"
 

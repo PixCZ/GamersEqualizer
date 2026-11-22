@@ -166,7 +166,7 @@ pub fn import(profiles_dir: &Path, path: &Path, only: Option<&Selection>) -> Res
 
 /// Suggested file name: `GamersEqualizer-settings-2026-11-15.json.gz`.
 pub fn default_file_name() -> String {
-  format!("GamersEqualizer-settings-{}.json.gz", jiff::Zoned::now().strftime("%Y-%m-%d"))
+  format!("GamersEqualizer-settings-{}.json.gz", jiff::ZonedDateTime::now().strftime("%Y-%m-%d"))
 }
 
 // --- private helpers -----------------------------------------------------------------------
@@ -232,7 +232,7 @@ fn collect(profiles_dir: &Path) -> ExportFile {
   ExportFile {
     format: FORMAT.into(),
     format_version: FORMAT_VERSION,
-    exported_at: jiff::Zoned::now().strftime("%Y-%m-%d %H:%M:%S %:z").to_string(),
+    exported_at: jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S %:z").to_string(),
     app_version: env!("GAMERSEQUALIZER_VERSION").into(),
     devices: device_ids::load_known(profiles_dir),
     settings,
@@ -342,7 +342,7 @@ fn merged_ui_prefs(target: &Path, imported: &serde_json::Value) -> serde_json::V
 
 fn backup_path(profiles_dir: &Path) -> PathBuf {
   let dir = profiles_dir.parent().unwrap_or(profiles_dir).join(BACKUP_DIR);
-  dir.join(format!("before-import-{}.json.gz", jiff::Zoned::now().strftime("%Y%m%d-%H%M%S")))
+  dir.join(format!("before-import-{}.json.gz", jiff::ZonedDateTime::now().strftime("%Y%m%d-%H%M%S")))
 }
 
 fn count(file: &ExportFile) -> usize {

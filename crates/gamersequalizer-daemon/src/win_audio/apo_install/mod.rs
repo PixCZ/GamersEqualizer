@@ -464,7 +464,7 @@ impl Flow {
 
 fn format_time(t: SystemTime) -> String {
   jiff::Timestamp::try_from(t)
-    .map(|ts| ts.to_zoned(jiff::tz::TimeZone::system()).strftime("%d.%m.%Y %H:%M").to_string())
+    .map(|ts| ts.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%d.%m.%Y %H:%M").to_string())
     .unwrap_or_else(|_| "?".to_string())
 }
 
