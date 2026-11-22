@@ -10,7 +10,6 @@
 //! the layout version and leave an installed microphone effect unreachable until it is reinstalled.
 
 use crate::win_audio::chatmix::ChatMixController;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -106,11 +105,10 @@ impl MixerEdits {
   }
 }
 
-/// An endpoint id as the block carries it. Both processes run the same exe, so the same hasher.
+/// An endpoint id as the block carries it: FNV-1a, the same in every build (the standard library's
+/// hasher may change between Rust versions, and a window and a service can be different builds).
 pub fn id_hash(id: &str) -> u64 {
-  let mut hasher = DefaultHasher::new();
-  id.hash(&mut hasher);
-  hasher.finish()
+  id.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The window: `default`, the output Windows just switched to, is the flyout's pick (its hash and
@@ -217,6 +215,8 @@ mod tests {
     assert!(!is_picked_output(pick(0), "monitor"), "a monitor took the default: switched back");
     assert!(!is_picked_output(pick(6), "headphones"), "an old pick is not why the default changed now");
     assert!(!is_picked_output(None, "headphones"));
+    // FNV-1a's published value: two builds of the app agree on it.
+    assert_eq!(id_hash("a"), 0xaf63_dc4c_8601_ec8c);
   }
 
   #[test]
