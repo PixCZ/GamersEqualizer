@@ -372,7 +372,8 @@ impl ShmHeader {
     // Nobody writes the reference until the daemon names the output.
     self.aec_ref_output_hash.store(0, Ordering::Relaxed);
     self.aec_ref_status.store(AecRefStatus::NotChecked.to_u32(), Ordering::Relaxed);
-    self.duck_enabled.store(false, Ordering::Relaxed);
+    // On for a fresh install; a saved choice (`AudioSettings`) replaces it, so nobody who turned it off gets it back.
+    self.duck_enabled.store(true, Ordering::Relaxed);
     self.duck_strength_permille.store(500, Ordering::Relaxed);
     self.duck_game_gain_permille.store(1000, Ordering::Relaxed);
     self.duck_chat_gain_permille.store(1000, Ordering::Relaxed);

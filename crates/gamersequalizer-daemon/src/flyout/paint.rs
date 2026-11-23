@@ -5,13 +5,12 @@
 //! Drawn into a 32-bit bitmap: the shapes are anti-aliased here (GDI's own are not), text is GDI's
 //! ClearType, icons are the apps' own, the bitmap goes to the window in one copy (no flicker).
 
-use super::{Hit, Interaction, MixChannel, Row, Target};
+use super::{Hit, Interaction, MixChannel, Row, Target, balance_value, loudness_db};
 use crate::health::Fix;
 use crate::i18n::{tr, trf};
 use crate::ui::theme::{Palette, adapt_for, icons};
 use crate::win_audio::AudioEndpointInfo;
 use egui::Color32;
-use gamersequalizer_mic_chain::voice_leveler::{MAX_TARGET_DB, MIN_TARGET_DB};
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
   ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
@@ -805,7 +804,7 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
 /// None: even.
 fn balance_look(value: f32) -> (String, Option<Color32>) {
   use crate::ui::tab_mixer::{CHAT_COLOR, GAME_COLOR};
-  let balance = value * 2.0 - 1.0;
+  let balance = balance_value(value);
   let percent = (balance.abs() * 100.0).round();
   if percent < 1.0 {
     ("50/50".to_string(), None)
@@ -899,10 +898,7 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
           let (text, color) = balance_look(row.volume);
           (text, color.map_or(percent, |c| adapt_for(p.dark, c)))
         }
-        Target::Channel(MixChannel::MicLoudness) => {
-          let db = MIN_TARGET_DB + row.volume * (MAX_TARGET_DB - MIN_TARGET_DB);
-          (format!("{db:.0} dB"), percent)
-        }
+        Target::Channel(MixChannel::MicLoudness) => (format!("{:.0} dB", loudness_db(row.volume)), percent),
         _ => (format!("{:.0} %", row.volume * row.max * 100.0), percent),
       };
       text(dc, &level, layout.percent_rect(i), fonts.regular, percent, DT_RIGHT);

@@ -14,8 +14,8 @@
 //! the output's name lists the active outputs; a pick goes the same way to
 //! `WinAudioSystem::select_output`, what the window's device list does.
 //!
-//! The channel rows are the window mixer's faders: the mic's is its loudness while the voice
-//! leveler is on, and the last one is ChatMix, its balance or, while Automatic ChatMix is on, its
+//! The channel rows are the window mixer's faders, except the mic's while the voice leveler is on:
+//! that one sets the leveler's target loudness (the mic volume stays in the window), and the last one is ChatMix, its balance or, while Automatic ChatMix is on, its
 //! strength (no switch here: that stays in the window).
 //!
 //! Along the edge nearest the tray icon a row opens the main window (what the menu's "Open
@@ -35,6 +35,7 @@ use crate::win_audio::AudioEndpointInfo;
 use crate::win_audio::chatmix::{ChatMixController, get_endpoint_volume, set_endpoint_mute, set_endpoint_volume};
 use crate::win_audio::endpoint_lock::{active_devices, get_endpoint_info};
 use crate::win_audio::mmdevice;
+use gamersequalizer_mic_chain::voice_leveler::{MAX_TARGET_DB, MIN_TARGET_DB};
 use log::{debug, info, warn};
 use paint::{Layout, Notice, Texts};
 use std::cell::RefCell;
@@ -112,7 +113,7 @@ pub enum MixChannel {
   Chat,
   Media,
   Mic,
-  /// The voice leveler's target loudness, while it is on: the slider spans its range. No mute.
+  /// The voice leveler's target loudness, while it is on: the slider spans its range, the icon mutes the mic.
   MicLoudness,
   /// ChatMix's game / chat balance: 0 = all game, 0.5 = even, 1 = all chat. No mute.
   Balance,
@@ -623,6 +624,26 @@ fn channel_rows(levels: Option<Vec<(MixChannel, ChannelLevel)>>) -> Vec<Row> {
     .collect()
 }
 
+/// The leveler's target (dBFS) at slider position `slider` (0..1 over its range).
+pub(crate) fn loudness_db(slider: f32) -> f32 {
+  MIN_TARGET_DB + slider.clamp(0.0, 1.0) * (MAX_TARGET_DB - MIN_TARGET_DB)
+}
+
+/// The slider position (0..1) of the leveler's target `db`.
+pub(crate) fn loudness_slider(db: f32) -> f32 {
+  ((db - MIN_TARGET_DB) / (MAX_TARGET_DB - MIN_TARGET_DB)).clamp(0.0, 1.0)
+}
+
+/// ChatMix's balance (-1 = all game .. 1 = all chat) at slider position `slider` (0..1).
+pub(crate) fn balance_value(slider: f32) -> f32 {
+  slider * 2.0 - 1.0
+}
+
+/// The slider position (0..1) of ChatMix's balance `balance`.
+pub(crate) fn balance_slider(balance: f32) -> f32 {
+  (balance + 1.0) / 2.0
+}
+
 impl MixChannel {
   pub(crate) fn name(self) -> &'static str {
     match self {
@@ -636,9 +657,9 @@ impl MixChannel {
     }
   }
 
-  /// Loudness, balance and strength have nothing to mute: their icon is no button.
+  /// Balance and strength have nothing to mute: their icon is no button.
   pub(crate) fn mutes(self) -> bool {
-    !matches!(self, Self::MicLoudness | Self::Balance | Self::DuckStrength)
+    !matches!(self, Self::Balance | Self::DuckStrength)
   }
 
   /// The window mixer's icon and color for it.

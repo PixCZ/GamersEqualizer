@@ -2,7 +2,6 @@
 
 use super::*;
 use gamersequalizer_common::shm::ShmHeader;
-use gamersequalizer_mic_chain::voice_leveler::{MAX_TARGET_DB, MIN_TARGET_DB};
 use log::warn;
 use std::sync::atomic::AtomicU32;
 
@@ -54,15 +53,15 @@ fn heal_device_ids(win_audio: &WinAudioSystem, profiles_dir: &Path, shm_ptr: Opt
 /// Game, chat, media, mic and ChatMix as the window's mixer shows them, for the tray flyout's rows:
 /// with the voice leveler on the mic's row is its target loudness (not the volume), with Automatic ChatMix on its strength.
 fn flyout_channels(h: &ShmHeader) -> Vec<(crate::flyout::MixChannel, crate::flyout::ChannelLevel)> {
-  use crate::flyout::{ChannelLevel, MixChannel};
+  use crate::flyout::{ChannelLevel, MixChannel, balance_slider, loudness_slider};
   let r = Ordering::Relaxed;
   let level =
     |v: &AtomicU32, m: &AtomicBool, max: f32| ChannelLevel { volume: v.load(r) as f32 / 1000.0, muted: m.load(r), max };
   let mic = if h.mic_leveler_enabled.load(r) {
-    // The leveler's target on the slider's 0..1 (its range); no mute.
+    // The leveler's target on the slider's 0..1 (its range); the icon mutes the mic.
     let target = h.mic_leveler_target_db_x10.load(r) as f32 / 10.0;
-    let volume = ((target - MIN_TARGET_DB) / (MAX_TARGET_DB - MIN_TARGET_DB)).clamp(0.0, 1.0);
-    (MixChannel::MicLoudness, ChannelLevel { volume, muted: false, max: 1.0 })
+    let volume = loudness_slider(target);
+    (MixChannel::MicLoudness, ChannelLevel { volume, muted: h.mic_muted.load(r), max: 1.0 })
   } else {
     (MixChannel::Mic, level(&h.mic_volume_permille, &h.mic_muted, ui::state::mic_volume_max(Some(h))))
   };
@@ -73,7 +72,7 @@ fn flyout_channels(h: &ShmHeader) -> Vec<(crate::flyout::MixChannel, crate::flyo
     )
   } else {
     let balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
-    (MixChannel::Balance, ChannelLevel { volume: (balance + 1.0) / 2.0, muted: false, max: 1.0 })
+    (MixChannel::Balance, ChannelLevel { volume: balance_slider(balance), muted: false, max: 1.0 })
   };
   vec![
     (MixChannel::Game, level(&h.game_volume_permille, &h.game_muted, 1.0)),
@@ -82,6 +81,13 @@ fn flyout_channels(h: &ShmHeader) -> Vec<(crate::flyout::MixChannel, crate::flyo
     mic,
     chatmix,
   ]
+}
+
+/// The leveler's target from the flyout row's slider, in whole dB: a wheel notch moves it less than
+/// the label's precision and the Mic page's slider steps 1 dB too.
+fn set_leveler_target(h: &ShmHeader, slider: f32) {
+  let db = crate::flyout::loudness_db(slider).round();
+  h.mic_leveler_target_db_x10.store((db * 10.0) as i32, Ordering::Relaxed);
 }
 
 /// A channel row of the tray flyout moved: what the window's slider does, with the window open or
@@ -118,14 +124,17 @@ fn set_channel(
     MixChannel::Mic => (&mut mix.mic, &h.mic_volume_permille, &h.mic_muted),
     MixChannel::MicLoudness => {
       if let Some(v) = volume {
-        let target = MIN_TARGET_DB + v.clamp(0.0, 1.0) * (MAX_TARGET_DB - MIN_TARGET_DB);
-        h.mic_leveler_target_db_x10.store((target * 10.0).round() as i32, r);
+        set_leveler_target(h, v);
       }
+      // The mic's own volume stays; only its mute follows the row's icon.
+      mix.mic.muted = muted;
+      mix.mic.write_to(&h.mic_volume_permille, &h.mic_muted);
+      mix.apply_mix();
       return;
     }
     MixChannel::Balance => {
       if let Some(v) = volume {
-        mix.set_balance(v * 2.0 - 1.0);
+        mix.set_balance(crate::flyout::balance_value(v));
         h.chatmix_balance_permille.store((mix.balance * 1000.0).round() as i32, r);
       }
       return;
@@ -569,6 +578,16 @@ mod tests {
   }
 
   #[test]
+  fn the_flyout_row_sets_the_leveler_target_in_whole_db() {
+    let h = ShmHeader::default();
+    // (slider, target x10): -36..-12 dBFS over 0..1; a wheel notch (0.02 = 0.48 dB) lands on a whole dB.
+    for (slider, target_x10) in [(0.75, -180), (0.52, -240), (0.0, -360), (2.0, -120), (-1.0, -360)] {
+      set_leveler_target(&h, slider);
+      assert_eq!(h.mic_leveler_target_db_x10.load(Ordering::Relaxed), target_x10, "slider {slider}");
+    }
+  }
+
+  #[test]
   fn the_flyout_gets_the_mic_and_chatmix_controls_that_are_on() {
     use crate::flyout::MixChannel;
     let h = ShmHeader::default();
@@ -589,5 +608,9 @@ mod tests {
     // The default target (-24 dBFS) is the middle of -36..-12.
     let (_, loudness) = flyout_channels(&h)[3];
     assert!((loudness.volume - 0.5).abs() < 1e-6);
+    // Muted mic: the loudness row shows it, so its icon can unmute.
+    assert!(!loudness.muted);
+    h.mic_muted.store(true, r);
+    assert!(flyout_channels(&h)[3].1.muted);
   }
 }
