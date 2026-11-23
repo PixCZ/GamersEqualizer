@@ -13,6 +13,7 @@ use gamersequalizer_common::shm::{
 use gamersequalizer_common::sidetone::{SidetonePair, SidetonePairs};
 use gamersequalizer_common::streams::StreamBus;
 use gamersequalizer_mic_chain::shared_memory::SharedMemoryClient;
+use gamersequalizer_mic_chain::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -485,10 +486,71 @@ pub(crate) fn mic_volume_max(h: Option<&ShmHeader>) -> f32 {
   if h.is_some_and(|h| h.mic_leveler_enabled.load(Ordering::Relaxed)) { 1.0 } else { 3.0 }
 }
 
+/// With the voice leveler on, the Mic fader (mixer, tray flyout, Mic page) is how loud others hear
+/// you, 1 = 100 % = the default target: the leveler's target, and below its lowest the mic volume
+/// (`mic_volume`, up to 100 %), which scales after the leveler (`chain.rs`, stage 5). None while
+/// the leveler is off: then the fader is the mic volume itself.
+/// shortcut: follows the setting, not whether the effect runs on this mic (as `mic_volume_max`).
+pub(crate) fn leveler_level(h: Option<&ShmHeader>, mic_volume: f32) -> Option<f32> {
+  let h = h.filter(|h| h.mic_leveler_enabled.load(Ordering::Relaxed))?;
+  let target = h.mic_leveler_target_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
+  Some(db_ratio(target - DEFAULT_TARGET_DB) * mic_volume.clamp(0.0, 1.0))
+}
+
+/// The top of the leveler's fader: its loudest target.
+pub(crate) fn leveler_level_max() -> f32 {
+  db_ratio(MAX_TARGET_DB - DEFAULT_TARGET_DB)
+}
+
+/// The leveler's fader moved to `level`: the target moves, the mic volume (`mic_volume` now, which
+/// is also the Windows input level) only where the target's range ends. Stores the target and
+/// returns the mic volume.
+pub(crate) fn set_leveler_level(h: &ShmHeader, level: f32, mic_volume: f32) -> f32 {
+  let (lowest, highest) = (db_ratio(MIN_TARGET_DB - DEFAULT_TARGET_DB), leveler_level_max());
+  let level = if level.is_finite() { level.clamp(0.0, highest) } else { 1.0 };
+  let mic = if mic_volume.is_finite() { mic_volume.clamp(0.0, 1.0) } else { 1.0 };
+  let target = if mic > 0.0 { (level / mic).clamp(lowest, highest) } else { highest };
+  let target_db = (DEFAULT_TARGET_DB + 20.0 * target.log10()).clamp(MIN_TARGET_DB, MAX_TARGET_DB);
+  h.mic_leveler_target_db_x10.store((target_db * 10.0).round() as i32, Ordering::Relaxed);
+  (level / target).min(1.0)
+}
+
+fn db_ratio(db: f32) -> f32 {
+  10f32.powf(db / 20.0)
+}
+
 /// The output EQ engine as the window and the service start it: first the presets a GG update
 /// added and the built-in game presets, then the profiles are loaded.
 pub(crate) fn load_output_eq(storage: &ProfileStorage) -> OutputEq {
   crate::output_eq::game_presets::seed_builtin_game_presets(storage);
   crate::sonar_importer::sync_new_sonar_profiles(storage);
   OutputEq::new(storage.clone())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_leveler_fader_round_trips_through_target_and_mic_volume() {
+    let h = ShmHeader::default();
+    h.mic_leveler_enabled.store(true, Ordering::Relaxed);
+    // (fader, mic volume before) -> (target, mic volume): the target moves, the mic volume (the
+    // Windows input level) only past the target's ends.
+    for ((level, before), (target_x10, volume)) in [
+      ((1.0, 1.0), (-240, 1.0)),
+      ((0.5, 0.5), (-240, 0.5)),
+      ((1.0, 0.5), (-180, 0.5)),
+      ((leveler_level_max(), 0.5), (-120, 1.0)),
+      ((0.1, 1.0), (-360, 0.398)),
+      ((0.5, 0.0), (-120, 0.126)),
+    ] {
+      let mic = set_leveler_level(&h, level, before);
+      assert_eq!(h.mic_leveler_target_db_x10.load(Ordering::Relaxed), target_x10, "{level} from {before}");
+      assert!((mic - volume).abs() < 0.001, "{level} from {before}: mic {mic}");
+      assert!((leveler_level(Some(&h), mic).unwrap() - level).abs() < 0.01, "{level} from {before}");
+    }
+    h.mic_leveler_enabled.store(false, Ordering::Relaxed);
+    assert_eq!(leveler_level(Some(&h), 1.0), None);
+  }
 }

@@ -5,7 +5,7 @@
 //! Drawn into a 32-bit bitmap: the shapes are anti-aliased here (GDI's own are not), text is GDI's
 //! ClearType, icons are the apps' own, the bitmap goes to the window in one copy (no flicker).
 
-use super::{Hit, Interaction, Row, Target};
+use super::{Hit, Interaction, MixChannel, Row, Target};
 use crate::health::Fix;
 use crate::i18n::{tr, trf};
 use crate::ui::theme::{Palette, adapt_for, icons};
@@ -758,7 +758,7 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
   for (i, row) in rows.iter().enumerate().take(layout.rows()) {
     let b = layout.button_rect(i);
     let (bw, bh) = ((b.right - b.left) as f32, (b.bottom - b.top) as f32);
-    if ui.hover == Some(Hit::Mute(i)) {
+    if ui.hover == Some(Hit::Mute(i)) && row.mutes() {
       c.round_rect(b.left as f32, b.top as f32, bw, bh, px(RADIUS), hover_bg);
     }
     // An exe without an icon we can read: a plain app tile, drawn (no font needed).
@@ -774,11 +774,14 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
     let th = px(TRACK_H);
     let fill = match &row.target {
       _ if row.muted => p.text_tertiary,
+      Target::Channel(MixChannel::Balance) => balance_look(row.volume).1.map_or(p.accent, |c| adapt_for(p.dark, c)),
       Target::Channel(channel) => adapt_for(p.dark, channel.look().1),
       _ => p.accent,
     };
+    // The balance fills from its middle (even) towards the side it favors.
+    let from = if row.target == Target::Channel(MixChannel::Balance) { (x0 + x1) / 2.0 } else { x0 };
     c.round_rect(x0, cy - th / 2.0, x1 - x0, th, th / 2.0, track_bg);
-    c.round_rect(x0, cy - th / 2.0, xv - x0, th, th / 2.0, fill);
+    c.round_rect(from.min(xv), cy - th / 2.0, (xv - from).abs(), th, th / 2.0, fill);
     let r = px(THUMB_R as f32);
     if !p.dark {
       c.circle(xv, cy, r + px(1.0), p.card_stroke);
@@ -793,6 +796,20 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
     if ui.focus == Some(Hit::Slider(i)) {
       focus_ring(c, layout, RECT { right: layout.width() - layout.px(PAD), ..b }, p);
     }
+  }
+}
+
+/// The balance slider at `value` (0 = all game, 1 = all chat): "50/50" in the middle, else how far
+/// the other side is lowered, in the color of the side that stays at 100 % (`get_multipliers`).
+/// None: even.
+fn balance_look(value: f32) -> (String, Option<Color32>) {
+  use crate::ui::tab_mixer::{CHAT_COLOR, GAME_COLOR};
+  let balance = value * 2.0 - 1.0;
+  let percent = (balance.abs() * 100.0).round();
+  if percent < 1.0 {
+    ("50/50".to_string(), None)
+  } else {
+    (format!("{percent:.0} %"), Some(if balance < 0.0 { GAME_COLOR } else { CHAT_COLOR }))
   }
 }
 
@@ -876,7 +893,13 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
       }
       let percent = if row.muted { p.text_tertiary } else { p.text_secondary };
       // Percent only: the mic's boost in dB would not fit.
-      let level = format!("{:.0} %", row.volume * row.max * 100.0);
+      let (level, percent) = match row.target {
+        Target::Channel(MixChannel::Balance) => {
+          let (text, color) = balance_look(row.volume);
+          (text, color.map_or(percent, |c| adapt_for(p.dark, c)))
+        }
+        _ => (format!("{:.0} %", row.volume * row.max * 100.0), percent),
+      };
       text(dc, &level, layout.percent_rect(i), fonts.regular, percent, DT_RIGHT);
     }
     if let Some(note) = texts.note {

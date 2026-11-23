@@ -46,6 +46,8 @@ pub mod icons {
   pub const CHAT: Icon = Icon { glyph: '\u{E8BD}', emoji: "💬" };
   pub const MEDIA: Icon = Icon { glyph: '\u{EC4F}', emoji: "🎵" };
   pub const MIC: Icon = Icon { glyph: '\u{E720}', emoji: "🎤" };
+  /// Segoe "Switch" (two opposite arrows): ChatMix shifts the mix between game and chat.
+  pub const CHATMIX: Icon = Icon { glyph: '\u{E8AB}', emoji: "⚖" };
   pub const LOG: Icon = Icon { glyph: '\u{E9D9}', emoji: "📜" };
   pub const SETTINGS: Icon = Icon { glyph: '\u{E713}', emoji: "⚙" };
   pub const LOCK: Icon = Icon { glyph: '\u{E72E}', emoji: "🔒" };

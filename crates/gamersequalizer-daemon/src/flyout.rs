@@ -14,6 +14,10 @@
 //! the output's name lists the active outputs; a pick goes the same way to
 //! `WinAudioSystem::select_output`, what the window's device list does.
 //!
+//! The channel rows are the window mixer's faders: the mic's is its loudness while the voice
+//! leveler is on, and the last one is ChatMix, its balance or, while Automatic ChatMix is on, its
+//! strength (no switch here: that stays in the window).
+//!
 //! Along the edge nearest the tray icon a row opens the main window (what the menu's "Open
 //! settings" does); next to it the first setup problem the tray menu lists, with its first fix
 //! as a button (`Flyout::fix`). App icons are read once per exe, after the first frame, and kept
@@ -100,13 +104,20 @@ pub(crate) enum Target {
   Channel(MixChannel),
 }
 
-/// The window mixer's channels besides Master (which is the output's row).
+/// The window mixer's channels besides Master (which is the output's row), and its ChatMix. The
+/// service picks which of the mic's and ChatMix's rows show (`daemon::flyout_channels`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MixChannel {
   Game,
   Chat,
   Media,
   Mic,
+  /// The mic with the voice leveler on: how loud others hear you (`ui::state::leveler_level`).
+  MicLoudness,
+  /// ChatMix's game / chat balance: 0 = all game, 0.5 = even, 1 = all chat. No mute.
+  Balance,
+  /// Automatic ChatMix's strength, while it is on. No mute.
+  DuckStrength,
 }
 
 /// A channel's level as the service has it; `volume` up to `max` (the mic's boost: above 1).
@@ -154,6 +165,13 @@ pub(crate) struct Row {
   pub pid: u32,
   /// The exe's icon from `Flyout::icons` (which owns it); None: a glyph instead.
   pub icon: Option<HICON>,
+}
+
+impl Row {
+  /// Its icon is a mute button.
+  pub(crate) fn mutes(&self) -> bool {
+    !matches!(self.target, Target::Channel(c) if !c.mutes())
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,7 +292,7 @@ thread_local! {
 /// The window mixer's Master output (the device behind a virtual default) and channel levels.
 struct Mixer {
   master: Option<String>,
-  channels: Option<[ChannelLevel; 4]>,
+  channels: Option<Vec<(MixChannel, ChannelLevel)>>,
 }
 
 /// The left click on the tray icon: opens the flyout, or closes it when it is open.
@@ -307,9 +325,8 @@ pub fn is_open() -> bool {
 }
 
 /// From each service-loop pass: the output the window's Master slider sets (None: the Windows
-/// default) and the channel levels (game, chat, media, mic; None: no channel rows, no shared
-/// memory).
-pub fn set_mixer(master: Option<&str>, channels: Option<[ChannelLevel; 4]>) {
+/// default) and the channel rows in their order (None: no channel rows, no shared memory).
+pub fn set_mixer(master: Option<&str>, channels: Option<Vec<(MixChannel, ChannelLevel)>>) {
   MIXER.with(|m| {
     if let Ok(mut m) = m.try_borrow_mut() {
       if m.master.as_deref() != master {
@@ -558,7 +575,7 @@ fn create() -> Result<HWND, String> {
 fn load_rows() -> Vec<Row> {
   let mut rows = Vec::new();
   let (master, channels) =
-    MIXER.with(|m| m.try_borrow().map(|m| (m.master.clone(), m.channels)).unwrap_or((None, None)));
+    MIXER.with(|m| m.try_borrow().map(|m| (m.master.clone(), m.channels.clone())).unwrap_or((None, None)));
   if let Some((id, name)) = master_output(master.as_deref()) {
     let (volume, muted) = get_endpoint_volume(&id).unwrap_or((1.0, false));
     rows.push(Row { target: Target::Device(id), name, volume, muted, max: 1.0, pid: 0, icon: None });
@@ -592,12 +609,11 @@ fn app_rows(sessions: impl Iterator<Item = (String, u32, f32, bool)>) -> Vec<Row
   rows
 }
 
-/// Game, chat, media, mic, the slider's end at each one's max.
-fn channel_rows(levels: Option<[ChannelLevel; 4]>) -> Vec<Row> {
-  let channels = [MixChannel::Game, MixChannel::Chat, MixChannel::Media, MixChannel::Mic];
+/// The service's channel rows, the slider's end at each one's max.
+fn channel_rows(levels: Option<Vec<(MixChannel, ChannelLevel)>>) -> Vec<Row> {
   levels
     .into_iter()
-    .flat_map(|levels| channels.into_iter().zip(levels))
+    .flatten()
     .map(|(channel, l)| {
       let max = if l.max.is_finite() && l.max > 0.0 { l.max } else { 1.0 };
       let volume = if l.volume.is_finite() { (l.volume / max).clamp(0.0, 1.0) } else { 1.0 };
@@ -614,7 +630,15 @@ impl MixChannel {
       Self::Chat => tr("Chat"),
       Self::Media => tr("Media"),
       Self::Mic => tr("Mic"),
+      Self::MicLoudness => tr("Mic loudness (voice leveler)"),
+      Self::Balance => tr("ChatMix: game or chat louder"),
+      Self::DuckStrength => tr("Automatic ChatMix strength"),
     }
+  }
+
+  /// Balance and strength have nothing to mute: their icon is no button.
+  pub(crate) fn mutes(self) -> bool {
+    !matches!(self, Self::Balance | Self::DuckStrength)
   }
 
   /// The window mixer's icon and color for it.
@@ -625,7 +649,9 @@ impl MixChannel {
       Self::Game => (icons::GAME, GAME_COLOR),
       Self::Chat => (icons::CHAT, CHAT_COLOR),
       Self::Media => (icons::MEDIA, MEDIA_COLOR),
-      Self::Mic => (icons::MIC, MIC_COLOR),
+      Self::Mic | Self::MicLoudness => (icons::MIC, MIC_COLOR),
+      // Its slider fills from the middle in the color of the side it favors (`paint::draw_shapes`).
+      Self::Balance | Self::DuckStrength => (icons::CHATMIX, CHAT_COLOR),
     }
   }
 }
@@ -1092,7 +1118,7 @@ impl Flyout {
   }
 
   fn toggle_mute(&mut self, i: usize) {
-    let Some(row) = self.rows.get_mut(i) else { return };
+    let Some(row) = self.rows.get_mut(i).filter(|r| r.mutes()) else { return };
     row.muted = !row.muted;
     apply_mute(row);
     self.read_back_soon();
@@ -1407,9 +1433,15 @@ mod tests {
   }
 
   /// Game 80 %, chat 100 %, media muted, mic 150 % of a 300 % slider.
-  fn channels() -> [ChannelLevel; 4] {
+  fn channels() -> Vec<(MixChannel, ChannelLevel)> {
     let l = |volume, muted, max| ChannelLevel { volume, muted, max };
-    [l(0.8, false, 1.0), l(1.0, false, 1.0), l(0.5, true, 1.0), l(1.5, false, 3.0)]
+    vec![
+      (MixChannel::Game, l(0.8, false, 1.0)),
+      (MixChannel::Chat, l(1.0, false, 1.0)),
+      (MixChannel::Media, l(0.5, true, 1.0)),
+      (MixChannel::Mic, l(1.5, false, 3.0)),
+      (MixChannel::Balance, l(0.3, false, 1.0)),
+    ]
   }
 
   fn outputs() -> Vec<AudioEndpointInfo> {
@@ -1542,9 +1574,9 @@ mod tests {
     ] {
       let notice = notice(issues.get(..shown).unwrap());
       let other = notice.as_ref().is_some_and(|n| n.other.is_some());
-      let layout = Layout::new(1.5, true, 4, 4, false, 10_000).with_issues(shown, other, 10_000).with_list(choices, 0);
+      let layout = Layout::new(1.5, true, 5, 4, false, 10_000).with_issues(shown, other, 10_000).with_list(choices, 0);
       let tip = match shown {
-        0 => Hit::Mute(6),
+        0 => Hit::Mute(7),
         1 => Hit::Fix,
         _ => Hit::Issue,
       };
@@ -1747,8 +1779,11 @@ mod tests {
         (ch(MixChannel::Chat), 1.0, false, 1.0),
         (ch(MixChannel::Media), 0.5, true, 1.0),
         (ch(MixChannel::Mic), 0.5, false, 3.0),
+        (ch(MixChannel::Balance), 0.3, false, 1.0),
       ]
     );
+    // The balance has nothing to mute.
+    assert!(rows.get(3).unwrap().mutes() && !rows.get(4).unwrap().mutes());
     assert!(channel_rows(None).is_empty(), "no shared memory: no channel rows");
     // The slider's half of the mic's 300 % is 150 %; mute and volume travel together.
     let mic = rows.get(3).unwrap();

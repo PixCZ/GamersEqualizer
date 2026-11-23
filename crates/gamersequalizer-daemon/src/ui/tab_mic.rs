@@ -10,7 +10,6 @@ use gamersequalizer_common::shm::{
 };
 use gamersequalizer_mic_chain::ai_denoiser::AiVoiceIsolator;
 use gamersequalizer_mic_chain::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
-use gamersequalizer_mic_chain::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
@@ -90,33 +89,8 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
     if !on {
       return;
     }
+    // How loud it makes you is the input card's Loudness, as the mixer's Mic fader.
     egui::Grid::new("leveler_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-      ui.label(tr("Target loudness:"));
-      ui.horizontal(|ui| {
-        let mut target = h.mic_leveler_target_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
-        ui.spacing_mut().slider_width = BAR_WIDTH;
-        let slider = egui::Slider::new(&mut target, MIN_TARGET_DB..=MAX_TARGET_DB).step_by(1.0).show_value(false);
-        if ui
-          .add(slider)
-          .on_hover_text(tr("How loud others hear you. The leveler gets your voice there by itself."))
-          .changed()
-        {
-          h.mic_leveler_target_db_x10.store((target * 10.0).round() as i32, Ordering::Relaxed);
-        }
-        let word = if target <= DEFAULT_TARGET_DB - 4.0 {
-          tr("quieter")
-        } else if target >= DEFAULT_TARGET_DB + 4.0 {
-          tr("louder")
-        } else {
-          tr("normal")
-        };
-        ui.label(format!("{word} ({target:.0} dBFS)"));
-        if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.small_button(tr("Default")).clicked() {
-          h.mic_leveler_target_db_x10.store((DEFAULT_TARGET_DB * 10.0).round() as i32, Ordering::Relaxed);
-        }
-      });
-      ui.end_row();
-
       ui.label(tr("Now:"));
       ui.horizontal(|ui| {
         let text = if gain_db.abs() < 0.05 {
@@ -220,11 +194,22 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
         ui.end_row();
       }
 
-      // Sensitivity 0% .. 300%
-      ui.label(tr("Sensitivity"));
+      // Sensitivity 0% .. 300%; with the voice leveler on its loudness, as the mixer's Mic fader.
       let max = state.mic_volume_max();
       win_audio.chatmix.mic.volume = win_audio.chatmix.mic.volume.min(max);
-      theme::percent_volume(ui, &mut win_audio.chatmix.mic.volume, max, BAR_WIDTH, EQ_COLOR);
+      let h = state.shm_header();
+      match (h, super::state::leveler_level(h, win_audio.chatmix.mic.volume)) {
+        (Some(h), Some(mut level)) => {
+          ui.label(tr("Loudness")).on_hover_text(tr(super::tab_mixer::LEVELER_FADER_TIP));
+          if theme::percent_volume(ui, &mut level, super::state::leveler_level_max(), BAR_WIDTH, EQ_COLOR) {
+            win_audio.chatmix.mic.volume = super::state::set_leveler_level(h, level, win_audio.chatmix.mic.volume);
+          }
+        }
+        _ => {
+          ui.label(tr("Sensitivity"));
+          theme::percent_volume(ui, &mut win_audio.chatmix.mic.volume, max, BAR_WIDTH, EQ_COLOR);
+        }
+      }
       ui.end_row();
     });
 
@@ -232,7 +217,7 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
     let leveler = state.shm_header().map(|h| (h.mic_leveler_enabled.load(r), h.mic_auto_gain_permille.load(r)));
     let caption = match leveler {
       Some((true, _)) => tr(
-        "With the voice leveler on this is how loud others hear you: 100 % = the leveler's target, 50 % = 6 dB under it. The Windows input level only keeps the signal clean; the app moves it by itself when the mic clips or is far too quiet.",
+        "With the voice leveler on this is how loud others hear you: 100 % = normal loudness (-24 dBFS), 50 % = 6 dB quieter. The Windows input level only keeps the signal clean; the app moves it by itself when the mic clips or is far too quiet.",
       ),
       _ => tr(
         "0 % - 100 % moves the Windows input slider. 100 % - 300 % adds a soft-saturated digital boost up to +9.5 dB (3x amplitude).",
