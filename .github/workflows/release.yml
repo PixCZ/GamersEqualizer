@@ -13,10 +13,9 @@
 # - Build provenance: the zip and both binaries (as shipped, after signing) get a GitHub-signed
 #   attestation (SLSA, via Sigstore) naming this workflow and commit. Check a file with
 #   `gh attestation verify gamersequalizer.exe -R PixCZ/GamersEqualizer`.
-# - SBOM: two CycloneDX files beside the zip (`-exe.cdx.json`, `-apo.cdx.json`), one per shipped
-#   binary, for vulnerability scanners. They list what the Windows build links, while Cargo.lock
-#   (which GitHub's own alerts read) also holds the crates of other platforms. The root
-#   component's version is the one in Cargo.toml, not the release's: that one is in the file name.
+# - SBOM: one CycloneDX file beside the zip (`GamersEqualizer-<version>-x64.sbom.json`) for
+#   vulnerability scanners, covering both shipped binaries. It lists what the Windows build links,
+#   while Cargo.lock (which GitHub's own alerts read) also holds the crates of other platforms.
 name: Release
 
 on:
@@ -108,27 +107,30 @@ jobs:
           $pkgName = "GamersEqualizer-$version-x64"
           .\scripts\package.ps1 -NoSign -PackageName $pkgName
           "pkg_name=$pkgName" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-      # After the build: the tool writes its files next to the Cargo.toml files. Build dependencies
-      # (what build scripts use) are in the lists with scope `excluded`; proc macros count as `required`.
+      # After the build: the tool writes one file per binary next to the Cargo.toml files, and
+      # scripts/sbom-merge.jq makes them one. Build dependencies (what build scripts use) are in the
+      # list with scope `excluded`; proc macros count as `required`. bash: its `>` keeps jq's bytes.
       - name: SBOM
-        shell: pwsh
+        shell: bash
         env:
           PKG_NAME: ${{ steps.package.outputs.pkg_name }}
+          PKG_VERSION: ${{ steps.package.outputs.version }}
         run: |
           cargo cyclonedx --format json --describe binaries --target x86_64-pc-windows-msvc
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Move-Item crates/gamersequalizer-daemon/gamersequalizer_bin.cdx.json "target/package/$env:PKG_NAME-exe.cdx.json"
-          Move-Item crates/gamersequalizer-apo/gamersequalizer_apo_cdylib.cdx.json "target/package/$env:PKG_NAME-apo.cdx.json"
+          jq -s -f scripts/sbom-merge.jq --arg version "$PKG_VERSION" \
+            crates/gamersequalizer-daemon/gamersequalizer_bin.cdx.json \
+            crates/gamersequalizer-apo/gamersequalizer_apo_cdylib.cdx.json > "target/package/$PKG_NAME.sbom.json"
 
-      # The staged files, build.txt and the SBOMs, for the publish job (which signs and zips the files).
+      # The staged files, build.txt and the SBOM, for the publish job (which signs and zips the files).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: staged
           path: |
             target/package/staging/${{ steps.package.outputs.pkg_name }}
             target/package/${{ steps.package.outputs.pkg_name }}.build.txt
-            target/package/${{ steps.package.outputs.pkg_name }}-*.cdx.json
+            target/package/${{ steps.package.outputs.pkg_name }}.sbom.json
           retention-days: 1
 
   publish:
@@ -184,8 +186,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out | Out-Null
-          # The SBOMs go beside the zip, not into it. Named one by one: a missing file fails the release.
-          Copy-Item "staged/$env:PKG_NAME-exe.cdx.json", "staged/$env:PKG_NAME-apo.cdx.json" out
+          # The SBOM goes beside the zip, not into it. A missing file fails the release.
+          Copy-Item "staged/$env:PKG_NAME.sbom.json" out
           Compress-Archive -Path $env:STAGE -DestinationPath $env:ZIP
           $info = @(Get-Content "staged/$env:PKG_NAME.build.txt" | Where-Object { $_ -notmatch '^[0-9A-F]{64}  ' })
           $signed = if ($env:SIGNED) { 'signed   Authenticode SHA256, timestamped' } else { 'signed   no' }
@@ -215,17 +217,17 @@ jobs:
           path: |
             ${{ env.ZIP }}
             ${{ env.BUILD_TXT }}
-            out/*.cdx.json
+            out/${{ env.PKG_NAME }}.sbom.json
           retention-days: 14
 
-      # The zip and the SBOMs: build.txt (commit, flags, toolchain, hashes) stays in the workflow artifact.
+      # The zip and the SBOM: build.txt (commit, flags, toolchain, hashes) stays in the workflow artifact.
       - name: GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             ${{ env.ZIP }}
-            out/*.cdx.json
+            out/${{ env.PKG_NAME }}.sbom.json
           # packaging/release-notes/<tag>.md, when there is one, goes above the generated notes.
           body_path: ${{ hashFiles(format('packaging/release-notes/{0}.md', github.ref_name)) != '' && format('packaging/release-notes/{0}.md', github.ref_name) || '' }}
           generate_release_notes: true
