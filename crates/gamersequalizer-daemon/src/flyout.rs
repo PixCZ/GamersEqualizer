@@ -112,7 +112,7 @@ pub enum MixChannel {
   Chat,
   Media,
   Mic,
-  /// The mic with the voice leveler on: how loud others hear you (`ui::state::leveler_level`).
+  /// The voice leveler's target loudness, while it is on: the slider spans its range. No mute.
   MicLoudness,
   /// ChatMix's game / chat balance: 0 = all game, 0.5 = even, 1 = all chat. No mute.
   Balance,
@@ -636,9 +636,9 @@ impl MixChannel {
     }
   }
 
-  /// Balance and strength have nothing to mute: their icon is no button.
+  /// Loudness, balance and strength have nothing to mute: their icon is no button.
   pub(crate) fn mutes(self) -> bool {
-    !matches!(self, Self::Balance | Self::DuckStrength)
+    !matches!(self, Self::MicLoudness | Self::Balance | Self::DuckStrength)
   }
 
   /// The window mixer's icon and color for it.

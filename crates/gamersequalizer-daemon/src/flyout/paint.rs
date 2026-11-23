@@ -11,6 +11,7 @@ use crate::i18n::{tr, trf};
 use crate::ui::theme::{Palette, adapt_for, icons};
 use crate::win_audio::AudioEndpointInfo;
 use egui::Color32;
+use gamersequalizer_mic_chain::voice_leveler::{MAX_TARGET_DB, MIN_TARGET_DB};
 use windows::Win32::Foundation::{COLORREF, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
   ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
@@ -897,6 +898,10 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
         Target::Channel(MixChannel::Balance) => {
           let (text, color) = balance_look(row.volume);
           (text, color.map_or(percent, |c| adapt_for(p.dark, c)))
+        }
+        Target::Channel(MixChannel::MicLoudness) => {
+          let db = MIN_TARGET_DB + row.volume * (MAX_TARGET_DB - MIN_TARGET_DB);
+          (format!("{db:.0} dB"), percent)
         }
         _ => (format!("{:.0} %", row.volume * row.max * 100.0), percent),
       };

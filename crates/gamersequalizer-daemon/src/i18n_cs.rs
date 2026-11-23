@@ -786,6 +786,14 @@ pub static CS: &[(&str, &str)] = &[
   ("Enable voice leveler", "Zapnout vyrovnání hlasitosti hlasu"),
   ("Listening: say a few words", "Poslouchám: řekněte pár slov"),
   ("Gain {} dB", "Zesílení {} dB"),
+  ("Target loudness:", "Cílová hlasitost:"),
+  (
+    "How loud others hear you. The leveler gets your voice there by itself.",
+    "Jak hlasitě vás uslyší ostatní. Vyrovnání hlasitosti tam hlas dostane samo.",
+  ),
+  ("quieter", "tišší"),
+  ("louder", "hlasitější"),
+  ("normal", "normální"),
   ("Default", "Výchozí"),
   ("Now:", "Teď:"),
   ("Learn again", "Naučit znovu"),
@@ -819,13 +827,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Sensitivity", "Citlivost"),
   ("Reset to 100 %", "Vrátit na 100 %"),
   (
-    "With the voice leveler on this is how loud others hear you: 100 % = normal loudness (-24 dBFS), 50 % = 6 dB quieter. The Windows input level only keeps the signal clean; the app moves it by itself when the mic clips or is far too quiet.",
-    "Se zapnutým vyrovnáním hlasitosti je to, jak hlasitě vás slyší ostatní: 100 % = normální hlasitost (-24 dBFS), 50 % = o 6 dB tišeji. Vstupní úroveň Windows jen drží signál čistý; aplikace ji sama posune, když mikrofon ořezává nebo je příliš tichý.",
-  ),
-  ("Loudness", "Hlasitost"),
-  (
-    "Voice leveler on: this is how loud others hear you, 100 % = normal loudness (-24 dBFS). The leveler gets your voice there by itself.",
-    "Vyrovnání hlasitosti je zapnuté: tohle je, jak hlasitě vás slyší ostatní, 100 % = normální hlasitost (-24 dBFS). Vyrovnání tam hlas dostane samo.",
+    "With the voice leveler on this is how loud others hear you: 100 % = the leveler's target, 50 % = 6 dB under it. The Windows input level only keeps the signal clean; the app moves it by itself when the mic clips or is far too quiet.",
+    "Se zapnutým vyrovnáním hlasitosti je to, jak hlasitě vás slyší ostatní: 100 % = cíl vyrovnání, 50 % = o 6 dB méně. Vstupní úroveň Windows jen drží signál čistý; aplikace ji sama posune, když mikrofon ořezává nebo je příliš tichý.",
   ),
   ("Windows input level set automatically: {} %", "Vstupní úroveň Windows nastavena automaticky: {} %"),
   (

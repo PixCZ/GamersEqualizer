@@ -2,6 +2,7 @@
 
 use super::*;
 use gamersequalizer_common::shm::ShmHeader;
+use gamersequalizer_mic_chain::voice_leveler::{MAX_TARGET_DB, MIN_TARGET_DB};
 use log::warn;
 use std::sync::atomic::AtomicU32;
 
@@ -51,16 +52,19 @@ fn heal_device_ids(win_audio: &WinAudioSystem, profiles_dir: &Path, shm_ptr: Opt
 }
 
 /// Game, chat, media, mic and ChatMix as the window's mixer shows them, for the tray flyout's rows:
-/// with the voice leveler on the mic's loudness, with Automatic ChatMix on its strength.
+/// with the voice leveler on the mic's row is its target loudness (not the volume), with Automatic ChatMix on its strength.
 fn flyout_channels(h: &ShmHeader) -> Vec<(crate::flyout::MixChannel, crate::flyout::ChannelLevel)> {
   use crate::flyout::{ChannelLevel, MixChannel};
   let r = Ordering::Relaxed;
   let level =
     |v: &AtomicU32, m: &AtomicBool, max: f32| ChannelLevel { volume: v.load(r) as f32 / 1000.0, muted: m.load(r), max };
-  let mic = level(&h.mic_volume_permille, &h.mic_muted, ui::state::mic_volume_max(Some(h)));
-  let mic = match ui::state::leveler_level(Some(h), mic.volume) {
-    Some(volume) => (MixChannel::MicLoudness, ChannelLevel { volume, max: ui::state::leveler_level_max(), ..mic }),
-    None => (MixChannel::Mic, mic),
+  let mic = if h.mic_leveler_enabled.load(r) {
+    // The leveler's target on the slider's 0..1 (its range); no mute.
+    let target = h.mic_leveler_target_db_x10.load(r) as f32 / 10.0;
+    let volume = ((target - MIN_TARGET_DB) / (MAX_TARGET_DB - MIN_TARGET_DB)).clamp(0.0, 1.0);
+    (MixChannel::MicLoudness, ChannelLevel { volume, muted: false, max: 1.0 })
+  } else {
+    (MixChannel::Mic, level(&h.mic_volume_permille, &h.mic_muted, ui::state::mic_volume_max(Some(h))))
   };
   let chatmix = if h.duck_enabled.load(r) {
     (
@@ -111,7 +115,14 @@ fn set_channel(
     MixChannel::Game => (&mut mix.game, &h.game_volume_permille, &h.game_muted),
     MixChannel::Chat => (&mut mix.chat, &h.chat_volume_permille, &h.chat_muted),
     MixChannel::Media => (&mut mix.media, &h.media_volume_permille, &h.media_muted),
-    MixChannel::Mic | MixChannel::MicLoudness => (&mut mix.mic, &h.mic_volume_permille, &h.mic_muted),
+    MixChannel::Mic => (&mut mix.mic, &h.mic_volume_permille, &h.mic_muted),
+    MixChannel::MicLoudness => {
+      if let Some(v) = volume {
+        let target = MIN_TARGET_DB + v.clamp(0.0, 1.0) * (MAX_TARGET_DB - MIN_TARGET_DB);
+        h.mic_leveler_target_db_x10.store((target * 10.0).round() as i32, r);
+      }
+      return;
+    }
     MixChannel::Balance => {
       if let Some(v) = volume {
         mix.set_balance(v * 2.0 - 1.0);
@@ -129,7 +140,6 @@ fn set_channel(
   };
   c.volume = match (channel, volume) {
     (_, None) => c.volume,
-    (MixChannel::MicLoudness, Some(v)) => ui::state::set_leveler_level(h, v, c.volume),
     (MixChannel::Mic, Some(v)) => v.clamp(0.0, ui::state::mic_volume_max(Some(h))),
     (_, Some(v)) => v.clamp(0.0, 1.0),
   };
@@ -576,5 +586,8 @@ mod tests {
     h.duck_strength_permille.store(700, r);
     assert_eq!(kinds(&h), [MixChannel::MicLoudness, MixChannel::DuckStrength]);
     assert_eq!(flyout_channels(&h).last().unwrap().1.volume, 0.7);
+    // The default target (-24 dBFS) is the middle of -36..-12.
+    let (_, loudness) = flyout_channels(&h)[3];
+    assert!((loudness.volume - 0.5).abs() < 1e-6);
   }
 }

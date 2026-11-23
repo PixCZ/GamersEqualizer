@@ -25,11 +25,6 @@ pub(crate) const GAME_COLOR: Color32 = Color32::from_rgb(82, 183, 136);
 pub(crate) const CHAT_COLOR: Color32 = Color32::from_rgb(72, 202, 228);
 pub(crate) const MEDIA_COLOR: Color32 = Color32::from_rgb(247, 37, 133);
 pub(crate) const MIC_COLOR: Color32 = Color32::from_rgb(247, 127, 0);
-/// The mic fader with the voice leveler on (`state::leveler_level`); the Mic page says it too.
-pub(crate) const LEVELER_FADER_TIP: &str = tk(
-  "Voice leveler on: this is how loud others hear you, 100 % = normal loudness (-24 dBFS). The leveler gets your \
-   voice there by itself.",
-);
 /// How often the mic strip re-reads which apps are recording (a registry walk; the page
 /// repaints every frame).
 const RECORDING_REFRESH: Duration = Duration::from_secs(1);
@@ -66,8 +61,6 @@ struct Strip<'a> {
   /// Height of the apps list (same in every strip so they line up).
   list_h: f32,
   meter: Option<f32>,
-  /// On the fader and its readout: what the fader sets when that is not plain volume.
-  tip: Option<&'a str>,
   footers: &'a FooterSync,
 }
 
@@ -150,7 +143,6 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       list_h,
       footers: &footers,
       meter: None,
-      tip: None,
     };
     render_strip(
       master_col,
@@ -181,7 +173,6 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       list_h,
       footers: &footers,
       meter: None,
-      tip: None,
     };
     render_strip(
       game_col,
@@ -211,7 +202,6 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       list_h,
       footers: &footers,
       meter: None,
-      tip: None,
     };
     render_strip(
       chat_col,
@@ -269,7 +259,6 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       list_h,
       footers: &footers,
       meter: None,
-      tip: None,
     };
     render_strip(
       media_col,
@@ -288,24 +277,21 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
 
     let mic_max = state.mic_volume_max();
     win_audio.chatmix.mic.volume = win_audio.chatmix.mic.volume.min(mic_max);
-    let leveler = super::state::leveler_level(state.shm_header(), win_audio.chatmix.mic.volume);
-    let mut mic_level = leveler.unwrap_or(win_audio.chatmix.mic.volume);
     let strip = Strip {
       title: tr("Mic"),
       icon: icons::MIC,
       color: MIC_COLOR,
       preset: tr(&state.mic_profile.name),
-      max_vol: if leveler.is_some() { super::state::leveler_level_max() } else { mic_max },
+      max_vol: mic_max,
       fader_h,
       list_h,
       footers: &footers,
       meter: Some(win_audio.chatmix.mic_peak_level),
-      tip: leveler.map(|_| tr(LEVELER_FADER_TIP)),
     };
     render_strip(
       mic_col,
       &strip,
-      &mut mic_level,
+      &mut win_audio.chatmix.mic.volume,
       &mut win_audio.chatmix.mic.muted,
       AppsBox::List {
         caption: tr("Recording now"),
@@ -342,13 +328,6 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
       },
     );
 
-    match (leveler, state.shm_header()) {
-      (None, _) => win_audio.chatmix.mic.volume = mic_level,
-      (Some(before), Some(h)) if (mic_level - before).abs() > f32::EPSILON => {
-        win_audio.chatmix.mic.volume = super::state::set_leveler_level(h, mic_level, win_audio.chatmix.mic.volume);
-      }
-      _ => {}
-    }
     if let Some(pick) = changed_mic_ep {
       super::tab_mic::pick_mic(state, win_audio, pick);
     }
@@ -549,28 +528,19 @@ fn render_strip(
         // so set it or the fader ignores fader_h while the meter next to it uses it.
         ui.spacing_mut().slider_width = strip.fader_h;
         let fader = egui::Slider::new(volume, 0.0..=strip.max_vol).vertical().show_value(false);
-        let add_fader = |ui: &mut Ui| {
-          let r = ui.add_sized(Vec2::new(26.0, strip.fader_h), fader);
-          if let Some(tip) = strip.tip {
-            r.on_hover_text(tip);
-          }
-        };
         if let Some(peak) = strip.meter {
           ui.horizontal(|ui| {
             let total_w = 26.0 + 6.0 + 6.0;
             ui.add_space(((ui.available_width() - total_w) / 2.0).max(0.0));
-            add_fader(ui);
+            ui.add_sized(Vec2::new(26.0, strip.fader_h), fader);
             ui.add_space(6.0);
             peak_meter(ui, peak, strip.fader_h);
           });
         } else {
-          add_fader(ui);
+          ui.add_sized(Vec2::new(26.0, strip.fader_h), fader);
         }
 
-        let readout = ui.label(theme::strong(theme::volume_text(*volume), 15.0));
-        if let Some(tip) = strip.tip {
-          readout.on_hover_text(tip);
-        }
+        ui.label(theme::strong(theme::volume_text(*volume), 15.0));
 
         let (mute_text, mute_color) = if *is_muted {
           (theme::with_icon(icons::MUTE, tr("Muted")), p.err)
