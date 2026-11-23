@@ -9,7 +9,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Exit GamersEqualizer", "Ukončit GamersEqualizer"),
   // --- tray flyout (flyout.rs) ---
   ("App volumes", "Hlasitost aplikací"),
-  ("No app is playing sound", "Žádná aplikace nehraje zvuk"),
+  ("No app is playing sound", "Nic teď nehraje"),
   ("Mic loudness (voice leveler)", "Hlasitost mikrofonu (vyrovnání hlasitosti)"),
   ("ChatMix: game or chat louder", "ChatMix: hlasitější hra, nebo chat"),
   ("Automatic ChatMix strength", "Síla automatického ChatMixu"),
@@ -32,18 +32,18 @@ pub static CS: &[(&str, &str)] = &[
   ("Microphone processing does not work on \"{}\"", "Zpracování mikrofonu na „{}“ nefunguje"),
   (
     "It is installed, but processed nothing while apps recorded: they get the raw microphone. The reason is in the app's log.",
-    "Je nainstalované, ale nic nezpracovalo, zatímco aplikace nahrávaly: dostávají neupravený mikrofon. Důvod je v logu aplikace.",
+    "Je nainstalované, ale během nahrávání nic nezpracovalo: aplikace dostávají neupravený mikrofon. Důvod je v protokolu aplikace.",
   ),
   (
     "Our effect is installed, but processed nothing while sound played: no EQ, no echo cancellation. The reason is in the app's log.",
-    "Náš efekt je nainstalovaný, ale nic nezpracoval, zatímco hrál zvuk: bez EQ a bez potlačení ozvěny. Důvod je v logu aplikace.",
+    "Náš efekt je nainstalovaný, ale během přehrávání nic nezpracoval: bez EQ a bez potlačení ozvěny. Důvod je v protokolu aplikace.",
   ),
   ("\"{}\" is not the Windows default microphone", "„{}“ není výchozí mikrofon Windows"),
   ("Switch back to \"{}\"", "Přepnout zpět na „{}“"),
   ("Keep \"{}\"", "Ponechat „{}“"),
   ("Open sound settings...", "Otevřít nastavení zvuku..."),
   ("Ignore", "Ignorovat"),
-  ("Fix in GamersEqualizer...", "Opravit v GamersEqualizer..."),
+  ("Fix in GamersEqualizer...", "Opravit v aplikaci GamersEqualizer..."),
   (
     "Update the sound effects (administrator, restarts Windows audio)...",
     "Aktualizovat zvukové efekty (správce, restartuje zvuk Windows)...",
@@ -63,7 +63,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Switch back", "Přepnout zpět"),
   ("Keep", "Ponechat"),
   ("Make default", "Nastavit výchozí"),
-  ("Other slot", "Jiný slot"),
+  ("Other slot", "Jiné zapojení"),
   ("Unmute", "Zapnout"),
   ("Set 100 %", "Nastavit 100 %"),
   ("Fix", "Opravit"),
@@ -83,11 +83,11 @@ pub static CS: &[(&str, &str)] = &[
   ),
   (
     "Microphone processing is not installed: apps get your raw microphone (no echo cancellation, noise suppression or EQ).",
-    "Zpracování mikrofonu není nainstalované: aplikace dostávají surový mikrofon (bez potlačení ozvěny, šumu a EQ).",
+    "Zpracování mikrofonu není nainstalované: aplikace dostávají surový mikrofon (bez potlačení ozvěny, hluku a EQ).",
   ),
   (
     "Microphone processing is not on the microphone in use: apps get it raw (no echo cancellation, noise suppression or EQ).",
-    "Zpracování mikrofonu není na používaném mikrofonu: aplikace ho dostávají surový (bez potlačení ozvěny, šumu a EQ).",
+    "Zpracování mikrofonu není na používaném mikrofonu: aplikace ho dostávají surový (bez potlačení ozvěny, hluku a EQ).",
   ),
   ("The selected microphone", "Vybraný mikrofon"),
   (
@@ -133,7 +133,7 @@ pub static CS: &[(&str, &str)] = &[
   ),
   (
     "The output EQ does NOT work on this device while sound plays: you hear it unprocessed.",
-    "EQ výstupu na tomto zařízení NEFUNGUJE, i když hraje zvuk: slyšíte ho neupravený.",
+    "EQ výstupu na tomto zařízení během přehrávání NEFUNGUJE: slyšíte zvuk neupravený.",
   ),
   (
     "Windows mic effect installed and running on this microphone (build {})",
@@ -159,8 +159,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Update…", "Aktualizovat…"),
   ("Enable on this microphone…", "Zapnout na tomto mikrofonu…"),
   // --- EQ editor ---
-  ("Response", "Odezva"),
-  ("Filter...", "Filtrovat..."),
+  ("Response", "Charakteristika"),
+  ("Filter...", "Hledat..."),
   ("Auto preamp {} dB", "Automatický předzesilovač {} dB"),
   (
     "Drag a dot to move it · mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
@@ -213,7 +213,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Removes one tone, e.g. 50 Hz mains hum.", "Odstraní jeden tón, např. brum sítě 50 Hz."),
   (
     "Made by a newer version of the app. This version passes the sound through it unchanged and keeps it as it is.",
-    "Vytvořila ho novější verze aplikace. Tato verze jím zvuk pouští beze změny a nechává ho, jak je.",
+    "Vytvořila ho novější verze aplikace. Tato verze ho nepoužije (zvuk projde beze změny), ale zachová ho.",
   ),
   // --- top bar, navigation, device card ---
   ("Not running: {}", "Neběží: {}"),
@@ -266,10 +266,10 @@ pub static CS: &[(&str, &str)] = &[
     "Pick where the sound goes, then the correction for it. Speakers or a headset without a profile: None.",
     "Vyberte, kam jde zvuk, a pak korekci pro něj. Reproduktory nebo headset bez profilu: Žádná.",
   ),
-  ("None (speakers, flat)", "Žádná (reproduktory, rovně)"),
+  ("None (speakers, flat)", "Žádná (reproduktory, bez korekce)"),
   (
     "Volume per app group, where each one plays and the game/chat balance.",
-    "Hlasitost podle skupin aplikací, kam která hraje, a poměr hra/chat.",
+    "Hlasitost skupin aplikací, kam která skupina posílá zvuk, a poměr hra/chat.",
   ),
   ("Locked ({} blocked)", "Zamčeno ({} zablokováno)"),
   ("Output", "Výstup"),
@@ -313,7 +313,7 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Save as…", "Uložit jako…"),
   ("Reset", "Obnovit"),
-  ("Throw away the changes, back to the preset.", "Zahodit změny a vrátit předvolbu."),
+  ("Throw away the changes, back to the preset.", "Zahodit změny a vrátit se k předvolbě."),
   ("Copy to share", "Kopírovat ke sdílení"),
   (
     "Copies the EQ as text: paste it into a chat or pastebin.com. Works in Equalizer APO too.",
@@ -387,13 +387,13 @@ pub static CS: &[(&str, &str)] = &[
   ("Discord clarity", "Srozumitelnost pro Discord"),
   ("Tame harsh S sounds", "Zjemnit ostré sykavky"),
   ("Walkie-talkie (effect)", "Vysílačka (efekt)"),
-  ("Flat (no EQ)", "Rovně (bez EQ)"),
+  ("Flat (no EQ)", "Lineární (bez EQ)"),
   // --- game / chat / media ---
   ("Game EQ", "Herní EQ"),
   ("Import from Sonar DB", "Importovat z databáze Sonar"),
   (
     "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
-    "Zkopíruje profily ze Sonaru z {}. Profil stejného jména, který jste upravili, se nejdřív přesune do profiles\\_deleted, odkud ho jde vrátit.",
+    "Zkopíruje sem profily Sonaru z {}. Profil se stejným názvem, který jste upravili, se nejdřív přesune do profiles\\_deleted, odkud ho jde vrátit.",
   ),
   ("Import {} profiles from SteelSeries Sonar", "Importovat profily ze SteelSeries Sonar ({})"),
   (
@@ -417,7 +417,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Launchers", "Spouštěče"),
   (
     "Steam, Epic, GOG, Ubisoft Connect and Microsoft Store data on this PC (e.g. division2.exe = Steam app 2221490 = The Division 2)",
-    "Data Steamu, Epicu, GOG, Ubisoft Connect a Microsoft Store v tomto PC (např. division2.exe = aplikace Steam 2221490 = The Division 2)",
+    "Data Steamu, Epicu, GOG, Ubisoft Connect a Microsoft Store na tomto PC (např. division2.exe = aplikace Steam 2221490 = The Division 2)",
   ),
   ("Names", "Názvy"),
   ("Genres", "Žánry"),
@@ -449,7 +449,7 @@ pub static CS: &[(&str, &str)] = &[
   ("None (no game EQ)", "Žádný (bez herního EQ)"),
   (
     "Apps that were in the foreground. Assign a profile if a game is not recognized, or mark an app as not a game.",
-    "Aplikace, které byly v popředí. Přiřaďte profil, pokud hra není rozpoznána, nebo označte aplikaci jako nehru.",
+    "Aplikace, které byly v popředí. Přiřaďte profil, pokud hra není rozpoznána, nebo označte, že aplikace není hra.",
   ),
   ("Switch to a game window once, then come back here.", "Jednou se přepněte do okna hry a pak se sem vraťte."),
   ("game, no profile", "hra, bez profilu"),
@@ -468,7 +468,7 @@ pub static CS: &[(&str, &str)] = &[
   ("\"Import from Sonar DB\" brings Sonar presets back.", "„Importovat z databáze Sonar“ vrátí předvolby ze Sonaru."),
   (
     "No profile selected (flat). Pick one above or click \"New…\" to create one.",
-    "Není vybrán žádný profil (rovně). Vyberte ho nahoře nebo klikněte na „Nový…“.",
+    "Není vybrán žádný profil (lineární). Vyberte ho nahoře nebo klikněte na „Nový…“.",
   ),
   ("Chat EQ", "EQ chatu"),
   ("Discord & co.", "Discord a spol."),
@@ -488,10 +488,10 @@ pub static CS: &[(&str, &str)] = &[
     "Používá ho EQ streamů, efekt na vlastním streamu každé aplikace před smícháním ve Windows (žádná virtuální zvuková karta, žádné zpoždění navíc). Na výstup ho jednou nainstalujte (správce): scripts\\apo-install.ps1 -Flow Render -Slot SFX. Aplikace, které nepřiřadí, si ponechají EQ sluchátek + hry.",
   ),
   ("Profile", "Profil"),
-  ("Flat (headphone correction only)", "Rovně (jen korekce sluchátek)"),
+  ("Flat (headphone correction only)", "Lineární (jen korekce sluchátek)"),
   ("this profile (dots)", "tento profil (tečky)"),
   ("combined, what these apps sound like", "výsledek, jak tyto aplikace znějí"),
-  ("Auto preamp {} dB (no clipping)", "Automatický předzesilovač {} dB (bez zkreslení)"),
+  ("Auto preamp {} dB (no clipping)", "Automatický předzesilovač {} dB (bez přebuzení)"),
   ("Detected: {}", "Rozpoznáno: {}"),
   ("assigned: {}", "přiřazeno: {}"),
   ("launcher id: {}", "ID ze spouštěče: {}"),
@@ -534,12 +534,12 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Microphone and volume settings", "Nastavení mikrofonu a hlasitostí"),
   ("Current microphone EQ", "Aktuální EQ mikrofonu"),
-  ("Apps assigned to mixer channels", "Aplikace přiřazené ke kanálům mixu"),
+  ("Apps assigned to mixer channels", "Aplikace přiřazené ke kanálům mixéru"),
   ("Language and theme", "Jazyk a motiv"),
   ("Import and restart", "Importovat a restartovat"),
   (
     "Settings imported. Devices are matched by their names; check the headphone profile and the microphone.",
-    "Nastavení je naimportované. Zařízení se párují podle názvu; zkontrolujte profil sluchátek a mikrofon.",
+    "Nastavení je naimportované. Zařízení se přiřazují podle názvu; zkontrolujte profil sluchátek a mikrofon.",
   ),
   ("Total volume change: {} dB.", "Celková změna hlasitosti: {} dB."),
   (
@@ -835,7 +835,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Stage 1: Speaker echo cancellation (AEC)", "Stupeň 1: Potlačení ozvěny z reproduktorů (AEC)"),
   (
     "What the speakers play is taken by GamersEqualizer's output EQ on that device (before your sidetone is mixed in) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
-    "Co hraje do reproduktorů, odebírá výstupní EQ GamersEqualizeru na tom zařízení (ještě před přimícháním vašeho příposlechu) a z mikrofonu to odstraňuje potlačovač ozvěny z WebRTC (AEC3): adaptivní filtr plus potlačení zbytku ozvěny. Zpoždění ozvěny se měří vzájemnou korelací (GCC-PHAT), pamatuje se pro každou dvojici zařízení a mění se až po opakovaném potvrzení.",
+    "Co hraje z reproduktorů, zachytí výstupní EQ GamersEqualizeru na tom zařízení (ještě před přimícháním vašeho příposlechu) a potlačovač ozvěny z WebRTC (AEC3) to z mikrofonu odstraní: adaptivní filtr plus potlačení zbytku ozvěny. Zpoždění ozvěny se měří vzájemnou korelací (GCC-PHAT), pamatuje se pro každou dvojici zařízení a mění se až po opakovaném potvrzení.",
   ),
   ("Echo", "Ozvěna"),
   ("Details", "Podrobnosti"),
@@ -867,7 +867,7 @@ pub static CS: &[(&str, &str)] = &[
   ),
   (
     "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. The app log ([ApoNote]) says more.",
-    "Chybí reference reproduktorů: Windows výstupnímu EQ na „{}“ neřekla, na kterém zařízení běží. Víc řekne log aplikace ([ApoNote]).",
+    "Chybí reference reproduktorů: Windows výstupnímu EQ na „{}“ neřekl, na kterém zařízení běží. Víc řekne protokol aplikace ([ApoNote]).",
   ),
   ("No speaker reference: no output device", "Chybí reference reproduktorů: žádné výstupní zařízení"),
   ("Looking for the speaker reference...", "Hledá se reference reproduktorů..."),
@@ -911,7 +911,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Delay: measuring, say something...", "Zpoždění: měřím, řekněte něco..."),
   (
     "Measured continuously: the raw microphone compared with what apps receive. Right now: echo cancellation {}, noise suppression {}, word-onset protection {}. EQ, leveler and limiter add no delay.",
-    "Měří se průběžně: surový mikrofon proti tomu, co dostávají aplikace. Teď: potlačení ozvěny {}, potlačení šumu {}, ochrana začátků slov {}. EQ, leveler a limiter zpoždění nepřidávají.",
+    "Měří se průběžně: surový mikrofon proti tomu, co dostávají aplikace. Teď: potlačení ozvěny {}, potlačení hluku {}, ochrana začátků slov {}. EQ, vyrovnání hlasitosti a limiter zpoždění nepřidávají.",
   ),
   (
     "No app is using the microphone now. {} starts with the next call/recording.",
@@ -967,7 +967,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Master", "Hlavní"),
   ("No headphone profile", "Bez profilu sluchátek"),
   ("No game profile", "Bez herního profilu"),
-  ("Flat", "Rovně"),
+  ("Flat", "Lineární"),
   ("Virtual cable", "Virtuální kabel"),
   ("Direct (Master)", "Přímo (hlavní)"),
   ("Direct (same as Master)", "Přímo (stejně jako hlavní)"),
@@ -975,7 +975,7 @@ pub static CS: &[(&str, &str)] = &[
   ("same as Master", "stejný jako hlavní"),
   ("Recording now", "Právě nahrávají"),
   ("No app is recording", "Žádná aplikace nenahrává"),
-  ("Playing on all channels", "Hraje ve všech kanálech"),
+  ("Playing on all channels", "Přehrávají ve všech kanálech"),
   ("{} - recording from a microphone (as Windows reports it).", "{} – nahrává z mikrofonu (podle Windows)."),
   ("Mic", "Mikrofon"),
   ("Default mic", "Výchozí mikrofon"),
@@ -1003,11 +1003,11 @@ pub static CS: &[(&str, &str)] = &[
   ("Spatial sound: the whole game is lowered", "Prostorový zvuk: zeslabuje se celá hra"),
   (
     "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate Game and Chat output devices (such as Sonar's).",
-    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem hra hraje mimo efekty jednotlivých aplikací, a když mají Hra a Chat vlastní výstupy, nemůže ji zeslabit jako celek. Jde to, když nejsou k dispozici samostatná výstupní zařízení pro Hru a Chat (například ze Sonaru).",
+    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem zvuk hry obchází efekty jednotlivých aplikací, a když mají Hra a Chat vlastní výstupy, nemůže ji zeslabit jako celek. Jde to, když nejsou k dispozici samostatná výstupní zařízení pro Hru a Chat (například ze Sonaru).",
   ),
   (
     "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and without the output EQ on this output it cannot hear the mix to lower the game as a whole. Install the output EQ on this output.",
-    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem hra hraje mimo efekty jednotlivých aplikací a bez výstupního EQ na tomto výstupu neslyší mix, aby ji zeslabil jako celek. Nainstalujte výstupní EQ na tento výstup.",
+    "Automatický ChatMix neslyší {}: se zapnutým prostorovým zvukem zvuk hry obchází efekty jednotlivých aplikací a bez výstupního EQ na tomto výstupu neslyší mix, aby ji zeslabil jako celek. Nainstalujte výstupní EQ na tento výstup.",
   ),
   ("the game", "hru"),
   ("Click to customize EQ curves for {}", "Kliknutím upravíte křivky EQ pro {}"),
@@ -1033,7 +1033,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Startup and background service", "Spouštění a služba na pozadí"),
   ("Starts the background service when you sign in to Windows.", "Spustí službu na pozadí po přihlášení do Windows."),
   ("Start with Windows", "Spouštět s Windows"),
-  ("Show the microphone level in the tray icon", "Ukazovat úroveň mikrofonu v ikoně na hlavním panelu"),
+  ("Show the microphone level in the tray icon", "Ukazovat úroveň mikrofonu v ikoně v oznamovací oblasti"),
   (
     "While an app records, the bars in the icon follow what others hear from you; only with microphone processing on. They stand still behind a full-screen app and while Windows keeps the icon among the hidden icons: drag it to the taskbar.",
     "Když nějaká aplikace nahrává, čárky v ikoně se hýbou podle toho, co od vás slyší ostatní; jen se zapnutým zpracováním mikrofonu. Stojí, když je v popředí aplikace přes celou obrazovku a když Windows drží ikonu mezi skrytými ikonami: přetáhněte ji na hlavní panel.",
@@ -1057,7 +1057,7 @@ pub static CS: &[(&str, &str)] = &[
     "Odebere vše, co aplikace do Windows dala: efekty mikrofonu a výstupu na všech zvukových zařízeních (práva správce, zvuk se na pár sekund zastaví), jejich zálohy, samotnou aplikaci v Program Files, spouštění s Windows a oznámení. Pak se aplikace ukončí.",
   ),
   ("Uninstall...", "Odinstalovat..."),
-  ("Also delete my settings, profiles and logs", "Smazat i moje nastavení, profily a logy"),
+  ("Also delete my settings, profiles and logs", "Smazat i moje nastavení, profily a protokoly"),
   ("Uninstall and exit", "Odinstalovat a ukončit"),
   ("Uninstall failed: {}", "Odinstalace selhala: {}"),
   (
@@ -1086,7 +1086,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Update GamersEqualizer in Windows", "Aktualizovat GamersEqualizer ve Windows"),
   (
     "Echo cancellation, noise suppression and EQ for Discord, games and every other app.",
-    "Potlačení ozvěny, šumu a EQ pro Discord, hry a všechny ostatní aplikace.",
+    "Potlačení ozvěny, hluku a EQ pro Discord, hry a všechny ostatní aplikace.",
   ),
   (
     "Headphone correction and the game, chat and media EQ; echo cancellation needs it too.",
@@ -1102,7 +1102,7 @@ pub static CS: &[(&str, &str)] = &[
   // --- health: notifications, new output, muted mic while recording ---
   (
     "Sound plays on another device now. The tray menu switches it back.",
-    "Zvuk teď hraje na jiném zařízení. Nabídka v oznamovací oblasti ho přepne zpět.",
+    "Zvuk se teď přehrává na jiném zařízení. Nabídka v oznamovací oblasti ho přepne zpět.",
   ),
   (
     "Turn it back on in the sound settings; the tray menu opens them.",
@@ -1110,7 +1110,7 @@ pub static CS: &[(&str, &str)] = &[
   ),
   (
     "Apps get your microphone without echo cancellation, noise suppression and EQ.",
-    "Aplikace dostávají mikrofon bez potlačení ozvěny, šumu a bez EQ.",
+    "Aplikace dostávají mikrofon bez potlačení ozvěny, hluku a bez EQ.",
   ),
   (
     "Discord, games and other apps use the default microphone, not this one.",
@@ -1135,7 +1135,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Set up…", "Nastavit…"),
   (
     "Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds.",
-    "Otevře nastavení: jeden dotaz správce, pak se zvuk Windows na pár sekund restartuje.",
+    "Otevře nastavení: jeden dotaz na práva správce, pak se zvuk Windows na pár sekund restartuje.",
   ),
   ("Newer features do not work until you update them.", "Novější funkce nefungují, dokud je neaktualizujete."),
   // --- AutoEQ file check ---
@@ -1193,7 +1193,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Your own voice in the headphones", "Vlastní hlas ve sluchátkách"),
   (
     "Sealed headphones block your own voice. Sidetone plays the microphone back into them.",
-    "Těsnící sluchátka utlumí vlastní hlas. Příposlech vrací mikrofon do sluchátek.",
+    "Uzavřená sluchátka utlumí vlastní hlas. Příposlech vrací mikrofon do sluchátek.",
   ),
   ("{} → {}", "{} → {}"),
   ("On for this pair", "Zapnuto pro tuto dvojici"),
@@ -1201,7 +1201,7 @@ pub static CS: &[(&str, &str)] = &[
   ("Stop trying", "Ukončit zkoušku"),
   (
     "Plays without a recording app. Windows shows the microphone as in use meanwhile.",
-    "Hraje i bez nahrávající aplikace. Windows mezitím ukazuje mikrofon jako používaný.",
+    "Funguje i bez nahrávající aplikace. Windows mezitím ukazuje mikrofon jako používaný.",
   ),
   ("Volume", "Hlasitost"),
   ("Level", "Úroveň"),
@@ -1237,7 +1237,7 @@ pub static CS: &[(&str, &str)] = &[
   ),
   (
     "Not offered: the installer undid its change on \"{}\" because the check after installing failed (the app log says why).",
-    "Nenabízí se: instalátor vrátil svou změnu na „{}“, protože zkouška po instalaci selhala (proč, říká log aplikace).",
+    "Nenabízí se: instalátor vrátil svou změnu na „{}“, protože zkouška po instalaci selhala (proč, říká protokol aplikace).",
   ),
   ("Try again", "Zkusit znovu"),
   ("Sidetone EQ", "EQ příposlechu"),
@@ -1266,7 +1266,7 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Off for this pair.", "Pro tuto dvojici vypnuto."),
   ("The microphone is muted: sidetone is silent.", "Mikrofon je ztlumený: příposlech mlčí."),
-  ("Another output is playing: sidetone waits for {}.", "Hraje jiný výstup: příposlech čeká na {}."),
+  ("Another output is playing: sidetone waits for {}.", "Používá se jiný výstup: příposlech čeká na {}."),
   ("Waiting: no app is recording from this microphone.", "Čeká: z tohoto mikrofonu žádná aplikace nenahrává."),
   ("Playing.", "Hraje."),
   ("Starting…", "Spouští se…"),
