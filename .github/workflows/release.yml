@@ -10,8 +10,8 @@
 #   the zip.
 # - The secrets reach only the `publish` job, a fresh runner that runs no cargo: build scripts and
 #   proc macros of dependencies never run where the key is. Actions are pinned to commit SHAs.
-# - Build provenance: the zip and both binaries (as shipped, after signing) get a GitHub-signed
-#   attestation (SLSA, via Sigstore) naming this workflow and commit. Check a file with
+# - Build provenance: the zip, both binaries (as shipped, after signing) and the SBOM get a
+#   GitHub-signed attestation (SLSA, via Sigstore) naming this workflow and commit. Check a file with
 #   `gh attestation verify gamersequalizer.exe -R PixCZ/GamersEqualizer`.
 # - SBOM: one CycloneDX file beside the zip (`GamersEqualizer-<version>-x64.sbom.json`) for
 #   vulnerability scanners, covering both shipped binaries. It lists what the Windows build links,
@@ -205,6 +205,7 @@ jobs:
             ${{ env.ZIP }}
             ${{ env.STAGE }}/gamersequalizer.exe
             ${{ env.STAGE }}/gamersequalizer_apo.dll
+            out/${{ env.PKG_NAME }}.sbom.json
 
       - name: Remove the signing key
         if: always()
