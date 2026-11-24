@@ -90,7 +90,9 @@ pub fn render_tab_headphones(ui: &mut Ui, state: &mut AppState, win_audio: &mut 
     icons::HEADPHONES,
     COLOR,
     tr("Output & headphones"),
-    Some(tr("Pick where the sound goes, then the correction for it. Speakers or a headset without a profile: None.")),
+    Some(tr(
+      "Choose your output device, then select a correction profile for it. Use None for speakers or headsets without a profile.",
+    )),
   );
   super::header::render_device_card(ui, state, win_audio);
   output_apo_status(ui, state, device_id.as_deref());
@@ -148,8 +150,7 @@ fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
     ui.horizontal(|ui| {
       theme::card_title(ui, Some((icons::CHAT, COLOR)), tr("Automatic ChatMix"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
-        "Lowers the game while someone in the chat is talking and the game is drowning them out. \
-         Smoothly, by about the same amount each time, and back up when the talk stops.",
+        "Smoothly lowers the game whenever someone speaks in chat and the game is drowning them out, then brings the game back up once they stop talking.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut new_on = on;
@@ -169,9 +170,7 @@ fn ducking_card(ui: &mut Ui, state: &mut AppState, session_mode: bool) {
       });
     });
     ui.label(theme::caption(tr(
-      "At 50 % the voice ends up about twice as loud as the game in the range of speech, at 100 % about three times. \
-       Works with chat apps on the Chat channel (Discord, TeamSpeak ...); voice chat built into the game \
-       is part of the game's sound and cannot be told apart from it.",
+      "At 50 %, voice chat is roughly twice as loud as the game in the speech range; at 100 %, roughly three times. Works with apps on the Chat channel (Discord, TeamSpeak, etc.). In-game voice chat is mixed into the game audio and cannot be separated.",
     )));
   });
 }
@@ -185,7 +184,7 @@ pub(super) fn strength_row(ui: &mut Ui, h: &ShmHeader, width: f32) {
     let slider = egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %");
     if theme::slider(ui, slider)
       .on_hover_text(tr(
-        "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
+        "Controls how clearly voice chat stands out over the game. Higher values lower the game sooner and further.",
       ))
       .changed()
     {
@@ -210,8 +209,7 @@ fn my_headphones_row(ui: &mut Ui, state: &mut AppState) {
   ui.add_space(4.0);
   ui.horizontal_wrapped(|ui| {
     ui.label(tr("My headphones")).on_hover_text(tr(
-      "Click to switch. The choice is remembered for the current output device, so a USB headset and \
-       headphones on the jack switch by themselves when you change the output.",
+      "Click to switch profiles. Your choice is remembered per output device, so switching between a USB headset and wired headphones updates the profile automatically.",
     ));
     let current = state.output_eq.headphone_profile_name().map(str::to_string);
     let mut picked: Option<Option<String>> = None;
@@ -256,7 +254,7 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
     .map(str::to_string);
   let (text, severity, button) = match check.status {
     ApoStatus::Active if not_running => (
-      tr("The output EQ does NOT work on this device while sound plays: you hear it unprocessed.").to_string(),
+      tr("Output EQ is NOT working on this device — you are hearing unprocessed audio.").to_string(),
       Severity::Error,
       None,
     ),
@@ -282,8 +280,7 @@ fn output_apo_status(ui: &mut Ui, state: &mut AppState, device_id: Option<&str>)
     ApoStatus::NoMicrophone => (tr("No output device found").to_string(), Severity::Warning, None),
     ApoStatus::NotInstalled => (
       tr(
-        "Output EQ is not installed yet: profiles are shown but you don't hear them. It is a Windows audio effect on \
-          this device (no virtual sound card).",
+        "Output EQ is not installed yet, so profiles are shown here but not applied to your audio. It installs as a native Windows audio effect on this device (no virtual sound card).",
       )
       .to_string(),
       Severity::Warning,

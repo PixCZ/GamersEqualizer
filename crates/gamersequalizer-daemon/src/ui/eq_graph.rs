@@ -62,7 +62,7 @@ pub fn band_editor(
 
   let mut changed = graph(ui, id, bands, max_slots, color, background, height, &mut selected);
   ui.label(theme::caption(tr(
-    "Drag a dot to move it · Alt + mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
+    "Drag a point to move it · Alt + scroll over a point to adjust width · double-click the graph to add a filter",
   )));
   changed |= chips(ui, bands, max_slots, &mut selected);
   if let Some(i) = selected {
@@ -275,7 +275,9 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
     let free = max_slots.saturating_sub(slots_used(bands));
     let add = ui
       .add_enabled(free > 0, egui::Button::new(theme::with_icon(theme::icons::ADD, tr("Add filter"))))
-      .on_disabled_hover_text(tr("Full. A 24 dB/oct cut takes the room of 2 filters, a 48 dB/oct cut 4."));
+      .on_disabled_hover_text(tr(
+        "Filter limit reached. A 24 dB/oct cut uses 2 filter slots, and a 48 dB/oct cut uses 4.",
+      ));
     if add.clicked() {
       bands.push(BiquadBand { q: 1.0, ..BiquadBand::default() });
       *selected = Some(bands.len() - 1);
@@ -334,7 +336,7 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
         ui.end_row();
       }
       if matches!(band.filter_type, FilterType::Peaking | FilterType::Notch) {
-        ui.label(tr("Width:")).on_hover_text(tr("Narrow touches one tone, wide a whole region."));
+        ui.label(tr("Width:")).on_hover_text(tr("Narrow affects a single frequency; wide affects a broader range."));
         let mut width = width_octaves(band.q);
         if value_slider(ui, &mut width, WIDTH_OCT_RANGE, tr(" oct"), 2, true) {
           band.q = q_for_width(width).clamp(0.1, 30.0);
@@ -342,7 +344,7 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
         }
         ui.end_row();
       } else if !band.is_cut() {
-        ui.label(tr("Slope (Q):")).on_hover_text(tr("Higher = a sharper step into the shelf."));
+        ui.label(tr("Slope (Q):")).on_hover_text(tr("Higher values create a steeper transition into the shelf."));
         changed |= value_slider(ui, &mut band.q, 0.3..=2.0, "", 2, false);
         ui.end_row();
       }
@@ -503,9 +505,9 @@ fn type_help(ft: &FilterType) -> &'static str {
     FilterType::LowShelf => tk("Raises or lowers everything below the frequency."),
     FilterType::HighShelf => tk("Raises or lowers everything above the frequency."),
     FilterType::Notch => tk("Removes one tone, e.g. 50 Hz mains hum."),
-    FilterType::Unknown(_) => tk(
-      "Made by a newer version of the app. This version passes the sound through it unchanged and keeps it as it is.",
-    ),
+    FilterType::Unknown(_) => {
+      tk("Created by a newer version of the app. This version leaves it untouched and passes audio through unchanged.")
+    }
   }
 }
 

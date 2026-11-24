@@ -246,7 +246,10 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
     // The service saw apps record from this mic while our effect processed nothing. "Does not
     // work", not "Windows does not run it": the APO may run and only pass audio through.
     ApoStatus::Active if not_running => (
-      trf("The mic effect does NOT work on this microphone (build {}): apps get the raw microphone", &[&version]),
+      trf(
+        "Microphone processing is NOT working on this microphone (build {}) — apps receive the unprocessed microphone",
+        &[&version],
+      ),
       Severity::Error,
     ),
     ApoStatus::Active if live => {
@@ -254,7 +257,7 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
     }
     ApoStatus::Active => (
       trf(
-        "Windows mic effect installed on this microphone (build {}); it runs while an app uses the microphone",
+        "Microphone effect installed on this microphone (build {}); activates automatically when an app uses the mic",
         &[&version],
       ),
       Severity::Success,
@@ -280,13 +283,11 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
   if several {
     let text = match crate::mic_usage::longest_recording_app() {
       Some(app) => trf(
-        "Several recordings are processed at once, each separately (apps record in different modes or from \
-         different microphones). The values shown here belong to the one that started first: {}",
+        "Multiple recordings are active at the same time and processed separately (apps are recording in different modes or from different microphones). The values shown here belong to the first one: {}",
         &[&app],
       ),
       None => tr(
-        "Several recordings are processed at once, each separately (apps record in different modes or from \
-         different microphones). The values shown here belong to the one that started first.",
+        "Multiple recordings are active at the same time and processed separately (apps are recording in different modes or from different microphones). The values shown here belong to the first one.",
       )
       .to_string(),
     };
@@ -298,8 +299,7 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
   let clicked = ui
     .add(theme::accent_button(ui, tr("Try another effect slot (administrator)...")))
     .on_hover_text(tr(
-      "Moves the mic effect between the two places where Windows can run it (device effects and mode effects). \
-       Some microphones run only one of them. Windows asks for permission and audio restarts for a few seconds.",
+      "Switches the microphone effect between the two slots Windows supports (device effects and mode effects), as some microphones only work with one. Windows will ask for permission and audio will restart for a few seconds.",
     ))
     .clicked();
   if clicked {
@@ -322,8 +322,7 @@ fn problems(state: &AppState) -> Vec<Problem> {
       ApoStatus::Active | ApoStatus::NoMicrophone => None,
       ApoStatus::NotInstalled => Some((
         tr(
-          "Microphone processing is not installed: apps get your raw microphone (no echo cancellation, noise \
-           suppression or EQ).",
+          "Microphone processing is not installed. Apps receive your unprocessed microphone without echo cancellation, noise suppression, or EQ.",
         )
         .to_string(),
         tk("Install…"),
@@ -334,8 +333,7 @@ fn problems(state: &AppState) -> Vec<Problem> {
       )),
       ApoStatus::NotOnThisMic => Some((
         tr(
-          "Microphone processing is not on the microphone in use: apps get it raw (no echo cancellation, noise \
-           suppression or EQ).",
+          "Microphone processing is not set up on the active microphone. Apps receive it unprocessed without echo cancellation, noise suppression, or EQ.",
         )
         .to_string(),
         tk("Enable on this microphone…"),
@@ -387,7 +385,8 @@ fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str, primary
 /// The button that opens the setup card, with what it costs said on hover.
 fn setup_button(ui: &mut Ui, text: &str, primary: bool) -> egui::Response {
   let resp = if primary { ui.add(theme::accent_button(ui, text)) } else { ui.button(text) };
-  resp.on_hover_text(tr("Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds."))
+  resp
+    .on_hover_text(tr("Opens setup. Requires one administrator prompt, then Windows audio restarts for a few seconds."))
 }
 
 fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str, primary: bool) {
@@ -445,7 +444,7 @@ fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem
       .on_hover_text(tr("Sets it as the Windows default and communications microphone. No admin rights needed."))
       .clicked();
     ui.label(trf(
-      "\"{}\" is not the Windows default microphone: Discord and games use the default one, not this one.",
+      "\"{}\" is not the Windows default microphone. Discord and games use the default microphone instead.",
       &[&mic_name],
     ));
   });

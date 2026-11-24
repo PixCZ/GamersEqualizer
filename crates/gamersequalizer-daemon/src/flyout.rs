@@ -652,7 +652,7 @@ impl MixChannel {
       Self::Media => tr("Media"),
       Self::Mic => tr("Mic"),
       Self::MicLoudness => tr("Mic loudness (voice leveler)"),
-      Self::Balance => tr("ChatMix: game or chat louder"),
+      Self::Balance => tr("ChatMix: game / chat balance"),
       Self::DuckStrength => tr("Automatic ChatMix strength"),
     }
   }

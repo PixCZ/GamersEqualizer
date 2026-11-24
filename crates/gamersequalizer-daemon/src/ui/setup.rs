@@ -196,8 +196,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
       return;
     }
     ui.label(tr(
-      "Pick what to set up. Everything that needs administrator rights is done in one go: Windows asks once, \
-       and the sound stops once, for a few seconds.",
+      "Choose what to set up. Everything requiring administrator rights runs in one step — Windows asks once and audio stops once, for a few seconds.",
     ));
     ui.add_space(4.0);
     for item in &list {
@@ -218,8 +217,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
       ui.add_space(4.0);
       ui.label(theme::strong(tr("Other connected devices"), 15.0));
       ui.label(theme::caption(tr(
-        "Not in use right now. Tick a device to set it up as well; each one is checked after the install, which \
-         restarts the sound once more if it fails there. Needs administrator rights.",
+        "Currently unused devices. Check any you also want to set up. Each device is verified after installation (if a check fails, Windows audio restarts once more to undo it). Requires administrator rights.",
       )));
       for (flow, guid, name) in &extras {
         let key = apo_install::endpoint_key(*flow, guid);
@@ -240,8 +238,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
       ui.add_space(4.0);
       ui.horizontal_wrapped(|ui| {
         ui.label(theme::caption(trf(
-          "Not offered: the installer undid its change on \"{}\" because the check after installing failed (the \
-           app log says why).",
+          "Not offered: the installer reverted its change on \"{}\" because the post-install check failed (see the Log tab for details).",
           &[name],
         )));
         if ui.button(tr("Try again")).clicked() {
@@ -257,14 +254,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
         ui.set_width(ui.available_width());
         ui.label(theme::strong(tr("Why does this need administrator rights?"), 15.0));
         ui.label(tr(
-          "The effects run inside Windows audio itself, so every app (Discord, games, the browser) gets them \
-           without any setup in that app, and no virtual sound card is needed. They are installed for the whole \
-           computer (Program Files and the system registry), so Windows asks for permission.\n\
-           What happens: one Windows prompt, a small installer window, and Windows audio restarts for a few \
-           seconds. The app itself is copied next to the effects and continues from there (the window reopens), \
-           so the folder you started it from can be deleted afterwards. Apps that use the microphone or the \
-           headphones may need to be reopened.\n\
-           Nothing else is changed. Settings > Uninstall from Windows removes all of it.",
+          "Audio effects run directly inside Windows audio, so every app (Discord, games, browsers) gets them automatically with no virtual sound card or per-app setup. Because they install system-wide (Program Files and system registry), Windows asks for administrator permission.\nWhat happens: one Windows prompt, the installer window opens briefly, and Windows audio restarts for a few seconds. The app copies itself next to the effects and reopens from there, so you can delete the original folder afterward. Apps currently using your mic or headphones may need a restart.\nNothing else is changed, and Settings > Uninstall from Windows removes everything cleanly.",
         ));
       });
     }
@@ -278,8 +268,7 @@ pub fn render(ui: &mut Ui, state: &mut AppState) {
         ui,
         Severity::Warning,
         &trf(
-          "{} is using the microphone right now (a call?). The install restarts Windows audio: the call loses \
-           the microphone and stays silent until you rejoin it or restart {}. Better finish the call first.",
+          "{} is currently using the microphone. Installing restarts Windows audio, which will drop the microphone until you rejoin the call or restart {}. It is best to finish your call first.",
           &[&apps, &apps],
         ),
       );
@@ -401,7 +390,7 @@ fn items(state: &AppState) -> Vec<Item> {
       kind: Kind::SonarImport,
       title: trf("Import {} profiles from SteelSeries Sonar", &[&sonar]),
       detail: tr(
-        "SteelSeries GG is on this PC: its game profiles and microphone presets are copied here. SteelSeries GG stays as it is; later imports are on the Game tab.",
+        "SteelSeries GG was found on this PC. Its game profiles and microphone presets will be copied here without changing SteelSeries GG. You can re-import anytime from the Game tab.",
       )
       .to_string(),
       admin_targets: Vec::new(),

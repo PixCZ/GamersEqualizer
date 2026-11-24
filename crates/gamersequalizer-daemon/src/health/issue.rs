@@ -110,7 +110,7 @@ impl Issue {
       ),
       Issue::MicProcessing { status: ApoStatus::Outdated, .. } => tr("Sound effects need an update").to_string(),
       Issue::MicProcessing { status: ApoStatus::NotOnThisMic, .. } => {
-        tr("Microphone processing is not on the microphone in use").to_string()
+        tr("Microphone processing is not set up on the active microphone").to_string()
       }
       Issue::MicProcessing { .. } => tr("Microphone processing is not installed").to_string(),
       Issue::NotDefaultMic { mic_name, .. } => trf("\"{}\" is not the Windows default microphone", &[mic_name]),
@@ -138,31 +138,30 @@ impl Issue {
   /// Second line of the Windows notification: what it means for the user.
   pub fn detail(&self) -> &'static str {
     match self {
-      Issue::OutputChanged(_) => tr("Sound plays on another device now. The tray menu switches it back."),
-      Issue::SpatialOff { .. } => tr("Turn it back on in the sound settings; the tray menu opens them."),
+      Issue::OutputChanged(_) => tr("Audio is now playing on another device. Use the tray menu to switch it back."),
+      Issue::SpatialOff { .. } => tr("Turn it back on in Windows sound settings (accessible from the tray menu)."),
       Issue::SpatialChanged { .. } => {
-        tr("Switch it back in the sound settings, or keep the new one; the tray menu has both.")
+        tr("Switch it back in Windows sound settings or keep the new one — both options are in the tray menu.")
       }
       Issue::MicProcessing { status: ApoStatus::Outdated, .. } => {
         tr("Newer features do not work until you update them.")
       }
       Issue::MicProcessing { .. } => {
-        tr("Apps get your microphone without echo cancellation, noise suppression and EQ.")
+        tr("Apps are receiving your raw microphone without echo cancellation, noise suppression, or EQ.")
       }
       Issue::NotDefaultMic { .. } => tr("Discord, games and other apps use the default microphone, not this one."),
       Issue::OutputProcessing { .. } => tr(
-        "A new sound device? Open GamersEqualizer to set it up: headphone correction, EQ and echo cancellation need it.",
+        "Connected a new audio device? Open GamersEqualizer to set it up for headphone correction, EQ, and echo cancellation.",
       ),
       Issue::MicSilenced { .. } => {
-        tr("Nobody hears you. Fix it from the GamersEqualizer icon in the notification area.")
+        tr("No one can hear you. Fix this from the GamersEqualizer icon in the notification area.")
       }
       // Only what was seen: it processed nothing. Why is in the log ([ApoNote], [ApoLink]).
       Issue::NotRunning { flow: Flow::Capture, .. } => tr(
-        "It is installed, but processed nothing while apps recorded: they get the raw microphone. The reason is in the app's log.",
+        "Microphone processing is installed, but it didn't process anything during recording — apps receive the unprocessed microphone. Check the app log for details.",
       ),
       Issue::NotRunning { flow: Flow::Render, .. } => tr(
-        "Our effect is installed, but processed nothing while sound played: no EQ, no echo cancellation. The reason \
-           is in the app's log.",
+        "The output effect is installed, but it didn't process anything during playback — EQ and echo cancellation are inactive. Check the app log for details.",
       ),
     }
   }
@@ -200,7 +199,7 @@ impl Issue {
         ),
       ],
       Issue::MicProcessing { status: ApoStatus::Outdated, key } => vec![
-        (tr("Update the sound effects (administrator, restarts Windows audio)...").to_string(), Fix::UpdateEffects),
+        (tr("Update sound effects (administrator, restarts Windows audio)...").to_string(), Fix::UpdateEffects),
         (tr("Ignore").to_string(), Fix::Ignore(key.clone())),
       ],
       Issue::MicProcessing { key, .. } => vec![

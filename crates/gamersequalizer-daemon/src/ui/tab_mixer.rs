@@ -112,7 +112,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
     icons::VOLUME,
     MASTER_COLOR,
     tr("Mixer & device"),
-    Some(tr("Volume per app group, where each one plays and the game/chat balance.")),
+    Some(tr("Control volume and output device per app group, plus game/chat balance.")),
   );
 
   // 5 Proportional Columns filling exact window width
@@ -420,8 +420,7 @@ fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) -> bool {
   let unheard = state.ducking_unheard(session_mode).and_then(|(game, mode)| unheard_text(&game, mode));
   let Some(h) = state.shm_header() else { return false };
   let help = tr(
-    "Lowers the game while someone in the chat is talking and the game is drowning them out. \
-     Smoothly, by about the same amount each time, and back up when the talk stops.",
+    "Smoothly lowers the game whenever someone speaks in chat and the game is drowning them out, then brings the game back up once they stop talking.",
   );
   let mut on = h.duck_enabled.load(Ordering::Relaxed);
   ui.horizontal(|ui| {
@@ -480,15 +479,11 @@ pub(super) fn unheard_text(game: &str, mode: Mode) -> Option<(String, Severity)>
     Mode::Stream => None,
     Mode::Mix => Some((tr("Spatial sound: the whole game is lowered").to_string(), Severity::Info)),
     Mode::ChannelOutputs => warning(trf(
-      "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and with \
-       Game and Chat on their own outputs it cannot lower the game as a whole. It can when there are no separate \
-       Game and Chat output devices (such as Sonar's).",
+      "Automatic ChatMix cannot detect {} right now. Spatial sound bypasses per-app effects, and because Game and Chat have their own output devices, the app cannot lower the game as a whole either. It works when Game and Chat have no separate output devices (such as Sonar's).",
       &[&game],
     )),
     Mode::NoReference => warning(trf(
-      "Automatic ChatMix cannot hear {}: with spatial sound on, the game plays past the per-app effects, and \
-       without the output EQ on this output it cannot hear the mix to lower the game as a whole. Install the \
-       output EQ on this output.",
+      "Automatic ChatMix cannot detect {} right now. Spatial sound bypasses per-app effects, and without output EQ installed on this device, the app cannot monitor the main mix to lower the game. Install output EQ on this device to fix this.",
       &[&game],
     )),
   }

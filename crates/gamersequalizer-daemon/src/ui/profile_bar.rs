@@ -157,7 +157,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     if ui
       .add_enabled(can_save, egui::Button::new(theme::with_icon(icons::SAVE, tr("Save"))))
       .on_hover_text(tr("Save the changes into this preset."))
-      .on_disabled_hover_text(tr("Only your own presets can be saved over; use \"Save as…\" for this one."))
+      .on_disabled_hover_text(tr("Only your own presets can be overwritten. Use \"Save as…\" to save a copy."))
       .clicked()
     {
       let (name, draft) = (state.mic_profile.name.clone(), SaveDraft::of(&state.mic_profile));
@@ -184,7 +184,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     && mic_source.is_some()
     && ui
       .button(theme::with_icon(icons::RESET, tr("Reset")))
-      .on_hover_text(tr("Throw away the changes, back to the preset."))
+      .on_hover_text(tr("Discard changes and revert to the saved preset."))
       .clicked()
     && let Some(p) = mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name)
   {
@@ -203,16 +203,15 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
   if let Some((layer, differs)) = original {
     let disabled_hint = if differs.is_none() {
       tr(
-        "This profile has no saved original: it was made before the app kept one, or it is your own. Import the headphones from AutoEQ again to get one.",
+        "This profile has no saved original (either it is your own profile or it was created before originals were saved). Re-import the headphones from AutoEQ to save one.",
       )
     } else {
-      tr("Nothing to reset: the bands are as they were imported.")
+      tr("Nothing to reset — the bands already match the imported original.")
     };
     if ui
       .add_enabled(differs == Some(true), egui::Button::new(theme::with_icon(icons::RESET, tr("Reset to original"))))
       .on_hover_text(tr(
-        "Puts the bands back as they were imported (from AutoEQ or a pasted EQ). Your volume stays; the edited \
-         version is kept in profiles\\_deleted.",
+        "Restores the EQ bands to their originally imported state (from AutoEQ or a pasted EQ). Your volume setting stays, and the edited version is backed up to profiles\\_deleted.",
       ))
       .on_disabled_hover_text(disabled_hint)
       .clicked()
@@ -242,7 +241,9 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
 
   if ui
     .add_enabled(has_profile, egui::Button::new(theme::with_icon(icons::COPY, tr("Copy to share"))))
-    .on_hover_text(tr("Copies the EQ as text: paste it into a chat or pastebin.com. Works in Equalizer APO too."))
+    .on_hover_text(tr(
+      "Copies the EQ as text so you can paste it into chat or pastebin.com. Also compatible with Equalizer APO.",
+    ))
     .on_disabled_hover_text(tr("Select a profile first."))
     .clicked()
     && let Some(text) = active_profile(state, target).map(share_text::to_share_text)
@@ -251,13 +252,13 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     state.profile_bar.notice = Some((
       target,
       true,
-      tr("Copied. Paste it anywhere (chat, pastebin.com); the other side uses \"Import…\".").to_string(),
+      tr("Copied! Paste it into chat or pastebin.com — the recipient can load it with \"Import…\".").to_string(),
     ));
   }
 
   if ui
     .button(theme::with_icon(icons::IMPORT, tr("Import…")))
-    .on_hover_text(tr("Paste an EQ someone shared (or Equalizer APO / AutoEQ text)."))
+    .on_hover_text(tr("Paste a shared EQ or Equalizer APO / AutoEQ text."))
     .clicked()
   {
     state.profile_bar.import_text.clear();
@@ -395,7 +396,7 @@ fn delete_dialog(ctx: &egui::Context, state: &mut AppState, target: EqTarget, na
   let title = if target == EqTarget::Mic { tr("Delete preset") } else { tr("Delete profile") };
   window(title).show(ctx, |ui| {
     let prompt = match target {
-      EqTarget::Mic => trf("Delete your preset \"{}\"? The EQ you hear now stays as it is.", &[&name]),
+      EqTarget::Mic => trf("Delete your preset \"{}\"? Your current EQ sound will stay active.", &[&name]),
       EqTarget::Output(_) => {
         let mut text =
           trf("Delete \"{}\"? The file moves to profiles\\_deleted and can be restored from there.", &[&tr(&name)]);
@@ -537,7 +538,10 @@ fn commit_save(state: &mut AppState, target: EqTarget, mode: SaveMode, name: &st
           (
             target,
             true,
-            trf("Saved \"{}\". The detected game keeps its own profile: pick the new one above to use it.", &[&name]),
+            trf(
+              "Saved \"{}\". The running game still uses its own profile — select the new one above to switch to it.",
+              &[&name],
+            ),
           )
         }
         Ok(()) => {
@@ -563,7 +567,7 @@ fn reset_to_original(state: &mut AppState, layer: OutputLayer) {
     Ok(path) => (
       EqTarget::Output(layer),
       true,
-      trf("Back to the original. Your edited version was moved to {}.", &[&path.display()]),
+      trf("Restored to the original. Your edited version was backed up to {}.", &[&path.display()]),
     ),
     Err(e) => {
       log::warn!("[OutputEq] reset to original failed: {e}");

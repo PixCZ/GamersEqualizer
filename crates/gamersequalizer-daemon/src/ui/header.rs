@@ -33,7 +33,12 @@ const NAV: [Nav; 12] = [
     tk("Output device and the correction for your headphones (AutoEQ)"),
   ),
   Nav::Item(ActiveTab::Game, icons::GAME, tk("Game"), tk("Game profiles, automatic game detection")),
-  Nav::Item(ActiveTab::Chat, icons::CHAT, tk("Chat"), tk("Voice EQ for Discord & co., instead of the game profile")),
+  Nav::Item(
+    ActiveTab::Chat,
+    icons::CHAT,
+    tk("Chat"),
+    tk("Voice EQ for Discord and chat apps, applied instead of the game profile"),
+  ),
   Nav::Item(ActiveTab::Media, icons::MEDIA, tk("Media"), tk("Music / video EQ for browsers and players")),
   Nav::Section(tk("Sidetone")),
   Nav::Item(ActiveTab::Sidetone, icons::HEADPHONES, tk("Sidetone"), tk("Your own voice in the headphones")),
@@ -79,7 +84,7 @@ pub fn render_top_bar(ui: &mut Ui, state: &mut AppState) {
       let hover = if service_down {
         tr("Processing runs inside this window only and stops when you close it.")
       } else {
-        tr("Apps get the sound unprocessed. The message below says what to do.")
+        tr("Apps are receiving unprocessed audio. See the banner below to fix it.")
       };
       status_pill(ui, p.warn, &trf("Not running: {}", &[&parts.join(", ")])).on_hover_text(hover);
     }
@@ -136,7 +141,7 @@ pub fn render_device_card(ui: &mut Ui, state: &mut AppState, win_audio: &mut Win
       };
       if ui
         .button(lock_text)
-        .on_hover_text(tr("Keeps Windows on this device. If a driver update or an HDMI monitor takes over the default output, it is switched back."))
+        .on_hover_text(tr("Keeps Windows locked to this device. If a driver update or HDMI monitor takes over the default output, it switches right back."))
         .clicked()
       {
         if is_locked {
@@ -234,7 +239,7 @@ fn render_spatial_row(ui: &mut Ui, state: &mut AppState) {
         &[&current_name, &expected.label(tr("your format"))],
       );
       theme::status_line(ui, Severity::Warning, &text)
-        .on_hover_text(tr("Something changed spatial sound on this device (a Windows or driver update, another app). Switch it back in the Windows settings, or keep the new one."));
+        .on_hover_text(tr("Spatial sound on this device was changed (likely by a Windows or driver update, or another app). Switch it back in Windows settings, or keep the new setting."));
       if let Some(now) = state.spatial_format.clone()
         && ui.button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
           keep = Some(now);
@@ -271,8 +276,7 @@ fn status_pill(ui: &mut Ui, color: Color32, text: &str) -> egui::Response {
 fn master_switch(ui: &mut Ui, state: &mut AppState) {
   let on = state.output_eq.settings.enabled;
   let hint = tr(
-    "One switch for everything: headphone correction, game EQ and the microphone chain (echo cancellation, \
-     noise suppression, EQ, boost). OFF = what you would hear without this app.",
+    "Master switch for all processing: headphone correction, game EQ, and the microphone chain (echo cancellation, noise suppression, EQ, and boost). When off, audio sounds the same as without this app.",
   );
   let mut v = on;
   // The switch is what the user wants; whether Windows really runs it is the service's verdict.

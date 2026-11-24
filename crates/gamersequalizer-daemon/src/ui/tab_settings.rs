@@ -124,7 +124,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
       }
       ui.label(tr("Show the microphone level in the tray icon"));
     });
-    ui.label(theme::caption(tr("While an app records, the bars in the icon follow what others hear from you; only with microphone processing on. They stand still behind a full-screen app and while Windows keeps the icon among the hidden icons: drag it to the taskbar.")));
+    ui.label(theme::caption(tr("Animates the tray icon bars to match what others hear while an app is recording (requires microphone processing). Pauses during full-screen apps or when the icon is tucked in the Windows overflow menu — drag it onto the taskbar to keep it visible.")));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
       if ui
@@ -162,7 +162,7 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::SAVE, theme::palette(ui).text_secondary)), tr("Back up or move settings"));
     ui.label(theme::caption(tr(
-      "Saves profiles and settings into one file, e.g. before reinstalling Windows or for a new PC. Devices are found again by their names, also on another USB port. The audio effects are installed on each PC separately.",
+      "Saves all profiles and settings into a single file — handy before reinstalling Windows or moving to a new PC. Audio devices are matched by name even on a different USB port. Audio effects must still be installed on each PC separately.",
     )));
     let base_dir = state.storage.base_dir().to_path_buf();
     let t = &mut state.transfer_ui;
@@ -192,7 +192,7 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
       ui.label(theme::strong(tr("What goes into the file:"), 14.0));
       part_checkboxes(ui, parts);
       ui.label(theme::caption(tr(
-        "Sharing profiles with a friend? Keep only the profiles: their devices and microphone settings stay as they are.",
+        "Sharing profiles with a friend? Check only the profiles so their devices and microphone settings stay unchanged.",
       )));
       let only = selection(parts);
       let mut close = false;
@@ -230,7 +230,7 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
         ui,
         Severity::Warning,
         tr(
-          "Your current settings are backed up first. Checked settings are replaced, profiles with the same name too; everything else stays. The app closes and starts again.",
+          "Your current settings are backed up automatically first. Selected items and profiles with matching names will be replaced; everything else stays untouched. The app will restart afterward.",
         ),
       );
       let only = selection(parts);
@@ -310,7 +310,7 @@ fn uninstall_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::DELETE, theme::palette(ui).text_secondary)), tr("Uninstall from Windows"));
     ui.label(theme::caption(tr(
-      "Removes everything the app put into Windows: the microphone and output effects on all audio devices (administrator rights, audio stops for a few seconds), their backups, the app itself in Program Files, start with Windows and the notifications. Then the app exits.",
+      "Removes everything GamersEqualizer installed in Windows: microphone and output effects on all devices (requires administrator rights and briefly restarts audio), effect backups, the app in Program Files, startup entry, and notifications. The app then exits.",
     )));
     if !state.uninstall_ui.confirming {
       if ui.button(theme::with_icon(icons::DELETE, tr("Uninstall..."))).clicked() {

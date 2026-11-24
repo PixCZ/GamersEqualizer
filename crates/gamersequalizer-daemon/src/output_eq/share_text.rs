@@ -55,11 +55,11 @@ pub fn from_share_text(text: &str, max_slots: usize) -> Result<SharedPreset, Str
   let parsed = parse_parametric_eq(text)?;
   let mut notes = Vec::new();
   if parsed.skipped > 0 {
-    notes.push(trf("{} lines were not understood and are skipped.", &[&parsed.skipped]));
+    notes.push(trf("{} unrecognized lines were skipped.", &[&parsed.skipped]));
   }
   let mut bands = collapse_slopes(&parsed.bands);
   if slots_used(&bands) > max_slots {
-    notes.push(trf("Too many filters (room for {}): the last ones are dropped.", &[&max_slots]));
+    notes.push(trf("Too many filters (maximum is {}) — extra filters at the end were dropped.", &[&max_slots]));
     while slots_used(&bands) > max_slots {
       bands.pop();
     }

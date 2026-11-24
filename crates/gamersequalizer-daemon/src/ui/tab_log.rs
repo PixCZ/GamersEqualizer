@@ -136,7 +136,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
       let mut save_debug = app_log::debug_to_disk();
       if ui
         .checkbox(&mut save_debug, tr("Save debug to disk"))
-        .on_hover_text(tr("Also write detailed debug lines to the log file, e.g. every voice leveler change and why. Off: they are not recorded at all."))
+        .on_hover_text(tr("Write detailed diagnostic entries to the log file (such as every voice leveler adjustment and why it happened). When off, they are not recorded."))
         .changed()
       {
         app_log::set_debug_to_disk(save_debug);
@@ -149,8 +149,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
         open_folder();
       }
       let save = ui.button(theme::with_icon(icons::SAVE, tr("Save a copy to send"))).on_hover_text(tr(
-        "Copies the log into your Downloads folder and shows it there. The log itself sits in a hidden folder and \
-         keeps changing while the app runs, so a browser or a messenger may refuse to upload it.",
+        "Saves a snapshot of the log to your Downloads folder and reveals it there. The live log sits in a hidden folder and updates continuously, which can prevent browsers or chat apps from uploading it.",
       ));
       if save.clicked() {
         view.saved = Some(match save_copy() {

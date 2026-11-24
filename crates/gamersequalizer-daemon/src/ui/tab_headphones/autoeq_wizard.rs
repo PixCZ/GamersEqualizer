@@ -49,8 +49,7 @@ pub(super) fn wizard(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     });
   });
   ui.label(theme::caption(tr(
-    "AutoEQ is a free database of measured corrections for thousands of headphones. This app never goes \
-     online itself: you download the file in your browser, the app finds it and checks it.",
+    "AutoEQ is a free database of measured corrections for thousands of headphones. GamersEqualizer never connects to the internet — download the file in your browser, and the app will locate and verify it.",
   )));
   ui.add_space(8.0);
   match step {
@@ -221,7 +220,7 @@ fn step_zip_folder(ui: &mut Ui, state: &mut AppState) {
 fn step_pick(ui: &mut Ui, state: &mut AppState) {
   ui.label(theme::strong(tr("Step 3 of 3: find your model"), 14.0));
   ui.label(theme::caption(tr(
-    "Several results per model = different measurements; oratory1990 or crinacle are a good first choice.",
+    "Multiple results for the same model mean different measurements — oratory1990 or crinacle are usually great starting points.",
   )));
   ui.horizontal(|ui| {
     ui.label(tr("Search:"));
@@ -424,7 +423,9 @@ fn review_file(state: &mut AppState, path: &Path, name: Option<&str>, back: Step
     file_name.trim_end_matches(".txt").trim_end_matches(" ParametricEQ").trim_end_matches(" FixedBandEQ").to_string();
   let too_big = std::fs::metadata(path).map(|m| m.len()).ok().filter(|&len| len > MAX_EQ_FILE_BYTES);
   let read = match too_big {
-    Some(len) => Err(trf("{} kB is far too big for an EQ file; pick the ParametricEQ.txt", &[&(len / 1024)])),
+    Some(len) => {
+      Err(trf("{} kB is too large for an EQ file — make sure you picked a ParametricEQ.txt file.", &[&(len / 1024)]))
+    }
     None => std::fs::read_to_string(path).map_err(|e| e.to_string()),
   };
   match read {
