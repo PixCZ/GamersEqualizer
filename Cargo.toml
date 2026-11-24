@@ -62,7 +62,9 @@ serde_json = "1.0"
 # Library only: default features build the CLI (clap, hound, dasp: ~27 crates).
 nnnoiseless = { version = "0.5", default-features = false }
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu"] }
-egui = "0.37"
+# Since 0.37 the bundled emoji fonts are a separate feature; `theme::with_icon` (icon buttons) and the
+# fallback without Segoe Fluent Icons draw emoji, which render as empty squares without it.
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 # Same wgpu eframe 0.37 uses (egui-wgpu turns its default features off); only adds the DX12 backend.
 wgpu = { version = "30", default-features = false, features = ["dx12"] }
 egui_plot = "0.38"

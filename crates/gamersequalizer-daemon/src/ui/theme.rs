@@ -55,7 +55,7 @@ pub mod icons {
   pub const SETTINGS: Icon = Icon { glyph: '\u{E713}', emoji: "⚙" };
   pub const LOCK: Icon = Icon { glyph: '\u{E72E}', emoji: "🔒" };
   pub const UNLOCK: Icon = Icon { glyph: '\u{E785}', emoji: "🔓" };
-  pub const POWER: Icon = Icon { glyph: '\u{E7E8}', emoji: "⏻" };
+  pub const POWER: Icon = Icon { glyph: '\u{E7E8}', emoji: "🔌" };
   pub const CLOSE: Icon = Icon { glyph: '\u{E8BB}', emoji: "✖" };
   pub const INFO: Icon = Icon { glyph: '\u{E946}', emoji: "ℹ" };
   pub const WARNING: Icon = Icon { glyph: '\u{E7BA}', emoji: "⚠" };
@@ -63,7 +63,7 @@ pub mod icons {
   pub const CHECK: Icon = Icon { glyph: '\u{E73E}', emoji: "✔" };
   pub const GLOBE: Icon = Icon { glyph: '\u{E774}', emoji: "🌐" };
   pub const COLOR: Icon = Icon { glyph: '\u{E790}', emoji: "🎨" };
-  pub const EQUALIZER: Icon = Icon { glyph: '\u{E9E9}', emoji: "🎚" };
+  pub const EQUALIZER: Icon = Icon { glyph: '\u{E9E9}', emoji: "📶" };
   pub const DELETE: Icon = Icon { glyph: '\u{E74D}', emoji: "🗑" };
   pub const SAVE: Icon = Icon { glyph: '\u{E74E}', emoji: "💾" };
   pub const OPEN: Icon = Icon { glyph: '\u{E838}', emoji: "📂" };
@@ -74,6 +74,13 @@ pub mod icons {
   pub const BACK: Icon = Icon { glyph: '\u{E72B}', emoji: "◀" };
   pub const FORWARD: Icon = Icon { glyph: '\u{E72A}', emoji: "▶" };
   pub const DOWN: Icon = Icon { glyph: '\u{E74B}', emoji: "⬇" };
+
+  #[cfg(test)]
+  pub const ALL: &[Icon] = &[
+    VOLUME, MUTE, HEADPHONES, SPEAKERS, GAME, CHAT, MEDIA, MIC, CHATMIX, LOG, SETTINGS, LOCK, UNLOCK, POWER, CLOSE,
+    INFO, WARNING, ERROR, CHECK, GLOBE, COLOR, EQUALIZER, DELETE, SAVE, OPEN, ADD, COPY, IMPORT, RESET, BACK, FORWARD,
+    DOWN,
+  ];
 }
 
 /// Message severity of an info bar / status text.
@@ -778,5 +785,52 @@ pub struct Toggle<'a>(pub &'a mut bool);
 impl Widget for Toggle<'_> {
   fn ui(self, ui: &mut Ui) -> Response {
     toggle(ui, self.0)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use egui::epaint::text::{Fonts, TextOptions};
+  use std::path::{Path, PathBuf};
+
+  /// An empty square in the window is a character no loaded font has: a Fluent glyph, an emoji
+  /// stand-in (`with_icon` draws them in plain text, so every icon button) or a symbol in a UI text.
+  #[test]
+  fn every_icon_and_ui_symbol_has_a_glyph() {
+    let mut f = Fonts::new(TextOptions::default(), fonts());
+    let icon_font = FontId::new(16.0, FontFamily::Name("icons".into()));
+    let text = FontId::proportional(14.0);
+    let mut missing = Vec::new();
+    for i in icons::ALL {
+      if ICON_FONT.load(Ordering::Relaxed) && !f.has_glyph(&icon_font, i.glyph) {
+        missing.push(format!("Fluent glyph U+{:04X}", i.glyph as u32));
+      }
+      missing.extend(i.emoji.chars().filter(|&c| !f.has_glyph(&text, c)).map(|c| format!("emoji {c}")));
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src.join("i18n_cs.rs")];
+    collect_rs(&src.join("ui"), &mut files);
+    for file in files {
+      let body = std::fs::read_to_string(&file).unwrap();
+      for c in body.chars().filter(|c| !c.is_ascii()) {
+        if !f.has_glyph(&text, c) {
+          missing.push(format!("{c} in {}", file.display()));
+        }
+      }
+    }
+    missing.dedup();
+    assert!(missing.is_empty(), "no font has: {missing:?}");
+  }
+
+  fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        collect_rs(&path, out);
+      } else if path.extension().is_some_and(|e| e == "rs") {
+        out.push(path);
+      }
+    }
   }
 }
