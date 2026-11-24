@@ -360,7 +360,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
     ui.add_space(4.0);
     if let (true, Some(h)) = (auto_on, state.shm_header()) {
       ui.horizontal(|ui| {
-        ui.label(theme::strong(tr("Strength:"), 15.0));
+        ui.label(theme::strong(tr("Strength:"), 14.0));
         ui.add_space(12.0);
         super::tab_headphones::strength_row(ui, h, 280.0);
       });
@@ -545,7 +545,7 @@ fn render_strip(
           theme::slider_sized(ui, Vec2::new(26.0, strip.fader_h), fader);
         }
 
-        ui.label(theme::strong(theme::volume_text(*volume), 15.0));
+        ui.label(theme::strong(theme::volume_text(*volume), 14.0));
 
         let (mute_text, mute_color) = if *is_muted {
           (theme::with_icon(icons::MUTE, tr("Muted")), p.err)

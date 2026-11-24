@@ -205,9 +205,12 @@ fn step_zip_folder(ui: &mut Ui, state: &mut AppState) {
     }
   });
   if let Some(msg) = state.headphones_ui.message.as_deref() {
-    let (sev, text) = match msg.strip_prefix("✔ ") {
-      Some(clean) => (Severity::Success, clean),
-      None => (Severity::Warning, msg),
+    let (sev, text) = if state.headphones_ui.scanning.is_some() {
+      (Severity::Info, msg)
+    } else if let Some(clean) = msg.strip_prefix("✔ ") {
+      (Severity::Success, clean)
+    } else {
+      (Severity::Warning, msg)
     };
     theme::status_line(ui, sev, text);
   }

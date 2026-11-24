@@ -926,7 +926,7 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
         let mut r = layout.other_fix_rect();
         r.left += layout.px(GAP);
         r.right -= layout.px(GAP);
-        text(dc, label, r, fonts.regular, p.text, DT_CENTER);
+        text(dc, label, r, fonts.button, p.text, DT_CENTER);
       }
       if layout.issues > 1 {
         let mut more = layout.more_rect();

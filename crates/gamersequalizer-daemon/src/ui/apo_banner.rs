@@ -173,7 +173,7 @@ pub fn render_health_bar(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudio
       }
     }
     if let Some(msg) = state.apo_banner.message.as_deref() {
-      ui.label(theme::caption(msg));
+      theme::status_line(ui, Severity::Error, msg);
     }
   });
   ui.add_space(6.0);
@@ -308,7 +308,7 @@ pub fn render_apo_status_line(ui: &mut Ui, state: &mut AppState) {
     recheck(state);
   }
   if let Some(msg) = state.apo_banner.message.as_deref() {
-    ui.label(theme::caption(msg));
+    theme::status_line(ui, Severity::Error, msg);
   }
 }
 

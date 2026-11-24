@@ -480,7 +480,8 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
     let hovered = response.hovered();
     let radius = pill.height() / 2.0;
     let (fill, stroke, knob) = if *on {
-      let fill = if hovered { p.accent_fill.lerp_to_gamma(Color32::BLACK, 0.1) } else { p.accent_fill };
+      let target = if p.dark { p.card } else { p.text };
+      let fill = if hovered { p.accent_fill.lerp_to_gamma(target, 0.15) } else { p.accent_fill };
       (fill, Stroke::NONE, p.on_accent)
     } else {
       let fill = if hovered { p.nav_hover } else { Color32::TRANSPARENT };

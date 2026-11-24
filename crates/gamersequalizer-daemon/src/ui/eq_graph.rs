@@ -34,7 +34,6 @@ const DOT_COLORS: [Color32; 8] = [
   Color32::from_rgb(65, 210, 180),
   Color32::from_rgb(255, 120, 100),
 ];
-const DISABLED_COLOR: Color32 = Color32::from_gray(110);
 
 /// Pixel <-> (frequency, dB) mapping of the plot area.
 struct Axes {
@@ -208,14 +207,14 @@ fn graph(
   }
   if let Some(band) = selected.and_then(|i| bands.get(i)).filter(|b| b.enabled) {
     let own = evaluate_bands_response(std::slice::from_ref(band), &freqs, SAMPLE_RATE);
-    let c = theme::adapt(ui, dot_color(selected.unwrap_or(0), band));
+    let c = dot_color(ui, selected.unwrap_or(0), band);
     clip.add(Shape::line(axes.curve_points(&freqs, &own), Stroke::new(1.2_f32, c)));
   }
   let total = evaluate_bands_response(bands, &freqs, SAMPLE_RATE);
   clip.add(Shape::line(axes.curve_points(&freqs, &total), Stroke::new(2.4_f32, color)));
 
   for (i, band) in bands.iter().enumerate() {
-    let c = theme::adapt(ui, dot_color(i, band));
+    let c = dot_color(ui, i, band);
     let center = axes.dot_pos(band);
     let is_sel = *selected == Some(i);
     let radius = if is_sel || hovered == Some(i) { DOT_RADIUS + 2.0 } else { DOT_RADIUS };
@@ -257,7 +256,7 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
     for (i, band) in bands.iter().enumerate() {
       let is_selected = *selected == Some(i);
       let mut job = egui::text::LayoutJob::default();
-      let bullet_color = if is_selected { pal.on_accent } else { theme::adapt(ui, dot_color(i, band)) };
+      let bullet_color = if is_selected { pal.on_accent } else { dot_color(ui, i, band) };
       let text_color = if is_selected { pal.on_accent } else { pal.text };
       let bullet = if band.enabled { "● " } else { "○ " };
       job.append(bullet, 0.0, egui::text::TextFormat::simple(font.clone(), bullet_color));
@@ -286,7 +285,7 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
 /// Settings of one filter. `room` = slots this filter may take. Sets `remove` on 🗑.
 fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, remove: &mut bool) -> bool {
   let mut changed = false;
-  let c = theme::adapt(ui, dot_color(i, band));
+  let c = dot_color(ui, i, band);
   theme::inset_frame(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
     ui.set_width(ui.available_width());
     ui.horizontal_wrapped(|ui| {
@@ -457,11 +456,11 @@ fn bands_without(bands: &[BiquadBand], skip: usize) -> Vec<BiquadBand> {
   bands.iter().enumerate().filter(|&(i, _)| i != skip).map(|(_, b)| b.clone()).collect()
 }
 
-fn dot_color(i: usize, band: &BiquadBand) -> Color32 {
+fn dot_color(ui: &Ui, i: usize, band: &BiquadBand) -> Color32 {
   if !band.enabled {
-    return DISABLED_COLOR;
+    return theme::palette(ui).text_secondary;
   }
-  DOT_COLORS.get(i % DOT_COLORS.len()).copied().unwrap_or(Color32::WHITE)
+  theme::adapt(ui, DOT_COLORS.get(i % DOT_COLORS.len()).copied().unwrap_or(Color32::WHITE))
 }
 
 /// High-contrast label color (white or near-black) over `bg`, by WCAG relative luminance.
