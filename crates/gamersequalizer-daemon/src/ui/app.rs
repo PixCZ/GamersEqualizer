@@ -12,9 +12,12 @@ const DAEMON_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Windows volumes / mic peak are read this often, not every frame (each read is an RPC into
 /// the audio service). 10 Hz keeps the meters moving.
 const SYSTEM_SYNC_INTERVAL: Duration = Duration::from_millis(100);
-/// Frame interval while visible (meters), and while minimized (nothing to show; the game
-/// detection and the watchdog still run).
-const FRAME_INTERVAL: Duration = Duration::from_millis(30);
+/// Frame intervals: smooth meters while focused, slower meters when unfocused (behind a game or
+/// on a second monitor), slow polling on static tabs (user input still repaints at once), and
+/// minimal tick while minimized (game detection and watchdog still run).
+const METER_FRAME_INTERVAL: Duration = Duration::from_millis(30);
+const UNFOCUSED_METER_INTERVAL: Duration = Duration::from_millis(125);
+const STATIC_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 const MINIMIZED_FRAME_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct GamersEqualizerApp {
@@ -55,7 +58,8 @@ impl eframe::App for GamersEqualizerApp {
       let auto = h.mic_auto_gain_permille.load(std::sync::atomic::Ordering::Relaxed);
       self.win_audio.chatmix.mic_hw_auto = (auto > 0).then(|| auto as f32 / 1000.0);
     }
-    let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+    let (minimized, focused) =
+      ctx.input(|i| (i.viewport().minimized.unwrap_or(false), i.viewport().focused.unwrap_or(true)));
     let sync_due = !minimized && self.synced_at.is_none_or(|t| t.elapsed() >= SYSTEM_SYNC_INTERVAL);
     if sync_due {
       self.synced_at = Some(Instant::now());
@@ -210,14 +214,22 @@ impl eframe::App for GamersEqualizerApp {
       }
     });
 
-    // Continuous repaint for smooth meters while visible; minimized (or behind a fullscreen
-    // game, which minimizes it) a slow tick is enough.
-    ctx.request_repaint_after(if minimized { MINIMIZED_FRAME_INTERVAL } else { FRAME_INTERVAL });
+    ctx.request_repaint_after(frame_interval(self.state.active_tab, minimized, focused));
     self.window.observe(ctx);
   }
 
   fn on_exit(&mut self) {
     self.window.save();
     self.state.save_pending(false);
+  }
+}
+
+fn frame_interval(tab: ActiveTab, minimized: bool, focused: bool) -> Duration {
+  let has_meters = matches!(tab, ActiveTab::Mixer | ActiveTab::Mic | ActiveTab::Sidetone);
+  match (minimized, has_meters, focused) {
+    (true, _, _) => MINIMIZED_FRAME_INTERVAL,
+    (false, true, true) => METER_FRAME_INTERVAL,
+    (false, true, false) => UNFOCUSED_METER_INTERVAL,
+    (false, false, _) => STATIC_FRAME_INTERVAL,
   }
 }

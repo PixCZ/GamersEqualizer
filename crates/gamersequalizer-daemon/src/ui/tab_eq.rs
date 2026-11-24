@@ -405,7 +405,10 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
   });
 
   theme::card(ui, |ui| {
-    let (result, preamp, peak) = state.output_eq.bus_result(bus);
+    let (hp_curve, combined, preamp, peak) = {
+      let (result, preamp, peak) = state.output_eq.bus_result(bus);
+      (result.layer_a_curve.gains_db.clone(), result.combined_curve.gains_db.clone(), preamp, peak)
+    };
     if state.output_eq.bus_profile(bus).is_some() {
       volume_row(ui, state, layer, Some((preamp, peak)));
       ui.add_space(4.0);
@@ -413,7 +416,6 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
     let mut changed = false;
 
     // Graph: this profile (editable dots) over the headphone correction and the sum.
-    let (hp_curve, combined) = (result.layer_a_curve.gains_db.clone(), result.combined_curve.gains_db.clone());
     let height = super::eq_editor::plot_height(ui, 0.3, 160.0, 400.0);
     if let Some(p) = state.output_eq.bus_profile_mut(bus) {
       let background = [

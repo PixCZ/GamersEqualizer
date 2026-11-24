@@ -22,10 +22,27 @@ fn average_gain(result: &CombinedEngineResult) -> f32 {
 
 impl OutputEq {
   /// Headphone + channel profile curves, volume change and peak after it, i.e. what a
-  /// paired chat/media app sounds like.
-  pub fn bus_result(&self, bus: StreamBus) -> (CombinedEngineResult, f32, f32) {
-    let (hp, own) = self.bus_layers(bus);
-    self.volume_change(hp, own)
+  /// paired chat/media app sounds like. Cached per channel until the next `recompute`.
+  pub fn bus_result(&mut self, bus: StreamBus) -> (&CombinedEngineResult, f32, f32) {
+    let missing = match bus {
+      StreamBus::Chat => self.chat_result.is_none(),
+      StreamBus::Media => self.media_result.is_none(),
+      _ => return (&self.result, self.preamp_db, self.peak_after_db),
+    };
+    if missing {
+      let (hp, own) = self.bus_layers(bus);
+      let computed = self.volume_change(hp, own);
+      if bus == StreamBus::Chat {
+        self.chat_result = Some(computed);
+      } else {
+        self.media_result = Some(computed);
+      }
+    }
+    let cached = if bus == StreamBus::Chat { self.chat_result.as_ref() } else { self.media_result.as_ref() };
+    match cached {
+      Some((result, preamp, peak)) => (result, *preamp, *peak),
+      None => (&self.result, self.preamp_db, self.peak_after_db),
+    }
   }
 
   /// Recompute curves and publish the combined EQ + master switch.
@@ -46,14 +63,15 @@ impl OutputEq {
       warn!("[OutputEq] {} filter stages, only the first {MAX_OUT_EQ_BANDS} are applied", bands.len());
       bands.truncate(MAX_OUT_EQ_BANDS);
     }
-    let preamp = if s.enabled { self.preamp_db } else { 0.0 };
-    h.master_bypass.store(!s.enabled, Ordering::Relaxed);
+    let enabled = s.enabled;
+    let preamp = if enabled { self.preamp_db } else { 0.0 };
+    h.master_bypass.store(!enabled, Ordering::Relaxed);
     h.write_out_eq(&bands, preamp);
 
     // The stream EQ undoes exactly the game stages the output APO got.
     let game_applied = bands.get(hp.len()..).unwrap_or_default();
     for (bus, slot) in StreamBus::WITH_EQ.iter().zip(&h.stream_eq) {
-      let (stages, bus_preamp) = if s.enabled { self.stream_eq(*bus, game_applied, preamp) } else { (Vec::new(), 0.0) };
+      let (stages, bus_preamp) = if enabled { self.stream_eq(*bus, game_applied, preamp) } else { (Vec::new(), 0.0) };
       slot.write(&stages, bus_preamp);
     }
   }
@@ -72,6 +90,8 @@ impl OutputEq {
     let game = if s.enabled && s.game_enabled { self.game_profile() } else { None };
     let (result, preamp, peak) = self.volume_change(hp, game);
     (self.result, self.preamp_db, self.peak_after_db) = (result, preamp, peak);
+    self.chat_result = None;
+    self.media_result = None;
   }
 
   /// Curves of `hp` + `layer`, their volume change (automatic preamp, safe or
@@ -106,8 +126,8 @@ impl OutputEq {
 
   /// Stream EQ of a chat/media stream: its own profile, then the game stages undone; the
   /// preamp turns the output's volume change into the channel's own.
-  fn stream_eq(&self, bus: StreamBus, game_applied: &[BiquadBand], out_preamp_db: f32) -> (Vec<BiquadBand>, f32) {
-    let (hp, own) = self.bus_layers(bus);
+  fn stream_eq(&mut self, bus: StreamBus, game_applied: &[BiquadBand], out_preamp_db: f32) -> (Vec<BiquadBand>, f32) {
+    let (_, own) = self.bus_layers(bus);
     let mut stages: Vec<BiquadBand> =
       expand_slopes(&own.map(|p| p.bands.clone()).unwrap_or_default()).into_iter().filter(|b| b.enabled).collect();
     stages.extend(invert_bands(game_applied));
@@ -115,7 +135,7 @@ impl OutputEq {
       warn!("[OutputEq] {bus:?} stream EQ: {} stages, only the first {MAX_STREAM_EQ_BANDS} are applied", stages.len());
       stages.truncate(MAX_STREAM_EQ_BANDS);
     }
-    let own_preamp = self.volume_change(hp, own).1;
+    let own_preamp = self.bus_result(bus).1;
     (stages, own_preamp - out_preamp_db)
   }
 }

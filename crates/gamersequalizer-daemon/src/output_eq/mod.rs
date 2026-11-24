@@ -83,6 +83,8 @@ impl OutputLayer {
   }
 }
 
+type BusResult = (CombinedEngineResult, f32, f32);
+
 pub struct OutputEq {
   storage: ProfileStorage,
   settings_path: PathBuf,
@@ -101,6 +103,9 @@ pub struct OutputEq {
   pub preamp_db: f32,
   /// Highest level of the combined curve after the preamp; > 0 = the limiter works.
   pub peak_after_db: f32,
+  /// Cached `(result, preamp_db, peak_after_db)` for Chat / Media, cleared on `recompute` / `reload`.
+  chat_result: Option<BusResult>,
+  media_result: Option<BusResult>,
   /// (pid, full path) of the active game; only the detection owner tracks it.
   tracked: Option<(u32, String)>,
   /// This process decides the active game (set by `tick` / `on_foreground`).
@@ -132,6 +137,8 @@ impl OutputEq {
       result: compute_combined_engine(&[], &[], 48_000.0),
       preamp_db: 0.0,
       peak_after_db: 0.0,
+      chat_result: None,
+      media_result: None,
       tracked: None,
       is_owner: false,
       last_alive_check: Instant::now(),
@@ -160,6 +167,8 @@ impl OutputEq {
       *self.layer_profiles_mut(layer) = self.storage.load_layer_profiles(layer);
     }
     self.facts_cache.clear();
+    self.chat_result = None;
+    self.media_result = None;
   }
 }
 

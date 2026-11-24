@@ -77,7 +77,7 @@ pub fn spawn(running: Arc<AtomicBool>) -> Option<std::thread::JoinHandle<()>> {
         // The open window shows the mirrored telemetry and its EQ edits reach the APO through
         // here (one sync per tick at the sync rate): not idle then.
         let busy = reference.tick(&shm, &mut apo);
-        let busy = busy.or_else(|| crate::tray::find_window().map(|_| ("window open", SYNC_INTERVAL)));
+        let busy = busy.or_else(|| crate::tray::window_visible().then_some(("window open", SYNC_INTERVAL)));
         idle_log.idle("reference thread", busy);
         // Known limit: when an app opens the mic, the echo canceller gets its reference one tick
         // after the DSP watch sees its telemetry, plus one sync (100 ms): ~100-200 ms, from idle

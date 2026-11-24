@@ -517,7 +517,7 @@ pub(super) fn run_background_daemon() {
     let duck_playing = header.is_some_and(|h| h.duck_enabled.load(Ordering::Relaxed))
       && win_audio::stream_router::game_session_playing();
     let busy = win_audio::worker::busy_reason(&[
-      (timed!(sections, "find_window", tray::find_window().is_some()), "window open", win_audio::worker::TICK),
+      (timed!(sections, "find_window", tray::window_visible()), "window open", win_audio::worker::TICK),
       (duck_playing, "Automatic ChatMix with a game playing", win_audio::worker::TICK),
     ]);
     let was_idle = std::mem::replace(&mut idle, idle_log.idle("service loop", busy));
