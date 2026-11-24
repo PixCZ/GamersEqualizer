@@ -842,8 +842,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Sensitivity", "Citlivost"),
   ("Reset to 100 %", "Vrátit na 100 %"),
   (
-    "With the voice leveler enabled, this sets how loud you sound to others (100 % = target loudness, 50 % = 6 dB quieter). The Windows input level only keeps the signal clean; the app adjusts it automatically when the mic clips or is too quiet.",
-    "Se zapnutým vyrovnáním hlasitosti určuje, jak hlasitě vás uslyší ostatní (100 % = cílová hlasitost, 50 % = o 6 dB tišeji). Vstupní úroveň Windows jen udržuje čistý signál: aplikace ji sama upraví, když je mikrofon přebuzený nebo příliš tichý.",
+    "With the voice leveler enabled, this is only the mic's input sensitivity: the leveler evens it out, so others hear you at the leveler's target whatever this is set to. The app lowers or raises it on its own when the mic clips or is too quiet.",
+    "Se zapnutým vyrovnáním hlasitosti je to jen citlivost vstupu mikrofonu: vyrovnání ji srovná, takže vás ostatní slyší na cílové hlasitosti, ať je tady nastaveno cokoli. Když je mikrofon přebuzený nebo příliš tichý, aplikace ji sama sníží nebo zvýší.",
   ),
   ("Windows input level set automatically: {} %", "Vstupní úroveň Windows nastavena automaticky: {} %"),
   (

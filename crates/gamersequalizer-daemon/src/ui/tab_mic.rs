@@ -230,7 +230,7 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
     let leveler = state.shm_header().map(|h| (h.mic_leveler_enabled.load(r), h.mic_auto_gain_permille.load(r)));
     let caption = match leveler {
       Some((true, _)) => tr(
-        "With the voice leveler enabled, this sets how loud you sound to others (100 % = target loudness, 50 % = 6 dB quieter). The Windows input level only keeps the signal clean; the app adjusts it automatically when the mic clips or is too quiet.",
+        "With the voice leveler enabled, this is only the mic's input sensitivity: the leveler evens it out, so others hear you at the leveler's target whatever this is set to. The app lowers or raises it on its own when the mic clips or is too quiet.",
       ),
       _ => {
         tr("0 %–100 % adjusts the Windows input level. 100 %–300 % adds a soft-limited digital boost up to +9.5 dB.")

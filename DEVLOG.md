@@ -3811,3 +3811,24 @@ sidetone noise mode picked while an app records). The running build has
   (no rounded corners, no system border) was not checked.
 - Tests: `mixer_edits.rs`, `flyout.rs`, `flyout/paint.rs`, `app_channels.rs`, `chatmix/mod.rs`; on
   the Mac only clippy for the Windows target, the tests run in CI.
+
+## Milestone 69: With the leveler on, only its target sets how loud others hear you (2026-11-24)
+
+Milestone 23 applied the mic volume (0..100 %) again after the leveler, as an output volume, so an
+app's own gain control would see its change and settle. In use that made the mic slider a hidden
+second loudness control nobody expects next to the leveler's target:
+
+- Log 2026-11-22 08:27: 80 ms after an output pick in the tray flyout the mic row went 50 -> 26 %
+  (the pick or a slider press, the log cannot tell), about -6 dB for others until a reinstall.
+- Log 2026-11-24 17:33 and 21:03: the Windows mic volume moved 26 -> 40 -> 29 % in small steps (an
+  app's gain control or the Windows slider); the wish followed and others heard -3 dB.
+- The automatic input gain was off all the time (`automatic level off`); the leveler compensated the
+  input each time ("compensated") and stage 5 then took it out again. The DSP itself is byte-identical
+  between 0.3.2 and 0.4.0 and only gained the volume ramp since.
+
+Now stage 5 applies the volume only without the leveler (a boost above 100 %). With it the Windows
+volume sits before the APO (Milestone 23) and is purely input sensitivity, which the leveler takes out.
+Limit: an app's analog gain control (Teams, Zoom, Chrome/WebRTC) no longer hears its own steps and may
+walk the Windows volume to an end; on a hardware volume the automatic input gain backs off after such a
+foreign change (`COOLDOWN_CLIP`, 3 s), and an app that keeps stepping can keep it waiting. Tests:
+`test_mic_volume_reaches_the_output_only_without_the_leveler`, the gamer chain golden recalibrated (G2).

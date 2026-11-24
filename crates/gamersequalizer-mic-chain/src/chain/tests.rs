@@ -280,16 +280,17 @@ fn test_whole_chain_output_stays_the_same() {
 }
 
 /// The whole chain as a gamer runs it, which the test above does not reach: DeepFilterNet 75 %,
-/// gate auto, leveler on at -24 dBFS, the Windows mic at 30 % (moved to 50 % once, the ramp), a
-/// voice EQ with a steep low cut, AEC with an echo. Energy per second must stay what it was, and
+/// gate auto, leveler on at -24 dBFS, the Windows mic at 30 % (moved to 50 % once, which must change
+/// nothing), a voice EQ with a steep low cut, AEC with an echo. Energy per second must stay what it was, and
 /// every word onset must reach the output one chain latency later, not cut against the word.
 #[test]
 fn test_gamer_chain_output_and_word_onsets_stay_the_same() {
   use crate::ai_denoiser::tests::read_wav_48k;
   const SECONDS: usize = 8;
   const ECHO_DELAY: usize = 960;
-  // G1 (2026-11-24): first values.
-  const EXPECTED: [f64; SECONDS] = [0.00031116, 4.9425, 2.9742, 4.2844, 9.1842, 42.469, 14.043, 14.466];
+  // G1 (2026-11-24): first values. G2 (2026-11-24): the mic volume no longer applies after the
+  // leveler, so seconds 1-4 rose by (1 / 0.3)^2 and 5-7 by (1 / 0.5)^2, nothing else moved.
+  const EXPECTED: [f64; SECONDS] = [0.0034573, 54.917, 33.046, 47.605, 102.05, 170.05, 56.172, 57.862];
   // Onset cut measured -2.0 .. +3.5 dB; a gate or model opening 10-30 ms late cuts tens of dB.
   const MAX_ONSET_CUT_DB: f32 = 6.0;
   let speech = read_wav_48k("speech_clean.wav");
@@ -379,6 +380,33 @@ fn test_gamer_chain_output_and_word_onsets_stay_the_same() {
   for (second, (got, want)) in energy.iter().zip(EXPECTED).enumerate() {
     assert!((got - want).abs() <= 1e-3 * want.abs().max(1e-6), "second {second}: {got} vs {want}");
   }
+}
+
+/// With the leveler on, its target alone sets how loud others hear you: the mic volume (moved by
+/// hand, by an app's gain control or in the tray) only sets the input, which the leveler takes out.
+/// Without the leveler a boost above 100 % still applies.
+#[test]
+fn test_mic_volume_reaches_the_output_only_without_the_leveler() {
+  use crate::ai_denoiser::tests::read_wav_48k;
+  let speech = read_wav_48k("speech_clean.wav");
+  let input = &speech[..speech.len().min(3 * 48_000) / FRAME_480 * FRAME_480];
+  let run = |leveler: bool, volume: u32| {
+    let mut p = chain_with_reference(&format!("volume_{leveler}_{volume}"), &noise(4_800, 4));
+    p.test_overrides = None; // they pin the volume to 100 %
+    {
+      let h = p.shm_header().expect("mapping");
+      h.denoise_model.store(DenoiseModel::RnNoise.to_u32(), Ordering::Relaxed);
+      h.mic_leveler_enabled.store(leveler, Ordering::Relaxed);
+      h.mic_volume_permille.store(volume, Ordering::Relaxed);
+    }
+    let mut out = vec![0.0f32; input.len()];
+    for (i, o) in input.chunks(FRAME_480).zip(out.chunks_mut(FRAME_480)) {
+      p.process_timed(&[i], &mut [o], None);
+    }
+    out
+  };
+  assert!(run(true, 300) == run(true, 1000), "leveler on: the mic volume must not reach the output");
+  assert!(run(false, 2000) != run(false, 1000), "leveler off: the boost above 100 % still applies");
 }
 
 /// "Learn again" blocks the saved level until the daemon clears it; a level it saves after that
