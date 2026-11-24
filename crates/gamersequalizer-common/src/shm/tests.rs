@@ -336,19 +336,20 @@ fn reference_source_fields_default_to_none_and_mirror() {
 fn ducking_controls_default_and_mirror_but_not_the_reduction() {
   let (daemon, apo) = (ShmHeader::default(), ShmHeader::default());
   let r = Ordering::Relaxed;
-  assert!(!daemon.duck_enabled.load(r));
+  assert!(daemon.duck_enabled.load(r));
   assert_eq!(
     [&daemon.duck_strength_permille, &daemon.duck_game_gain_permille, &daemon.duck_chat_gain_permille]
       .map(|a| a.load(r)),
     [500, 1000, 1000]
   );
-  daemon.duck_enabled.store(true, r);
+  // Off is what must travel: a fresh header is on.
+  daemon.duck_enabled.store(false, r);
   daemon.duck_strength_permille.store(900, r);
   daemon.duck_game_gain_permille.store(300, r);
   daemon.duck_chat_gain_permille.store(800, r);
   daemon.duck_reduction_permille.store(400, r);
   apo.copy_controls_from(&daemon, &mut CopiedEqVersions::default());
-  assert!(apo.duck_enabled.load(r));
+  assert!(!apo.duck_enabled.load(r));
   assert_eq!(
     [&apo.duck_strength_permille, &apo.duck_game_gain_permille, &apo.duck_chat_gain_permille].map(|a| a.load(r)),
     [900, 300, 800]

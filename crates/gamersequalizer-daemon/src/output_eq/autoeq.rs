@@ -95,7 +95,9 @@ pub fn check_file(text: &str, file_name: &str) -> (Option<ParsedEq>, Vec<Check>)
     return (None, checks);
   }
   if lower_name.contains("fixedbandeq") {
-    let msg = tr("This is the FixedBandEQ variant (10 fixed bands, less precise). The ParametricEQ file fits better.");
+    let msg = tr(
+      "This is the FixedBandEQ variant (10 fixed bands, less precise). Download the ParametricEQ file for better accuracy.",
+    );
     push(&mut checks, CheckLevel::Warning, msg.to_string());
   }
   let parsed = match parse_parametric_eq(text) {
@@ -130,12 +132,12 @@ pub fn check_file(text: &str, file_name: &str) -> (Option<ParsedEq>, Vec<Check>)
     push(
       &mut checks,
       CheckLevel::Warning,
-      trf("{} lines were not understood and are skipped (unknown filter type).", &[&parsed.skipped]),
+      trf("{} unrecognized lines were skipped (unknown filter type).", &[&parsed.skipped]),
     );
   }
   if parsed.bands.len() > MAX_HEADPHONE_BANDS {
     let msg = trf(
-      "{} filters is a lot: together with a game profile only 32 fit, the rest is dropped.",
+      "{} filters is quite a lot — combined with a game profile, only 32 filters fit and the rest are dropped.",
       &[&parsed.bands.len()],
     );
     push(&mut checks, CheckLevel::Warning, msg);
@@ -149,7 +151,7 @@ pub fn check_file(text: &str, file_name: &str) -> (Option<ParsedEq>, Vec<Check>)
   }
   if parsed.preamp_db != 0.0 && (parsed.preamp_db + max_boost).abs() > PREAMP_TOLERANCE_DB {
     let msg = trf(
-      "The file's preamp ({} dB) does not match its filters; it may have been edited. The app uses its own preamp.",
+      "The file's preamp ({} dB) does not match its filters and may have been edited. The app will calculate its own preamp instead.",
       &[&format!("{:.1}", parsed.preamp_db)],
     );
     push(&mut checks, CheckLevel::Warning, msg);
@@ -364,7 +366,7 @@ Filter 5: ON XYZ Fc 10 Hz\r\n";
     assert!(parsed.is_some());
     assert!(checks.iter().all(|c| c.level != CheckLevel::Error));
     assert!(checks.iter().any(|c| c.text.contains("3 filters")));
-    assert!(checks.iter().any(|c| c.text.contains("not understood")), "the XYZ line is reported");
+    assert!(checks.iter().any(|c| c.text.contains("unrecognized")), "the XYZ line is reported");
 
     let (parsed, checks) = check_file("GraphicEQ: 20 -1.2; 21 -1.1", "HD 600 GraphicEQ.txt");
     assert!(parsed.is_none());

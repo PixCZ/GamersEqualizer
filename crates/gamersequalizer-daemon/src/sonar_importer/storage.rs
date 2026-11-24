@@ -1,5 +1,5 @@
 use crate::output_eq::OutputLayer;
-use gamersequalizer_common::profile::{ParametricProfile, VadType};
+use gamersequalizer_common::profile::{BiquadBand, ParametricProfile, VadType};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -145,6 +145,11 @@ fn sanitize_profile(profile: &mut ParametricProfile) {
   let finite_or_zero = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
   profile.preamp_db = finite_or_zero(profile.preamp_db, -48.0, 24.0);
   profile.gain_db = finite_or_zero(profile.gain_db, -24.0, 24.0);
+  // A reset puts these into the live EQ: same checks.
+  if let Some(original) = profile.original.as_mut() {
+    original.bands.iter_mut().for_each(BiquadBand::clamp_parameters);
+    original.preamp_db = finite_or_zero(original.preamp_db, -48.0, 24.0);
+  }
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {

@@ -75,11 +75,19 @@ impl OutputProcessor {
   }
 
   /// A block the engine marked silent (nothing is mixed): `process` does not run for it, but the
-  /// reference must hear the silence, or the next audio would be timed one block too early.
-  pub(super) fn process_silence(&mut self, frames: usize, channels: usize, time: Option<(u64, bool)>) {
+  /// reference must hear the silence (or the next audio would be timed one block too early), and
+  /// active sidetone still plays. Returns true when sidetone was written to `out`.
+  pub(super) fn process_silence(
+    &mut self,
+    out: &mut [f32],
+    frames: usize,
+    channels: usize,
+    time: Option<(u64, bool)>,
+  ) -> bool {
     if self.failed || channels == 0 {
-      return;
+      return false;
     }
+    let mut wrote_audio = false;
     let ran = catch_unwind(AssertUnwindSafe(|| {
       let Some(shm) = self.shm.as_ref() else {
         return;
@@ -90,10 +98,36 @@ impl OutputProcessor {
       if self.ref_feed.as_mut().is_ok_and(|feed| feed.take_part(h, owner_live, self.endpoint, now)) {
         self.feed_reference(None, frames, channels, time);
       }
+      // As in `process_inner`: the sidetone does not depend on the EQ's master switch.
+      let sidetone = !out.is_empty()
+        && self.shm.as_ref().is_some_and(|shm| {
+          read_sidetone(
+            &mut self.sidetone,
+            &mut self.sidetone_buf,
+            shm.layout(),
+            frames,
+            self.sample_rate,
+            self.endpoint,
+          )
+        });
+      let sidetone_started = !std::mem::replace(&mut self.sidetone_playing, sidetone) && sidetone;
+      if sidetone {
+        if sidetone_started {
+          // The limiter did not run while nothing was mixed in: its gain is from back then.
+          self.limiter = PeakLimiter::new(self.sample_rate);
+        }
+        // The engine does not define the samples of a silent block.
+        out.fill(0.0);
+        add_sidetone(out, channels, &self.sidetone_buf);
+        self.limiter.process(out, channels);
+        wrote_audio = true;
+      }
     }));
     if ran.is_err() {
       self.fail();
+      return false;
     }
+    wrote_audio
   }
 
   /// The Application-log note for the end of the stream about the reference, if there is one.
@@ -134,7 +168,8 @@ impl OutputProcessor {
     // The mono sidetone block for this buffer is in `sidetone_buf` when this is true.
     let sidetone =
       read_sidetone(&mut self.sidetone, &mut self.sidetone_buf, layout, frames, self.sample_rate, self.endpoint);
-    let sidetone_started = sidetone && !std::mem::replace(&mut self.sidetone_playing, sidetone);
+    // The flag is stored first: `&&` the other way round never took it back after a pause.
+    let sidetone_started = !std::mem::replace(&mut self.sidetone_playing, sidetone) && sidetone;
     // The reference is taken after the EQ and before the sidetone in each branch below: what
     // the speakers play, without the user's own voice.
     if self.eq.wet <= 0.0 && goal <= 0.0 {

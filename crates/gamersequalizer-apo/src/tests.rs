@@ -503,6 +503,16 @@ fn sidetone_plays_on_the_pair_output_only() {
   output.endpoint = OUT;
   assert!(run(&mut tap, &mut output, 100) > 0.2, "back on the pair's output");
 
+  // A block the engine marked silent (its samples are undefined) still carries the voice.
+  h.owner_beat.fetch_add(1, Ordering::Release);
+  let mic: Vec<f32> = (0..480).flat_map(|i| [(i as f32 * 0.13).sin() * 0.25; 2]).collect();
+  tap.process(layout, &mic, 2, None, 0.0, true);
+  let mut out = vec![7.0f32; 960];
+  assert!(output.process_silence(&mut out, 480, 2, None), "sidetone written into a silent block");
+  let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+  assert!((0.1..0.3).contains(&peak), "the voice alone, nothing of the undefined samples: {peak}");
+  assert!(!output.process_silence(&mut [], 480, 2, None), "no buffer: nothing written");
+
   // The microphone of another pair stops feeding the ring.
   tap.endpoint_hash = MIC + 1;
   assert_eq!(run(&mut tap, &mut output, 100), 0.0);
@@ -702,7 +712,7 @@ fn jittery_block_times_leave_no_gaps_and_a_silent_block_stays_in_place() {
     // One block the engine marked silent, then the tone again: 10 ms of silence, in its place.
     let before = control.layout().header.write_frame_index.load(Ordering::Relaxed);
     control.layout().header.owner_beat.fetch_add(1, Ordering::Release);
-    output.process_silence(rate as usize / 100, 2, Some((REF_T0 + 300 * BLOCK_HNS, false)));
+    output.process_silence(&mut [], rate as usize / 100, 2, Some((REF_T0 + 300 * BLOCK_HNS, false)));
     play(&mut output, &control, rate, 2, 301..320, true, |_| 0);
     let (left, _) = ring_from(&mut control, before.wrapping_sub(960));
     let quiet = longest_quiet_run(&left);

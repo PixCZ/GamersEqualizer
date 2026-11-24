@@ -17,6 +17,8 @@ const RESCUE_VOICE_PROB: f32 = 0.5;
 const RESCUE_ENV_COEF: f32 = 1.0 / (48.0 * 5.0);
 const RESCUE_IN_COEF: f32 = 1.0 / (48.0 * 2.0);
 const RESCUE_OUT_COEF: f32 = 1.0 / (48.0 * 30.0);
+/// Snap decaying IIR states to zero before they enter f32 subnormal range in silence.
+const DENORMAL_FLOOR: f32 = 1e-20;
 
 /// DeepFilterNet 3 rates a frame with a loud click in it (a mouse button next to the mic) as
 /// noise and cuts the voice in it with the click: speech at -30 dBFS, clicks hammered at -3 dBFS
@@ -73,6 +75,15 @@ impl ClickRescue {
         continue;
       }
       *d += (r - *d) * self.mix;
+    }
+    if self.env_dfn < DENORMAL_FLOOR {
+      self.env_dfn = 0.0;
+    }
+    if self.env_rnn < DENORMAL_FLOOR {
+      self.env_rnn = 0.0;
+    }
+    if self.mix < DENORMAL_FLOOR {
+      self.mix = 0.0;
     }
     prob
   }

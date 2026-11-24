@@ -96,6 +96,9 @@ pub struct MicChain {
   /// Clipped raw input samples (full scale or flat tops), all time (wraps).
   input_clips: u32,
   clip_detector: ClipDetector,
+  /// Volume gain of the last block: a change ramps over one block instead of jumping. None: the
+  /// next block starts at its own gain (new stream, after a pause).
+  boost_gain: Option<f32>,
   /// Shift of the reference fed to the AEC in the last block (None: the AEC didn't run).
   aec_ref_offset: Option<u32>,
   /// Chain state for the daemon's debug log.
@@ -158,6 +161,7 @@ impl MicChain {
       load: DspLoad::default(),
       input_clips: 0,
       clip_detector: ClipDetector::default(),
+      boost_gain: None,
       aec_ref_offset: None,
       chain: ChainWindow::default(),
       #[cfg(feature = "debug-capture")]
@@ -225,6 +229,7 @@ impl MicChain {
       self.latency_meter.reset();
       self.pre_high_pass.reset_state();
       self.limiter = PeakLimiter::new(48_000.0);
+      self.boost_gain = None;
     }
     let started = std::time::Instant::now();
     let frames = mic_in.len();
@@ -412,8 +417,17 @@ impl MicChain {
     } else {
       1.0
     };
-    for sample in mic.iter_mut() {
-      *sample *= boost;
+    let mut gain = self.boost_gain.replace(boost).unwrap_or(boost);
+    if (gain - boost).abs() > 1e-6 && !mic.is_empty() {
+      let step = (boost - gain) / mic.len() as f32;
+      for sample in mic.iter_mut() {
+        gain += step;
+        *sample *= gain;
+      }
+    } else if boost != 1.0 {
+      for sample in mic.iter_mut() {
+        *sample *= boost;
+      }
     }
     self.limiter.process(mic, 1);
     self.chain.add_block(&self.ai_denoiser.debug_state(), self.ai_denoiser.heard_voice(), self.limiter.gain(), frames);

@@ -5,7 +5,7 @@
 //! Drawn into a 32-bit bitmap: the shapes are anti-aliased here (GDI's own are not), text is GDI's
 //! ClearType, icons are the apps' own, the bitmap goes to the window in one copy (no flicker).
 
-use super::{Hit, Interaction, Row, Target};
+use super::{Hit, Interaction, MixChannel, Row, Target, balance_value, loudness_db};
 use crate::health::Fix;
 use crate::i18n::{tr, trf};
 use crate::ui::theme::{Palette, adapt_for, icons};
@@ -58,10 +58,10 @@ const PERCENT_W: i32 = 44;
 const TRACK_H: f32 = 4.0;
 const THUMB_R: i32 = 10;
 const RADIUS: f32 = 4.0;
-const TEXT_PT: i32 = 14;
-const CAPTION_PT: i32 = 12;
-const GLYPH_PT: i32 = 16;
-const SMALL_GLYPH_PT: i32 = 11;
+const TEXT_PX: i32 = 14;
+const CAPTION_PX: i32 = 12;
+const GLYPH_PX: i32 = 16;
+const SMALL_GLYPH_PX: i32 = 11;
 /// Segoe MDL2 Assets: the same glyphs as Segoe Fluent Icons, and on Windows 10 too.
 const GLYPH_FONT: PCWSTR = w!("Segoe MDL2 Assets");
 
@@ -603,6 +603,13 @@ pub fn paint(
         let (x, y, s) = (r.left as f32, r.top as f32, (r.right - r.left) as f32);
         let bg = if ui.hover == Some(Hit::Mute(i)) { hover_color(p) } else { p.card };
         canvas.shape(x, y, s, s, bg, |_, _| 0.6);
+        // Diagonal mute slash so mute is never shown by dimming alone (WCAG 1.4.1).
+        let half = layout.scale.max(1.0);
+        let pad = 3.0 * layout.scale;
+        canvas.shape(x + pad, y + pad, s - 2.0 * pad, s - 2.0 * pad, p.text, |px, py| {
+          let dist = ((px - x) - (py - y)).abs() * std::f32::consts::FRAC_1_SQRT_2;
+          coverage(dist - half)
+        });
       }
     }
     if layout.list_rows > 0 {
@@ -740,7 +747,10 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
       focus_ring(c, layout, o, p);
     }
     let f = layout.fix_rect();
-    let fill = if ui.hover == Some(Hit::Fix) { mix(p.accent, p.card, 0.15) } else { p.accent };
+    // Hover darkens in both themes: towards the card in the dark one, towards the text in the light
+    // one (towards its light card the fill would drop under 4.5:1 with white text).
+    let darker = if p.dark { p.card } else { p.text };
+    let fill = if ui.hover == Some(Hit::Fix) { mix(p.accent_fill, darker, 0.15) } else { p.accent_fill };
     let (fw, fh) = ((f.right - f.left) as f32, (f.bottom - f.top) as f32);
     c.round_rect(f.left as f32, f.top as f32, fw, fh, px(RADIUS), fill);
     if ui.focus == Some(Hit::Fix) {
@@ -758,7 +768,7 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
   for (i, row) in rows.iter().enumerate().take(layout.rows()) {
     let b = layout.button_rect(i);
     let (bw, bh) = ((b.right - b.left) as f32, (b.bottom - b.top) as f32);
-    if ui.hover == Some(Hit::Mute(i)) {
+    if ui.hover == Some(Hit::Mute(i)) && row.mutes() {
       c.round_rect(b.left as f32, b.top as f32, bw, bh, px(RADIUS), hover_bg);
     }
     // An exe without an icon we can read: a plain app tile, drawn (no font needed).
@@ -774,11 +784,14 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
     let th = px(TRACK_H);
     let fill = match &row.target {
       _ if row.muted => p.text_tertiary,
+      Target::Channel(MixChannel::Balance) => balance_look(row.volume).1.map_or(p.accent, |c| adapt_for(p.dark, c)),
       Target::Channel(channel) => adapt_for(p.dark, channel.look().1),
       _ => p.accent,
     };
+    // The balance fills from its middle (even) towards the side it favors.
+    let from = if row.target == Target::Channel(MixChannel::Balance) { (x0 + x1) / 2.0 } else { x0 };
     c.round_rect(x0, cy - th / 2.0, x1 - x0, th, th / 2.0, track_bg);
-    c.round_rect(x0, cy - th / 2.0, xv - x0, th, th / 2.0, fill);
+    c.round_rect(from.min(xv), cy - th / 2.0, (xv - from).abs(), th, th / 2.0, fill);
     let r = px(THUMB_R as f32);
     if !p.dark {
       c.circle(xv, cy, r + px(1.0), p.card_stroke);
@@ -793,6 +806,20 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
     if ui.focus == Some(Hit::Slider(i)) {
       focus_ring(c, layout, RECT { right: layout.width() - layout.px(PAD), ..b }, p);
     }
+  }
+}
+
+/// The balance slider at `value` (0 = all game, 1 = all chat): "50/50" in the middle, else how far
+/// the other side is lowered, in the color of the side that stays at 100 % (`get_multipliers`).
+/// None: even.
+fn balance_look(value: f32) -> (String, Option<Color32>) {
+  use crate::ui::tab_mixer::{CHAT_COLOR, GAME_COLOR};
+  let balance = balance_value(value);
+  let percent = (balance.abs() * 100.0).round();
+  if percent < 1.0 {
+    ("50/50".to_string(), None)
+  } else {
+    (format!("{percent:.0} %"), Some(if balance < 0.0 { GAME_COLOR } else { CHAT_COLOR }))
   }
 }
 
@@ -874,9 +901,16 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
       if let Some(glyph) = glyph {
         text(dc, &glyph.to_string(), layout.button_rect(i), fonts.glyphs, dim, DT_CENTER);
       }
-      let percent = if row.muted { p.text_tertiary } else { p.text_secondary };
+      let percent = p.text_secondary;
       // Percent only: the mic's boost in dB would not fit.
-      let level = format!("{:.0} %", row.volume * row.max * 100.0);
+      let (level, percent) = match row.target {
+        Target::Channel(MixChannel::Balance) => {
+          let (text, color) = balance_look(row.volume);
+          (text, color.map_or(percent, |c| adapt_for(p.dark, c)))
+        }
+        Target::Channel(MixChannel::MicLoudness) => (format!("{:.0} dB", loudness_db(row.volume)), percent),
+        _ => (format!("{:.0} %", row.volume * row.max * 100.0), percent),
+      };
       text(dc, &level, layout.percent_rect(i), fonts.regular, percent, DT_RIGHT);
     }
     if let Some(note) = texts.note {
@@ -887,12 +921,12 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
       let glyph = icons::WARNING.glyph.to_string();
       text(dc, &glyph, layout.issue_glyph_rect(), fonts.glyphs, p.warn, DT_CENTER);
       text(dc, issue.short, layout.issue_text_rect(), fonts.regular, p.text, DT_LEFT);
-      text(dc, issue.button, layout.fix_rect(), fonts.semibold, p.on_accent, DT_CENTER);
+      text(dc, issue.button, layout.fix_rect(), fonts.button, p.on_accent, DT_CENTER);
       if let Some((label, _)) = issue.other.as_ref().filter(|_| layout.other_fix) {
         let mut r = layout.other_fix_rect();
         r.left += layout.px(GAP);
         r.right -= layout.px(GAP);
-        text(dc, label, r, fonts.regular, p.text, DT_CENTER);
+        text(dc, label, r, fonts.button, p.text, DT_CENTER);
       }
       if layout.issues > 1 {
         let mut more = layout.more_rect();
@@ -981,6 +1015,8 @@ fn font(height: i32, weight: u32, quality: FONT_QUALITY, face: PCWSTR) -> HFONT 
 /// The fonts of one paint, made for its scale.
 struct Fonts {
   regular: HFONT,
+  /// The fix button's text: the face the window draws its buttons in (sturdier at 14 px).
+  button: HFONT,
   semibold: HFONT,
   caption: HFONT,
   glyphs: HFONT,
@@ -990,18 +1026,23 @@ struct Fonts {
 impl Fonts {
   fn new(layout: &Layout) -> Self {
     let f = |pt: i32, weight: u32, face| font(layout.px(pt), weight, CLEARTYPE_QUALITY, face);
+    // The same file the window loads (`ui/theme.rs`); without it (Windows 10) GDI would substitute
+    // some other face, so Segoe UI stays.
+    static VARIABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let variable = *VARIABLE.get_or_init(|| std::path::Path::new(r"C:\Windows\Fonts\SegUIVar.ttf").exists());
     Self {
-      regular: f(TEXT_PT, FW_NORMAL.0, w!("Segoe UI")),
-      semibold: f(TEXT_PT, FW_SEMIBOLD.0, w!("Segoe UI")),
-      caption: f(CAPTION_PT, FW_NORMAL.0, w!("Segoe UI")),
-      glyphs: f(GLYPH_PT, FW_NORMAL.0, GLYPH_FONT),
-      small_glyphs: f(SMALL_GLYPH_PT, FW_NORMAL.0, GLYPH_FONT),
+      regular: f(TEXT_PX, FW_NORMAL.0, w!("Segoe UI")),
+      button: f(TEXT_PX, FW_NORMAL.0, if variable { w!("Segoe UI Variable Text") } else { w!("Segoe UI") }),
+      semibold: f(TEXT_PX, FW_SEMIBOLD.0, w!("Segoe UI")),
+      caption: f(CAPTION_PX, FW_NORMAL.0, w!("Segoe UI")),
+      glyphs: f(GLYPH_PX, FW_NORMAL.0, GLYPH_FONT),
+      small_glyphs: f(SMALL_GLYPH_PX, FW_NORMAL.0, GLYPH_FONT),
     }
   }
 
   /// Only once no DC has them selected.
   fn delete(self) {
-    for f in [self.regular, self.semibold, self.caption, self.glyphs, self.small_glyphs] {
+    for f in [self.regular, self.button, self.semibold, self.caption, self.glyphs, self.small_glyphs] {
       // SAFETY: fonts this struct made; deleting a null one does nothing.
       let _ = unsafe { DeleteObject(HGDIOBJ(f.0)) };
     }

@@ -253,6 +253,22 @@ pub struct ParametricProfile {
   /// profiles can be matched by ear.
   #[serde(default)]
   pub gain_db: f32,
+  /// The EQ as imported (AutoEQ, a pasted share text), for "Reset to original"; None for the
+  /// user's own profiles, Sonar imports and profiles imported before this field existed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub original: Option<OriginalEq>,
+  /// Fields from a newer version of the app, kept so a save here does not drop them.
+  #[serde(flatten)]
+  pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Bands and preamp of a profile as it was imported. The user's volume trim (`gain_db`) is not
+/// part of it: it is the user's own setting, not the imported correction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OriginalEq {
+  pub bands: Vec<BiquadBand>,
+  #[serde(default)]
+  pub preamp_db: f32,
   /// Fields from a newer version of the app, kept so a save here does not drop them.
   #[serde(flatten)]
   pub extra: serde_json::Map<String, serde_json::Value>,
@@ -268,14 +284,69 @@ impl ParametricProfile {
       is_custom: true,
       game_ids: Vec::new(),
       gain_db: 0.0,
+      original: None,
       extra: serde_json::Map::new(),
     }
+  }
+
+  /// Remember the current bands and preamp as the imported original.
+  pub fn remember_original(&mut self) {
+    self.original =
+      Some(OriginalEq { bands: self.bands.clone(), preamp_db: self.preamp_db, extra: serde_json::Map::new() });
+  }
+
+  /// True when the profile has an imported original and its bands or preamp differ from it.
+  pub fn differs_from_original(&self) -> bool {
+    self.original.as_ref().is_some_and(|o| o.bands != self.bands || o.preamp_db != self.preamp_db)
+  }
+
+  /// Put the imported bands and preamp back (the volume trim stays). False without an original.
+  pub fn reset_to_original(&mut self) -> bool {
+    let Some(o) = self.original.as_ref() else { return false };
+    self.bands = o.bands.clone();
+    self.preamp_db = o.preamp_db;
+    true
   }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn original_eq_round_trips_and_old_files_have_none() {
+    let old = r#"{"name": "HD 600", "vad_type": "media", "preamp_db": -6.0, "is_custom": false, "bands": []}"#;
+    let profile: ParametricProfile = serde_json::from_str(old).unwrap();
+    assert_eq!(profile.original, None);
+    assert!(!profile.differs_from_original());
+    assert!(!serde_json::to_string(&profile).unwrap().contains("original"), "None is not written");
+
+    let newer = r#"{"name": "HD 600", "vad_type": "media", "preamp_db": -6.0, "is_custom": false,
+      "bands": [{"enabled": true, "filter_type": "peaking", "frequency": 1000.0, "gain_db": 3.0, "q": 1.0}],
+      "original": {"bands": [], "preamp_db": -6.0, "source": "autoeq"}}"#;
+    let profile: ParametricProfile = serde_json::from_str(newer).unwrap();
+    let saved = serde_json::to_string(&profile).unwrap();
+    assert!(saved.contains(r#""source":"autoeq""#), "unknown fields of the original survive: {saved}");
+    assert_eq!(serde_json::from_str::<ParametricProfile>(&saved).unwrap(), profile);
+  }
+
+  #[test]
+  fn reset_to_original_restores_bands_and_preamp_but_keeps_the_volume_trim() {
+    let mut p = ParametricProfile::new("HD 600", VadType::Media);
+    p.bands = vec![BiquadBand { gain_db: 4.0, ..BiquadBand::default() }];
+    p.preamp_db = -4.5;
+    assert!(!p.reset_to_original(), "no original: nothing to reset to");
+    p.remember_original();
+    assert!(!p.differs_from_original());
+
+    p.bands[0].frequency = 3000.0;
+    p.gain_db = 2.0;
+    assert!(p.differs_from_original());
+    assert!(p.reset_to_original());
+    assert!(!p.differs_from_original());
+    assert_eq!(p.bands[0].frequency, BiquadBand::default().frequency);
+    assert_eq!(p.gain_db, 2.0);
+  }
 
   #[test]
   fn a_profile_from_a_newer_version_survives_load_and_save() {

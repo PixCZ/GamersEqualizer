@@ -438,6 +438,13 @@ pub fn find_window() -> Option<HWND> {
   unsafe { FindWindowW(PCWSTR::null(), &HSTRING::from(WINDOW_TITLE)) }.ok().filter(|h| !h.is_invalid())
 }
 
+/// The main window is open and not minimized (minimized, it repaints at 1 Hz and does not need
+/// the service's fast loop).
+pub fn window_visible() -> bool {
+  // SAFETY: plain window query on a handle from `find_window`; a closed window just returns false.
+  find_window().is_some_and(|h| unsafe { !IsIconic(h).as_bool() })
+}
+
 /// The main window is open and the active window (its own bar shows problems; no notification).
 pub fn window_in_front() -> bool {
   // SAFETY: no arguments; the handle is only compared.

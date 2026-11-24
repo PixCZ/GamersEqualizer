@@ -23,6 +23,9 @@ pub const CARD_GAP: f32 = 12.0;
 /// Brand accent (orange), tuned per theme for contrast.
 const ACCENT_DARK: Color32 = Color32::from_rgb(255, 140, 64);
 const ACCENT_LIGHT: Color32 = Color32::from_rgb(196, 82, 0);
+/// Dark theme's fill under text (buttons, switch, step circle): the bright accent bleeds over thin
+/// dark strokes and reads badly (see `.claude/rules/design.md`). White text on it: 5.4:1.
+const ACCENT_FILL_DARK: Color32 = Color32::from_rgb(181, 71, 0);
 /// Fluent glyph offset below the text row's center, as a fraction of the text row height.
 const ICON_DROP: f32 = 0.07;
 
@@ -46,11 +49,13 @@ pub mod icons {
   pub const CHAT: Icon = Icon { glyph: '\u{E8BD}', emoji: "💬" };
   pub const MEDIA: Icon = Icon { glyph: '\u{EC4F}', emoji: "🎵" };
   pub const MIC: Icon = Icon { glyph: '\u{E720}', emoji: "🎤" };
+  /// Segoe "Switch" (two opposite arrows): ChatMix shifts the mix between game and chat.
+  pub const CHATMIX: Icon = Icon { glyph: '\u{E8AB}', emoji: "⚖" };
   pub const LOG: Icon = Icon { glyph: '\u{E9D9}', emoji: "📜" };
   pub const SETTINGS: Icon = Icon { glyph: '\u{E713}', emoji: "⚙" };
   pub const LOCK: Icon = Icon { glyph: '\u{E72E}', emoji: "🔒" };
   pub const UNLOCK: Icon = Icon { glyph: '\u{E785}', emoji: "🔓" };
-  pub const POWER: Icon = Icon { glyph: '\u{E7E8}', emoji: "⏻" };
+  pub const POWER: Icon = Icon { glyph: '\u{E7E8}', emoji: "🔌" };
   pub const CLOSE: Icon = Icon { glyph: '\u{E8BB}', emoji: "✖" };
   pub const INFO: Icon = Icon { glyph: '\u{E946}', emoji: "ℹ" };
   pub const WARNING: Icon = Icon { glyph: '\u{E7BA}', emoji: "⚠" };
@@ -58,10 +63,24 @@ pub mod icons {
   pub const CHECK: Icon = Icon { glyph: '\u{E73E}', emoji: "✔" };
   pub const GLOBE: Icon = Icon { glyph: '\u{E774}', emoji: "🌐" };
   pub const COLOR: Icon = Icon { glyph: '\u{E790}', emoji: "🎨" };
-  pub const EQUALIZER: Icon = Icon { glyph: '\u{E9E9}', emoji: "🎚" };
+  pub const EQUALIZER: Icon = Icon { glyph: '\u{E9E9}', emoji: "📶" };
   pub const DELETE: Icon = Icon { glyph: '\u{E74D}', emoji: "🗑" };
   pub const SAVE: Icon = Icon { glyph: '\u{E74E}', emoji: "💾" };
   pub const OPEN: Icon = Icon { glyph: '\u{E838}', emoji: "📂" };
+  pub const ADD: Icon = Icon { glyph: '\u{E710}', emoji: "➕" };
+  pub const COPY: Icon = Icon { glyph: '\u{E8C8}', emoji: "📋" };
+  pub const IMPORT: Icon = Icon { glyph: '\u{E896}', emoji: "📥" };
+  pub const RESET: Icon = Icon { glyph: '\u{E72C}', emoji: "↺" };
+  pub const BACK: Icon = Icon { glyph: '\u{E72B}', emoji: "◀" };
+  pub const FORWARD: Icon = Icon { glyph: '\u{E72A}', emoji: "▶" };
+  pub const DOWN: Icon = Icon { glyph: '\u{E74B}', emoji: "⬇" };
+
+  #[cfg(test)]
+  pub const ALL: &[Icon] = &[
+    VOLUME, MUTE, HEADPHONES, SPEAKERS, GAME, CHAT, MEDIA, MIC, CHATMIX, LOG, SETTINGS, LOCK, UNLOCK, POWER, CLOSE,
+    INFO, WARNING, ERROR, CHECK, GLOBE, COLOR, EQUALIZER, DELETE, SAVE, OPEN, ADD, COPY, IMPORT, RESET, BACK, FORWARD,
+    DOWN,
+  ];
 }
 
 /// Message severity of an info bar / status text.
@@ -83,8 +102,11 @@ pub struct Palette {
   pub text: Color32,
   pub text_secondary: Color32,
   pub text_tertiary: Color32,
+  /// Thin and small things: slider and meter fills, the navigation pill, links.
   pub accent: Color32,
-  /// Text/icons on an accent fill.
+  /// Areas that carry text or a knob (buttons, switch, step circle, text selection); never put text on `accent`.
+  pub accent_fill: Color32,
+  /// Text/icons on `accent_fill`.
   pub on_accent: Color32,
   pub ok: Color32,
   pub warn: Color32,
@@ -103,7 +125,8 @@ const DARK: Palette = Palette {
   text_secondary: Color32::from_rgb(200, 200, 200),
   text_tertiary: Color32::from_rgb(150, 150, 150),
   accent: ACCENT_DARK,
-  on_accent: Color32::from_rgb(20, 20, 20),
+  accent_fill: ACCENT_FILL_DARK,
+  on_accent: Color32::WHITE,
   ok: Color32::from_rgb(108, 203, 95),
   warn: Color32::from_rgb(252, 225, 0),
   err: Color32::from_rgb(255, 153, 164),
@@ -121,7 +144,8 @@ const LIGHT: Palette = Palette {
   text_secondary: Color32::from_rgb(96, 96, 96),
   text_tertiary: Color32::from_rgb(130, 130, 130),
   accent: ACCENT_LIGHT,
-  on_accent: Color32::from_rgb(255, 255, 255),
+  accent_fill: ACCENT_LIGHT,
+  on_accent: Color32::WHITE,
   ok: Color32::from_rgb(15, 123, 15),
   warn: Color32::from_rgb(157, 93, 0),
   err: Color32::from_rgb(196, 43, 28),
@@ -312,9 +336,54 @@ pub fn status_line(ui: &mut Ui, severity: Severity, text: &str) -> Response {
 }
 
 /// Filled accent button (Fluent "AccentButton"), for the primary action of a group.
-pub fn accent_button(ui: &Ui, text: &str) -> egui::Button<'static> {
-  let p = palette(ui);
-  egui::Button::new(RichText::new(text.to_string()).color(p.on_accent)).fill(p.accent).stroke(Stroke::NONE)
+/// Darkens on hover and press in both themes so white text stays above WCAG AA.
+pub fn accent_button(_ui: &Ui, text: &str) -> AccentButton {
+  AccentButton(text.to_string())
+}
+
+pub struct AccentButton(String);
+
+impl Widget for AccentButton {
+  fn ui(self, ui: &mut Ui) -> Response {
+    let p = palette(ui);
+    let target = if p.dark { p.card } else { p.text };
+    let hover = p.accent_fill.lerp_to_gamma(target, 0.15);
+    let press = p.accent_fill.lerp_to_gamma(target, 0.25);
+    ui.scope(|ui| {
+      let w = &mut ui.visuals_mut().widgets;
+      w.inactive.weak_bg_fill = p.accent_fill;
+      w.inactive.bg_stroke = Stroke::NONE;
+      w.inactive.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
+      w.hovered.weak_bg_fill = hover;
+      w.hovered.bg_stroke = Stroke::NONE;
+      w.hovered.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
+      w.active.weak_bg_fill = press;
+      w.active.bg_stroke = Stroke::NONE;
+      w.active.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
+      ui.add(egui::Button::new(RichText::new(self.0).color(p.on_accent)))
+    })
+    .inner
+  }
+}
+
+/// An egui slider with the bright accent as its fill. The slider's filled part is egui's selection
+/// color, which is `accent_fill` (a dark orange that carries white text); a thin fill wants the
+/// bright accent. Every slider goes through this and `slider_sized`.
+pub fn slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
+  with_bright_selection(ui, |ui| ui.add(slider))
+}
+
+/// `slider` in a box of the given size (a vertical fader).
+pub fn slider_sized(ui: &mut Ui, size: Vec2, slider: egui::Slider<'_>) -> Response {
+  with_bright_selection(ui, |ui| ui.add_sized(size, slider))
+}
+
+fn with_bright_selection<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+  let (bright, kept) = (palette(ui).accent, ui.visuals().selection.bg_fill);
+  ui.visuals_mut().selection.bg_fill = bright;
+  let result = add(ui);
+  ui.visuals_mut().selection.bg_fill = kept;
+  result
 }
 
 // --- meters --------------------------------------------------------------------------------
@@ -368,7 +437,7 @@ pub fn volume_text(volume: f32) -> String {
 pub fn percent_volume(ui: &mut Ui, volume: &mut f32, max: f32, width: f32, color: Color32) -> bool {
   ui.horizontal(|ui| {
     ui.spacing_mut().slider_width = width;
-    let mut changed = ui.add(egui::Slider::new(volume, 0.0..=max).show_value(false)).changed();
+    let mut changed = slider(ui, egui::Slider::new(volume, 0.0..=max).show_value(false)).changed();
     ui.label(strong(volume_text(*volume), 14.0).color(adapt(ui, color)));
     // With 100 % as the top (mic with the leveler on) the slider's end says it already.
     if max > 1.0 && ui.button(crate::i18n::tr("Reset to 100 %")).clicked() {
@@ -402,9 +471,9 @@ pub fn level_color(ui: &Ui, fraction: f32) -> Color32 {
 
 // --- toggle switch -------------------------------------------------------------------------
 
-/// Fluent toggle switch (40 x 20). Flips `on` when clicked.
+/// Fluent toggle switch (40 x 20 pill inside a 40 x 24 hit target). Flips `on` when clicked.
 pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
-  let size = Vec2::new(40.0, 20.0);
+  let size = Vec2::new(40.0, 24.0);
   let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
   if response.clicked() {
     *on = !*on;
@@ -413,21 +482,26 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
   response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, ""));
   if ui.is_rect_visible(rect) {
     let p = palette(ui);
+    let pill = egui::Rect::from_center_size(rect.center(), Vec2::new(40.0, 20.0));
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
     let hovered = response.hovered();
-    let radius = rect.height() / 2.0;
+    let radius = pill.height() / 2.0;
     let (fill, stroke, knob) = if *on {
-      let fill = if hovered { p.accent.gamma_multiply(0.9) } else { p.accent };
+      let target = if p.dark { p.card } else { p.text };
+      let fill = if hovered { p.accent_fill.lerp_to_gamma(target, 0.15) } else { p.accent_fill };
       (fill, Stroke::NONE, p.on_accent)
     } else {
       let fill = if hovered { p.nav_hover } else { Color32::TRANSPARENT };
       (fill, Stroke::new(1.0_f32, p.text_secondary), p.text_secondary)
     };
     let painter = ui.painter();
-    painter.rect(rect, radius, fill, stroke, egui::StrokeKind::Middle);
+    painter.rect(pill, radius, fill, stroke, egui::StrokeKind::Middle);
+    if response.has_focus() {
+      painter.rect_stroke(pill.expand(2.0), radius + 2.0, Stroke::new(2.0_f32, p.text), egui::StrokeKind::Outside);
+    }
     let knob_r = if hovered { 7.0 } else { 6.0 };
-    let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
-    painter.circle_filled(egui::pos2(x, rect.center().y), knob_r, knob);
+    let x = egui::lerp((pill.left() + radius)..=(pill.right() - radius), t);
+    painter.circle_filled(egui::pos2(x, pill.center().y), knob_r, knob);
   }
   response
 }
@@ -464,6 +538,9 @@ pub fn nav_item(ui: &mut Ui, selected: bool, ic: Icon, label: &str) -> Response 
       Color32::TRANSPARENT
     };
     painter.rect_filled(rect, CONTROL_RADIUS, fill);
+    if response.has_focus() {
+      painter.rect_stroke(rect.shrink(1.0), CONTROL_RADIUS, Stroke::new(2.0_f32, p.text), egui::StrokeKind::Inside);
+    }
     if selected {
       let pill = egui::Rect::from_center_size(egui::pos2(rect.left() + 1.5, rect.center().y), Vec2::new(3.0, 16.0));
       painter.rect_filled(pill, 1.5, p.accent);
@@ -492,7 +569,7 @@ pub fn nav_section(ui: &mut Ui, text: &str) {
   ui.add_space(10.0);
   ui.horizontal(|ui| {
     ui.add_space(12.0);
-    ui.label(RichText::new(text).small().color(palette(ui).text_tertiary));
+    ui.label(RichText::new(text).small().color(palette(ui).text_secondary));
   });
   ui.add_space(2.0);
 }
@@ -656,7 +733,9 @@ fn visuals(p: &Palette) -> Visuals {
   v.hyperlink_color = p.accent;
   v.warn_fg_color = p.warn;
   v.error_fg_color = p.err;
-  v.selection.bg_fill = p.accent;
+  // Selected chips and options, text selection: they carry text, so the fill that does. Sliders put
+  // the bright accent back (`slider`).
+  v.selection.bg_fill = p.accent_fill;
   v.selection.stroke = Stroke::new(1.0_f32, p.on_accent);
   v.slider_trailing_fill = true;
   v.striped = false;
@@ -684,10 +763,10 @@ fn visuals(p: &Palette) -> Visuals {
   w.hovered.corner_radius = control_rounding;
   w.hovered.expansion = 0.0;
 
-  w.active.bg_fill = p.accent;
+  w.active.bg_fill = p.accent_fill;
   w.active.weak_bg_fill = control_press;
-  w.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
-  w.active.fg_stroke = Stroke::new(1.0_f32, p.text_secondary);
+  w.active.bg_stroke = Stroke::new(1.0_f32, p.accent_fill);
+  w.active.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
   w.active.corner_radius = control_rounding;
   w.active.expansion = 0.0;
 
@@ -706,5 +785,52 @@ pub struct Toggle<'a>(pub &'a mut bool);
 impl Widget for Toggle<'_> {
   fn ui(self, ui: &mut Ui) -> Response {
     toggle(ui, self.0)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use egui::epaint::text::{Fonts, TextOptions};
+  use std::path::{Path, PathBuf};
+
+  /// An empty square in the window is a character no loaded font has: a Fluent glyph, an emoji
+  /// stand-in (`with_icon` draws them in plain text, so every icon button) or a symbol in a UI text.
+  #[test]
+  fn every_icon_and_ui_symbol_has_a_glyph() {
+    let mut f = Fonts::new(TextOptions::default(), fonts());
+    let icon_font = FontId::new(16.0, FontFamily::Name("icons".into()));
+    let text = FontId::proportional(14.0);
+    let mut missing = Vec::new();
+    for i in icons::ALL {
+      if ICON_FONT.load(Ordering::Relaxed) && !f.has_glyph(&icon_font, i.glyph) {
+        missing.push(format!("Fluent glyph U+{:04X}", i.glyph as u32));
+      }
+      missing.extend(i.emoji.chars().filter(|&c| !f.has_glyph(&text, c)).map(|c| format!("emoji {c}")));
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src.join("i18n_cs.rs")];
+    collect_rs(&src.join("ui"), &mut files);
+    for file in files {
+      let body = std::fs::read_to_string(&file).unwrap();
+      for c in body.chars().filter(|c| !c.is_ascii()) {
+        if !f.has_glyph(&text, c) {
+          missing.push(format!("{c} in {}", file.display()));
+        }
+      }
+    }
+    missing.dedup();
+    assert!(missing.is_empty(), "no font has: {missing:?}");
+  }
+
+  fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+      let path = entry.unwrap().path();
+      if path.is_dir() {
+        collect_rs(&path, out);
+      } else if path.extension().is_some_and(|e| e == "rs") {
+        out.push(path);
+      }
+    }
   }
 }

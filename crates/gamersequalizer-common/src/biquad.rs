@@ -88,23 +88,24 @@ struct StageCoefs {
   a2: f64,
 }
 
-impl BiquadCoefficients {
-  /// Calculate biquad coefficients using RBJ Audio-EQ-Cookbook formulas. Total: any input
+impl StageCoefs {
+  /// Calculate biquad coefficients in `f64` using RBJ Audio-EQ-Cookbook formulas so low-frequency
+  /// bands at 96/192 kHz do not suffer `f32` cancellation in `1 - cos(w0)`. Total: any input
   /// (profiles from disk, a bogus stream rate) gives finite coefficients, never a panic
   /// (`clamp` panics when min > max) and never NaN (which `process_strided` can't recover from,
   /// it only resets the state).
-  pub fn from_band(band: &BiquadBand, sample_rate: f32) -> Self {
-    let sample_rate = if sample_rate.is_finite() && sample_rate >= 8000.0 { sample_rate } else { 48_000.0 };
-    let f0 = if band.frequency.is_finite() { band.frequency.max(20.0).min(sample_rate * 0.499) } else { 1000.0 };
-    let q = if band.q.is_finite() { band.q.clamp(0.1, 30.0) } else { std::f32::consts::FRAC_1_SQRT_2 };
-    // +-60 dB is far past any real EQ setting; above ~770 dB a shelf overflows f32.
-    let gain_db = if band.gain_db.is_finite() { band.gain_db.clamp(-60.0, 60.0) } else { 0.0 };
+  fn from_band(band: &BiquadBand, sample_rate: f32) -> Self {
+    let sample_rate = if sample_rate.is_finite() && sample_rate >= 8000.0 { sample_rate as f64 } else { 48_000.0 };
+    let f0 = if band.frequency.is_finite() { (band.frequency as f64).clamp(20.0, sample_rate * 0.499) } else { 1000.0 };
+    let q = if band.q.is_finite() { (band.q as f64).clamp(0.1, 30.0) } else { std::f64::consts::FRAC_1_SQRT_2 };
+    // +-60 dB is far past any real EQ setting, and keeps the `f32` copy for the curves finite.
+    let gain_db = if band.gain_db.is_finite() { (band.gain_db as f64).clamp(-60.0, 60.0) } else { 0.0 };
 
-    let w0 = 2.0 * PI * f0 / sample_rate;
+    let w0 = 2.0 * std::f64::consts::PI * f0 / sample_rate;
     let cos_w0 = w0.cos();
     let sin_w0 = w0.sin();
     let alpha = sin_w0 / (2.0 * q);
-    let a_linear = 10.0f32.powf(gain_db / 40.0); // sqrt(10^(gain/20))
+    let a_linear = 10.0f64.powf(gain_db / 40.0); // sqrt(10^(gain/20))
 
     let (b0, b1, b2, a0, a1, a2) = match band.filter_type {
       FilterType::Peaking => {
@@ -167,13 +168,21 @@ impl BiquadCoefficients {
       FilterType::Unknown(_) => (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
     };
 
-    let c = Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a0: 1.0, a1: a1 / a0, a2: a2 / a0 };
+    let c = Self { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
     if [c.b0, c.b1, c.b2, c.a1, c.a2].iter().all(|v| v.is_finite()) {
       c
     } else {
       // Pass-through rather than a filter that turns every later block into NaN.
-      Self { b0: 1.0, b1: 0.0, b2: 0.0, a0: 1.0, a1: 0.0, a2: 0.0 }
+      Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 }
     }
+  }
+}
+
+impl BiquadCoefficients {
+  /// Calculate biquad coefficients using RBJ Audio-EQ-Cookbook formulas.
+  pub fn from_band(band: &BiquadBand, sample_rate: f32) -> Self {
+    let c = StageCoefs::from_band(band, sample_rate);
+    Self { b0: c.b0 as f32, b1: c.b1 as f32, b2: c.b2 as f32, a0: 1.0, a1: c.a1 as f32, a2: c.a2 as f32 }
   }
 
   /// Complex frequency response magnitude in decibels at frequency f
@@ -234,10 +243,7 @@ impl BiquadCascade {
       if !band.enabled {
         continue;
       }
-      let stage = |b: &BiquadBand| {
-        let c = BiquadCoefficients::from_band(b, sample_rate);
-        StageCoefs { b0: c.b0 as f64, b1: c.b1 as f64, b2: c.b2 as f64, a1: c.a1 as f64, a2: c.a2 as f64 }
-      };
+      let stage = |b: &BiquadBand| StageCoefs::from_band(b, sample_rate);
       let room = MAX_STREAM_EQ_BANDS.saturating_sub(self.coefs.len());
       match band.butterworth_qs() {
         Some(qs) => {
@@ -457,8 +463,8 @@ mod tests {
     let expected: Vec<_> = expand_slopes(&bands).into_iter().filter(|b| b.enabled).collect();
     assert_eq!(cascade.coefs.len(), expected.len());
     for (got, b) in cascade.coefs.iter().zip(&expected) {
-      let c = BiquadCoefficients::from_band(b, 48_000.0);
-      assert_eq!((got.b0, got.a1, got.a2), (c.b0 as f64, c.a1 as f64, c.a2 as f64));
+      let c = StageCoefs::from_band(b, 48_000.0);
+      assert_eq!((got.b0, got.a1, got.a2), (c.b0, c.a1, c.a2));
     }
     // More bands than stages: capped, and still no new allocation.
     cascade.set_bands(vec![band(FilterType::HighPass, 80.0, 48, true); 40], 48_000.0);
@@ -524,6 +530,28 @@ mod tests {
 
     let resp_far = coef.response_db_at(100.0, 48000.0);
     assert!(resp_far.abs() < 0.5, "Expected ~0 dB far from center, got {}", resp_far);
+  }
+
+  #[test]
+  fn a_20_hz_band_at_192_khz_keeps_its_gain() {
+    // Regression: `1 - cos(w0)` is 2e-7 here, below what an f32 coefficient can hold next to 1.
+    let band = BiquadBand {
+      enabled: true,
+      filter_type: FilterType::Peaking,
+      frequency: 20.0,
+      gain_db: 6.0,
+      q: 1.0,
+      slope_db: 12,
+    };
+    let w = 2.0 * std::f64::consts::PI * 20.0 / 192_000.0;
+    let power = |x0: f64, x1: f64, x2: f64| {
+      let re = x0 + x1 * w.cos() + x2 * (2.0 * w).cos();
+      let im = x1 * w.sin() + x2 * (2.0 * w).sin();
+      re * re + im * im
+    };
+    let c = StageCoefs::from_band(&band, 192_000.0);
+    let db = 10.0 * (power(c.b0, c.b1, c.b2) / power(1.0, c.a1, c.a2)).log10();
+    assert!((db - 6.0).abs() < 0.01, "{db} dB at the band's centre");
   }
 
   #[test]

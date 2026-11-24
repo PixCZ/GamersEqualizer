@@ -20,7 +20,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     icons::HEADPHONES,
     ACCENT,
     tr("Sidetone"),
-    Some(tr("Sealed headphones block your own voice. Sidetone plays the microphone back into them.")),
+    Some(tr(
+      "Closed-back headphones muffle your own voice. Sidetone plays your microphone back into your headphones so you can hear yourself naturally.",
+    )),
   );
 
   // 1. The pair the worker follows (the mixer's microphone and Master output, as the service's
@@ -110,7 +112,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     ui.add_space(theme::CARD_GAP);
 
     theme::info_bar(ui, Severity::Info, |ui| {
-      ui.label(tr("Exclusive-mode playback bypasses Windows effects: sidetone is silent then."));
+      ui.label(tr(
+        "Exclusive-mode playback bypasses Windows audio effects, so sidetone will be silent while it is active.",
+      ));
     });
 
     ui.add_space(4.0);
@@ -153,7 +157,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
           state.sidetone_ui.testing = !state.sidetone_ui.testing;
         }
       });
-      ui.label(theme::caption(tr("Plays without a recording app. Windows shows the microphone as in use meanwhile.")));
+      ui.label(theme::caption(tr("Lets you test sidetone without opening a recording app. Windows will show the microphone as in use while testing.")));
     });
 
     // Latency report when reader is active
@@ -166,19 +170,22 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       let out_block_us = (out_block_frames as u64 * 1_000_000 / out_rate as u64) as u32;
       let latence_us = age_us.saturating_add(noise_delay_us).saturating_add(out_block_us);
       let delay_ms = latence_us as f32 / 1000.0;
-      let p = theme::palette(ui);
-      let col = if delay_ms <= 10.0 {
-        p.ok
+      let sev = if delay_ms <= 10.0 {
+        Severity::Success
       } else if delay_ms <= 20.0 {
-        p.warn
+        Severity::Warning
       } else {
-        p.err
+        Severity::Error
       };
       ui.add_space(8.0);
-      ui.label(
-        theme::strong(trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]), 14.0)
-          .color(col),
-      );
+      theme::status_line(
+        ui,
+        sev,
+        &trf("Delay about {} ms (software only, without hardware)", &[&format!("{:.0}", delay_ms.round())]),
+      )
+      .on_hover_text(tr(
+        "Time spent in the software audio buffers; your sound card and wireless headset add their own small delay on top.",
+      ));
       let mic_rate = h.sidetone_mic_rate.load(r).max(1);
       let mic_block_frames = h.sidetone_mic_block_frames.load(r);
       let mic_period_ms = mic_block_frames as f32 * 1000.0 / mic_rate as f32;
@@ -188,14 +195,15 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         ui.label(theme::caption(trf(
           "Microphone {} ms, output {} ms",
           &[&format!("{:.1}", mic_period_ms), &format!("{:.1}", out_period_ms)],
-        )));
+        )))
+        .on_hover_text(tr(
+          "Size of each audio chunk from the microphone and to the headphones. Smaller means lower delay.",
+        ));
         ui.separator();
         ui.label(theme::caption(trf("Dropouts: {}", &[&underruns.to_string()])));
       });
     }
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 2: Volume, Meter & Low Latency
@@ -227,18 +235,18 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         {
           h.sidetone_low_latency.store(!low_lat, Ordering::Relaxed);
         }
-        ui.label(theme::caption(tr("Asks Windows for its shortest audio period on both devices. Uses more CPU.")));
+        ui.label(theme::caption(tr(
+          "Requests the shortest audio buffer from Windows on both devices for lower latency. Uses slightly more CPU.",
+        )));
       });
       ui.end_row();
     });
     ui.label(theme::caption(if leveler_on {
-      tr("100 % = your voice as loud as the voice leveler makes it for the others, whatever the microphone's own level. The volume of the output device applies on top.")
+      tr("100 % matches the loudness that the voice leveler sends to others, regardless of the mic's raw level. Output device volume applies on top.")
     } else {
-      tr("The voice leveler is off: 100 % = the microphone as it comes in. The volume of the output device applies on top.")
+      tr("Voice leveler is off, so 100 % plays the raw microphone level. Output device volume applies on top.")
     }));
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 3: Noise suppression
@@ -273,24 +281,39 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     ui.horizontal(|ui| {
       ui.label(tr("Noise suppression"));
       let current_label = format_mode_label(settings.noise_mode, running_delay_us, active_mode == settings.noise_mode);
-      egui::ComboBox::from_id_salt("sidetone_noise_mode").selected_text(current_label).width(280.0).show_ui(ui, |ui| {
-        for mode in [NoiseMode::Off, NoiseMode::Expander, NoiseMode::WebRtcNs, NoiseMode::RnNoise, NoiseMode::RnNoise2]
-        {
-          let label = format_mode_label(mode, running_delay_us, active_mode == mode);
-          if ui.selectable_value(&mut settings.noise_mode, mode, label).changed() {
-            changed = true;
+      egui::ComboBox::from_id_salt("sidetone_noise_mode")
+        .selected_text(current_label)
+        .width(280.0)
+        .show_ui(ui, |ui| {
+          for mode in
+            [NoiseMode::Off, NoiseMode::Expander, NoiseMode::WebRtcNs, NoiseMode::RnNoise, NoiseMode::RnNoise2]
+          {
+            let label = format_mode_label(mode, running_delay_us, active_mode == mode);
+            let help = match mode {
+              NoiseMode::Off => tr("No noise cleanup, lowest possible delay."),
+              NoiseMode::Expander => tr("Quiets background hiss between words with zero added delay."),
+              NoiseMode::WebRtcNs => tr("Removes steady background noise (fans, hum) with a small delay."),
+              NoiseMode::RnNoise => tr("Light AI noise removal with a small delay."),
+              NoiseMode::RnNoise2 => tr("Newer AI noise removal model with a small delay."),
+            };
+            if ui.selectable_value(&mut settings.noise_mode, mode, label).on_hover_text(help).changed() {
+              changed = true;
+            }
           }
-        }
-      });
+        })
+        .response
+        .on_hover_text(tr(
+          "Reduces background noise in your sidetone. Stronger cleanup adds a few milliseconds of delay.",
+        ));
     });
 
     if active_mode_u32 != settings.noise_mode.to_u32() {
       if active_mode == NoiseMode::Expander && settings.noise_mode.is_framed() {
         // At 48 kHz the mode is being built (a moment after it is picked), or could not be.
         let why = if mic_rate == SAMPLE_RATE {
-          tr("Running quiet pauses instead: this mode has not started. If this stays, restart the recording app.")
+          tr("Using quiet pauses instead — this mode has not started yet. If this persists, restart the recording app.")
         } else {
-          tr("Running quiet pauses instead: this mode needs the microphone at 48 kHz.")
+          tr("Using quiet pauses instead — this mode requires a 48 kHz microphone.")
         };
         theme::status_line(ui, Severity::Warning, why);
       } else if settings.noise_mode == NoiseMode::RnNoise2 && active_mode == NoiseMode::RnNoise {
@@ -300,7 +323,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
 
     if settings.noise_mode == NoiseMode::Expander {
       ui.label(theme::caption(tr(
-        "Turns down steady noise in the pauses between words. Loud short sounds (keys) pass.",
+        "Lowers steady background noise during pauses between words. Short, loud sounds like keystrokes still pass through.",
       )));
     }
 
@@ -309,13 +332,16 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         ui.label(tr("Sensitivity"));
         ui.horizontal(|ui| {
           ui.spacing_mut().slider_width = 280.0;
-          if ui
-            .add(
-              egui::Slider::new(&mut settings.gate_margin_db, GATE_MARGIN_DB_MIN..=GATE_MARGIN_DB_MAX)
-                .step_by(1.0)
-                .suffix(" dB"),
-            )
-            .changed()
+          if theme::slider(
+            ui,
+            egui::Slider::new(&mut settings.gate_margin_db, GATE_MARGIN_DB_MIN..=GATE_MARGIN_DB_MAX)
+              .step_by(1.0)
+              .suffix(" dB"),
+          )
+          .on_hover_text(tr(
+            "How much louder your voice must be than background noise to open the mic. Lower picks up quieter speech; higher blocks more noise.",
+          ))
+          .changed()
           {
             changed = true;
           }
@@ -327,9 +353,14 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         ui.label(tr("Depth"));
         ui.horizontal(|ui| {
           ui.spacing_mut().slider_width = 280.0;
-          if ui
-            .add(egui::Slider::new(&mut settings.gate_range_db, 0.0..=GATE_RANGE_DB_MAX).step_by(1.0).suffix(" dB"))
-            .changed()
+          if theme::slider(
+            ui,
+            egui::Slider::new(&mut settings.gate_range_db, 0.0..=GATE_RANGE_DB_MAX).step_by(1.0).suffix(" dB"),
+          )
+          .on_hover_text(tr(
+            "How much background noise is turned down between words (in dB). Higher makes pauses quieter.",
+          ))
+          .changed()
           {
             changed = true;
           }
@@ -344,14 +375,14 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
           let max_range = settings.gate_range_db.max(1.0);
           let fraction = (reduction / max_range).clamp(0.0, 1.0);
           let val_text = format!("{:.1} dB", -gate_db);
-          theme::meter(ui, fraction, 280.0, theme::palette(ui).accent, &val_text);
+          theme::meter(ui, fraction, 280.0, theme::palette(ui).accent, &val_text).on_hover_text(tr(
+            "How much background noise is being turned down right now while you are not speaking.",
+          ));
         });
         ui.end_row();
       }
     });
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 4: EQ, the same editor as the voice EQ on the Microphone page
@@ -359,13 +390,11 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
   theme::card(ui, |ui| {
     theme::card_title(ui, Some((icons::EQUALIZER, EQ_COLOR)), tr("Sidetone EQ"));
     ui.label(theme::caption(tr(
-      "Only for what you hear of yourself; others still get the voice EQ of the Microphone page. Changes are live and saved with the pair.",
+      "Affects only how you hear yourself — others still hear the voice EQ from the Microphone tab. Changes apply immediately and are saved per device pair.",
     )));
     let height = super::eq_editor::plot_height(ui, 0.3, 180.0, 340.0);
     eq_changed = super::eq_editor::band_editor(ui, "sidetone_eq", &mut pair.bands, MAX_EQ_BANDS, EQ_COLOR, &[], height);
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 5: Saved pairs
@@ -392,7 +421,7 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         theme::status_line(
           ui,
           Severity::Warning,
-          tr("Delete this pair? Its whole sidetone setup goes with it, the EQ included, and cannot be restored."),
+          tr("Delete this device pair? All its sidetone settings, including EQ, will be permanently removed."),
         );
         ui.horizontal(|ui| {
           let err = theme::palette(ui).err;

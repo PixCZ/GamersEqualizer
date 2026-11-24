@@ -155,6 +155,20 @@ impl OutputEq {
     self.notify(shm);
   }
 
+  /// Puts the active profile of `layer` back to its imported original and publishes it. The
+  /// edited version (unsaved edits included) goes to `profiles/_deleted` first, as a delete does.
+  pub fn reset_layer_profile(&mut self, layer: OutputLayer, shm: Option<&ShmHeader>) -> Result<PathBuf, String> {
+    let profile = self.layer_profile(layer).filter(|p| p.original.is_some()).ok_or("no imported original")?;
+    let edited = self.storage.save_layer_profile(layer, profile)?;
+    let moved = self.storage.move_to_deleted(&edited)?;
+    if let Some(p) = self.layer_profile_mut(layer) {
+      p.reset_to_original();
+    }
+    self.save_layer_profile(layer, shm);
+    self.apply(shm);
+    Ok(moved)
+  }
+
   /// Moves the profile file to `profiles/_deleted` (recoverable) and forgets every reference
   /// to it: the headphone assignments, game bindings and fallback, or the chat / media pick
   /// (that channel falls back to flat). Returns where the file went.
@@ -189,7 +203,8 @@ impl OutputEq {
   /// Add or replace a profile in `layer` and select it, except on the Game layer while a
   /// detected game has its own profile: game bindings only change on the user's explicit pick.
   /// A replaced profile keeps its name's spelling (bindings and selections refer to it), its
-  /// launcher ids (game detection) and whether it is the user's own.
+  /// launcher ids (game detection), whether it is the user's own and, unless the new one brings
+  /// its own (a new import), the imported original.
   pub fn add_layer_profile(
     &mut self,
     layer: OutputLayer,
@@ -205,10 +220,16 @@ impl OutputEq {
       profile.name = old.name.clone();
       profile.game_ids = old.game_ids.clone();
       profile.is_custom = old.is_custom;
+      if profile.original.is_none() {
+        profile.original = old.original.clone();
+      }
     }
     let name = profile.name.clone();
     for b in &mut profile.bands {
       b.clamp_parameters();
+    }
+    if let Some(original) = profile.original.as_mut() {
+      original.bands.iter_mut().for_each(|b| b.clamp_parameters());
     }
     if let Some(vad) = layer.vad() {
       profile.vad_type = vad;

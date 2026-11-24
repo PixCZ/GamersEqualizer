@@ -1,5 +1,5 @@
 //! Visual parametric EQ editor: the response graph with one dot per filter (drag it to
-//! move frequency and gain, mouse wheel over it for width, double-click the graph to add),
+//! move frequency and gain, Alt + mouse wheel over it for width, double-click the graph to add),
 //! a row of filter chips, and the settings of the selected filter below.
 
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
@@ -23,6 +23,8 @@ const AXIS_BOTTOM: f32 = 16.0;
 const WIDTH_OCT_RANGE: std::ops::RangeInclusive<f32> = 0.1..=5.0;
 /// Mouse wheel: Q change per scrolled point (about 8 % per wheel notch).
 const WHEEL_Q_PER_POINT: f32 = 1.0015;
+/// Rail width of the three filter sliders in `details`, the same for all so they line up.
+const SLIDER_WIDTH: f32 = 260.0;
 const GRID_FREQS: [f32; 10] = [20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0];
 const DOT_COLORS: [Color32; 8] = [
   Color32::from_rgb(255, 170, 60),
@@ -31,10 +33,9 @@ const DOT_COLORS: [Color32; 8] = [
   Color32::from_rgb(240, 110, 180),
   Color32::from_rgb(250, 220, 80),
   Color32::from_rgb(170, 140, 255),
-  Color32::from_rgb(80, 220, 190),
+  Color32::from_rgb(65, 210, 180),
   Color32::from_rgb(255, 120, 100),
 ];
-const DISABLED_COLOR: Color32 = Color32::from_gray(110);
 
 /// Pixel <-> (frequency, dB) mapping of the plot area.
 struct Axes {
@@ -61,7 +62,7 @@ pub fn band_editor(
 
   let mut changed = graph(ui, id, bands, max_slots, color, background, height, &mut selected);
   ui.label(theme::caption(tr(
-    "Drag a dot to move it · mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
+    "Drag a point to move it · Alt + scroll over a point to adjust width · double-click the graph to add a filter",
   )));
   changed |= chips(ui, bands, max_slots, &mut selected);
   if let Some(i) = selected {
@@ -146,7 +147,8 @@ fn graph(
   }
   if let Some(i) = hovered.filter(|_| resp.hovered()) {
     ui.ctx().set_cursor_icon(if dragging.is_some() { CursorIcon::Grabbing } else { CursorIcon::Grab });
-    let wheel = ui.input(|inp| inp.smooth_scroll_delta.y);
+    // Alt only: a bare wheel over a dot used to change Q (saved at once) while the user scrolled the page.
+    let wheel = ui.input(|inp| if inp.modifiers.alt { inp.smooth_scroll_delta.y } else { 0.0 });
     if let Some(band) = bands.get_mut(i).filter(|b| wheel != 0.0 && !b.is_cut()) {
       // Wheel up = wider = lower Q. Eaten, so the page doesn't scroll at the same time.
       band.q = (band.q / WHEEL_Q_PER_POINT.powf(wheel)).clamp(0.1, 30.0);
@@ -156,49 +158,92 @@ fn graph(
     }
   }
 
+  if resp.has_focus()
+    && let Some(band) = selected.and_then(|i| bands.get_mut(i))
+  {
+    let (dx, dy, fine) = ui.input(|inp| {
+      let dx = i8::from(inp.key_pressed(egui::Key::ArrowRight)) - i8::from(inp.key_pressed(egui::Key::ArrowLeft));
+      let dy = i8::from(inp.key_pressed(egui::Key::ArrowUp)) - i8::from(inp.key_pressed(egui::Key::ArrowDown));
+      (dx, dy, inp.modifiers.shift)
+    });
+    if dx != 0 {
+      let step = if fine { 1.01f32 } else { 1.05f32 };
+      band.frequency = (band.frequency * step.powi(i32::from(dx))).round().clamp(F_MIN, F_MAX);
+      changed = true;
+    }
+    if dy != 0 && band.filter_type.uses_gain() {
+      band.gain_db = (band.gain_db + f32::from(dy) * 0.5).clamp(-axes.range_db, axes.range_db);
+      changed = true;
+    }
+  }
+
   // --- Drawing. ---
   let pal = theme::palette(ui);
   let painter = ui.painter_at(rect);
   painter.rect_filled(rect, theme::CONTROL_RADIUS, pal.inset);
+  if resp.has_focus() {
+    painter.rect_stroke(
+      rect.shrink(1.0),
+      theme::CONTROL_RADIUS,
+      Stroke::new(2.0_f32, pal.text),
+      egui::StrokeKind::Inside,
+    );
+  }
   draw_grid(&painter, &axes, &pal);
   let color = theme::adapt(ui, color);
 
   let freqs = generate_log_frequencies();
   let clip = ui.painter_at(axes.plot);
-  for &(_, gains, c, width) in background {
+  for (idx, &(_, gains, c, width)) in background.iter().enumerate() {
     let c = theme::adapt(ui, c);
-    clip.add(Shape::line(axes.curve_points(&freqs, gains), Stroke::new(width.min(1.4), c.gamma_multiply(0.6))));
+    let pts = axes.curve_points(&freqs, gains);
+    if idx == 0 {
+      // Dashed segments so background curves are distinguishable without relying on color alone.
+      for seg in pts.chunks(2) {
+        if let [a, b] = *seg {
+          clip.line_segment([a, b], Stroke::new(width.min(1.4), c));
+        }
+      }
+    } else {
+      clip.add(Shape::line(pts, Stroke::new(width.min(1.6), c)));
+    }
   }
   if let Some(band) = selected.and_then(|i| bands.get(i)).filter(|b| b.enabled) {
     let own = evaluate_bands_response(std::slice::from_ref(band), &freqs, SAMPLE_RATE);
-    let c = theme::adapt(ui, dot_color(selected.unwrap_or(0), band));
-    clip.add(Shape::line(axes.curve_points(&freqs, &own), Stroke::new(1.0_f32, c.gamma_multiply(0.7))));
+    let c = dot_color(ui, selected.unwrap_or(0), band);
+    clip.add(Shape::line(axes.curve_points(&freqs, &own), Stroke::new(1.2_f32, c)));
   }
   let total = evaluate_bands_response(bands, &freqs, SAMPLE_RATE);
   clip.add(Shape::line(axes.curve_points(&freqs, &total), Stroke::new(2.4_f32, color)));
 
   for (i, band) in bands.iter().enumerate() {
-    let c = theme::adapt(ui, dot_color(i, band));
+    let c = dot_color(ui, i, band);
     let center = axes.dot_pos(band);
     let is_sel = *selected == Some(i);
     let radius = if is_sel || hovered == Some(i) { DOT_RADIUS + 2.0 } else { DOT_RADIUS };
-    let outline =
-      if is_sel { Stroke::new(2.0_f32, pal.text) } else { Stroke::new(1.0_f32, Color32::from_black_alpha(90)) };
-    painter.circle(center, radius, c, outline);
-    painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), Color32::BLACK);
+    // Disabled bands draw hollow so off-state is visible by shape, not only color (WCAG 1.4.1).
+    let (fill, outline, label_color) = if band.enabled {
+      let stroke = if is_sel { Stroke::new(2.0_f32, pal.text) } else { Stroke::new(1.0_f32, pal.card_stroke) };
+      (c, stroke, text_on(c))
+    } else {
+      let stroke = Stroke::new(2.0_f32, if is_sel { pal.text } else { pal.text_secondary });
+      (pal.inset, stroke, pal.text_secondary)
+    };
+    painter.circle(center, radius, fill, outline);
+    painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), label_color);
   }
   if let Some(band) = hovered.and_then(|i| bands.get(i)) {
     let pos = axes.dot_pos(band) + Vec2::new(0.0, -DOT_RADIUS - 6.0);
     let text = describe(band);
-    let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
+    let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), pal.text);
     let mut box_rect =
       Rect::from_center_size(pos - Vec2::new(0.0, galley.size().y / 2.0), galley.size() + Vec2::splat(8.0));
     box_rect = box_rect.translate(Vec2::new(
       (rect.left() - box_rect.left()).max(0.0) + (rect.right() - box_rect.right()).min(0.0),
       (rect.top() - box_rect.top()).max(0.0),
     ));
-    painter.rect_filled(box_rect, 3.0, Color32::from_black_alpha(220));
-    painter.galley(box_rect.min + Vec2::splat(4.0), galley, Color32::WHITE);
+    painter.rect(box_rect, 3.0, pal.card, Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside);
+    painter.galley(box_rect.min + Vec2::splat(4.0), galley, pal.text);
   }
   changed
 }
@@ -209,20 +254,30 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
     if bands.is_empty() {
       ui.label(theme::caption(tr("No filters: the sound passes unchanged.")));
     }
+    let pal = theme::palette(ui);
+    let font = FontId::proportional(14.0);
     for (i, band) in bands.iter().enumerate() {
       let is_selected = *selected == Some(i);
-      let text = RichText::new(format!("● {}  {}", i + 1, describe(band)));
-      // On the accent selection fill the band color is unreadable: a selected chip keeps the
-      // theme's text-on-accent color, the others show the band color.
-      let text = if is_selected { text } else { text.color(theme::adapt(ui, dot_color(i, band))) };
-      if ui.selectable_label(is_selected, text).clicked() {
+      let mut job = egui::text::LayoutJob::default();
+      let bullet_color = if is_selected { pal.on_accent } else { dot_color(ui, i, band) };
+      let text_color = if is_selected { pal.on_accent } else { pal.text };
+      let bullet = if band.enabled { "● " } else { "○ " };
+      job.append(bullet, 0.0, egui::text::TextFormat::simple(font.clone(), bullet_color));
+      job.append(
+        &format!("{}  {}", i + 1, describe(band)),
+        0.0,
+        egui::text::TextFormat::simple(font.clone(), text_color),
+      );
+      if ui.selectable_label(is_selected, job).clicked() {
         *selected = if *selected == Some(i) { None } else { Some(i) };
       }
     }
     let free = max_slots.saturating_sub(slots_used(bands));
     let add = ui
-      .add_enabled(free > 0, egui::Button::new(format!("➕  {}", tr("Add filter"))))
-      .on_disabled_hover_text(tr("Full. A 24 dB/oct cut takes the room of 2 filters, a 48 dB/oct cut 4."));
+      .add_enabled(free > 0, egui::Button::new(theme::with_icon(theme::icons::ADD, tr("Add filter"))))
+      .on_disabled_hover_text(tr(
+        "Filter limit reached. A 24 dB/oct cut uses 2 filter slots, and a 48 dB/oct cut uses 4.",
+      ));
     if add.clicked() {
       bands.push(BiquadBand { q: 1.0, ..BiquadBand::default() });
       *selected = Some(bands.len() - 1);
@@ -235,11 +290,12 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
 /// Settings of one filter. `room` = slots this filter may take. Sets `remove` on 🗑.
 fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, remove: &mut bool) -> bool {
   let mut changed = false;
-  let c = theme::adapt(ui, dot_color(i, band));
+  let c = dot_color(ui, i, band);
   theme::inset_frame(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
     ui.set_width(ui.available_width());
     ui.horizontal_wrapped(|ui| {
-      ui.label(theme::strong(format!("● {}", trf("Filter {}", &[&(i + 1)])), 14.0).color(c));
+      ui.label(RichText::new(if band.enabled { "●" } else { "○" }).color(c));
+      ui.label(theme::strong(trf("Filter {}", &[&(i + 1)]), 14.0));
       egui::ComboBox::from_id_salt(format!("{id}_type"))
         .selected_text(tr(friendly_name(&band.filter_type)))
         .width(170.0)
@@ -262,22 +318,40 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
         });
       changed |=
         ui.checkbox(&mut band.enabled, tr("On")).on_hover_text(tr("Switch off to hear the difference")).changed();
-      if ui.button(format!("🗑  {}", tr("Remove"))).clicked() {
+      if ui.button(theme::with_icon(theme::icons::DELETE, tr("Remove"))).clicked() {
         *remove = true;
       }
     });
 
-    ui.horizontal_wrapped(|ui| {
-      ui.label(tr("Frequency:"));
+    // One grid for the sliders: labels share a column and every slider has the same width, so they line up.
+    egui::Grid::new(format!("{id}_sliders")).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+      ui.spacing_mut().slider_width = SLIDER_WIDTH;
+      ui.label(tr("Frequency:"))
+        .on_hover_text(tr("Which pitch range this filter affects (low = bass, high = treble)."));
       changed |= value_slider(ui, &mut band.frequency, F_MIN..=F_MAX, " Hz", 0, true);
+      ui.end_row();
       if band.filter_type.uses_gain() {
-        ui.label(tr("Gain:"));
+        ui.label(tr("Gain:")).on_hover_text(tr("How much to boost (+) or cut (-) around this frequency, in dB."));
         changed |= value_slider(ui, &mut band.gain_db, -24.0..=24.0, " dB", 1, false);
+        ui.end_row();
+      }
+      if matches!(band.filter_type, FilterType::Peaking | FilterType::Notch) {
+        ui.label(tr("Width:")).on_hover_text(tr("Narrow affects a single frequency; wide affects a broader range."));
+        let mut width = width_octaves(band.q);
+        if value_slider(ui, &mut width, WIDTH_OCT_RANGE, tr(" oct"), 2, true) {
+          band.q = q_for_width(width).clamp(0.1, 30.0);
+          changed = true;
+        }
+        ui.end_row();
+      } else if !band.is_cut() {
+        ui.label(tr("Slope (Q):")).on_hover_text(tr("Higher values create a steeper transition into the shelf."));
+        changed |= value_slider(ui, &mut band.q, 0.3..=2.0, "", 2, false);
+        ui.end_row();
       }
     });
 
-    ui.horizontal_wrapped(|ui| {
-      if band.is_cut() {
+    if band.is_cut() {
+      ui.horizontal_wrapped(|ui| {
         ui.label(tr("Steepness:")).on_hover_text(tr("How fast the sound beyond the frequency disappears."));
         for slope in SLOPES_DB {
           let stages = BiquadBand { slope_db: slope, ..band.clone() }.stages();
@@ -295,18 +369,8 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
             changed = true;
           }
         }
-      } else if matches!(band.filter_type, FilterType::Peaking | FilterType::Notch) {
-        ui.label(tr("Width:")).on_hover_text(tr("Narrow touches one tone, wide a whole region."));
-        let mut width = width_octaves(band.q);
-        if value_slider(ui, &mut width, WIDTH_OCT_RANGE, " oct", 2, true) {
-          band.q = q_for_width(width).clamp(0.1, 30.0);
-          changed = true;
-        }
-      } else {
-        ui.label(tr("Slope (Q):")).on_hover_text(tr("Higher = a sharper step into the shelf."));
-        changed |= value_slider(ui, &mut band.q, 0.3..=2.0, "", 2, false);
-      }
-    });
+      });
+    }
   });
   changed
 }
@@ -345,13 +409,13 @@ impl Axes {
 
 fn draw_grid(painter: &egui::Painter, axes: &Axes, pal: &theme::Palette) {
   let grid = Stroke::new(1.0_f32, pal.grid);
-  let label = pal.text_tertiary;
+  let label = pal.text_secondary;
   let font = FontId::proportional(12.0);
   let plot = axes.plot;
   for f in GRID_FREQS {
     let x = axes.x_of(f);
     painter.line_segment([Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], grid);
-    let text = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
+    let text = if f >= 1000.0 { format!("{} k", f / 1000.0) } else { format!("{f}") };
     painter.text(Pos2::new(x, plot.bottom() + 2.0), Align2::CENTER_TOP, text, font.clone(), label);
   }
   let step = axes.range_db / 2.0;
@@ -377,7 +441,7 @@ fn value_slider(
 ) -> bool {
   let untouched = shown_value(*value, &range, decimals);
   let mut v = *value;
-  ui.add(egui::Slider::new(&mut v, range).logarithmic(logarithmic).suffix(suffix).max_decimals(decimals));
+  theme::slider(ui, egui::Slider::new(&mut v, range).logarithmic(logarithmic).suffix(suffix).max_decimals(decimals));
   if v == untouched {
     return false;
   }
@@ -404,11 +468,21 @@ fn bands_without(bands: &[BiquadBand], skip: usize) -> Vec<BiquadBand> {
   bands.iter().enumerate().filter(|&(i, _)| i != skip).map(|(_, b)| b.clone()).collect()
 }
 
-fn dot_color(i: usize, band: &BiquadBand) -> Color32 {
+fn dot_color(ui: &Ui, i: usize, band: &BiquadBand) -> Color32 {
   if !band.enabled {
-    return DISABLED_COLOR;
+    return theme::palette(ui).text_secondary;
   }
-  DOT_COLORS.get(i % DOT_COLORS.len()).copied().unwrap_or(Color32::WHITE)
+  theme::adapt(ui, DOT_COLORS.get(i % DOT_COLORS.len()).copied().unwrap_or(Color32::WHITE))
+}
+
+/// High-contrast label color (white or near-black) over `bg`, by WCAG relative luminance.
+fn text_on(bg: Color32) -> Color32 {
+  let ch = |v: u8| {
+    let s = f32::from(v) / 255.0;
+    if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+  };
+  let lum = 0.2126 * ch(bg.r()) + 0.7152 * ch(bg.g()) + 0.0722 * ch(bg.b());
+  if lum > 0.18 { Color32::from_rgb(20, 20, 20) } else { Color32::WHITE }
 }
 
 fn friendly_name(ft: &FilterType) -> &'static str {
@@ -431,9 +505,9 @@ fn type_help(ft: &FilterType) -> &'static str {
     FilterType::LowShelf => tk("Raises or lowers everything below the frequency."),
     FilterType::HighShelf => tk("Raises or lowers everything above the frequency."),
     FilterType::Notch => tk("Removes one tone, e.g. 50 Hz mains hum."),
-    FilterType::Unknown(_) => tk(
-      "Made by a newer version of the app. This version passes the sound through it unchanged and keeps it as it is.",
-    ),
+    FilterType::Unknown(_) => {
+      tk("Created by a newer version of the app. This version leaves it untouched and passes audio through unchanged.")
+    }
   }
 }
 

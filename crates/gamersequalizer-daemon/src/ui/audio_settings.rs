@@ -263,8 +263,8 @@ mod tests {
     let mut old = ShmHeader::default();
     AudioSettings::load_or_default(&dir).apply_to_header(&mut old);
     assert_eq!(old.get_selected_mic_id(), None);
-    // Nor did it know automatic ChatMix: off, at the default strength.
-    assert!(!old.duck_enabled.load(Ordering::Relaxed));
+    // Nor did it know automatic ChatMix: it gets the default, on, at the default strength.
+    assert!(old.duck_enabled.load(Ordering::Relaxed));
     assert_eq!(old.duck_strength_permille.load(Ordering::Relaxed), 500);
 
     std::fs::write(dir.join(FILE), "{ nope").unwrap();

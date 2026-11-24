@@ -7,9 +7,7 @@ use super::theme::{self, Severity, icons};
 use crate::i18n::{self, LANGUAGES, LanguagePref, tr, trf};
 use crate::settings_transfer::{self, Part, Selection, Summary};
 use crate::win_audio::shell;
-use egui::{Color32, RichText, Ui};
-
-const COLOR: Color32 = Color32::from_rgb(150, 150, 150);
+use egui::{RichText, Ui};
 
 /// Uninstall card: asks once more before doing anything.
 #[derive(Default)]
@@ -45,10 +43,11 @@ impl TransferUi {
 }
 
 pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
-  theme::page_header(ui, icons::SETTINGS, COLOR, tr("Settings"), None);
+  let icon_color = theme::palette(ui).text_secondary;
+  theme::page_header(ui, icons::SETTINGS, icon_color, tr("Settings"), None);
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::COLOR, COLOR)), tr("App theme"));
+    theme::card_title(ui, Some((icons::COLOR, icon_color)), tr("App theme"));
     ui.label(theme::caption(tr("Light or dark. \"Windows setting\" follows Settings > Personalization > Colors.")));
     ui.horizontal(|ui| {
       let mut pick = state.prefs.theme;
@@ -64,7 +63,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   });
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::GLOBE, COLOR)), tr("Language"));
+    theme::card_title(ui, Some((icons::GLOBE, icon_color)), tr("Language"));
     let system_name = match i18n::system_language() {
       i18n::Lang::Cs => "Čeština",
       i18n::Lang::En => "English",
@@ -89,7 +88,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   });
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::POWER, COLOR)), tr("Startup and background service"));
+    theme::card_title(ui, Some((icons::POWER, icon_color)), tr("Startup and background service"));
     ui.horizontal(|ui| {
       let mut on = state.autostart_enabled;
       if ui
@@ -125,7 +124,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
       }
       ui.label(tr("Show the microphone level in the tray icon"));
     });
-    ui.label(theme::caption(tr("While an app records, the bars in the icon follow what others hear from you; only with microphone processing on. They stand still behind a full-screen app and while Windows keeps the icon among the hidden icons: drag it to the taskbar.")));
+    ui.label(theme::caption(tr("Animates the tray icon bars to match what others hear while an app is recording (requires microphone processing). Pauses during full-screen apps or when the icon is tucked in the Windows overflow menu — drag it onto the taskbar to keep it visible.")));
     ui.add_space(4.0);
     ui.horizontal(|ui| {
       if ui
@@ -153,7 +152,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   uninstall_card(ui, state);
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::INFO, COLOR)), tr("About"));
+    theme::card_title(ui, Some((icons::INFO, icon_color)), tr("About"));
     ui.label(concat!("GamersEqualizer ", env!("GAMERSEQUALIZER_VERSION")));
     ui.label(format!("{}: {}", tr("Author"), env!("CARGO_PKG_AUTHORS")));
   });
@@ -161,9 +160,9 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
 
 fn transfer_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::SAVE, COLOR)), tr("Back up or move settings"));
+    theme::card_title(ui, Some((icons::SAVE, theme::palette(ui).text_secondary)), tr("Back up or move settings"));
     ui.label(theme::caption(tr(
-      "Saves profiles and settings into one file, e.g. before reinstalling Windows or for a new PC. Devices are found again by their names, also on another USB port. The audio effects are installed on each PC separately.",
+      "Saves all profiles and settings into a single file — handy before reinstalling Windows or moving to a new PC. Audio devices are matched by name even on a different USB port. Audio effects must still be installed on each PC separately.",
     )));
     let base_dir = state.storage.base_dir().to_path_buf();
     let t = &mut state.transfer_ui;
@@ -193,7 +192,7 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
       ui.label(theme::strong(tr("What goes into the file:"), 14.0));
       part_checkboxes(ui, parts);
       ui.label(theme::caption(tr(
-        "Sharing profiles with a friend? Keep only the profiles: their devices and microphone settings stay as they are.",
+        "Sharing profiles with a friend? Check only the profiles so their devices and microphone settings stay unchanged.",
       )));
       let only = selection(parts);
       let mut close = false;
@@ -231,7 +230,7 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
         ui,
         Severity::Warning,
         tr(
-          "Your current settings are backed up first. Checked settings are replaced, profiles with the same name too; everything else stays. The app closes and starts again.",
+          "Your current settings are backed up automatically first. Selected items and profiles with matching names will be replaced; everything else stays untouched. The app will restart afterward.",
         ),
       );
       let only = selection(parts);
@@ -267,7 +266,20 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
 
 fn part_checkboxes(ui: &mut Ui, parts: &mut [(Part, bool)]) {
   for (part, on) in parts {
-    ui.checkbox(on, part_label(part));
+    let cb = ui.checkbox(on, part_label(part));
+    if let Some(help) = part_help(part) {
+      cb.on_hover_text(help);
+    }
+  }
+}
+
+fn part_help(part: &Part) -> Option<&'static str> {
+  match part.key.as_str() {
+    "profiles/aux" => Some(tr("Extra saved EQ profiles for auxiliary audio.")),
+    "settings/sidetone" => {
+      Some(tr("Hearing your own microphone in your headphones, with its volume, noise cleanup and EQ."))
+    }
+    _ => None,
   }
 }
 
@@ -296,9 +308,9 @@ fn part_label(part: &Part) -> String {
 
 fn uninstall_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::DELETE, COLOR)), tr("Uninstall from Windows"));
+    theme::card_title(ui, Some((icons::DELETE, theme::palette(ui).text_secondary)), tr("Uninstall from Windows"));
     ui.label(theme::caption(tr(
-      "Removes everything the app put into Windows: the microphone and output effects on all audio devices (administrator rights, audio stops for a few seconds), their backups, the app itself in Program Files, start with Windows and the notifications. Then the app exits.",
+      "Removes everything GamersEqualizer installed in Windows: microphone and output effects on all devices (requires administrator rights and briefly restarts audio), effect backups, the app in Program Files, startup entry, and notifications. The app then exits.",
     )));
     if !state.uninstall_ui.confirming {
       if ui.button(theme::with_icon(icons::DELETE, tr("Uninstall..."))).clicked() {

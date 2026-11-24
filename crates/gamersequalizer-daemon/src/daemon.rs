@@ -50,19 +50,44 @@ fn heal_device_ids(win_audio: &WinAudioSystem, profiles_dir: &Path, shm_ptr: Opt
   header.out_settings_version.fetch_add(1, Ordering::AcqRel);
 }
 
-/// Game, chat, media and mic as the window's mixer shows them, for the tray flyout's rows.
-fn flyout_channels(h: &ShmHeader) -> [crate::flyout::ChannelLevel; 4] {
-  let level = |v: &AtomicU32, m: &AtomicBool, max: f32| crate::flyout::ChannelLevel {
-    volume: v.load(Ordering::Relaxed) as f32 / 1000.0,
-    muted: m.load(Ordering::Relaxed),
-    max,
+/// Game, chat, media, mic and ChatMix as the window's mixer shows them, for the tray flyout's rows:
+/// with the voice leveler on the mic's row is its target loudness (not the volume), with Automatic ChatMix on its strength.
+fn flyout_channels(h: &ShmHeader) -> Vec<(crate::flyout::MixChannel, crate::flyout::ChannelLevel)> {
+  use crate::flyout::{ChannelLevel, MixChannel, balance_slider, loudness_slider};
+  let r = Ordering::Relaxed;
+  let level =
+    |v: &AtomicU32, m: &AtomicBool, max: f32| ChannelLevel { volume: v.load(r) as f32 / 1000.0, muted: m.load(r), max };
+  let mic = if h.mic_leveler_enabled.load(r) {
+    // The leveler's target on the slider's 0..1 (its range); the icon mutes the mic.
+    let target = h.mic_leveler_target_db_x10.load(r) as f32 / 10.0;
+    let volume = loudness_slider(target);
+    (MixChannel::MicLoudness, ChannelLevel { volume, muted: h.mic_muted.load(r), max: 1.0 })
+  } else {
+    (MixChannel::Mic, level(&h.mic_volume_permille, &h.mic_muted, ui::state::mic_volume_max(Some(h))))
   };
-  [
-    level(&h.game_volume_permille, &h.game_muted, 1.0),
-    level(&h.chat_volume_permille, &h.chat_muted, 1.0),
-    level(&h.media_volume_permille, &h.media_muted, 1.0),
-    level(&h.mic_volume_permille, &h.mic_muted, ui::state::mic_volume_max(Some(h))),
+  let chatmix = if h.duck_enabled.load(r) {
+    (
+      MixChannel::DuckStrength,
+      ChannelLevel { volume: h.duck_strength_permille.load(r) as f32 / 1000.0, muted: false, max: 1.0 },
+    )
+  } else {
+    let balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
+    (MixChannel::Balance, ChannelLevel { volume: balance_slider(balance), muted: false, max: 1.0 })
+  };
+  vec![
+    (MixChannel::Game, level(&h.game_volume_permille, &h.game_muted, 1.0)),
+    (MixChannel::Chat, level(&h.chat_volume_permille, &h.chat_muted, 1.0)),
+    (MixChannel::Media, level(&h.media_volume_permille, &h.media_muted, 1.0)),
+    mic,
+    chatmix,
   ]
+}
+
+/// The leveler's target from the flyout row's slider, in whole dB: a wheel notch moves it less than
+/// the label's precision and the Mic page's slider steps 1 dB too.
+fn set_leveler_target(h: &ShmHeader, slider: f32) {
+  let db = crate::flyout::loudness_db(slider).round();
+  h.mic_leveler_target_db_x10.store((db * 10.0) as i32, Ordering::Relaxed);
 }
 
 /// A channel row of the tray flyout moved: what the window's slider does, with the window open or
@@ -84,16 +109,51 @@ fn set_channel(
   (mix.chat.volume, mix.chat.muted) = (level(&h.chat_volume_permille), h.chat_muted.load(r));
   (mix.media.volume, mix.media.muted) = (level(&h.media_volume_permille), h.media_muted.load(r));
   (mix.mic.volume, mix.mic.muted) = (level(&h.mic_volume_permille), h.mic_muted.load(r));
-  let max = if channel == MixChannel::Mic { ui::state::mic_volume_max(Some(h)) } else { 1.0 };
+  mix.balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
+  debug!("[Flyout] {channel:?} at {:.0} %, muted {muted}", volume * 100.0);
+  // A row read before the leveler or Automatic ChatMix was switched means another control now.
+  if !flyout_channels(h).iter().any(|(c, _)| *c == channel) {
+    debug!("[Flyout] {channel:?} is no longer shown, change dropped");
+    return;
+  }
+  let volume = Some(volume).filter(|v| v.is_finite());
   let (c, volume_at, muted_at) = match channel {
     MixChannel::Game => (&mut mix.game, &h.game_volume_permille, &h.game_muted),
     MixChannel::Chat => (&mut mix.chat, &h.chat_volume_permille, &h.chat_muted),
     MixChannel::Media => (&mut mix.media, &h.media_volume_permille, &h.media_muted),
     MixChannel::Mic => (&mut mix.mic, &h.mic_volume_permille, &h.mic_muted),
+    MixChannel::MicLoudness => {
+      if let Some(v) = volume {
+        set_leveler_target(h, v);
+      }
+      // The mic's own volume stays; only its mute follows the row's icon.
+      mix.mic.muted = muted;
+      mix.mic.write_to(&h.mic_volume_permille, &h.mic_muted);
+      mix.apply_mix();
+      return;
+    }
+    MixChannel::Balance => {
+      if let Some(v) = volume {
+        mix.set_balance(crate::flyout::balance_value(v));
+        h.chatmix_balance_permille.store((mix.balance * 1000.0).round() as i32, r);
+      }
+      return;
+    }
+    // Atomics the window never writes back: it reads them (and saves them) as they are.
+    MixChannel::DuckStrength => {
+      if let Some(v) = volume {
+        h.duck_strength_permille.store((v.clamp(0.0, 1.0) * 1000.0).round() as u32, r);
+      }
+      return;
+    }
   };
-  (c.volume, c.muted) = (if volume.is_finite() { volume.clamp(0.0, max) } else { c.volume }, muted);
+  c.volume = match (channel, volume) {
+    (_, None) => c.volume,
+    (MixChannel::Mic, Some(v)) => v.clamp(0.0, ui::state::mic_volume_max(Some(h))),
+    (_, Some(v)) => v.clamp(0.0, 1.0),
+  };
+  c.muted = muted;
   c.write_to(volume_at, muted_at);
-  debug!("[Flyout] {channel:?} at {:.0} %, muted {muted}", c.volume * 100.0);
   mix.apply_mix();
 }
 
@@ -457,7 +517,7 @@ pub(super) fn run_background_daemon() {
     let duck_playing = header.is_some_and(|h| h.duck_enabled.load(Ordering::Relaxed))
       && win_audio::stream_router::game_session_playing();
     let busy = win_audio::worker::busy_reason(&[
-      (timed!(sections, "find_window", tray::find_window().is_some()), "window open", win_audio::worker::TICK),
+      (timed!(sections, "find_window", tray::window_visible()), "window open", win_audio::worker::TICK),
       (duck_playing, "Automatic ChatMix with a game playing", win_audio::worker::TICK),
     ]);
     let was_idle = std::mem::replace(&mut idle, idle_log.idle("service loop", busy));
@@ -515,5 +575,42 @@ mod tests {
     assert!(!volume_sync_due(Some(half), true), "idle: not before 1 s");
     assert!(volume_sync_due(Some(IDLE_VOLUME_SYNC_INTERVAL), true));
     assert!(!volume_sync_due(Some(Duration::from_millis(100)), false));
+  }
+
+  #[test]
+  fn the_flyout_row_sets_the_leveler_target_in_whole_db() {
+    let h = ShmHeader::default();
+    // (slider, target x10): -36..-12 dBFS over 0..1; a wheel notch (0.02 = 0.48 dB) lands on a whole dB.
+    for (slider, target_x10) in [(0.75, -180), (0.52, -240), (0.0, -360), (2.0, -120), (-1.0, -360)] {
+      set_leveler_target(&h, slider);
+      assert_eq!(h.mic_leveler_target_db_x10.load(Ordering::Relaxed), target_x10, "slider {slider}");
+    }
+  }
+
+  #[test]
+  fn the_flyout_gets_the_mic_and_chatmix_controls_that_are_on() {
+    use crate::flyout::MixChannel;
+    let h = ShmHeader::default();
+    let r = Ordering::Relaxed;
+    let kinds = |h: &ShmHeader| flyout_channels(h).iter().skip(3).map(|(c, _)| *c).collect::<Vec<_>>();
+    h.mic_leveler_enabled.store(false, r);
+    h.duck_enabled.store(false, r);
+    assert_eq!(kinds(&h), [MixChannel::Mic, MixChannel::Balance]);
+    // The balance -0.4 (game louder) is the slider's 0.3, which the service turns back into -0.4.
+    h.chatmix_balance_permille.store(-400, r);
+    let (_, balance) = *flyout_channels(&h).last().unwrap();
+    assert!((balance.volume - 0.3).abs() < 1e-6 && (balance.volume * 2.0 - 1.0 + 0.4).abs() < 1e-6);
+    h.mic_leveler_enabled.store(true, r);
+    h.duck_enabled.store(true, r);
+    h.duck_strength_permille.store(700, r);
+    assert_eq!(kinds(&h), [MixChannel::MicLoudness, MixChannel::DuckStrength]);
+    assert_eq!(flyout_channels(&h).last().unwrap().1.volume, 0.7);
+    // The default target (-24 dBFS) is the middle of -36..-12.
+    let (_, loudness) = flyout_channels(&h)[3];
+    assert!((loudness.volume - 0.5).abs() < 1e-6);
+    // Muted mic: the loudness row shows it, so its icon can unmute.
+    assert!(!loudness.muted);
+    h.mic_muted.store(true, r);
+    assert!(flyout_channels(&h)[3].1.muted);
   }
 }

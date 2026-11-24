@@ -44,7 +44,7 @@ binary has **no network code**; latency of the microphone chain is measured and 
 | `test_data/`                        | Test fixtures; `test_data/private/` is git-ignored (own recordings)       |
 | `docs/`                             | Build guide, AEC3 tuning notes, screenshots                               |
 | `packaging/`                        | winget manifest drafts, release notes                                     |
-| `.claude/rules/`                    | Detailed agent rules: architecture, style, testing, installer, release    |
+| `.claude/rules/`                    | Agent rules: architecture, style, design, testing, installer, release     |
 | `secrets/`                          | Never read, edit, or commit                                               |
 
 Inside `crates/gamersequalizer-daemon/src/`:
@@ -122,6 +122,7 @@ admin or restart Windows audio are never delegated: a human runs them.
   When it is installed but does nothing, the app log alone must say why (`[ApoCheck]`, `[ApoNote]`,
   `[ApoLink]`); installer and diagnostics rules: `.claude/rules/installer.md`.
 - Tester ZIP, installed layout, versions and signing: `.claude/rules/packaging.md`.
+- Colors, fonts and contrast of the window and the tray flyout: `.claude/rules/design.md`.
 
 ## Before a release or a push to main
 

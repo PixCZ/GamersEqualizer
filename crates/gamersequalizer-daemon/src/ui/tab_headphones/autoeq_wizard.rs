@@ -49,8 +49,7 @@ pub(super) fn wizard(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     });
   });
   ui.label(theme::caption(tr(
-    "AutoEQ is a free database of measured corrections for thousands of headphones. This app never goes \
-     online itself: you download the file in your browser, the app finds it and checks it.",
+    "AutoEQ is a free database of measured corrections for thousands of headphones. GamersEqualizer never connects to the internet — download the file in your browser, and the app will locate and verify it.",
   )));
   ui.add_space(8.0);
   match step {
@@ -75,7 +74,7 @@ fn choice(ui: &mut Ui, title: &str, caption: &str) -> bool {
 }
 
 fn step_choose(ui: &mut Ui, state: &mut AppState) {
-  ui.label(theme::strong(tr("How do you want to get it?"), 15.0));
+  ui.label(theme::strong(tr("How do you want to get it?"), 14.0));
   ui.add_space(4.0);
   if choice(
     ui,
@@ -101,13 +100,9 @@ fn step_choose(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn step_web_download(ui: &mut Ui, state: &mut AppState) {
-  ui.label(theme::strong(tr("Step 1 of 3: download the file in your browser"), 15.0));
+  ui.label(theme::strong(tr("Step 1 of 3: download the file in your browser"), 14.0));
   numbered(ui, 1, tr("Click the button below. autoeq.app opens in your normal browser."));
-  if ui
-    .add(theme::accent_button(ui, &theme::with_icon(icons::GLOBE, tr("Open autoeq.app"))))
-    .on_hover_text(AUTOEQ_WEB_URL)
-    .clicked()
-  {
+  if ui.button(theme::with_icon(icons::GLOBE, tr("Open autoeq.app"))).on_hover_text(AUTOEQ_WEB_URL).clicked() {
     shell::open_url(AUTOEQ_WEB_URL);
   }
   numbered(ui, 2, tr("Type your headphone model into the search box and pick it from the list."));
@@ -118,7 +113,7 @@ fn step_web_download(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn step_web_find(ui: &mut Ui, state: &mut AppState) {
-  ui.label(theme::strong(tr("Step 2 of 3: find the downloaded file"), 15.0));
+  ui.label(theme::strong(tr("Step 2 of 3: find the downloaded file"), 14.0));
   refresh_downloads(ui, state);
   let dir = autoeq::downloads_dir().map(|d| d.display().to_string()).unwrap_or_else(|| tr("Downloads").into());
   let scan = state.headphones_ui.downloads.clone();
@@ -146,7 +141,7 @@ fn step_web_find(ui: &mut Ui, state: &mut AppState) {
       &trf("\"{}\" is a different variant. On autoeq.app choose a Parametric EQ app and download again.", &[&name]),
     );
   }
-  if ui.button(format!("📂  {}", tr("Pick the file myself..."))).clicked()
+  if ui.button(theme::with_icon(icons::OPEN, tr("Pick the file myself..."))).clicked()
     && let Some(path) = shell::pick_text_file(tr("AutoEQ / Equalizer APO parametric EQ"))
   {
     review_file(state, &path, None, Step::WebFind);
@@ -155,13 +150,9 @@ fn step_web_find(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn step_zip_download(ui: &mut Ui, state: &mut AppState) {
-  ui.label(theme::strong(tr("Step 1 of 3: download and extract the database"), 15.0));
+  ui.label(theme::strong(tr("Step 1 of 3: download and extract the database"), 14.0));
   numbered(ui, 1, tr("Click the button below. The AutoEq page on GitHub opens in your browser."));
-  if ui
-    .add(theme::accent_button(ui, &theme::with_icon(icons::GLOBE, tr("Open AutoEq on GitHub"))))
-    .on_hover_text(AUTOEQ_REPO_URL)
-    .clicked()
-  {
+  if ui.button(theme::with_icon(icons::GLOBE, tr("Open AutoEq on GitHub"))).on_hover_text(AUTOEQ_REPO_URL).clicked() {
     shell::open_url(AUTOEQ_REPO_URL);
   }
   numbered(ui, 2, tr("Click the green \"Code\" button, then \"Download ZIP\". It is large; let it finish."));
@@ -195,14 +186,14 @@ fn step_zip_download(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn step_zip_folder(ui: &mut Ui, state: &mut AppState) {
-  ui.label(theme::strong(tr("Step 2 of 3: index the database"), 15.0));
+  ui.label(theme::strong(tr("Step 2 of 3: index the database"), 14.0));
   ui.label(tr("The app reads the folder once (a few seconds) and remembers where it is."));
   ui.horizontal(|ui| {
     ui.label(tr("Folder:"));
     ui.add(
       egui::TextEdit::singleline(&mut state.headphones_ui.folder_text)
         .desired_width(380.0)
-        .hint_text(r"C:\Users\...\Downloads\AutoEq-master"),
+        .hint_text(tr("C:\\Users\\...\\Downloads\\AutoEq-master")),
     );
     let scanning = state.headphones_ui.scanning.is_some();
     let label = if scanning { tr("Indexing...") } else { tr("Index") };
@@ -213,16 +204,23 @@ fn step_zip_folder(ui: &mut Ui, state: &mut AppState) {
     }
   });
   if let Some(msg) = state.headphones_ui.message.as_deref() {
-    ui.label(theme::caption(msg));
+    let (sev, text) = if state.headphones_ui.scanning.is_some() {
+      (Severity::Info, msg)
+    } else if let Some(clean) = msg.strip_prefix("✔ ") {
+      (Severity::Success, clean)
+    } else {
+      (Severity::Warning, msg)
+    };
+    theme::status_line(ui, sev, text);
   }
   let next = (!state.headphones_ui.entries.is_empty()).then_some((tr("Next: find your model"), Step::Pick));
   nav(ui, state, Step::ZipDownload, next);
 }
 
 fn step_pick(ui: &mut Ui, state: &mut AppState) {
-  ui.label(theme::strong(tr("Step 3 of 3: find your model"), 15.0));
+  ui.label(theme::strong(tr("Step 3 of 3: find your model"), 14.0));
   ui.label(theme::caption(tr(
-    "Several results per model = different measurements; oratory1990 or crinacle are a good first choice.",
+    "Multiple results for the same model mean different measurements — oratory1990 or crinacle are usually great starting points.",
   )));
   ui.horizontal(|ui| {
     ui.label(tr("Search:"));
@@ -263,7 +261,7 @@ fn step_pick(ui: &mut Ui, state: &mut AppState) {
 }
 
 fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
-  ui.label(theme::strong(tr("Check before saving"), 15.0));
+  ui.label(theme::strong(tr("Check before saving"), 14.0));
   let Some(mut candidate) = state.headphones_ui.candidate.clone() else {
     go(state, Step::Choose);
     return;
@@ -292,7 +290,7 @@ fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
   let back = state.headphones_ui.review_back;
   let mut save = false;
   ui.horizontal(|ui| {
-    if ui.button(format!("◀  {}", tr("Back"))).clicked() {
+    if ui.button(theme::with_icon(icons::BACK, tr("Back"))).clicked() {
       go(state, back);
     }
     let label = trf("💾  Save and use on {}", &[&crate::ui::truncate_chars(device_name, 28)]);
@@ -304,6 +302,7 @@ fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     profile.bands = parsed.bands;
     profile.preamp_db = parsed.preamp_db;
     profile.is_custom = false;
+    profile.remember_original();
     match state.output_eq_do(|eq, shm| eq.add_layer_profile(OutputLayer::Headphone, profile, shm)) {
       Ok(()) => {
         state.headphones_ui.saved_name = Some(name);
@@ -337,7 +336,7 @@ fn step_done(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     );
   }
   ui.horizontal(|ui| {
-    if ui.button(format!("➕  {}", tr("Add another pair"))).clicked() {
+    if ui.button(theme::with_icon(icons::ADD, tr("Add another pair"))).clicked() {
       go(state, Step::Choose);
     }
     if ui.button(tr("Close")).clicked() {
@@ -358,7 +357,7 @@ fn numbered(ui: &mut Ui, n: u32, text: &str) {
     let p = theme::palette(ui);
     // Numbered circle, like the steps in Windows setup pages.
     let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 11.0, p.accent);
+    ui.painter().circle_filled(rect.center(), 11.0, p.accent_fill);
     ui.painter().text(
       rect.center(),
       egui::Align2::CENTER_CENTER,
@@ -373,11 +372,11 @@ fn numbered(ui: &mut Ui, n: u32, text: &str) {
 fn nav(ui: &mut Ui, state: &mut AppState, back: Step, next: Option<(&str, Step)>) {
   ui.add_space(8.0);
   ui.horizontal(|ui| {
-    if ui.button(format!("◀  {}", tr("Back"))).clicked() {
+    if ui.button(theme::with_icon(icons::BACK, tr("Back"))).clicked() {
       go(state, back);
     }
     if let Some((label, step)) = next
-      && ui.add(theme::accent_button(ui, &format!("{label}  ▶"))).clicked()
+      && ui.add(theme::accent_button(ui, &format!("{label}  {}", icons::FORWARD.emoji))).clicked()
     {
       go(state, step);
     }
@@ -424,7 +423,9 @@ fn review_file(state: &mut AppState, path: &Path, name: Option<&str>, back: Step
     file_name.trim_end_matches(".txt").trim_end_matches(" ParametricEQ").trim_end_matches(" FixedBandEQ").to_string();
   let too_big = std::fs::metadata(path).map(|m| m.len()).ok().filter(|&len| len > MAX_EQ_FILE_BYTES);
   let read = match too_big {
-    Some(len) => Err(trf("{} kB is far too big for an EQ file; pick the ParametricEQ.txt", &[&(len / 1024)])),
+    Some(len) => {
+      Err(trf("{} kB is too large for an EQ file — make sure you picked a ParametricEQ.txt file.", &[&(len / 1024)]))
+    }
     None => std::fs::read_to_string(path).map_err(|e| e.to_string()),
   };
   match read {

@@ -17,8 +17,7 @@ use std::sync::atomic::Ordering;
 pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
 const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
 const AI_COLOR: Color32 = Color32::from_rgb(140, 240, 120);
-pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(255, 180, 80);
-const OK_COLOR: Color32 = Color32::from_rgb(80, 220, 120);
+pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(230, 150, 40);
 /// Lowest level shown on the dBFS meters.
 const METER_FLOOR_DB: f32 = -80.0;
 /// Width of the meters and bars in the AEC grid.
@@ -42,7 +41,7 @@ pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudi
       icons::MIC,
       ACCENT,
       tr("Microphone"),
-      Some(tr("Chain (Windows effect on the microphone, so every app gets it): echo cancellation → AI noise suppression → voice EQ → voice leveler → boost/limiter.")),
+      Some(tr("Processing chain (runs directly on your Windows microphone for all apps): echo cancellation → AI noise suppression → voice EQ → voice leveler → boost/limiter.")),
     );
     super::apo_banner::render_apo_status_line(ui, state);
     latency_line(ui, state);
@@ -76,9 +75,7 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
     ui.horizontal(|ui| {
       theme::card_title(ui, Some((icons::MIC, ACCENT)), tr("Stage 4: Voice leveler"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
-        "Brings your voice to the same loudness whether you talk softly or loudly, or the mic is set low. \
-         It learns your level only while it hears you speak: quickly in the first seconds, then ever slower, \
-         so one shout or cough changes nothing. Between words the gain stays put, it does not pump up the noise.",
+        "Keeps your voice at a consistent volume whether you speak softly, loudly, or have a quiet mic. It learns your speaking level only while you talk — quickly at first, then gradually slower so a single shout or cough won't throw it off. Between words, the gain holds steady so background noise isn't boosted.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut new_on = on;
@@ -96,9 +93,8 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         let mut target = h.mic_leveler_target_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
         ui.spacing_mut().slider_width = BAR_WIDTH;
         let slider = egui::Slider::new(&mut target, MIN_TARGET_DB..=MAX_TARGET_DB).step_by(1.0).show_value(false);
-        if ui
-          .add(slider)
-          .on_hover_text(tr("How loud others hear you. The leveler gets your voice there by itself."))
+        if theme::slider(ui, slider)
+          .on_hover_text(tr("How loud you sound to others. The voice leveler adjusts your mic automatically to reach this target."))
           .changed()
         {
           h.mic_leveler_target_db_x10.store((target * 10.0).round() as i32, Ordering::Relaxed);
@@ -110,8 +106,10 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         } else {
           tr("normal")
         };
-        ui.label(format!("{word} ({target:.0} dBFS)"));
-        if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.small_button(tr("Default")).clicked() {
+        ui.label(format!("{word} ({target:.0} dBFS)")).on_hover_text(tr(
+          "Decibels below maximum digital volume (0 dBFS is the loudest before distortion; around -18 dBFS is a comfortable voice level).",
+        ));
+        if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.button(tr("Default")).clicked() {
           h.mic_leveler_target_db_x10.store((DEFAULT_TARGET_DB * 10.0).round() as i32, Ordering::Relaxed);
         }
       });
@@ -128,7 +126,7 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         if ui
           .button(tr("Learn again"))
           .on_hover_text(tr(
-            "Forget the learned level of this microphone and learn it from your next words (new mic, mic moved).",
+            "Resets the learned level for this microphone so it re-learns from your next words (useful after moving or changing your mic).",
           ))
           .clicked()
         {
@@ -232,11 +230,11 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
     let leveler = state.shm_header().map(|h| (h.mic_leveler_enabled.load(r), h.mic_auto_gain_permille.load(r)));
     let caption = match leveler {
       Some((true, _)) => tr(
-        "With the voice leveler on this is how loud others hear you: 100 % = the leveler's target, 50 % = 6 dB under it. The Windows input level only keeps the signal clean; the app moves it by itself when the mic clips or is far too quiet.",
+        "With the voice leveler enabled, this sets how loud you sound to others (100 % = target loudness, 50 % = 6 dB quieter). The Windows input level only keeps the signal clean; the app adjusts it automatically when the mic clips or is too quiet.",
       ),
-      _ => tr(
-        "0 % - 100 % moves the Windows input slider. 100 % - 300 % adds a soft-saturated digital boost up to +9.5 dB (3x amplitude).",
-      ),
+      _ => {
+        tr("0 %–100 % adjusts the Windows input level. 100 %–300 % adds a soft-limited digital boost up to +9.5 dB.")
+      }
     };
     ui.label(theme::caption(caption));
     if let Some((true, auto)) = leveler.filter(|&(_, auto)| auto > 0) {
@@ -261,10 +259,7 @@ fn clipping_status(ui: &mut Ui, clips: u32) {
     Some(ago) => {
       theme::status_line(ui, Severity::Warning, &trf("Mic clipped {} s ago", &[&format!("{:.0}", ago)])).on_hover_text(
         tr(
-          "The sound card's input distorts: the wave is cut at its top. Lower the Windows input level, and check \
-           \"Microphone Boost\" in the Windows sound control panel (device properties, Levels): it amplifies before \
-           the input level, so lowering the level alone doesn't help. With the voice leveler on the app lowers the \
-           input level by itself.",
+          "The microphone input is distorting because the signal is peaking too high. Lower the Windows input level and check \"Microphone Boost\" in the Windows sound control panel (device properties, Levels): it amplifies before the input slider, so lowering the slider alone doesn't help. When the voice leveler is enabled, the app lowers the Windows input level automatically.",
         ),
       );
     }
@@ -279,9 +274,9 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
     // Header: title, description in a tooltip, on/off switch on the right.
     let (aec_enabled, ai_strength, gate_db) = mic_controls(state);
     ui.horizontal(|ui| {
-      theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation (AEC)"));
+      theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
-        "What the speakers play is taken by GamersEqualizer's output EQ on that device (before your sidetone is mixed in) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
+        "Listens to what plays through your speakers (before your own sidetone is added) and subtracts it from the microphone so friends do not hear your game or their own voice back. The sound delay between speakers and mic is measured automatically and remembered per device pair.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut on = aec_enabled;
@@ -312,7 +307,9 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
     ui.horizontal_top(|ui| {
       aec_column(ui, col_w, tr("Echo"), |ui| {
         aec_row(ui, tr("Removed"), |ui| {
-          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db));
+          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db)).on_hover_text(tr(
+            "How much speaker echo is being cancelled out of your microphone (in dB; higher means cleaner voice).",
+          ));
         });
         let (delay, hover) = match t.delay_ms {
           Some(d) => {
@@ -322,7 +319,8 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
           None => ("—".to_string(), tr("not measured yet: play some sound through the speakers").to_string()),
         };
         aec_row(ui, tr("Delay"), |ui| {
-          ui.label(RichText::new(delay).color(p.ok)).on_hover_text(hover);
+          let col = if t.delay_ms.is_some() { p.text } else { p.text_secondary };
+          ui.label(RichText::new(delay).color(col)).on_hover_text(hover);
         });
       });
       ui.add_space(AEC_COLUMN_GAP);
@@ -351,9 +349,21 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
       });
       ui.add_space(8.0);
       ui.horizontal_top(|ui| {
-        aec_plot(ui, col_w, tr("Correlation vs. delay"), None, |ui| corr_plot(ui, &t, col_w));
+        aec_plot(
+          ui,
+          col_w,
+          tr("Echo match vs. delay"),
+          Some(tr("Shows how clearly speaker sound matches the microphone at each delay. A single sharp peak means the echo delay is locked.")),
+          |ui| corr_plot(ui, &t, col_w),
+        );
         ui.add_space(AEC_COLUMN_GAP);
-        aec_plot(ui, col_w, tr("History (60 s): ERLE dB / delay ms"), None, |ui| history_plot(ui, state, col_w));
+        aec_plot(
+          ui,
+          col_w,
+          tr("History (60 s): echo removed / delay"),
+          Some(tr("Last 60 seconds of cancelled echo (dB, higher is better) and measured speaker-to-mic delay (ms).")),
+          |ui| history_plot(ui, state, col_w),
+        );
       });
     });
   });
@@ -364,7 +374,7 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
 fn aec_column(ui: &mut Ui, width: f32, title: &str, rows: impl FnOnce(&mut Ui)) {
   ui.vertical(|ui| {
     ui.set_width(width);
-    ui.label(theme::strong(title, 15.0));
+    ui.label(theme::strong(title, 14.0));
     egui::Grid::new(("aec_grid", title))
       .num_columns(2)
       .min_col_width(AEC_LABEL_WIDTH)
@@ -395,9 +405,9 @@ fn aec_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
 }
 
 /// Meter with its value in the normal text style of the AEC rows.
-fn aec_meter(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: String) {
+fn aec_meter(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: String) -> egui::Response {
   let text = RichText::new(value).color(theme::palette(ui).text);
-  theme::meter_with(ui, fraction, width, fill, text);
+  theme::meter_with(ui, fraction, width, fill, text)
 }
 
 /// `output`: name of the output the reference is taken from.
@@ -415,8 +425,8 @@ fn aec_status_text(t: &AecTelemetry, output: Option<&str>) -> (String, Severity)
     Some(AecState::ReferenceSilent) => (tr("Waiting for speaker audio to measure the delay").into(), Severity::Warning),
     Some(AecState::Measuring) => (tr("Measuring echo delay...").into(), Severity::Warning),
     Some(AecState::Locked) => (tr("Active: cancelling speaker echo").into(), Severity::Success),
-    Some(AecState::Unknown(v)) => (trf("Unknown state {} (newer DSP build?)", &[&v]), Severity::Info),
-    None => (tr("Mic DSP not running").into(), Severity::Info),
+    Some(AecState::Unknown(v)) => (trf("Unknown state {} (newer audio effect version?)", &[&v]), Severity::Info),
+    None => (tr("Microphone audio effect is not running").into(), Severity::Info),
   }
 }
 
@@ -425,15 +435,15 @@ fn no_reference_text(status: Option<AecRefStatus>, output: Option<&str>) -> Stri
   let output = output.unwrap_or_else(|| tr("the current output"));
   match status {
     Some(AecRefStatus::EffectMissing) => trf(
-      "No speaker reference: the output EQ is not installed on \"{}\". Install it there (Output & headphones) and the echo is cancelled.",
+      "Echo cancellation needs a speaker reference, but output EQ is not installed on \"{}\". Install it in Output & headphones to enable echo cancellation.",
       &[&output],
     ),
     Some(AecRefStatus::EffectOutdated) => trf(
-      "No speaker reference: the sound effects on \"{}\" need an update. Update them in Output & headphones.",
+      "Echo cancellation needs a speaker reference, but the sound effects on \"{}\" are outdated. Update them in Output & headphones.",
       &[&output],
     ),
     Some(AecRefStatus::EndpointUnknown) => trf(
-      "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. The app log ([ApoNote]) says more.",
+      "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. See the Log tab for details.",
       &[&output],
     ),
     Some(AecRefStatus::NoOutput) => tr("No speaker reference: no output device").into(),
@@ -451,7 +461,11 @@ fn level_row(ui: &mut Ui, label: &str, db: Option<f32>, width: f32) {
     Some(db) if db <= METER_FLOOR_DB => (0.0, tr("silent").to_string()),
     Some(db) => (((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0), format!("{db:.1}")),
   };
-  aec_row(ui, label, |ui| aec_meter(ui, frac, width, theme::level_color(ui, frac), text));
+  aec_row(ui, label, |ui| {
+    aec_meter(ui, frac, width, theme::level_color(ui, frac), text).on_hover_text(tr(
+      "Level in dBFS: decibels below maximum digital volume (0 dBFS is the loudest before distortion).",
+    ));
+  });
 }
 
 /// Y grid for a plot that starts at 0: lines at tenths and halves, labels at 0, half and `top`
@@ -476,7 +490,7 @@ fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
   let max_ms = if t.corr_max_delay_ms > 0.0 { t.corr_max_delay_ms } else { 400.0 };
   let pts: PlotPoints =
     t.corr.iter().enumerate().map(|(i, &v)| [((i as f32 + 0.5) / n as f32 * max_ms) as f64, v as f64]).collect();
-  let (line, mark) = (theme::adapt(ui, AEC_COLOR), theme::adapt(ui, OK_COLOR));
+  let (line, mark) = (theme::adapt(ui, AEC_COLOR), theme::palette(ui).ok);
   let threshold_color = theme::palette(ui).text_tertiary;
   small_plot("aec_corr_plot", width)
     .include_y(0.0)
@@ -494,7 +508,7 @@ fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
     .show(ui, |pu| {
       let threshold = (MIN_PEAK_RATIO / FULL_SCALE_PEAK_RATIO) as f64;
       pu.hline(HLine::new(tr("acceptance threshold"), threshold).stroke(Stroke::new(1.0_f32, threshold_color)));
-      pu.line(Line::new("|corr|", pts).stroke(Stroke::new(1.5_f32, line)));
+      pu.line(Line::new(tr("echo match"), pts).stroke(Stroke::new(1.5_f32, line)));
       if let Some(d) = t.delay_ms {
         pu.vline(VLine::new(tr("locked delay"), d as f64).stroke(Stroke::new(1.2_f32, mark)));
       }
@@ -505,7 +519,7 @@ fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
   let now = state.aec_history.back().map_or(0.0, |p| p.t);
   let erle: PlotPoints = state.aec_history.iter().map(|p| [p.t - now, p.erle_db as f64]).collect();
   let delay: PlotPoints = state.aec_history.iter().filter_map(|p| p.delay_ms.map(|d| [p.t - now, d as f64])).collect();
-  let (a, b) = (theme::adapt(ui, AEC_COLOR), theme::adapt(ui, OK_COLOR));
+  let (a, b) = (theme::adapt(ui, AEC_COLOR), theme::palette(ui).ok);
   small_plot("aec_history_plot", width)
     .include_x(-60.0)
     .include_x(0.0)
@@ -514,7 +528,7 @@ fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
     .x_axis_formatter(|v, _| format!("{:.0} s", v.value))
     .legend(Legend::default())
     .show(ui, |pu| {
-      pu.line(Line::new("ERLE dB", erle).stroke(Stroke::new(1.5_f32, a)));
+      pu.line(Line::new(tr("echo removed (dB)"), erle).stroke(Stroke::new(1.5_f32, a)));
       pu.line(Line::new(tr("delay ms"), delay).stroke(Stroke::new(1.5_f32, b)));
     });
 }
@@ -587,11 +601,11 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
       DenoiseStatus::Limited { limit, running } => Some((
         match limit {
           DenoiseLimit::Overloaded => trf(
-            "Limited: {} was too slow for real time on this CPU, {} runs instead. Pick {} again to retry.",
+            "{} was too slow for real-time audio on this CPU, so {} is running instead. Select {} again to retry.",
             &[&model_name(selected), &model_name(running), &model_name(selected)],
           ),
           DenoiseLimit::LoadFailed => trf(
-            "{} could not be loaded by the audio engine, {} runs instead. Pick {} again to retry.",
+            "The audio engine couldn't load {}, so {} is running instead. Select {} again to retry.",
             &[&model_name(selected), &model_name(running), &model_name(selected)],
           ),
           other => trf("Limited ({}), running: {}", &[&format!("{other:?}"), &model_name(running)]),
@@ -621,7 +635,11 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
         .show_value(true)
         .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
         .custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0));
-      changed |= ui.add(slider).changed();
+      changed |= theme::slider(ui, slider)
+        .on_hover_text(tr(
+          "How strongly background noise (fans, keyboard, room) is removed. Lower keeps more of your natural voice; higher cuts more noise.",
+        ))
+        .changed();
       ui.end_row();
 
       // Any old threshold value (e.g. -45) means "on": the gate is automatic now.
@@ -633,10 +651,7 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
         changed |= ui
           .selectable_value(&mut gate_auto, true, tr("Auto"))
           .on_hover_text(tr(
-            "Turns the mic down by 12 dB while you are not speaking. Opens on speech, not on loudness: \
-             works the same for a loud or quiet voice.\n\
-             Tuned to never cut your voice, so loud typing sometimes gets through, most often with RNNoise \
-             (it removes the least noise).",
+            "Lowers the microphone by 12 dB whenever you aren't speaking. It reacts to speech rather than raw volume, so it works equally well for quiet and loud voices.\nTuned to avoid cutting off words, so loud typing may occasionally get through — especially with RNNoise.",
           ))
           .changed();
         changed |= ui
@@ -652,9 +667,7 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
         changed |= ui
           .checkbox(&mut protect, text)
           .on_hover_text(tr(
-            "Holds your voice back briefly so the gate is already open when a word starts after a pause. \
-             Without it the first syllable can come out quieter. Adds this much delay; \
-             only active while the gate is on.",
+            "Delays your voice slightly so the noise gate is already open when you start speaking after a pause. Without it, the first syllable can sound quieter. Adds the delay shown; only active when the noise gate is on.",
           ))
           .changed();
       });
@@ -683,7 +696,7 @@ fn latency_line(ui: &mut Ui, state: &mut AppState) {
     None => tr("Delay: measuring, say something...").to_owned(),
   };
   let breakdown = trf(
-    "Measured continuously: the raw microphone compared with what apps receive. Right now: echo cancellation {}, noise suppression {}, word-onset protection {}. EQ, leveler and limiter add no delay.",
+    "Measured continuously by comparing the raw mic signal with what apps receive. Current breakdown: echo cancellation {}, noise suppression {}, word-onset protection {}. EQ, voice leveler, and limiter add zero delay.",
     &[&ms_text(l.aec_ms), &ms_text(l.denoise_ms), &ms_text(l.lookahead_ms)],
   );
   // Normal size with the status icon: a caption was easy to miss at the top of the page.
@@ -717,28 +730,25 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
 
 {}",
       tr(
-        "Time the mic chain needs per audio block, as a share of the block's length. The chain runs on one CPU core, so this is how busy it keeps that one core; Task Manager shows the same work divided over all cores. Above 100 % the block is late: crackles or dropouts.\nSustained overload switches DeepFilterNet 3 or DPDFNet to RNNoise (see Log).",
+        "Shows how much of one CPU core the microphone chain uses to process each audio block in time (Task Manager spreads this across all cores, so it reports a lower number). Going over 100 % causes crackles or audio dropouts.\nIf overload persists, DeepFilterNet 3 or DPDFNet automatically falls back to RNNoise (logged in the Log tab).",
       )
     ));
     // Only a problem is shown; zero late blocks needs no words.
     if load.late_blocks > 0 {
-      ui.label(RichText::new(trf("late blocks: {}", &[&load.late_blocks])).color(p.warn));
+      theme::status_line(ui, Severity::Warning, &trf("late blocks: {}", &[&load.late_blocks]));
     }
   });
   ui.end_row();
 }
 
 const RNNOISE_ABOUT: &str = tk(
-  "RNNoise: light classic model (nnnoiseless), the voice stays natural. For a quiet room or a weak CPU.\n\
-  Cost: ~0.1 % CPU · Weak point: removes little noise (keyboard only ~12-15 dB); loud typing stays audible and can keep the gate open.",
+  "Lightweight model that keeps your voice natural. Best for a quiet room or an older PC (~0.1 % CPU). Removes little noise (keyboard only ~12–15 dB), so loud typing stays audible and can keep the noise gate open.",
 );
 const DEEPFILTER_ABOUT: &str = tk(
-  "DeepFilterNet 3: best open-source quality (full-band 48 kHz), removes keyboard well (~20-30 dB).\n\
-  Cost: ~1 % CPU, ~0.2 s gap when switched during a call · Weak point: a keystroke during speech sometimes gets through; a very quiet voice under loud typing can lose soft syllables.",
+  "Great balance of voice quality and noise removal, handling keyboard noise well (~20–30 dB, ~1 % CPU). Switching to it mid-call causes a brief ~0.2 s pause. Occasional keystrokes during speech can still slip through, and very quiet speech under loud typing may lose soft syllables.",
 );
 const DPDFNET_ABOUT: &str = tk(
-  "DPDFNet: strongest keyboard removal (~47-50 dB), the gate almost never lets keys through.\n\
-  Cost: about 3x the CPU of DeepFilterNet 3, ~0.1 s gap when switched during a call · Weak point: slightly changes the voice's tone; very loud typing right over a word can thin it out.",
+  "Strongest keyboard noise removal (~47–50 dB) — the noise gate almost never lets keystrokes through. Uses about 3× more CPU than DeepFilterNet 3, with a ~0.1 s pause when switched mid-call. Slightly alters voice tone, and heavy typing directly over a word can make it sound thinner.",
 );
 
 /// Delay the mic gets with this model: its own (measured, see the denoiser's latency test)
@@ -755,7 +765,7 @@ fn latency_breakdown(m: DenoiseModel, ahead: bool) -> String {
   let model = ms_text(AiVoiceIsolator::latency_ms(m));
   if ahead {
     trf(
-      "Expected latency: {} = {} model + {} word-onset protection.",
+      "Expected latency: {} ({} model + {} word-onset protection).",
       &[&ms_text(total_latency_ms(m, true)), &model, &ms_text(AiVoiceIsolator::lookahead_ms(m))],
     )
   } else {
@@ -777,7 +787,7 @@ fn eq_section(ui: &mut Ui, state: &mut AppState) {
     theme::card_title(ui, Some((icons::EQUALIZER, EQ_COLOR)), tr("Stage 3: Voice parametric EQ"));
     super::profile_bar::render_mic_bar(ui, state);
     ui.label(theme::caption(tr(
-      "Applied after noise suppression, before the boost/limiter. Changes are live and kept across restarts; \"Save as…\" keeps them as a named preset.",
+      "Applied after noise suppression and before boost/limiter. Changes take effect immediately and are saved automatically; use \"Save as…\" to create a named preset.",
     )));
 
     let height = super::eq_editor::plot_height(ui, 0.3, 180.0, 340.0);

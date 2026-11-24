@@ -202,7 +202,7 @@ impl StreamProcessor {
     let Some(eq) = target.and_then(|(bus, _)| bus.eq_index()).and_then(|i| self.shm.layout().header.stream_eq.get(i))
     else {
       self.eq.cascade.clear();
-      self.eq.preamp_gain = 1.0;
+      self.eq.set_preamp_db(0.0);
       return;
     };
     let (bands, preamp_db) = eq.read();

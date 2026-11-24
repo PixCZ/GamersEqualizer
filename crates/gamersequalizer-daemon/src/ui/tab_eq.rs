@@ -38,20 +38,22 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
     if super::setup::sonar_profiles(state) > 0 {
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let hover = trf(
-          "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
+          "Copies Sonar profiles from {}. If you modified a profile with the same name, your version is backed up to profiles\\_deleted first so it can be restored.",
           &[&DEFAULT_SONAR_DB_PATH],
         );
-  if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(hover).clicked() {
+        if ui.button(theme::with_icon(icons::IMPORT, tr("Import from Sonar DB"))).on_hover_text(hover).clicked() {
           reimport_sonar(state);
         }
       });
     }
   });
   ui.label(
-    RichText::new(tr("Game profiles on top of the headphone correction, switched by the game in the foreground."))
-      .color(theme::palette(ui).text_secondary),
+    RichText::new(tr(
+      "Game EQ profiles layered on top of your headphone correction, switching automatically based on the active game.",
+    ))
+    .color(theme::palette(ui).text_secondary),
   );
-  ui.add_space(theme::CARD_GAP);
+  ui.add_space(4.0);
 
   // Switches and detection.
   theme::card(ui, |ui| {
@@ -63,14 +65,14 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
       }
       ui.add_space(16.0);
       ui.checkbox(&mut next.auto_detect, tr("Auto-detect game"))
-        .on_hover_text(tr("Switch the profile when a game comes to the foreground; it stays until the game exits."));
+        .on_hover_text(tr("Automatically switches the EQ profile when a game comes to the foreground and keeps it active until the game closes."));
       ui.add_enabled_ui(next.auto_detect, |ui| {
         ui.checkbox(&mut next.detect_launchers, tr("Launchers"))
-          .on_hover_text(tr("Steam, Epic, GOG, Ubisoft Connect and Microsoft Store data on this PC (e.g. division2.exe = Steam app 2221490 = The Division 2)"));
+          .on_hover_text(tr("Uses local Steam, Epic, GOG, Ubisoft Connect, and Microsoft Store library data on this PC to identify games (e.g. division2.exe → The Division 2)."));
         ui.checkbox(&mut next.detect_names, tr("Names"))
-          .on_hover_text(tr("Match the exe name / product name with profile names (e.g. \"Tom Clancy's The Division 2\")"));
+          .on_hover_text(tr("Matches the executable or app name against your profile names (e.g. \"Tom Clancy's The Division 2\")."));
         ui.checkbox(&mut next.detect_genres, tr("Genres"))
-          .on_hover_text(tr("A game without its own profile gets the genre profile (shooter, MOBA, ...). The genre comes from a built-in list of big games, GOG Galaxy and Steam on this PC; nothing is sent anywhere."));
+          .on_hover_text(tr("Games without a dedicated profile use a genre profile (shooter, MOBA, etc.). Genres are looked up locally from a built-in list, GOG Galaxy, and Steam — nothing is sent online."));
       });
       if next != s {
         state.output_eq.settings = next;
@@ -122,7 +124,10 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
       ],
     );
     if state.output_eq.preamp_db != 0.0 {
-      ui.label(theme::caption(trf("Auto preamp {} dB (no clipping)", &[&format!("{:.1}", state.output_eq.preamp_db)])));
+      ui.label(theme::caption(trf(
+        "Volume change {} dB (prevents distortion)",
+        &[&format!("{:+.1}", state.output_eq.preamp_db)],
+      )));
     }
     if changed {
       state.apply_output_eq();
@@ -131,7 +136,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
   });
 
   theme::card(ui, |ui| {
-    egui::CollapsingHeader::new(theme::strong(tr("Recent apps: assign a profile manually"), 15.0))
+    egui::CollapsingHeader::new(theme::strong(tr("Recent apps: assign a profile manually"), 14.0))
       .show(ui, |ui| recent_apps(ui, state));
   });
 }
@@ -139,10 +144,28 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
 /// Colored line samples with their meaning, under a graph.
 fn legend(ui: &mut Ui, items: &[(&str, Color32)]) {
   ui.horizontal_wrapped(|ui| {
-    for &(text, color) in items {
+    for (idx, &(text, color)) in items.iter().enumerate() {
       let c = theme::adapt(ui, color);
-      let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-      ui.painter().line_segment([rect.left_center(), rect.right_center()], egui::Stroke::new(2.5_f32, c));
+      let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 12.0), egui::Sense::hover());
+      let y = rect.center().y;
+      let painter = ui.painter();
+      match idx {
+        // 0 = edited curve (thick + dot), 1 = headphone correction (dashed), 2+ = combined (solid).
+        0 => {
+          painter
+            .line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(2.5_f32, c));
+          painter.circle_filled(rect.center(), 3.0, c);
+        }
+        1 => {
+          let stroke = egui::Stroke::new(1.5_f32, c);
+          painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.left() + 6.0, y)], stroke);
+          painter.line_segment([egui::pos2(rect.right() - 6.0, y), egui::pos2(rect.right(), y)], stroke);
+        }
+        _ => {
+          painter
+            .line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(1.8_f32, c));
+        }
+      }
       ui.label(RichText::new(text).small().color(theme::palette(ui).text_secondary));
       ui.add_space(8.0);
     }
@@ -213,7 +236,7 @@ fn active_game_row(ui: &mut Ui, state: &mut AppState) {
 
 fn recent_apps(ui: &mut Ui, state: &mut AppState) {
   ui.label(theme::caption(tr(
-    "Apps that were in the foreground. Assign a profile if a game is not recognized, or mark an app as not a game.",
+    "Apps that recently ran in the foreground. Assign a profile if a game wasn't detected, or mark an app as not a game.",
   )));
   let (auto, not_a_game, no_profile) = (tr(AUTO), tr(NOT_A_GAME), tr(NO_PROFILE));
   let mut names: Vec<String> = vec![auto.to_string(), not_a_game.to_string(), no_profile.to_string()];
@@ -271,9 +294,8 @@ pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer, bus_vol
     let profile = state.output_eq.layer_profile_mut(layer);
     let mut changed = false;
     if let Some(p) = profile {
-      changed = ui
-        .add(egui::Slider::new(&mut p.gain_db, -12.0..=12.0).suffix(" dB").max_decimals(1))
-        .on_hover_text(tr("Make this profile louder or quieter by ear, e.g. so all your headphones sound equally loud. Saved with the profile."))
+      changed = theme::slider(ui, egui::Slider::new(&mut p.gain_db, -12.0..=12.0).suffix(" dB").max_decimals(1))
+        .on_hover_text(tr("Adjust this profile's volume by ear — for example, to match loudness across different headphones. Saved with the profile."))
         .changed();
     }
     if changed {
@@ -286,10 +308,7 @@ pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer, bus_vol
     if ui
       .checkbox(&mut matching, tr("Match loudness between profiles"))
       .on_hover_text(tr(
-        "Every EQ boost needs headroom, so the app turns the volume down first (preamp).\n\
-         ON: by the average level between 200 Hz and 6 kHz, so switching profiles keeps the loudness. Rare peaks \
-         above full scale (at most +3 dB) are turned down smoothly by a limiter in the output effect.\n\
-         OFF: by the strongest boost. Never needs the limiter, but profiles with big boosts sound quieter.",
+        "EQ boosts need headroom to avoid distortion, so the app lowers the volume first (preamp).\nON: lowers volume based on the average level between 200 Hz and 6 kHz, keeping loudness consistent when switching profiles. Rare peaks above maximum (up to +3 dB) are smoothly caught by a limiter.\nOFF: lowers volume by the highest boost. Never triggers the limiter, but profiles with heavy boosts sound quieter.",
       ))
       .changed()
     {
@@ -365,17 +384,14 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
       let (severity, status) = match state.streams_on_bus(bus) {
         None => (Severity::Warning, tr("Stream EQ not running").to_string()),
         Some(0) => (Severity::Info, tr("No app stream of this channel recognized right now").to_string()),
-        Some(n) => (Severity::Success, trf("Applied to {} app stream(s) now", &[&n])),
+        Some(n) => (Severity::Success, trf("Active on {} app stream(s)", &[&n])),
       };
       theme::status_line(ui, severity, &status).on_hover_text(tr(
-        "Counts streams the background service has matched to an app of this channel. A stream is \
-         recognized within about a second once it plays; silent streams aren't.",
+        "Number of active audio streams matched to apps on this channel. Streams are detected within about a second once audio starts playing; silent streams are ignored.",
       ));
     });
     ui.label(theme::caption(tr(
-      "Applied by the stream EQ, an effect on each app's own stream before Windows mixes them (no virtual sound \
-       card, no extra latency). Install it on the output once (admin): scripts\\apo-install.ps1 -Flow Render -Slot \
-       SFX. Apps it can't match keep headphone + game EQ.",
+      "Applied per app before Windows mixes audio together — no virtual sound card and no extra latency. Install the audio effects on this output using the banner at the top. Unmatched apps keep headphone + game EQ.",
     )));
     ui.add_space(4.0);
 
@@ -405,7 +421,10 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
   });
 
   theme::card(ui, |ui| {
-    let (result, preamp, peak) = state.output_eq.bus_result(bus);
+    let (hp_curve, combined, preamp, peak) = {
+      let (result, preamp, peak) = state.output_eq.bus_result(bus);
+      (result.layer_a_curve.gains_db.clone(), result.combined_curve.gains_db.clone(), preamp, peak)
+    };
     if state.output_eq.bus_profile(bus).is_some() {
       volume_row(ui, state, layer, Some((preamp, peak)));
       ui.add_space(4.0);
@@ -413,7 +432,6 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
     let mut changed = false;
 
     // Graph: this profile (editable dots) over the headphone correction and the sum.
-    let (hp_curve, combined) = (result.layer_a_curve.gains_db.clone(), result.combined_curve.gains_db.clone());
     let height = super::eq_editor::plot_height(ui, 0.3, 160.0, 400.0);
     if let Some(p) = state.output_eq.bus_profile_mut(bus) {
       let background = [

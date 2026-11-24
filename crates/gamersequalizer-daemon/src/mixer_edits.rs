@@ -1,5 +1,5 @@
-//! Channel levels the service changed (the tray flyout's Game / Chat / Media / Mic rows), for the
-//! window to adopt. The window writes every level into the shared header each frame, so a level
+//! Channel levels and the ChatMix balance the service changed (the tray flyout's Game / Chat /
+//! Media / Mic / ChatMix rows), for the window to adopt. The window writes every level into the shared header each frame, so a level
 //! the service put there alone would be overwritten; this block is written by the service only and
 //! counted, and the window adopts it once per new count. It never writes back, so nothing bounces.
 //!
@@ -11,7 +11,7 @@
 
 use crate::win_audio::chatmix::ChatMixController;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Memory::{
@@ -20,7 +20,7 @@ use windows::Win32::System::Memory::{
 use windows::core::HSTRING;
 
 /// A new layout of `MixerEdits` gets a new name (a window of another build then sees none).
-const NAME: &str = r"Local\GamersEqualizer_MixerEdits_v2";
+const NAME: &str = r"Local\GamersEqualizer_MixerEdits_v3";
 /// How long an output picked in the flyout counts as the reason the default changed (the service
 /// switches Windows in the loop pass it tells of the pick).
 /// shortcut: a pick whose switch failed still counts for this long, so the same output becoming
@@ -36,6 +36,8 @@ pub struct MixerEdits {
   /// Game, chat, media, mic (the mic's wish may be above 1000).
   permille: [AtomicU32; 4],
   muted: [AtomicBool; 4],
+  /// `ChatMixController::balance` x 1000.
+  balance: AtomicI32,
   /// Bumped after `output` is written.
   output_count: AtomicU32,
   /// `id_hash` of the output picked last (an endpoint id does not fit into atomics).
@@ -57,6 +59,7 @@ impl MixerEdits {
         m.store(c.muted, Ordering::Relaxed);
       }
     }
+    self.balance.store((mix.balance * 1000.0).round() as i32, Ordering::Relaxed);
     self.count.fetch_add(1, Ordering::Release);
   }
 
@@ -79,6 +82,7 @@ impl MixerEdits {
         c.muted = m.load(Ordering::Relaxed);
       }
     }
+    mix.balance = (self.balance.load(Ordering::Relaxed) as f32 / 1000.0).clamp(-1.0, 1.0);
     true
   }
 
@@ -168,10 +172,11 @@ mod tests {
     let (mut service, mut window) = (ChatMixController::new(), ChatMixController::new());
     let mut seen = edits.count();
     assert!(!edits.adopt(&mut seen, &mut window), "nothing edited yet");
-    (service.chat.volume, service.mic.volume, service.media.muted) = (0.3, 2.5, true);
+    (service.chat.volume, service.mic.volume, service.media.muted, service.balance) = (0.3, 2.5, true, -0.4);
     edits.publish(&service);
     assert!(edits.adopt(&mut seen, &mut window));
     assert_eq!((window.chat.volume, window.mic.volume, window.media.muted), (0.3, 2.5, true));
+    assert_eq!(window.balance, -0.4);
     // The window moves its slider next: the block does not hand the old level back.
     window.chat.volume = 0.8;
     assert!(!edits.adopt(&mut seen, &mut window));
