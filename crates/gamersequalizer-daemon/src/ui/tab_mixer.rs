@@ -235,7 +235,11 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
                 changed_chat_route = Some(Some(ep.id.clone()));
               }
             }
-          });
+          })
+          .response
+          .on_hover_text(tr(
+            "Output device for voice chat. Lets you send Chat apps to a separate headset or speaker than games.",
+          ));
       },
     );
 
@@ -371,7 +375,9 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
 fn balance_row(ui: &mut Ui, win_audio: &mut WinAudioSystem) {
   {
     ui.horizontal(|ui| {
-      ui.label(theme::strong(tr("ChatMix"), 15.0));
+      ui.label(theme::strong(tr("ChatMix"), 14.0)).on_hover_text(tr(
+        "Shifts the volume balance between Game and Chat: drag left to hear more game, right to hear more voice chat.",
+      ));
       ui.add_space(12.0);
       let game = theme::adapt(ui, GAME_COLOR);
       theme::icon_label(ui, icons::GAME, 16.0, game, RichText::new(tr("Game")).color(game));
@@ -381,9 +387,9 @@ fn balance_row(ui: &mut Ui, win_audio: &mut WinAudioSystem) {
       let width = (ui.available_width() - 470.0).clamp(140.0, 520.0);
       ui.spacing_mut().slider_width = width;
       let r = theme::slider(ui, slider).on_hover_text(if balance < -0.05 {
-        trf("Game +{}%", &[&format!("{:.0}", -balance * 100.0)])
+        trf("Game +{} %", &[&format!("{:.0}", -balance * 100.0)])
       } else if balance > 0.05 {
-        trf("Chat +{}%", &[&format!("{:.0}", balance * 100.0)])
+        trf("Chat +{} %", &[&format!("{:.0}", balance * 100.0)])
       } else {
         tr("Equal (50/50)").to_string()
       });

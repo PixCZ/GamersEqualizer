@@ -108,7 +108,9 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         } else {
           tr("normal")
         };
-        ui.label(format!("{word} ({target:.0} dBFS)"));
+        ui.label(format!("{word} ({target:.0} dBFS)")).on_hover_text(tr(
+          "Decibels below maximum digital volume (0 dBFS is the loudest before distortion; around -18 dBFS is a comfortable voice level).",
+        ));
         if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.button(tr("Default")).clicked() {
           h.mic_leveler_target_db_x10.store((DEFAULT_TARGET_DB * 10.0).round() as i32, Ordering::Relaxed);
         }
@@ -277,9 +279,9 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
     // Header: title, description in a tooltip, on/off switch on the right.
     let (aec_enabled, ai_strength, gate_db) = mic_controls(state);
     ui.horizontal(|ui| {
-      theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation (AEC)"));
+      theme::card_title(ui, Some((icons::SPEAKERS, AEC_COLOR)), tr("Stage 1: Speaker echo cancellation"));
       ui.label(theme::icon(icons::INFO, 14.0).color(theme::palette(ui).text_secondary)).on_hover_text(tr(
-        "What the speakers play is taken by GamersEqualizer's output EQ on that device (before your sidetone is mixed in) and removed from the mic by WebRTC's echo canceller (AEC3): an adaptive filter plus suppression of the echo it leaves. The echo delay is measured by cross-correlation (GCC-PHAT), remembered per device pair and only changed after repeated confirmation.",
+        "Listens to what plays through your speakers (before your own sidetone is added) and subtracts it from the microphone so friends do not hear your game or their own voice back. The sound delay between speakers and mic is measured automatically and remembered per device pair.",
       ));
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let mut on = aec_enabled;
@@ -310,7 +312,9 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
     ui.horizontal_top(|ui| {
       aec_column(ui, col_w, tr("Echo"), |ui| {
         aec_row(ui, tr("Removed"), |ui| {
-          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db));
+          aec_meter(ui, t.erle_db / 40.0, meter_w, p.accent, format!("{:.1} dB", t.erle_db)).on_hover_text(tr(
+            "How much speaker echo is being cancelled out of your microphone (in dB; higher means cleaner voice).",
+          ));
         });
         let (delay, hover) = match t.delay_ms {
           Some(d) => {
@@ -350,9 +354,21 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
       });
       ui.add_space(8.0);
       ui.horizontal_top(|ui| {
-        aec_plot(ui, col_w, tr("Correlation vs. delay"), None, |ui| corr_plot(ui, &t, col_w));
+        aec_plot(
+          ui,
+          col_w,
+          tr("Echo match vs. delay"),
+          Some(tr("Shows how clearly speaker sound matches the microphone at each delay. A single sharp peak means the echo delay is locked.")),
+          |ui| corr_plot(ui, &t, col_w),
+        );
         ui.add_space(AEC_COLUMN_GAP);
-        aec_plot(ui, col_w, tr("History (60 s): ERLE dB / delay ms"), None, |ui| history_plot(ui, state, col_w));
+        aec_plot(
+          ui,
+          col_w,
+          tr("History (60 s): echo removed / delay"),
+          Some(tr("Last 60 seconds of cancelled echo (dB, higher is better) and measured speaker-to-mic delay (ms).")),
+          |ui| history_plot(ui, state, col_w),
+        );
       });
     });
   });
@@ -363,7 +379,7 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
 fn aec_column(ui: &mut Ui, width: f32, title: &str, rows: impl FnOnce(&mut Ui)) {
   ui.vertical(|ui| {
     ui.set_width(width);
-    ui.label(theme::strong(title, 15.0));
+    ui.label(theme::strong(title, 14.0));
     egui::Grid::new(("aec_grid", title))
       .num_columns(2)
       .min_col_width(AEC_LABEL_WIDTH)
@@ -394,9 +410,9 @@ fn aec_row(ui: &mut Ui, label: &str, value: impl FnOnce(&mut Ui)) {
 }
 
 /// Meter with its value in the normal text style of the AEC rows.
-fn aec_meter(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: String) {
+fn aec_meter(ui: &mut Ui, fraction: f32, width: f32, fill: Color32, value: String) -> egui::Response {
   let text = RichText::new(value).color(theme::palette(ui).text);
-  theme::meter_with(ui, fraction, width, fill, text);
+  theme::meter_with(ui, fraction, width, fill, text)
 }
 
 /// `output`: name of the output the reference is taken from.
@@ -414,8 +430,8 @@ fn aec_status_text(t: &AecTelemetry, output: Option<&str>) -> (String, Severity)
     Some(AecState::ReferenceSilent) => (tr("Waiting for speaker audio to measure the delay").into(), Severity::Warning),
     Some(AecState::Measuring) => (tr("Measuring echo delay...").into(), Severity::Warning),
     Some(AecState::Locked) => (tr("Active: cancelling speaker echo").into(), Severity::Success),
-    Some(AecState::Unknown(v)) => (trf("Unknown state {} (newer DSP build?)", &[&v]), Severity::Info),
-    None => (tr("Mic DSP not running").into(), Severity::Info),
+    Some(AecState::Unknown(v)) => (trf("Unknown state {} (newer audio effect version?)", &[&v]), Severity::Info),
+    None => (tr("Microphone audio effect is not running").into(), Severity::Info),
   }
 }
 
@@ -432,7 +448,7 @@ fn no_reference_text(status: Option<AecRefStatus>, output: Option<&str>) -> Stri
       &[&output],
     ),
     Some(AecRefStatus::EndpointUnknown) => trf(
-      "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. The app log ([ApoNote]) says more.",
+      "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. See the Log tab for details.",
       &[&output],
     ),
     Some(AecRefStatus::NoOutput) => tr("No speaker reference: no output device").into(),
@@ -450,7 +466,11 @@ fn level_row(ui: &mut Ui, label: &str, db: Option<f32>, width: f32) {
     Some(db) if db <= METER_FLOOR_DB => (0.0, tr("silent").to_string()),
     Some(db) => (((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0), format!("{db:.1}")),
   };
-  aec_row(ui, label, |ui| aec_meter(ui, frac, width, theme::level_color(ui, frac), text));
+  aec_row(ui, label, |ui| {
+    aec_meter(ui, frac, width, theme::level_color(ui, frac), text).on_hover_text(tr(
+      "Level in dBFS: decibels below maximum digital volume (0 dBFS is the loudest before distortion).",
+    ));
+  });
 }
 
 /// Y grid for a plot that starts at 0: lines at tenths and halves, labels at 0, half and `top`
@@ -493,7 +513,7 @@ fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
     .show(ui, |pu| {
       let threshold = (MIN_PEAK_RATIO / FULL_SCALE_PEAK_RATIO) as f64;
       pu.hline(HLine::new(tr("acceptance threshold"), threshold).stroke(Stroke::new(1.0_f32, threshold_color)));
-      pu.line(Line::new("|corr|", pts).stroke(Stroke::new(1.5_f32, line)));
+      pu.line(Line::new(tr("echo match"), pts).stroke(Stroke::new(1.5_f32, line)));
       if let Some(d) = t.delay_ms {
         pu.vline(VLine::new(tr("locked delay"), d as f64).stroke(Stroke::new(1.2_f32, mark)));
       }
@@ -513,7 +533,7 @@ fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
     .x_axis_formatter(|v, _| format!("{:.0} s", v.value))
     .legend(Legend::default())
     .show(ui, |pu| {
-      pu.line(Line::new("ERLE dB", erle).stroke(Stroke::new(1.5_f32, a)));
+      pu.line(Line::new(tr("echo removed (dB)"), erle).stroke(Stroke::new(1.5_f32, a)));
       pu.line(Line::new(tr("delay ms"), delay).stroke(Stroke::new(1.5_f32, b)));
     });
 }
@@ -620,7 +640,11 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
         .show_value(true)
         .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
         .custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0));
-      changed |= theme::slider(ui, slider).changed();
+      changed |= theme::slider(ui, slider)
+        .on_hover_text(tr(
+          "How strongly background noise (fans, keyboard, room) is removed. Lower keeps more of your natural voice; higher cuts more noise.",
+        ))
+        .changed();
       ui.end_row();
 
       // Any old threshold value (e.g. -45) means "on": the gate is automatic now.

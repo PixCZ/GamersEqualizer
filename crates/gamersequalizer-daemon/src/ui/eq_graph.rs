@@ -320,10 +320,11 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
     });
 
     ui.horizontal_wrapped(|ui| {
-      ui.label(tr("Frequency:"));
+      ui.label(tr("Frequency:"))
+        .on_hover_text(tr("Which pitch range this filter affects (low = bass, high = treble)."));
       changed |= value_slider(ui, &mut band.frequency, F_MIN..=F_MAX, " Hz", 0, true);
       if band.filter_type.uses_gain() {
-        ui.label(tr("Gain:"));
+        ui.label(tr("Gain:")).on_hover_text(tr("How much to boost (+) or cut (-) around this frequency, in dB."));
         changed |= value_slider(ui, &mut band.gain_db, -24.0..=24.0, " dB", 1, false);
       }
     });
@@ -350,7 +351,7 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
       } else if matches!(band.filter_type, FilterType::Peaking | FilterType::Notch) {
         ui.label(tr("Width:")).on_hover_text(tr("Narrow touches one tone, wide a whole region."));
         let mut width = width_octaves(band.q);
-        if value_slider(ui, &mut width, WIDTH_OCT_RANGE, " oct", 2, true) {
+        if value_slider(ui, &mut width, WIDTH_OCT_RANGE, tr(" oct"), 2, true) {
           band.q = q_for_width(width).clamp(0.1, 30.0);
           changed = true;
         }
@@ -403,7 +404,7 @@ fn draw_grid(painter: &egui::Painter, axes: &Axes, pal: &theme::Palette) {
   for f in GRID_FREQS {
     let x = axes.x_of(f);
     painter.line_segment([Pos2::new(x, plot.top()), Pos2::new(x, plot.bottom())], grid);
-    let text = if f >= 1000.0 { format!("{}k", f / 1000.0) } else { format!("{f}") };
+    let text = if f >= 1000.0 { format!("{} k", f / 1000.0) } else { format!("{f}") };
     painter.text(Pos2::new(x, plot.bottom() + 2.0), Align2::CENTER_TOP, text, font.clone(), label);
   }
   let step = axes.range_db / 2.0;

@@ -122,7 +122,10 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
       ],
     );
     if state.output_eq.preamp_db != 0.0 {
-      ui.label(theme::caption(trf("Auto preamp {} dB (no clipping)", &[&format!("{:.1}", state.output_eq.preamp_db)])));
+      ui.label(theme::caption(trf(
+        "Volume change {} dB (prevents distortion)",
+        &[&format!("{:+.1}", state.output_eq.preamp_db)],
+      )));
     }
     if changed {
       state.apply_output_eq();
@@ -390,9 +393,9 @@ fn render_bus_tab(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
       ));
     });
     ui.label(theme::caption(tr(
-      "Applied by the stream EQ, an effect on each app's own stream before Windows mixes them (no virtual sound \
-       card, no extra latency). Install it on the output once (admin): scripts\\apo-install.ps1 -Flow Render -Slot \
-       SFX. Apps it can't match keep headphone + game EQ.",
+      "Applied by the per-app EQ before Windows mixes sounds together (no virtual sound card, no extra delay). \
+       Install the audio effects on this output using the banner at the top of the window. Apps that cannot be \
+       matched keep headphone + game EQ.",
     )));
     ui.add_space(4.0);
 

@@ -266,7 +266,20 @@ fn transfer_card(ui: &mut Ui, state: &mut AppState) {
 
 fn part_checkboxes(ui: &mut Ui, parts: &mut [(Part, bool)]) {
   for (part, on) in parts {
-    ui.checkbox(on, part_label(part));
+    let cb = ui.checkbox(on, part_label(part));
+    if let Some(help) = part_help(part) {
+      cb.on_hover_text(help);
+    }
+  }
+}
+
+fn part_help(part: &Part) -> Option<&'static str> {
+  match part.key.as_str() {
+    "profiles/aux" => Some(tr("Extra saved EQ profiles for auxiliary audio.")),
+    "settings/sidetone" => {
+      Some(tr("Hearing your own microphone in your headphones, with its volume, noise cleanup and EQ."))
+    }
+    _ => None,
   }
 }
 

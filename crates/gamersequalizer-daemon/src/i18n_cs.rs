@@ -1281,4 +1281,111 @@ pub static CS: &[(&str, &str)] = &[
     "Exclusive-mode playback bypasses Windows effects: sidetone is silent then.",
     "Přehrávání ve výhradním režimu obchází efekty Windows: příposlech pak mlčí.",
   ),
+  // --- Plain-language tooltips, labels and units ---
+  (
+    "Which pitch range this filter affects (low = bass, high = treble).",
+    "Jakou výšku tónů tento filtr ovlivňuje (nízké = basy, vysoké = výšky).",
+  ),
+  (
+    "How much to boost (+) or cut (-) around this frequency, in dB.",
+    "O kolik dB se zvuk kolem této frekvence zesílí (+) nebo ztlumí (-).",
+  ),
+  (" oct", " okt"),
+  (
+    "Applied by the per-app EQ before Windows mixes sounds together (no virtual sound card, no extra delay). Install the audio effects on this output using the banner at the top of the window. Apps that cannot be matched keep headphone + game EQ.",
+    "Použije se přes EQ pro jednotlivé aplikace ještě předtím, než Windows zvuky smíchá (bez virtuální zvukovky a bez zpoždění navíc). Zvukové efekty na tento výstup nainstalujte přes lištu v horní části okna. Aplikace, které se nepodaří rozpoznat, si nechají EQ sluchátek a hry.",
+  ),
+  ("Volume change {} dB (prevents distortion)", "Změna hlasitosti {} dB (brání zkreslení)"),
+  ("no Downloads folder", "chybí složka Stažené soubory"),
+  (
+    "Decibels below maximum digital volume (0 dBFS is the loudest before distortion; around -18 dBFS is a comfortable voice level).",
+    "Decibely pod maximální digitální hlasitostí (0 dBFS je maximum před zkreslením; kolem -18 dBFS je příjemná úroveň hlasu).",
+  ),
+  ("Stage 1: Speaker echo cancellation", "Stupeň 1: Potlačení ozvěny z reproduktorů"),
+  (
+    "Listens to what plays through your speakers (before your own sidetone is added) and subtracts it from the microphone so friends do not hear your game or their own voice back. The sound delay between speakers and mic is measured automatically and remembered per device pair.",
+    "Sleduje, co hraje z reproduktorů (ještě před přimícháním vašeho příposlechu), a odečítá to z mikrofonu, aby ostatní neslyšeli vaši hru ani vlastní ozvěnu. Zpoždění mezi reproduktory a mikrofonem se měří automaticky a pamatuje se pro každou dvojici zařízení.",
+  ),
+  (
+    "How much speaker echo is being cancelled out of your microphone (in dB; higher means cleaner voice).",
+    "Kolik ozvěny z reproduktorů se z mikrofonu daří odstranit (v dB; čím víc, tím čistší hlas).",
+  ),
+  ("Echo match vs. delay", "Shoda ozvěny podle zpoždění"),
+  (
+    "Shows how clearly speaker sound matches the microphone at each delay. A single sharp peak means the echo delay is locked.",
+    "Ukazuje, jak zřetelně se zvuk z reproduktorů shoduje s mikrofonem při různém zpoždění. Jedna ostrá špička znamená ustálené zpoždění ozvěny.",
+  ),
+  ("History (60 s): echo removed / delay", "Historie (60 s): potlačená ozvěna / zpoždění"),
+  (
+    "Last 60 seconds of cancelled echo (dB, higher is better) and measured speaker-to-mic delay (ms).",
+    "Posledních 60 sekund potlačené ozvěny (dB, více je lépe) a změřeného zpoždění mezi reproduktory a mikrofonem (ms).",
+  ),
+  ("Microphone audio effect is not running", "Zvukový efekt mikrofonu neběží"),
+  (
+    "Level in dBFS: decibels below maximum digital volume (0 dBFS is the loudest before distortion).",
+    "Úroveň v dBFS: decibely pod maximální digitální hlasitostí (0 dBFS je maximum před zkreslením).",
+  ),
+  ("echo match", "shoda ozvěny"),
+  ("echo removed (dB)", "potlačená ozvěna (dB)"),
+  (
+    "How strongly background noise (fans, keyboard, room) is removed. Lower keeps more of your natural voice; higher cuts more noise.",
+    "Jak silně se odstraňuje okolní hluk (větráky, klávesnice, šum místnosti). Nižší hodnota zachová přirozenější hlas, vyšší odstraní víc hluku.",
+  ),
+  ("Unknown state {} (newer audio effect version?)", "Neznámý stav {} (novější verze zvukového efektu?)"),
+  (
+    "No speaker reference: Windows did not tell the output EQ on \"{}\" which device it runs on. See the Log tab for details.",
+    "Chybí reference reproduktorů: Windows výstupnímu EQ na „{}“ nesdělil, na kterém zařízení běží. Podrobnosti najdete na kartě Protokol.",
+  ),
+  (
+    "Output device for voice chat. Lets you send Chat apps to a separate headset or speaker than games.",
+    "Výstupní zařízení pro hlasový chat. Umožňuje poslat aplikace z kanálu Chat do jiných sluchátek nebo reproduktorů než hry.",
+  ),
+  (
+    "Shifts the volume balance between Game and Chat: drag left to hear more game, right to hear more voice chat.",
+    "Mění poměr hlasitosti mezi hrou a chatem: doleva uslyšíte víc hru, doprava víc hlasový chat.",
+  ),
+  ("Game +{} %", "Hra +{} %"),
+  ("Chat +{} %", "Chat +{} %"),
+  ("Extra saved EQ profiles for auxiliary audio.", "Další uložené EQ profily pro doplňkový zvuk."),
+  (
+    "Hearing your own microphone in your headphones, with its volume, noise cleanup and EQ.",
+    "Příposlech vlastního mikrofonu ve sluchátkách včetně jeho hlasitosti, potlačení šumu a EQ.",
+  ),
+  (
+    "Time spent in the software audio buffers; your sound card and wireless headset add their own small delay on top.",
+    "Čas strávený v softwarových vyrovnávacích pamětech; zvuková karta a bezdrátová sluchátka přidávají navrch ještě vlastní malé zpoždění.",
+  ),
+  (
+    "Size of each audio chunk from the microphone and to the headphones. Smaller means lower delay.",
+    "Velikost jednoho bloku zvuku z mikrofonu a do sluchátek. Menší hodnota znamená nižší zpoždění.",
+  ),
+  ("No noise cleanup, lowest possible delay.", "Bez potlačení šumu, nejnižší možné zpoždění."),
+  (
+    "Quiets background hiss between words with zero added delay.",
+    "Ztlumí šum na pozadí mezi slovy bez jakéhokoliv zpoždění navíc.",
+  ),
+  (
+    "Removes steady background noise (fans, hum) with a small delay.",
+    "Odstraní stálý hluk na pozadí (větráky, brum) s malým zpožděním.",
+  ),
+  ("Light AI noise removal with a small delay.", "Lehké AI potlačení hluku s malým zpožděním."),
+  ("Newer AI noise removal model with a small delay.", "Novější AI model pro potlačení hluku s malým zpožděním."),
+  (
+    "Reduces background noise in what you hear of yourself. Stronger cleanup adds a few milliseconds of delay.",
+    "Snižuje hluk na pozadí v tom, jak slyšíte sami sebe. Silnější potlačení přidá několik milisekund zpoždění.",
+  ),
+  (
+    "How much louder your voice must be than background noise to open the mic. Lower picks up quieter speech; higher blocks more noise.",
+    "O kolik musí být váš hlas hlasitější než šum pozadí, aby se mikrofon otevřel. Nižší hodnota zachytí tišší řeč, vyšší zablokuje víc hluku.",
+  ),
+  (
+    "How much background noise is turned down between words (in dB). Higher makes pauses quieter.",
+    "O kolik dB se ztlumí hluk pozadí mezi slovy. Vyšší hodnota znamená tišší pauzy.",
+  ),
+  (
+    "How much background noise is being turned down right now while you are not speaking.",
+    "O kolik se právě teď tlumí hluk pozadí, když nemluvíte.",
+  ),
+  ("Delay about {} ms (software only, without hardware)", "Zpoždění asi {} ms (jen software, bez hardwaru)"),
+  ("C:\\Users\\...\\Downloads\\AutoEq-master", "C:\\Users\\...\\Downloads\\AutoEq-master"),
 ];

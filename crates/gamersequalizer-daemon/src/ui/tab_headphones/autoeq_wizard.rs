@@ -194,7 +194,7 @@ fn step_zip_folder(ui: &mut Ui, state: &mut AppState) {
     ui.add(
       egui::TextEdit::singleline(&mut state.headphones_ui.folder_text)
         .desired_width(380.0)
-        .hint_text(r"C:\Users\...\Downloads\AutoEq-master"),
+        .hint_text(tr("C:\\Users\\...\\Downloads\\AutoEq-master")),
     );
     let scanning = state.headphones_ui.scanning.is_some();
     let label = if scanning { tr("Indexing...") } else { tr("Index") };

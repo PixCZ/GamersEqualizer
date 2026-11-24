@@ -288,7 +288,7 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
 /// Copies the log to Downloads under a new, time-stamped name and shows it in Explorer: a
 /// file that does not change and sits where upload dialogs start.
 fn save_copy() -> Result<PathBuf, String> {
-  let dir = downloads_dir().ok_or("no Downloads folder")?;
+  let dir = downloads_dir().ok_or_else(|| tr("no Downloads folder").to_string())?;
   let name = format!("GamersEqualizer-log-{}.txt", jiff::ZonedDateTime::now().strftime("%Y%m%d-%H%M%S"));
   let target = dir.join(name);
   std::fs::copy(app_log::log_path(), &target).map_err(|e| e.to_string())?;

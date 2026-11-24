@@ -177,8 +177,11 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       theme::status_line(
         ui,
         sev,
-        &trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]),
-      );
+        &trf("Delay about {} ms (software only, without hardware)", &[&format!("{:.0}", delay_ms.round())]),
+      )
+      .on_hover_text(tr(
+        "Time spent in the software audio buffers; your sound card and wireless headset add their own small delay on top.",
+      ));
       let mic_rate = h.sidetone_mic_rate.load(r).max(1);
       let mic_block_frames = h.sidetone_mic_block_frames.load(r);
       let mic_period_ms = mic_block_frames as f32 * 1000.0 / mic_rate as f32;
@@ -188,7 +191,10 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         ui.label(theme::caption(trf(
           "Microphone {} ms, output {} ms",
           &[&format!("{:.1}", mic_period_ms), &format!("{:.1}", out_period_ms)],
-        )));
+        )))
+        .on_hover_text(tr(
+          "Size of each audio chunk from the microphone and to the headphones. Smaller means lower delay.",
+        ));
         ui.separator();
         ui.label(theme::caption(trf("Dropouts: {}", &[&underruns.to_string()])));
       });
@@ -269,15 +275,30 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     ui.horizontal(|ui| {
       ui.label(tr("Noise suppression"));
       let current_label = format_mode_label(settings.noise_mode, running_delay_us, active_mode == settings.noise_mode);
-      egui::ComboBox::from_id_salt("sidetone_noise_mode").selected_text(current_label).width(280.0).show_ui(ui, |ui| {
-        for mode in [NoiseMode::Off, NoiseMode::Expander, NoiseMode::WebRtcNs, NoiseMode::RnNoise, NoiseMode::RnNoise2]
-        {
-          let label = format_mode_label(mode, running_delay_us, active_mode == mode);
-          if ui.selectable_value(&mut settings.noise_mode, mode, label).changed() {
-            changed = true;
+      egui::ComboBox::from_id_salt("sidetone_noise_mode")
+        .selected_text(current_label)
+        .width(280.0)
+        .show_ui(ui, |ui| {
+          for mode in
+            [NoiseMode::Off, NoiseMode::Expander, NoiseMode::WebRtcNs, NoiseMode::RnNoise, NoiseMode::RnNoise2]
+          {
+            let label = format_mode_label(mode, running_delay_us, active_mode == mode);
+            let help = match mode {
+              NoiseMode::Off => tr("No noise cleanup, lowest possible delay."),
+              NoiseMode::Expander => tr("Quiets background hiss between words with zero added delay."),
+              NoiseMode::WebRtcNs => tr("Removes steady background noise (fans, hum) with a small delay."),
+              NoiseMode::RnNoise => tr("Light AI noise removal with a small delay."),
+              NoiseMode::RnNoise2 => tr("Newer AI noise removal model with a small delay."),
+            };
+            if ui.selectable_value(&mut settings.noise_mode, mode, label).on_hover_text(help).changed() {
+              changed = true;
+            }
           }
-        }
-      });
+        })
+        .response
+        .on_hover_text(tr(
+          "Reduces background noise in what you hear of yourself. Stronger cleanup adds a few milliseconds of delay.",
+        ));
     });
 
     if active_mode_u32 != settings.noise_mode.to_u32() {
@@ -311,6 +332,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
               .step_by(1.0)
               .suffix(" dB"),
           )
+          .on_hover_text(tr(
+            "How much louder your voice must be than background noise to open the mic. Lower picks up quieter speech; higher blocks more noise.",
+          ))
           .changed()
           {
             changed = true;
@@ -327,6 +351,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
             ui,
             egui::Slider::new(&mut settings.gate_range_db, 0.0..=GATE_RANGE_DB_MAX).step_by(1.0).suffix(" dB"),
           )
+          .on_hover_text(tr(
+            "How much background noise is turned down between words (in dB). Higher makes pauses quieter.",
+          ))
           .changed()
           {
             changed = true;
@@ -342,7 +369,9 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
           let max_range = settings.gate_range_db.max(1.0);
           let fraction = (reduction / max_range).clamp(0.0, 1.0);
           let val_text = format!("{:.1} dB", -gate_db);
-          theme::meter(ui, fraction, 280.0, theme::palette(ui).accent, &val_text);
+          theme::meter(ui, fraction, 280.0, theme::palette(ui).accent, &val_text).on_hover_text(tr(
+            "How much background noise is being turned down right now while you are not speaking.",
+          ));
         });
         ui.end_row();
       }

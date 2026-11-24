@@ -42,7 +42,7 @@ pub fn curves_plot(ui: &mut Ui, id: &str, freqs: &[f32], curves: &[Curve], pream
     .allow_scroll(false)
     .x_axis_formatter(|val, _range| {
       let f = 10f64.powf(val.value);
-      if f >= 1000.0 { format!("{:.1}k", f / 1000.0) } else { format!("{:.0}", f) }
+      if f >= 1000.0 { format!("{:.1} k", f / 1000.0) } else { format!("{:.0}", f) }
     })
     .y_axis_formatter(|val, _range| format!("{:.0} dB", val.value))
     .label_formatter(|pos| {
@@ -53,7 +53,7 @@ pub fn curves_plot(ui: &mut Ui, id: &str, freqs: &[f32], curves: &[Curve], pream
       plot_ui.hline(HLine::new("", 0.0).stroke(Stroke::new(1.0_f32, zero_line)));
       if let Some(preamp) = preamp_db.filter(|p| *p != 0.0) {
         plot_ui.hline(
-          HLine::new(trf("Auto preamp {} dB", &[&format!("{preamp:.1}")]), preamp as f64)
+          HLine::new(trf("Volume change {} dB", &[&format!("{preamp:+.1}")]), preamp as f64)
             .stroke(Stroke::new(1.0_f32, preamp_color)),
         );
       }
