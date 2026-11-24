@@ -41,7 +41,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
           "Copies the Sonar profiles in from {}. A profile of the same name that you changed is moved to profiles\\_deleted first, so it can be restored.",
           &[&DEFAULT_SONAR_DB_PATH],
         );
-  if ui.button(format!("📥  {}", tr("Import from Sonar DB"))).on_hover_text(hover).clicked() {
+        if ui.button(theme::with_icon(icons::IMPORT, tr("Import from Sonar DB"))).on_hover_text(hover).clicked() {
           reimport_sonar(state);
         }
       });
@@ -51,7 +51,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
     RichText::new(tr("Game profiles on top of the headphone correction, switched by the game in the foreground."))
       .color(theme::palette(ui).text_secondary),
   );
-  ui.add_space(theme::CARD_GAP);
+  ui.add_space(4.0);
 
   // Switches and detection.
   theme::card(ui, |ui| {
@@ -131,7 +131,7 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
   });
 
   theme::card(ui, |ui| {
-    egui::CollapsingHeader::new(theme::strong(tr("Recent apps: assign a profile manually"), 15.0))
+    egui::CollapsingHeader::new(theme::strong(tr("Recent apps: assign a profile manually"), 14.0))
       .show(ui, |ui| recent_apps(ui, state));
   });
 }

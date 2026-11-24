@@ -507,7 +507,7 @@ fn render_strip(
     .show(ui, |ui| {
       ui.set_width(ui.available_width());
       // 1. Channel title
-      theme::icon_label(ui, strip.icon, 16.0, color, theme::strong(strip.title, 15.0));
+      theme::icon_label(ui, strip.icon, 16.0, color, theme::strong(strip.title, 14.0));
 
       // 2. Preset pill (link to the channel's EQ page)
       let preset = super::truncate_chars(strip.preset, 15);

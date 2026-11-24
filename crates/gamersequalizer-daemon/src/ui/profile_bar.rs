@@ -6,7 +6,7 @@ use egui::{Align2, Color32, RichText, Ui};
 
 use super::mic_presets::{self, MicPreset, NameCheck, PresetSource};
 use super::state::{AppState, OutputLayer};
-use super::theme::{self, Severity};
+use super::theme::{self, Severity, icons};
 use crate::i18n::{tr, trf};
 use crate::output_eq::same_profile_slot;
 use crate::output_eq::share_text::{self, SHARE_HEADER, SHARE_NAME_PREFIX};
@@ -142,7 +142,7 @@ pub fn render_output_notice(ui: &mut Ui, state: &mut AppState, layer: OutputLaye
 fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified: bool) {
   let has_profile = active_profile(state, target).is_some();
 
-  if ui.button(format!("➕  {}", tr("New…"))).on_hover_text(tr("Create a new flat profile.")).clicked() {
+  if ui.button(theme::with_icon(icons::ADD, tr("New…"))).on_hover_text(tr("Create a new flat profile.")).clicked() {
     let name = unique_name(state, target, tr("New profile"));
     open_save_dialog(state, target, SaveMode::New, name, SaveDraft::flat(Vec::new()));
   }
@@ -155,7 +155,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
   if target == EqTarget::Mic {
     let can_save = modified && mic_source == Some(PresetSource::User);
     if ui
-      .add_enabled(can_save, egui::Button::new(format!("💾  {}", tr("Save"))))
+      .add_enabled(can_save, egui::Button::new(theme::with_icon(icons::SAVE, tr("Save"))))
       .on_hover_text(tr("Save the changes into this preset."))
       .on_disabled_hover_text(tr("Only your own presets can be saved over; use \"Save as…\" for this one."))
       .clicked()
@@ -183,7 +183,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     && modified
     && mic_source.is_some()
     && ui
-      .button(format!("↺  {}", tr("Reset")))
+      .button(theme::with_icon(icons::RESET, tr("Reset")))
       .on_hover_text(tr("Throw away the changes, back to the preset."))
       .clicked()
     && let Some(p) = mic_presets::find(&state.available_mic_profiles, &state.mic_profile.name)
@@ -197,7 +197,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     EqTarget::Output(_) => (has_profile, tr("Select a profile first.")),
   };
   if ui
-    .add_enabled(can_delete, egui::Button::new("🗑"))
+    .add_enabled(can_delete, egui::Button::new(theme::icon(icons::DELETE, 14.0)))
     .on_hover_text(tr("Delete this profile"))
     .on_disabled_hover_text(delete_disabled_hint)
     .clicked()
@@ -212,7 +212,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
   ui.add_space(12.0);
 
   if ui
-    .add_enabled(has_profile, egui::Button::new(format!("📋  {}", tr("Copy to share"))))
+    .add_enabled(has_profile, egui::Button::new(theme::with_icon(icons::COPY, tr("Copy to share"))))
     .on_hover_text(tr("Copies the EQ as text: paste it into a chat or pastebin.com. Works in Equalizer APO too."))
     .on_disabled_hover_text(tr("Select a profile first."))
     .clicked()
@@ -227,7 +227,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
   }
 
   if ui
-    .button(format!("📥  {}", tr("Import…")))
+    .button(theme::with_icon(icons::IMPORT, tr("Import…")))
     .on_hover_text(tr("Paste an EQ someone shared (or Equalizer APO / AutoEQ text)."))
     .clicked()
   {

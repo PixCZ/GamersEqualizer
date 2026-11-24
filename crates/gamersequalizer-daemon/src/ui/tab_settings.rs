@@ -7,9 +7,7 @@ use super::theme::{self, Severity, icons};
 use crate::i18n::{self, LANGUAGES, LanguagePref, tr, trf};
 use crate::settings_transfer::{self, Part, Selection, Summary};
 use crate::win_audio::shell;
-use egui::{Color32, RichText, Ui};
-
-const COLOR: Color32 = Color32::from_rgb(150, 150, 150);
+use egui::{RichText, Ui};
 
 /// Uninstall card: asks once more before doing anything.
 #[derive(Default)]
@@ -45,10 +43,11 @@ impl TransferUi {
 }
 
 pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
-  theme::page_header(ui, icons::SETTINGS, COLOR, tr("Settings"), None);
+  let icon_color = theme::palette(ui).text_secondary;
+  theme::page_header(ui, icons::SETTINGS, icon_color, tr("Settings"), None);
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::COLOR, COLOR)), tr("App theme"));
+    theme::card_title(ui, Some((icons::COLOR, icon_color)), tr("App theme"));
     ui.label(theme::caption(tr("Light or dark. \"Windows setting\" follows Settings > Personalization > Colors.")));
     ui.horizontal(|ui| {
       let mut pick = state.prefs.theme;
@@ -64,7 +63,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   });
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::GLOBE, COLOR)), tr("Language"));
+    theme::card_title(ui, Some((icons::GLOBE, icon_color)), tr("Language"));
     let system_name = match i18n::system_language() {
       i18n::Lang::Cs => "Čeština",
       i18n::Lang::En => "English",
@@ -89,7 +88,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   });
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::POWER, COLOR)), tr("Startup and background service"));
+    theme::card_title(ui, Some((icons::POWER, icon_color)), tr("Startup and background service"));
     ui.horizontal(|ui| {
       let mut on = state.autostart_enabled;
       if ui
@@ -153,7 +152,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
   uninstall_card(ui, state);
 
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::INFO, COLOR)), tr("About"));
+    theme::card_title(ui, Some((icons::INFO, icon_color)), tr("About"));
     ui.label(concat!("GamersEqualizer ", env!("GAMERSEQUALIZER_VERSION")));
     ui.label(format!("{}: {}", tr("Author"), env!("CARGO_PKG_AUTHORS")));
   });
@@ -161,7 +160,7 @@ pub fn render_tab_settings(ui: &mut Ui, state: &mut AppState) {
 
 fn transfer_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::SAVE, COLOR)), tr("Back up or move settings"));
+    theme::card_title(ui, Some((icons::SAVE, theme::palette(ui).text_secondary)), tr("Back up or move settings"));
     ui.label(theme::caption(tr(
       "Saves profiles and settings into one file, e.g. before reinstalling Windows or for a new PC. Devices are found again by their names, also on another USB port. The audio effects are installed on each PC separately.",
     )));
@@ -296,7 +295,7 @@ fn part_label(part: &Part) -> String {
 
 fn uninstall_card(ui: &mut Ui, state: &mut AppState) {
   theme::card(ui, |ui| {
-    theme::card_title(ui, Some((icons::DELETE, COLOR)), tr("Uninstall from Windows"));
+    theme::card_title(ui, Some((icons::DELETE, theme::palette(ui).text_secondary)), tr("Uninstall from Windows"));
     ui.label(theme::caption(tr(
       "Removes everything the app put into Windows: the microphone and output effects on all audio devices (administrator rights, audio stops for a few seconds), their backups, the app itself in Program Files, start with Windows and the notifications. Then the app exits.",
     )));

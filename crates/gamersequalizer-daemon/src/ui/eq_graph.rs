@@ -272,7 +272,7 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
     }
     let free = max_slots.saturating_sub(slots_used(bands));
     let add = ui
-      .add_enabled(free > 0, egui::Button::new(format!("➕  {}", tr("Add filter"))))
+      .add_enabled(free > 0, egui::Button::new(theme::with_icon(theme::icons::ADD, tr("Add filter"))))
       .on_disabled_hover_text(tr("Full. A 24 dB/oct cut takes the room of 2 filters, a 48 dB/oct cut 4."));
     if add.clicked() {
       bands.push(BiquadBand { q: 1.0, ..BiquadBand::default() });
@@ -314,7 +314,7 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
         });
       changed |=
         ui.checkbox(&mut band.enabled, tr("On")).on_hover_text(tr("Switch off to hear the difference")).changed();
-      if ui.button(format!("🗑  {}", tr("Remove"))).clicked() {
+      if ui.button(theme::with_icon(theme::icons::DELETE, tr("Remove"))).clicked() {
         *remove = true;
       }
     });

@@ -3,11 +3,11 @@
 //! scroll back to the bottom. Reads the file at most once a second, only while shown.
 
 use super::state::AppState;
-use super::theme::{self, icons};
+use super::theme::{self, Severity, icons};
 use crate::app_log::{self, LineLevel, LogLine};
 use crate::i18n::{tk, tr, trf};
 use crate::output_eq::autoeq::downloads_dir;
-use egui::{Color32, RichText, Ui};
+use egui::Ui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -61,8 +61,8 @@ pub struct LogView {
   layout_job: egui::text::LayoutJob,
   /// Remembers theme so switching dark/light updates line colors in the cached layout.
   dark_mode: Option<bool>,
-  /// Result of the last "Save a copy to send": where it went, or why it failed.
-  saved: Option<String>,
+  /// Result of the last "Save a copy to send" or "Copy": severity and message.
+  saved: Option<(Severity, String)>,
 }
 
 impl Default for LogView {
@@ -110,77 +110,82 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   theme::page_header(
     ui,
     icons::LOG,
-    Color32::from_rgb(150, 150, 150),
+    theme::palette(ui).text_secondary,
     tr("Log"),
     Some(tr(
       "What the app and the background service detected and did: game detection, profile changes, microphone processing, CPU overload.",
     )),
   );
   let mut filters_changed = false;
-  ui.horizontal_wrapped(|ui| {
-    for (i, (name, _)) in TOPICS.iter().enumerate() {
-      filters_changed |= ui.selectable_value(&mut view.topic, i, tr(name)).changed();
-    }
-    ui.separator();
-    ui.label(tr("Level:"));
-    for (level, name) in LEVELS {
-      filters_changed |= ui.selectable_value(&mut view.level, level, tr(name)).changed();
-    }
-    ui.separator();
-    filters_changed |= ui
-      .checkbox(&mut view.libraries, tr("Library messages"))
-      .on_hover_text(tr("Also show messages from libraries (graphics driver, window toolkit)."))
-      .changed();
-    ui.separator();
-    let mut save_debug = app_log::debug_to_disk();
-    if ui
-      .checkbox(&mut save_debug, tr("Save debug to disk"))
-      .on_hover_text(tr("Also write detailed debug lines to the log file, e.g. every voice leveler change and why. Off: they are not recorded at all."))
-      .changed()
-    {
-      app_log::set_debug_to_disk(save_debug);
-    }
-  });
-  ui.horizontal(|ui| {
-    ui.label(tr("Search:"));
-    filters_changed |= ui.text_edit_singleline(&mut view.search).changed();
-    if ui.button(format!("📂  {}", tr("Open log folder"))).clicked() {
-      open_folder();
-    }
-    let save = ui.button(tr("Save a copy to send")).on_hover_text(tr(
-      "Copies the log into your Downloads folder and shows it there. The log itself sits in a hidden folder and \
-       keeps changing while the app runs, so a browser or a messenger may refuse to upload it.",
-    ));
-    if save.clicked() {
-      view.saved = Some(match save_copy() {
-        Ok(path) => trf("Saved: {}", &[&path.display()]),
-        Err(e) => trf("The copy could not be saved: {}", &[&e]),
-      });
-    }
-    let copy_label = if view.selection.is_some() { tr("Copy selection") } else { tr("Copy all") };
-    if ui.button(format!("📋  {}", copy_label)).on_hover_text(tr("Copies to the Windows clipboard (Ctrl+C).")).clicked()
-    {
-      let text = view.selection.map_or(view.buffer.as_str(), |r| r.slice_str(&view.buffer));
-      view.saved = Some(match crate::win_clipboard::set_clipboard_text(text) {
-        Ok(()) => tr("Copied to clipboard.").to_string(),
-        Err(e) => trf("Copy failed: {}", &[&e]),
-      });
-    }
-    if !view.at_end
-      && ui
-        .button(format!("⬇  {}", tr("Newest")))
-        .on_hover_text(tr("Jump to the end and follow new lines again."))
+  theme::card(ui, |ui| {
+    ui.horizontal_wrapped(|ui| {
+      for (i, (name, _)) in TOPICS.iter().enumerate() {
+        filters_changed |= ui.selectable_value(&mut view.topic, i, tr(name)).changed();
+      }
+      ui.separator();
+      ui.label(tr("Level:"));
+      for (level, name) in LEVELS {
+        filters_changed |= ui.selectable_value(&mut view.level, level, tr(name)).changed();
+      }
+      ui.separator();
+      filters_changed |= ui
+        .checkbox(&mut view.libraries, tr("Library messages"))
+        .on_hover_text(tr("Also show messages from libraries (graphics driver, window toolkit)."))
+        .changed();
+      ui.separator();
+      let mut save_debug = app_log::debug_to_disk();
+      if ui
+        .checkbox(&mut save_debug, tr("Save debug to disk"))
+        .on_hover_text(tr("Also write detailed debug lines to the log file, e.g. every voice leveler change and why. Off: they are not recorded at all."))
+        .changed()
+      {
+        app_log::set_debug_to_disk(save_debug);
+      }
+    });
+    ui.horizontal_wrapped(|ui| {
+      ui.label(tr("Search:"));
+      filters_changed |= ui.text_edit_singleline(&mut view.search).changed();
+      if ui.button(theme::with_icon(icons::OPEN, tr("Open log folder"))).clicked() {
+        open_folder();
+      }
+      let save = ui.button(theme::with_icon(icons::SAVE, tr("Save a copy to send"))).on_hover_text(tr(
+        "Copies the log into your Downloads folder and shows it there. The log itself sits in a hidden folder and \
+         keeps changing while the app runs, so a browser or a messenger may refuse to upload it.",
+      ));
+      if save.clicked() {
+        view.saved = Some(match save_copy() {
+          Ok(path) => (Severity::Success, trf("Saved: {}", &[&path.display()])),
+          Err(e) => (Severity::Error, trf("The copy could not be saved: {}", &[&e])),
+        });
+      }
+      let copy_label = if view.selection.is_some() { tr("Copy selection") } else { tr("Copy all") };
+      if ui
+        .button(theme::with_icon(icons::COPY, copy_label))
+        .on_hover_text(tr("Copies to the Windows clipboard (Ctrl+C)."))
         .clicked()
-    {
-      view.jump_to_end = true;
+      {
+        let text = view.selection.map_or(view.buffer.as_str(), |r| r.slice_str(&view.buffer));
+        view.saved = Some(match crate::win_clipboard::set_clipboard_text(text) {
+          Ok(()) => (Severity::Success, tr("Copied to clipboard.").to_string()),
+          Err(e) => (Severity::Error, trf("Copy failed: {}", &[&e])),
+        });
+      }
+      if !view.at_end
+        && ui
+          .button(theme::with_icon(icons::DOWN, tr("Newest")))
+          .on_hover_text(tr("Jump to the end and follow new lines again."))
+          .clicked()
+      {
+        view.jump_to_end = true;
+      }
+    });
+    if let Some((sev, saved)) = &view.saved {
+      theme::status_line(ui, *sev, saved);
+    }
+    if let Some(e) = view.error.as_deref() {
+      theme::status_line(ui, Severity::Warning, &trf("Log file not readable yet: {}", &[&e]));
     }
   });
-  if let Some(saved) = view.saved.as_deref() {
-    ui.label(theme::caption(saved));
-  }
-  if let Some(e) = view.error.as_deref() {
-    ui.label(RichText::new(trf("Log file not readable yet: {}", &[&e])).color(theme::palette(ui).warn));
-  }
   // A different filter means different content: show its newest lines.
   if filters_changed {
     view.jump_to_end = true;
@@ -229,7 +234,6 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
     view.layout_job = job;
   }
 
-  ui.separator();
   let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
   // egui keeps following the end by itself once the offset sits there (stick_to_bottom), and
   // stops/resumes when the user scrolls away/back. We only jump to the end once on request.
@@ -246,16 +250,20 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
   let mut layouter = move |ui: &Ui, _buf: &dyn egui::text_edit::TextBuffer, _wrap_width: f32| {
     ui.fonts_mut(|f| f.layout_job(cached_job.clone()))
   };
-  let out = area.show(ui, |ui| {
-    let mut text_ref = view.buffer.as_str();
-    egui::TextEdit::multiline(&mut text_ref)
-      .id_salt("log_text")
-      .font(egui::TextStyle::Monospace)
-      .frame(egui::Frame::NONE)
-      .desired_width(f32::INFINITY)
-      .layouter(&mut layouter)
-      .show(ui)
-  });
+  let out = theme::inset_frame(ui)
+    .show(ui, |ui| {
+      area.show(ui, |ui| {
+        let mut text_ref = view.buffer.as_str();
+        egui::TextEdit::multiline(&mut text_ref)
+          .id_salt("log_text")
+          .font(egui::TextStyle::Monospace)
+          .frame(egui::Frame::NONE)
+          .desired_width(f32::INFINITY)
+          .layouter(&mut layouter)
+          .show(ui)
+      })
+    })
+    .inner;
   let max_offset = (out.content_size.y - out.inner_rect.height()).max(0.0);
   view.at_end = out.state.unclamped_offset().y >= max_offset - BOTTOM_SLACK;
   view.selection = out.inner.cursor_range.filter(|r| r.primary != r.secondary);

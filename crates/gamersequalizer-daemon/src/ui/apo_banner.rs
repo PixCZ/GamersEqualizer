@@ -7,7 +7,7 @@
 //! what will happen, then asks Windows once for all of them. "Not now" keeps the app running
 //! degraded; the bar stays until the problem is gone.
 
-use egui::{RichText, Ui};
+use egui::Ui;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -125,11 +125,12 @@ pub fn render_mic_warning(ui: &mut Ui, state: &mut AppState) {
   };
   let mut clicked = None;
   theme::info_bar(ui, Severity::Warning, |ui| {
-    ui.label(theme::strong(issue.title(), 15.0));
+    ui.label(theme::strong(issue.title(), 14.0));
     ui.horizontal_wrapped(|ui| {
       ui.label(tr("Nobody hears you."));
-      for (label, fix) in issue.fixes() {
-        if ui.add(theme::accent_button(ui, &label)).clicked() {
+      for (i, (label, fix)) in issue.fixes().into_iter().enumerate() {
+        let resp = if i == 0 { ui.add(theme::accent_button(ui, &label)) } else { ui.button(&label) };
+        if resp.clicked() {
           clicked = Some(fix);
         }
       }
@@ -161,13 +162,14 @@ pub fn effect_not_running(state: &AppState) -> bool {
 pub fn render_health_bar(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
   let list = problems(state);
   theme::info_bar(ui, Severity::Error, |ui| {
-    ui.label(theme::strong(tr("GamersEqualizer is not working correctly"), 15.0));
-    for problem in list {
+    ui.label(theme::strong(tr("GamersEqualizer is not working correctly"), 14.0));
+    for (i, problem) in list.into_iter().enumerate() {
+      let primary = i == 0;
       match problem {
-        Problem::Apo { title, button } => apo_row(ui, state, &title, button),
-        Problem::NewOutput { name } => new_output_row(ui, state, &name),
-        Problem::NotDefaultMic { mic_name } => default_mic_row(ui, state, win_audio, &mic_name),
-        Problem::OutputChanged(change) => output_changed_row(ui, state, win_audio, &change),
+        Problem::Apo { title, button } => apo_row(ui, state, &title, button, primary),
+        Problem::NewOutput { name } => new_output_row(ui, state, &name, primary),
+        Problem::NotDefaultMic { mic_name } => default_mic_row(ui, state, win_audio, &mic_name, primary),
+        Problem::OutputChanged(change) => output_changed_row(ui, state, win_audio, &change, primary),
       }
     }
     if let Some(msg) = state.apo_banner.message.as_deref() {
@@ -359,7 +361,7 @@ fn problems(state: &AppState) -> Vec<Problem> {
   list
 }
 
-fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str) {
+fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str, primary: bool) {
   let Some(check) = state.apo_banner.check.clone() else {
     return;
   };
@@ -367,44 +369,53 @@ fn apo_row(ui: &mut Ui, state: &mut AppState, title: &str, button: &str) {
     // The button first (as in every row): a long line wraps and would push it out of sight.
     if !check.can_install {
       ui.label(title);
-      ui.label(
-        RichText::new(tr("Installer files were not found next to the app; reinstall the app."))
-          .color(theme::palette(ui).warn),
+      theme::status_line(
+        ui,
+        Severity::Warning,
+        tr("Installer files were not found next to the app; reinstall the app."),
       );
       return;
     }
     // The setup card explains the admin prompt and bundles every admin step into one.
-    if !super::setup::visible(state) && setup_button(ui, tr(button)).clicked() {
+    if !super::setup::visible(state) && setup_button(ui, tr(button), primary).clicked() {
       super::setup::open(state);
     }
     ui.label(title);
   });
 }
 
-/// The accent button that opens the setup card, with what it costs said on hover.
-fn setup_button(ui: &mut Ui, text: &str) -> egui::Response {
-  ui.add(theme::accent_button(ui, text))
-    .on_hover_text(tr("Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds."))
+/// The button that opens the setup card, with what it costs said on hover.
+fn setup_button(ui: &mut Ui, text: &str, primary: bool) -> egui::Response {
+  let resp = if primary { ui.add(theme::accent_button(ui, text)) } else { ui.button(text) };
+  resp.on_hover_text(tr("Opens the setup: one administrator prompt, then Windows audio restarts for a few seconds."))
 }
 
-fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str) {
+fn new_output_row(ui: &mut Ui, state: &mut AppState, name: &str, primary: bool) {
   ui.horizontal_wrapped(|ui| {
     // The button first: a long line wraps and would push it out of sight.
-    if !super::setup::visible(state) && setup_button(ui, tr("Set up…")).clicked() {
+    if !super::setup::visible(state) && setup_button(ui, tr("Set up…"), primary).clicked() {
       super::setup::open(state);
     }
     ui.label(trf("Echo cancellation and EQ do not work on \"{}\"", &[&name]));
   });
 }
 
-fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, change: &OutputChange) {
+fn output_changed_row(
+  ui: &mut Ui,
+  state: &mut AppState,
+  win_audio: &WinAudioSystem,
+  change: &OutputChange,
+  primary: bool,
+) {
   let mut keep = None;
   // What happened on its own line, the choices below it: both device names are long, and in one
   // row the text and the two buttons ran into each other.
   ui.label(trf("Windows default output changed to \"{}\"", &[&change.current_name]));
   ui.horizontal_wrapped(|ui| {
     // The same two choices as in the tray menu (`Issue::fixes`).
-    if ui.add(theme::accent_button(ui, &trf("Switch back to \"{}\"", &[&change.expected_name]))).clicked() {
+    let switch_label = trf("Switch back to \"{}\"", &[&change.expected_name]);
+    let switch_resp = if primary { ui.add(theme::accent_button(ui, &switch_label)) } else { ui.button(&switch_label) };
+    if switch_resp.clicked() {
       keep = Some(false);
     }
     if ui.button(trf("Keep \"{}\"", &[&change.current_name])).clicked() {
@@ -425,11 +436,12 @@ fn output_changed_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSys
   state.apo_banner.run.output_changed = None;
 }
 
-fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, mic_name: &str) {
+fn default_mic_row(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem, mic_name: &str, primary: bool) {
   let mut clicked = false;
   ui.horizontal_wrapped(|ui| {
-    clicked = ui
-      .add(theme::accent_button(ui, tr("Make it the default")))
+    let label = tr("Make it the default");
+    let resp = if primary { ui.add(theme::accent_button(ui, label)) } else { ui.button(label) };
+    clicked = resp
       .on_hover_text(tr("Sets it as the Windows default and communications microphone. No admin rights needed."))
       .clicked();
     ui.label(trf(

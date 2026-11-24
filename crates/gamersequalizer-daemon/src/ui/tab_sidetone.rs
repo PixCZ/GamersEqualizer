@@ -166,18 +166,18 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       let out_block_us = (out_block_frames as u64 * 1_000_000 / out_rate as u64) as u32;
       let latence_us = age_us.saturating_add(noise_delay_us).saturating_add(out_block_us);
       let delay_ms = latence_us as f32 / 1000.0;
-      let p = theme::palette(ui);
-      let col = if delay_ms <= 10.0 {
-        p.ok
+      let sev = if delay_ms <= 10.0 {
+        Severity::Success
       } else if delay_ms <= 20.0 {
-        p.warn
+        Severity::Warning
       } else {
-        p.err
+        Severity::Error
       };
       ui.add_space(8.0);
-      ui.label(
-        theme::strong(trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]), 14.0)
-          .color(col),
+      theme::status_line(
+        ui,
+        sev,
+        &trf("Delay about {} ms (without the converters)", &[&format!("{:.0}", delay_ms.round())]),
       );
       let mic_rate = h.sidetone_mic_rate.load(r).max(1);
       let mic_block_frames = h.sidetone_mic_block_frames.load(r);
@@ -194,8 +194,6 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       });
     }
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 2: Volume, Meter & Low Latency
@@ -237,8 +235,6 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
       tr("The voice leveler is off: 100 % = the microphone as it comes in. The volume of the output device applies on top.")
     }));
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 3: Noise suppression
@@ -353,8 +349,6 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     });
   });
 
-  ui.add_space(theme::CARD_GAP);
-
   // -------------------------------------------------------------------------------------
   // Card 4: EQ, the same editor as the voice EQ on the Microphone page
   // -------------------------------------------------------------------------------------
@@ -366,8 +360,6 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
     let height = super::eq_editor::plot_height(ui, 0.3, 180.0, 340.0);
     eq_changed = super::eq_editor::band_editor(ui, "sidetone_eq", &mut pair.bands, MAX_EQ_BANDS, EQ_COLOR, &[], height);
   });
-
-  ui.add_space(theme::CARD_GAP);
 
   // -------------------------------------------------------------------------------------
   // Card 5: Saved pairs

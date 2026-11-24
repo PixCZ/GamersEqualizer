@@ -18,7 +18,6 @@ pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
 const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
 const AI_COLOR: Color32 = Color32::from_rgb(140, 240, 120);
 pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(230, 150, 40);
-const OK_COLOR: Color32 = Color32::from_rgb(80, 220, 120);
 /// Lowest level shown on the dBFS meters.
 const METER_FLOOR_DB: f32 = -80.0;
 /// Width of the meters and bars in the AEC grid.
@@ -321,7 +320,8 @@ fn aec_section(ui: &mut Ui, state: &mut AppState, win_audio: &WinAudioSystem) {
           None => ("—".to_string(), tr("not measured yet: play some sound through the speakers").to_string()),
         };
         aec_row(ui, tr("Delay"), |ui| {
-          ui.label(RichText::new(delay).color(p.ok)).on_hover_text(hover);
+          let col = if t.delay_ms.is_some() { p.text } else { p.text_secondary };
+          ui.label(RichText::new(delay).color(col)).on_hover_text(hover);
         });
       });
       ui.add_space(AEC_COLUMN_GAP);
@@ -475,7 +475,7 @@ fn corr_plot(ui: &mut Ui, t: &AecTelemetry, width: f32) {
   let max_ms = if t.corr_max_delay_ms > 0.0 { t.corr_max_delay_ms } else { 400.0 };
   let pts: PlotPoints =
     t.corr.iter().enumerate().map(|(i, &v)| [((i as f32 + 0.5) / n as f32 * max_ms) as f64, v as f64]).collect();
-  let (line, mark) = (theme::adapt(ui, AEC_COLOR), theme::adapt(ui, OK_COLOR));
+  let (line, mark) = (theme::adapt(ui, AEC_COLOR), theme::palette(ui).ok);
   let threshold_color = theme::palette(ui).text_tertiary;
   small_plot("aec_corr_plot", width)
     .include_y(0.0)
@@ -504,7 +504,7 @@ fn history_plot(ui: &mut Ui, state: &AppState, width: f32) {
   let now = state.aec_history.back().map_or(0.0, |p| p.t);
   let erle: PlotPoints = state.aec_history.iter().map(|p| [p.t - now, p.erle_db as f64]).collect();
   let delay: PlotPoints = state.aec_history.iter().filter_map(|p| p.delay_ms.map(|d| [p.t - now, d as f64])).collect();
-  let (a, b) = (theme::adapt(ui, AEC_COLOR), theme::adapt(ui, OK_COLOR));
+  let (a, b) = (theme::adapt(ui, AEC_COLOR), theme::palette(ui).ok);
   small_plot("aec_history_plot", width)
     .include_x(-60.0)
     .include_x(0.0)
@@ -721,7 +721,7 @@ fn dsp_load_row(ui: &mut Ui, load: super::state::DspLoad) {
     ));
     // Only a problem is shown; zero late blocks needs no words.
     if load.late_blocks > 0 {
-      ui.label(RichText::new(trf("late blocks: {}", &[&load.late_blocks])).color(p.warn));
+      theme::status_line(ui, Severity::Warning, &trf("late blocks: {}", &[&load.late_blocks]));
     }
   });
   ui.end_row();

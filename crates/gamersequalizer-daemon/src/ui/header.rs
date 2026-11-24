@@ -3,7 +3,7 @@
 //! shared by the Headphones and Mixer pages.
 
 use super::state::{ActiveTab, AppState};
-use super::theme::{self, Icon, icons};
+use super::theme::{self, Icon, Severity, icons};
 use crate::i18n::{tk, tr, trf};
 use crate::win_audio::dolby_atmos::{active_format, spatial_status};
 use crate::win_audio::{SpatialAudioStatus, WinAudioSystem, shell};
@@ -14,6 +14,7 @@ pub const NAV_WIDTH: f32 = 248.0;
 /// One spatial-audio activation + a few registry reads.
 const SPATIAL_RECHECK: Duration = Duration::from_secs(3);
 const BRAND: Color32 = Color32::from_rgb(255, 120, 40);
+const SPATIAL_COLOR: Color32 = Color32::from_rgb(0, 180, 216);
 
 /// One row of the navigation pane.
 enum Nav {
@@ -232,14 +233,14 @@ fn render_spatial_row(ui: &mut Ui, state: &mut AppState) {
         "Spatial sound: {} instead of {}",
         &[&current_name, &expected.label(tr("your format"))],
       );
-      ui.label(RichText::new(theme::with_icon(icons::WARNING, &text)).small().color(p.warn))
+      theme::status_line(ui, Severity::Warning, &text)
         .on_hover_text(tr("Something changed spatial sound on this device (a Windows or driver update, another app). Switch it back in the Windows settings, or keep the new one."));
       if let Some(now) = state.spatial_format.clone()
         && ui.button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
           keep = Some(now);
         }
     } else {
-      let color = if active { theme::adapt(ui, Color32::from_rgb(0, 180, 216)) } else { p.text_tertiary };
+      let color = if active { theme::adapt(ui, SPATIAL_COLOR) } else { p.text_tertiary };
       status_pill(ui, color, &format!("{}: {}", tr("Spatial sound"), current_name))
         .on_hover_text(tr("Windows spatial sound on this device (Dolby Atmos, DTS:X, Windows Sonic). The headphone and game EQ run after it."));
     }

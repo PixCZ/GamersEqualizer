@@ -67,6 +67,13 @@ pub mod icons {
   pub const DELETE: Icon = Icon { glyph: '\u{E74D}', emoji: "🗑" };
   pub const SAVE: Icon = Icon { glyph: '\u{E74E}', emoji: "💾" };
   pub const OPEN: Icon = Icon { glyph: '\u{E838}', emoji: "📂" };
+  pub const ADD: Icon = Icon { glyph: '\u{E710}', emoji: "➕" };
+  pub const COPY: Icon = Icon { glyph: '\u{E8C8}', emoji: "📋" };
+  pub const IMPORT: Icon = Icon { glyph: '\u{E896}', emoji: "📥" };
+  pub const RESET: Icon = Icon { glyph: '\u{E72C}', emoji: "↺" };
+  pub const BACK: Icon = Icon { glyph: '\u{E72B}', emoji: "◀" };
+  pub const FORWARD: Icon = Icon { glyph: '\u{E72A}', emoji: "▶" };
+  pub const DOWN: Icon = Icon { glyph: '\u{E74B}', emoji: "⬇" };
 }
 
 /// Message severity of an info bar / status text.
@@ -322,9 +329,34 @@ pub fn status_line(ui: &mut Ui, severity: Severity, text: &str) -> Response {
 }
 
 /// Filled accent button (Fluent "AccentButton"), for the primary action of a group.
-pub fn accent_button(ui: &Ui, text: &str) -> egui::Button<'static> {
-  let p = palette(ui);
-  egui::Button::new(RichText::new(text.to_string()).color(p.on_accent)).fill(p.accent_fill).stroke(Stroke::NONE)
+/// Darkens on hover and press in both themes so white text stays above WCAG AA.
+pub fn accent_button(_ui: &Ui, text: &str) -> AccentButton {
+  AccentButton(text.to_string())
+}
+
+pub struct AccentButton(String);
+
+impl Widget for AccentButton {
+  fn ui(self, ui: &mut Ui) -> Response {
+    let p = palette(ui);
+    let target = if p.dark { p.card } else { p.text };
+    let hover = p.accent_fill.lerp_to_gamma(target, 0.15);
+    let press = p.accent_fill.lerp_to_gamma(target, 0.25);
+    ui.scope(|ui| {
+      let w = &mut ui.visuals_mut().widgets;
+      w.inactive.weak_bg_fill = p.accent_fill;
+      w.inactive.bg_stroke = Stroke::NONE;
+      w.inactive.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
+      w.hovered.weak_bg_fill = hover;
+      w.hovered.bg_stroke = Stroke::NONE;
+      w.hovered.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
+      w.active.weak_bg_fill = press;
+      w.active.bg_stroke = Stroke::NONE;
+      w.active.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
+      ui.add(egui::Button::new(RichText::new(self.0).color(p.on_accent)))
+    })
+    .inner
+  }
 }
 
 /// An egui slider with the bright accent as its fill. The slider's filled part is egui's selection
