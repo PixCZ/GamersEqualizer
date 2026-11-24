@@ -192,24 +192,33 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     state.use_mic_profile(p);
   }
 
-  // Imported profiles (AutoEQ, pasted text) only: others have no original to go back to.
+  // Always shown for an output profile so it can be found; only imported profiles (AutoEQ, pasted text)
+  // have an original to go back to, the others get a disabled button that says why.
   let original = match target {
     EqTarget::Output(layer) => {
-      active_profile(state, target).filter(|p| p.original.is_some()).map(|p| (layer, p.differs_from_original()))
+      active_profile(state, target).map(|p| (layer, p.original.is_some().then(|| p.differs_from_original())))
     }
     EqTarget::Mic => None,
   };
-  if let Some((layer, differs)) = original
-    && ui
-      .add_enabled(differs, egui::Button::new(theme::with_icon(icons::RESET, tr("Reset to original"))))
+  if let Some((layer, differs)) = original {
+    let disabled_hint = if differs.is_none() {
+      tr(
+        "This profile has no saved original: it was made before the app kept one, or it is your own. Import the headphones from AutoEQ again to get one.",
+      )
+    } else {
+      tr("Nothing to reset: the bands are as they were imported.")
+    };
+    if ui
+      .add_enabled(differs == Some(true), egui::Button::new(theme::with_icon(icons::RESET, tr("Reset to original"))))
       .on_hover_text(tr(
         "Puts the bands back as they were imported (from AutoEQ or a pasted EQ). Your volume stays; the edited \
          version is kept in profiles\\_deleted.",
       ))
-      .on_disabled_hover_text(tr("Nothing to reset: the bands are as they were imported."))
+      .on_disabled_hover_text(disabled_hint)
       .clicked()
-  {
-    reset_to_original(state, layer);
+    {
+      reset_to_original(state, layer);
+    }
   }
 
   let (can_delete, delete_disabled_hint) = match target {

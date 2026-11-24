@@ -321,6 +321,10 @@ pub static CS: &[(&str, &str)] = &[
   ),
   ("Nothing to reset: the bands are as they were imported.", "Není co vracet: pásma jsou stejná jako po importu."),
   (
+    "This profile has no saved original: it was made before the app kept one, or it is your own. Import the headphones from AutoEQ again to get one.",
+    "Tento profil nemá uložený originál: vznikl dřív, než si ho aplikace začala pamatovat, nebo je váš vlastní. Originál získáte novým importem sluchátek z AutoEQ.",
+  ),
+  (
     "Back to the original. Your edited version was moved to {}.",
     "Vráceno na původní. Upravená verze je přesunutá do {}.",
   ),
