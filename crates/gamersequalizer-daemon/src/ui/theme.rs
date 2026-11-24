@@ -23,6 +23,9 @@ pub const CARD_GAP: f32 = 12.0;
 /// Brand accent (orange), tuned per theme for contrast.
 const ACCENT_DARK: Color32 = Color32::from_rgb(255, 140, 64);
 const ACCENT_LIGHT: Color32 = Color32::from_rgb(196, 82, 0);
+/// Dark theme's fill under text (buttons, switch, step circle): the bright accent bleeds over thin
+/// dark strokes and reads badly (see `.claude/rules/design.md`). White text on it: 5.4:1.
+const ACCENT_FILL_DARK: Color32 = Color32::from_rgb(181, 71, 0);
 /// Fluent glyph offset below the text row's center, as a fraction of the text row height.
 const ICON_DROP: f32 = 0.07;
 
@@ -85,8 +88,11 @@ pub struct Palette {
   pub text: Color32,
   pub text_secondary: Color32,
   pub text_tertiary: Color32,
+  /// Thin and small things: slider and meter fills, the navigation pill, links, text selection.
   pub accent: Color32,
-  /// Text/icons on an accent fill.
+  /// Areas that carry text or a knob (buttons, switch, step circle); never put text on `accent`.
+  pub accent_fill: Color32,
+  /// Text/icons on `accent_fill`.
   pub on_accent: Color32,
   pub ok: Color32,
   pub warn: Color32,
@@ -105,7 +111,8 @@ const DARK: Palette = Palette {
   text_secondary: Color32::from_rgb(200, 200, 200),
   text_tertiary: Color32::from_rgb(150, 150, 150),
   accent: ACCENT_DARK,
-  on_accent: Color32::from_rgb(20, 20, 20),
+  accent_fill: ACCENT_FILL_DARK,
+  on_accent: Color32::WHITE,
   ok: Color32::from_rgb(108, 203, 95),
   warn: Color32::from_rgb(252, 225, 0),
   err: Color32::from_rgb(255, 153, 164),
@@ -123,7 +130,8 @@ const LIGHT: Palette = Palette {
   text_secondary: Color32::from_rgb(96, 96, 96),
   text_tertiary: Color32::from_rgb(130, 130, 130),
   accent: ACCENT_LIGHT,
-  on_accent: Color32::from_rgb(255, 255, 255),
+  accent_fill: ACCENT_LIGHT,
+  on_accent: Color32::WHITE,
   ok: Color32::from_rgb(15, 123, 15),
   warn: Color32::from_rgb(157, 93, 0),
   err: Color32::from_rgb(196, 43, 28),
@@ -316,7 +324,27 @@ pub fn status_line(ui: &mut Ui, severity: Severity, text: &str) -> Response {
 /// Filled accent button (Fluent "AccentButton"), for the primary action of a group.
 pub fn accent_button(ui: &Ui, text: &str) -> egui::Button<'static> {
   let p = palette(ui);
-  egui::Button::new(RichText::new(text.to_string()).color(p.on_accent)).fill(p.accent).stroke(Stroke::NONE)
+  egui::Button::new(RichText::new(text.to_string()).color(p.on_accent)).fill(p.accent_fill).stroke(Stroke::NONE)
+}
+
+/// An egui slider with the bright accent as its fill. The slider's filled part is egui's selection
+/// color, which is `accent_fill` (a dark orange that carries white text); a thin fill wants the
+/// bright accent. Every slider goes through this and `slider_sized`.
+pub fn slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
+  with_bright_selection(ui, |ui| ui.add(slider))
+}
+
+/// `slider` in a box of the given size (a vertical fader).
+pub fn slider_sized(ui: &mut Ui, size: Vec2, slider: egui::Slider<'_>) -> Response {
+  with_bright_selection(ui, |ui| ui.add_sized(size, slider))
+}
+
+fn with_bright_selection<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+  let (bright, kept) = (palette(ui).accent, ui.visuals().selection.bg_fill);
+  ui.visuals_mut().selection.bg_fill = bright;
+  let result = add(ui);
+  ui.visuals_mut().selection.bg_fill = kept;
+  result
 }
 
 // --- meters --------------------------------------------------------------------------------
@@ -370,7 +398,7 @@ pub fn volume_text(volume: f32) -> String {
 pub fn percent_volume(ui: &mut Ui, volume: &mut f32, max: f32, width: f32, color: Color32) -> bool {
   ui.horizontal(|ui| {
     ui.spacing_mut().slider_width = width;
-    let mut changed = ui.add(egui::Slider::new(volume, 0.0..=max).show_value(false)).changed();
+    let mut changed = slider(ui, egui::Slider::new(volume, 0.0..=max).show_value(false)).changed();
     ui.label(strong(volume_text(*volume), 14.0).color(adapt(ui, color)));
     // With 100 % as the top (mic with the leveler on) the slider's end says it already.
     if max > 1.0 && ui.button(crate::i18n::tr("Reset to 100 %")).clicked() {
@@ -419,7 +447,7 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
     let hovered = response.hovered();
     let radius = rect.height() / 2.0;
     let (fill, stroke, knob) = if *on {
-      let fill = if hovered { p.accent.gamma_multiply(0.9) } else { p.accent };
+      let fill = if hovered { p.accent_fill.lerp_to_gamma(Color32::BLACK, 0.1) } else { p.accent_fill };
       (fill, Stroke::NONE, p.on_accent)
     } else {
       let fill = if hovered { p.nav_hover } else { Color32::TRANSPARENT };
@@ -658,7 +686,9 @@ fn visuals(p: &Palette) -> Visuals {
   v.hyperlink_color = p.accent;
   v.warn_fg_color = p.warn;
   v.error_fg_color = p.err;
-  v.selection.bg_fill = p.accent;
+  // Selected chips and options, text selection: they carry text, so the fill that does. Sliders put
+  // the bright accent back (`slider`).
+  v.selection.bg_fill = p.accent_fill;
   v.selection.stroke = Stroke::new(1.0_f32, p.on_accent);
   v.slider_trailing_fill = true;
   v.striped = false;

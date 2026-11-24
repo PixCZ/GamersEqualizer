@@ -380,7 +380,7 @@ fn balance_row(ui: &mut Ui, win_audio: &mut WinAudioSystem) {
       let slider = egui::Slider::new(&mut balance, -1.0..=1.0).show_value(false);
       let width = (ui.available_width() - 470.0).clamp(140.0, 520.0);
       ui.spacing_mut().slider_width = width;
-      let r = ui.add(slider).on_hover_text(if balance < -0.05 {
+      let r = theme::slider(ui, slider).on_hover_text(if balance < -0.05 {
         trf("Game +{}%", &[&format!("{:.0}", -balance * 100.0)])
       } else if balance > 0.05 {
         trf("Chat +{}%", &[&format!("{:.0}", balance * 100.0)])
@@ -532,12 +532,12 @@ fn render_strip(
           ui.horizontal(|ui| {
             let total_w = 26.0 + 6.0 + 6.0;
             ui.add_space(((ui.available_width() - total_w) / 2.0).max(0.0));
-            ui.add_sized(Vec2::new(26.0, strip.fader_h), fader);
+            theme::slider_sized(ui, Vec2::new(26.0, strip.fader_h), fader);
             ui.add_space(6.0);
             peak_meter(ui, peak, strip.fader_h);
           });
         } else {
-          ui.add_sized(Vec2::new(26.0, strip.fader_h), fader);
+          theme::slider_sized(ui, Vec2::new(26.0, strip.fader_h), fader);
         }
 
         ui.label(theme::strong(theme::volume_text(*volume), 15.0));

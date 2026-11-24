@@ -96,8 +96,7 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
         let mut target = h.mic_leveler_target_db_x10.load(Ordering::Relaxed) as f32 / 10.0;
         ui.spacing_mut().slider_width = BAR_WIDTH;
         let slider = egui::Slider::new(&mut target, MIN_TARGET_DB..=MAX_TARGET_DB).step_by(1.0).show_value(false);
-        if ui
-          .add(slider)
+        if theme::slider(ui, slider)
           .on_hover_text(tr("How loud others hear you. The leveler gets your voice there by itself."))
           .changed()
         {
@@ -621,7 +620,7 @@ fn denoise_section(ui: &mut Ui, state: &mut AppState) {
         .show_value(true)
         .custom_formatter(|v, _| format!("{:.0} %", v * 100.0))
         .custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0));
-      changed |= ui.add(slider).changed();
+      changed |= theme::slider(ui, slider).changed();
       ui.end_row();
 
       // Any old threshold value (e.g. -45) means "on": the gate is automatic now.

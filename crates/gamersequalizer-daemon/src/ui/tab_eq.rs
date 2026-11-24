@@ -271,8 +271,7 @@ pub fn volume_row(ui: &mut Ui, state: &mut AppState, layer: OutputLayer, bus_vol
     let profile = state.output_eq.layer_profile_mut(layer);
     let mut changed = false;
     if let Some(p) = profile {
-      changed = ui
-        .add(egui::Slider::new(&mut p.gain_db, -12.0..=12.0).suffix(" dB").max_decimals(1))
+      changed = theme::slider(ui, egui::Slider::new(&mut p.gain_db, -12.0..=12.0).suffix(" dB").max_decimals(1))
         .on_hover_text(tr("Make this profile louder or quieter by ear, e.g. so all your headphones sound equally loud. Saved with the profile."))
         .changed();
     }

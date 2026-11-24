@@ -212,8 +212,8 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
     for (i, band) in bands.iter().enumerate() {
       let is_selected = *selected == Some(i);
       let text = RichText::new(format!("● {}  {}", i + 1, describe(band)));
-      // On the accent selection fill the band color is unreadable: a selected chip keeps the
-      // theme's text-on-accent color, the others show the band color.
+      // On the selection fill the band color is unreadable: a selected chip keeps the theme's
+      // text-on-accent color (white), the others show the band color.
       let text = if is_selected { text } else { text.color(theme::adapt(ui, dot_color(i, band))) };
       if ui.selectable_label(is_selected, text).clicked() {
         *selected = if *selected == Some(i) { None } else { Some(i) };
@@ -377,7 +377,7 @@ fn value_slider(
 ) -> bool {
   let untouched = shown_value(*value, &range, decimals);
   let mut v = *value;
-  ui.add(egui::Slider::new(&mut v, range).logarithmic(logarithmic).suffix(suffix).max_decimals(decimals));
+  theme::slider(ui, egui::Slider::new(&mut v, range).logarithmic(logarithmic).suffix(suffix).max_decimals(decimals));
   if v == untouched {
     return false;
   }

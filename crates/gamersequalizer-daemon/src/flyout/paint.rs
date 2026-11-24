@@ -58,10 +58,10 @@ const PERCENT_W: i32 = 44;
 const TRACK_H: f32 = 4.0;
 const THUMB_R: i32 = 10;
 const RADIUS: f32 = 4.0;
-const TEXT_PT: i32 = 14;
-const CAPTION_PT: i32 = 12;
-const GLYPH_PT: i32 = 16;
-const SMALL_GLYPH_PT: i32 = 11;
+const TEXT_PX: i32 = 14;
+const CAPTION_PX: i32 = 12;
+const GLYPH_PX: i32 = 16;
+const SMALL_GLYPH_PX: i32 = 11;
 /// Segoe MDL2 Assets: the same glyphs as Segoe Fluent Icons, and on Windows 10 too.
 const GLYPH_FONT: PCWSTR = w!("Segoe MDL2 Assets");
 
@@ -740,7 +740,10 @@ fn draw_shapes(c: &mut Canvas, layout: &Layout, rows: &[Row], ui: Interaction, p
       focus_ring(c, layout, o, p);
     }
     let f = layout.fix_rect();
-    let fill = if ui.hover == Some(Hit::Fix) { mix(p.accent, p.card, 0.15) } else { p.accent };
+    // Hover darkens in both themes: towards the card in the dark one, towards the text in the light
+    // one (towards its light card the fill would drop under 4.5:1 with white text).
+    let darker = if p.dark { p.card } else { p.text };
+    let fill = if ui.hover == Some(Hit::Fix) { mix(p.accent_fill, darker, 0.15) } else { p.accent_fill };
     let (fw, fh) = ((f.right - f.left) as f32, (f.bottom - f.top) as f32);
     c.round_rect(f.left as f32, f.top as f32, fw, fh, px(RADIUS), fill);
     if ui.focus == Some(Hit::Fix) {
@@ -911,7 +914,7 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
       let glyph = icons::WARNING.glyph.to_string();
       text(dc, &glyph, layout.issue_glyph_rect(), fonts.glyphs, p.warn, DT_CENTER);
       text(dc, issue.short, layout.issue_text_rect(), fonts.regular, p.text, DT_LEFT);
-      text(dc, issue.button, layout.fix_rect(), fonts.semibold, p.on_accent, DT_CENTER);
+      text(dc, issue.button, layout.fix_rect(), fonts.button, p.on_accent, DT_CENTER);
       if let Some((label, _)) = issue.other.as_ref().filter(|_| layout.other_fix) {
         let mut r = layout.other_fix_rect();
         r.left += layout.px(GAP);
@@ -1005,6 +1008,8 @@ fn font(height: i32, weight: u32, quality: FONT_QUALITY, face: PCWSTR) -> HFONT 
 /// The fonts of one paint, made for its scale.
 struct Fonts {
   regular: HFONT,
+  /// The fix button's text: the face the window draws its buttons in (sturdier at 14 px).
+  button: HFONT,
   semibold: HFONT,
   caption: HFONT,
   glyphs: HFONT,
@@ -1014,18 +1019,23 @@ struct Fonts {
 impl Fonts {
   fn new(layout: &Layout) -> Self {
     let f = |pt: i32, weight: u32, face| font(layout.px(pt), weight, CLEARTYPE_QUALITY, face);
+    // The same file the window loads (`ui/theme.rs`); without it (Windows 10) GDI would substitute
+    // some other face, so Segoe UI stays.
+    static VARIABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let variable = *VARIABLE.get_or_init(|| std::path::Path::new(r"C:\Windows\Fonts\SegUIVar.ttf").exists());
     Self {
-      regular: f(TEXT_PT, FW_NORMAL.0, w!("Segoe UI")),
-      semibold: f(TEXT_PT, FW_SEMIBOLD.0, w!("Segoe UI")),
-      caption: f(CAPTION_PT, FW_NORMAL.0, w!("Segoe UI")),
-      glyphs: f(GLYPH_PT, FW_NORMAL.0, GLYPH_FONT),
-      small_glyphs: f(SMALL_GLYPH_PT, FW_NORMAL.0, GLYPH_FONT),
+      regular: f(TEXT_PX, FW_NORMAL.0, w!("Segoe UI")),
+      button: f(TEXT_PX, FW_NORMAL.0, if variable { w!("Segoe UI Variable Text") } else { w!("Segoe UI") }),
+      semibold: f(TEXT_PX, FW_SEMIBOLD.0, w!("Segoe UI")),
+      caption: f(CAPTION_PX, FW_NORMAL.0, w!("Segoe UI")),
+      glyphs: f(GLYPH_PX, FW_NORMAL.0, GLYPH_FONT),
+      small_glyphs: f(SMALL_GLYPH_PX, FW_NORMAL.0, GLYPH_FONT),
     }
   }
 
   /// Only once no DC has them selected.
   fn delete(self) {
-    for f in [self.regular, self.semibold, self.caption, self.glyphs, self.small_glyphs] {
+    for f in [self.regular, self.button, self.semibold, self.caption, self.glyphs, self.small_glyphs] {
       // SAFETY: fonts this struct made; deleting a null one does nothing.
       let _ = unsafe { DeleteObject(HGDIOBJ(f.0)) };
     }

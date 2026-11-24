@@ -358,7 +358,7 @@ fn numbered(ui: &mut Ui, n: u32, text: &str) {
     let p = theme::palette(ui);
     // Numbered circle, like the steps in Windows setup pages.
     let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 11.0, p.accent);
+    ui.painter().circle_filled(rect.center(), 11.0, p.accent_fill);
     ui.painter().text(
       rect.center(),
       egui::Align2::CENTER_CENTER,

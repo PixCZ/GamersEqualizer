@@ -309,13 +309,13 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         ui.label(tr("Sensitivity"));
         ui.horizontal(|ui| {
           ui.spacing_mut().slider_width = 280.0;
-          if ui
-            .add(
-              egui::Slider::new(&mut settings.gate_margin_db, GATE_MARGIN_DB_MIN..=GATE_MARGIN_DB_MAX)
-                .step_by(1.0)
-                .suffix(" dB"),
-            )
-            .changed()
+          if theme::slider(
+            ui,
+            egui::Slider::new(&mut settings.gate_margin_db, GATE_MARGIN_DB_MIN..=GATE_MARGIN_DB_MAX)
+              .step_by(1.0)
+              .suffix(" dB"),
+          )
+          .changed()
           {
             changed = true;
           }
@@ -327,9 +327,11 @@ pub fn render_tab_sidetone(ui: &mut Ui, state: &mut AppState, win_audio: &mut Wi
         ui.label(tr("Depth"));
         ui.horizontal(|ui| {
           ui.spacing_mut().slider_width = 280.0;
-          if ui
-            .add(egui::Slider::new(&mut settings.gate_range_db, 0.0..=GATE_RANGE_DB_MAX).step_by(1.0).suffix(" dB"))
-            .changed()
+          if theme::slider(
+            ui,
+            egui::Slider::new(&mut settings.gate_range_db, 0.0..=GATE_RANGE_DB_MAX).step_by(1.0).suffix(" dB"),
+          )
+          .changed()
           {
             changed = true;
           }

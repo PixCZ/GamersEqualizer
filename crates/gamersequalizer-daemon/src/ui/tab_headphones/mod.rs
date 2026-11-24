@@ -183,8 +183,7 @@ pub(super) fn strength_row(ui: &mut Ui, h: &ShmHeader, width: f32) {
     let mut percent = strength as f32 / 10.0;
     ui.spacing_mut().slider_width = width;
     let slider = egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %");
-    if ui
-      .add(slider)
+    if theme::slider(ui, slider)
       .on_hover_text(tr(
         "How clearly the voice should stand out from the game. A higher setting lowers the game sooner and further.",
       ))
