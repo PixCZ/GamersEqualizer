@@ -139,10 +139,28 @@ fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
 /// Colored line samples with their meaning, under a graph.
 fn legend(ui: &mut Ui, items: &[(&str, Color32)]) {
   ui.horizontal_wrapped(|ui| {
-    for &(text, color) in items {
+    for (idx, &(text, color)) in items.iter().enumerate() {
       let c = theme::adapt(ui, color);
-      let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 12.0), egui::Sense::hover());
-      ui.painter().line_segment([rect.left_center(), rect.right_center()], egui::Stroke::new(2.5_f32, c));
+      let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 12.0), egui::Sense::hover());
+      let y = rect.center().y;
+      let painter = ui.painter();
+      match idx {
+        // 0 = edited curve (thick + dot), 1 = headphone correction (dashed), 2+ = combined (solid).
+        0 => {
+          painter
+            .line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(2.5_f32, c));
+          painter.circle_filled(rect.center(), 3.0, c);
+        }
+        1 => {
+          let stroke = egui::Stroke::new(1.5_f32, c);
+          painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.left() + 6.0, y)], stroke);
+          painter.line_segment([egui::pos2(rect.right() - 6.0, y), egui::pos2(rect.right(), y)], stroke);
+        }
+        _ => {
+          painter
+            .line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)], egui::Stroke::new(1.8_f32, c));
+        }
+      }
       ui.label(RichText::new(text).small().color(theme::palette(ui).text_secondary));
       ui.add_space(8.0);
     }

@@ -88,9 +88,9 @@ pub struct Palette {
   pub text: Color32,
   pub text_secondary: Color32,
   pub text_tertiary: Color32,
-  /// Thin and small things: slider and meter fills, the navigation pill, links, text selection.
+  /// Thin and small things: slider and meter fills, the navigation pill, links.
   pub accent: Color32,
-  /// Areas that carry text or a knob (buttons, switch, step circle); never put text on `accent`.
+  /// Areas that carry text or a knob (buttons, switch, step circle, text selection); never put text on `accent`.
   pub accent_fill: Color32,
   /// Text/icons on `accent_fill`.
   pub on_accent: Color32,
@@ -432,9 +432,9 @@ pub fn level_color(ui: &Ui, fraction: f32) -> Color32 {
 
 // --- toggle switch -------------------------------------------------------------------------
 
-/// Fluent toggle switch (40 x 20). Flips `on` when clicked.
+/// Fluent toggle switch (40 x 20 pill inside a 40 x 24 hit target). Flips `on` when clicked.
 pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
-  let size = Vec2::new(40.0, 20.0);
+  let size = Vec2::new(40.0, 24.0);
   let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
   if response.clicked() {
     *on = !*on;
@@ -443,9 +443,10 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
   response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, ""));
   if ui.is_rect_visible(rect) {
     let p = palette(ui);
+    let pill = egui::Rect::from_center_size(rect.center(), Vec2::new(40.0, 20.0));
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
     let hovered = response.hovered();
-    let radius = rect.height() / 2.0;
+    let radius = pill.height() / 2.0;
     let (fill, stroke, knob) = if *on {
       let fill = if hovered { p.accent_fill.lerp_to_gamma(Color32::BLACK, 0.1) } else { p.accent_fill };
       (fill, Stroke::NONE, p.on_accent)
@@ -454,10 +455,13 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
       (fill, Stroke::new(1.0_f32, p.text_secondary), p.text_secondary)
     };
     let painter = ui.painter();
-    painter.rect(rect, radius, fill, stroke, egui::StrokeKind::Middle);
+    painter.rect(pill, radius, fill, stroke, egui::StrokeKind::Middle);
+    if response.has_focus() {
+      painter.rect_stroke(pill.expand(2.0), radius + 2.0, Stroke::new(2.0_f32, p.text), egui::StrokeKind::Outside);
+    }
     let knob_r = if hovered { 7.0 } else { 6.0 };
-    let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
-    painter.circle_filled(egui::pos2(x, rect.center().y), knob_r, knob);
+    let x = egui::lerp((pill.left() + radius)..=(pill.right() - radius), t);
+    painter.circle_filled(egui::pos2(x, pill.center().y), knob_r, knob);
   }
   response
 }
@@ -494,6 +498,9 @@ pub fn nav_item(ui: &mut Ui, selected: bool, ic: Icon, label: &str) -> Response 
       Color32::TRANSPARENT
     };
     painter.rect_filled(rect, CONTROL_RADIUS, fill);
+    if response.has_focus() {
+      painter.rect_stroke(rect.shrink(1.0), CONTROL_RADIUS, Stroke::new(2.0_f32, p.text), egui::StrokeKind::Inside);
+    }
     if selected {
       let pill = egui::Rect::from_center_size(egui::pos2(rect.left() + 1.5, rect.center().y), Vec2::new(3.0, 16.0));
       painter.rect_filled(pill, 1.5, p.accent);
@@ -522,7 +529,7 @@ pub fn nav_section(ui: &mut Ui, text: &str) {
   ui.add_space(10.0);
   ui.horizontal(|ui| {
     ui.add_space(12.0);
-    ui.label(RichText::new(text).small().color(palette(ui).text_tertiary));
+    ui.label(RichText::new(text).small().color(palette(ui).text_secondary));
   });
   ui.add_space(2.0);
 }
@@ -716,10 +723,10 @@ fn visuals(p: &Palette) -> Visuals {
   w.hovered.corner_radius = control_rounding;
   w.hovered.expansion = 0.0;
 
-  w.active.bg_fill = p.accent;
+  w.active.bg_fill = p.accent_fill;
   w.active.weak_bg_fill = control_press;
-  w.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
-  w.active.fg_stroke = Stroke::new(1.0_f32, p.text_secondary);
+  w.active.bg_stroke = Stroke::new(1.0_f32, p.accent_fill);
+  w.active.fg_stroke = Stroke::new(1.0_f32, p.on_accent);
   w.active.corner_radius = control_rounding;
   w.active.expansion = 0.0;
 

@@ -235,7 +235,7 @@ fn render_spatial_row(ui: &mut Ui, state: &mut AppState) {
       ui.label(RichText::new(theme::with_icon(icons::WARNING, &text)).small().color(p.warn))
         .on_hover_text(tr("Something changed spatial sound on this device (a Windows or driver update, another app). Switch it back in the Windows settings, or keep the new one."));
       if let Some(now) = state.spatial_format.clone()
-        && ui.small_button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
+        && ui.button(trf("Keep \"{}\"", &[&now.label(tr("the new format"))])).clicked() {
           keep = Some(now);
         }
     } else {
@@ -244,7 +244,7 @@ fn render_spatial_row(ui: &mut Ui, state: &mut AppState) {
         .on_hover_text(tr("Windows spatial sound on this device (Dolby Atmos, DTS:X, Windows Sonic). The headphone and game EQ run after it."));
     }
     if ui
-      .small_button(tr("Change…"))
+      .button(tr("Change…"))
       .on_hover_text(tr("Opens the Windows settings of this device, where spatial sound is chosen."))
       .clicked()
     {

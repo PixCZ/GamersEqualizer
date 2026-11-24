@@ -603,6 +603,13 @@ pub fn paint(
         let (x, y, s) = (r.left as f32, r.top as f32, (r.right - r.left) as f32);
         let bg = if ui.hover == Some(Hit::Mute(i)) { hover_color(p) } else { p.card };
         canvas.shape(x, y, s, s, bg, |_, _| 0.6);
+        // Diagonal mute slash so mute is never shown by dimming alone (WCAG 1.4.1).
+        let half = layout.scale.max(1.0);
+        let pad = 3.0 * layout.scale;
+        canvas.shape(x + pad, y + pad, s - 2.0 * pad, s - 2.0 * pad, p.text, |px, py| {
+          let dist = ((px - x) - (py - y)).abs() * std::f32::consts::FRAC_1_SQRT_2;
+          coverage(dist - half)
+        });
       }
     }
     if layout.list_rows > 0 {
@@ -894,7 +901,7 @@ unsafe fn draw_text(dc: HDC, layout: &Layout, rows: &[Row], p: &Palette, texts: 
       if let Some(glyph) = glyph {
         text(dc, &glyph.to_string(), layout.button_rect(i), fonts.glyphs, dim, DT_CENTER);
       }
-      let percent = if row.muted { p.text_tertiary } else { p.text_secondary };
+      let percent = p.text_secondary;
       // Percent only: the mic's boost in dB would not fit.
       let (level, percent) = match row.target {
         Target::Channel(MixChannel::Balance) => {

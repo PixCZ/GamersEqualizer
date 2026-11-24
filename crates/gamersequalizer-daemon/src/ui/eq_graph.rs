@@ -31,7 +31,7 @@ const DOT_COLORS: [Color32; 8] = [
   Color32::from_rgb(240, 110, 180),
   Color32::from_rgb(250, 220, 80),
   Color32::from_rgb(170, 140, 255),
-  Color32::from_rgb(80, 220, 190),
+  Color32::from_rgb(65, 210, 180),
   Color32::from_rgb(255, 120, 100),
 ];
 const DISABLED_COLOR: Color32 = Color32::from_gray(110);
@@ -156,23 +156,60 @@ fn graph(
     }
   }
 
+  if resp.has_focus()
+    && let Some(band) = selected.and_then(|i| bands.get_mut(i))
+  {
+    let (dx, dy, fine) = ui.input(|inp| {
+      let dx = i8::from(inp.key_pressed(egui::Key::ArrowRight)) - i8::from(inp.key_pressed(egui::Key::ArrowLeft));
+      let dy = i8::from(inp.key_pressed(egui::Key::ArrowUp)) - i8::from(inp.key_pressed(egui::Key::ArrowDown));
+      (dx, dy, inp.modifiers.shift)
+    });
+    if dx != 0 {
+      let step = if fine { 1.01f32 } else { 1.05f32 };
+      band.frequency = (band.frequency * step.powi(i32::from(dx))).round().clamp(F_MIN, F_MAX);
+      changed = true;
+    }
+    if dy != 0 && band.filter_type.uses_gain() {
+      band.gain_db = (band.gain_db + f32::from(dy) * 0.5).clamp(-axes.range_db, axes.range_db);
+      changed = true;
+    }
+  }
+
   // --- Drawing. ---
   let pal = theme::palette(ui);
   let painter = ui.painter_at(rect);
   painter.rect_filled(rect, theme::CONTROL_RADIUS, pal.inset);
+  if resp.has_focus() {
+    painter.rect_stroke(
+      rect.shrink(1.0),
+      theme::CONTROL_RADIUS,
+      Stroke::new(2.0_f32, pal.text),
+      egui::StrokeKind::Inside,
+    );
+  }
   draw_grid(&painter, &axes, &pal);
   let color = theme::adapt(ui, color);
 
   let freqs = generate_log_frequencies();
   let clip = ui.painter_at(axes.plot);
-  for &(_, gains, c, width) in background {
+  for (idx, &(_, gains, c, width)) in background.iter().enumerate() {
     let c = theme::adapt(ui, c);
-    clip.add(Shape::line(axes.curve_points(&freqs, gains), Stroke::new(width.min(1.4), c.gamma_multiply(0.6))));
+    let pts = axes.curve_points(&freqs, gains);
+    if idx == 0 {
+      // Dashed segments so background curves are distinguishable without relying on color alone.
+      for seg in pts.chunks(2) {
+        if let [a, b] = *seg {
+          clip.line_segment([a, b], Stroke::new(width.min(1.4), c));
+        }
+      }
+    } else {
+      clip.add(Shape::line(pts, Stroke::new(width.min(1.6), c)));
+    }
   }
   if let Some(band) = selected.and_then(|i| bands.get(i)).filter(|b| b.enabled) {
     let own = evaluate_bands_response(std::slice::from_ref(band), &freqs, SAMPLE_RATE);
     let c = theme::adapt(ui, dot_color(selected.unwrap_or(0), band));
-    clip.add(Shape::line(axes.curve_points(&freqs, &own), Stroke::new(1.0_f32, c.gamma_multiply(0.7))));
+    clip.add(Shape::line(axes.curve_points(&freqs, &own), Stroke::new(1.2_f32, c)));
   }
   let total = evaluate_bands_response(bands, &freqs, SAMPLE_RATE);
   clip.add(Shape::line(axes.curve_points(&freqs, &total), Stroke::new(2.4_f32, color)));
@@ -182,23 +219,29 @@ fn graph(
     let center = axes.dot_pos(band);
     let is_sel = *selected == Some(i);
     let radius = if is_sel || hovered == Some(i) { DOT_RADIUS + 2.0 } else { DOT_RADIUS };
-    let outline =
-      if is_sel { Stroke::new(2.0_f32, pal.text) } else { Stroke::new(1.0_f32, Color32::from_black_alpha(90)) };
-    painter.circle(center, radius, c, outline);
-    painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), Color32::BLACK);
+    // Disabled bands draw hollow so off-state is visible by shape, not only color (WCAG 1.4.1).
+    let (fill, outline, label_color) = if band.enabled {
+      let stroke = if is_sel { Stroke::new(2.0_f32, pal.text) } else { Stroke::new(1.0_f32, pal.card_stroke) };
+      (c, stroke, text_on(c))
+    } else {
+      let stroke = Stroke::new(2.0_f32, if is_sel { pal.text } else { pal.text_secondary });
+      (pal.inset, stroke, pal.text_secondary)
+    };
+    painter.circle(center, radius, fill, outline);
+    painter.text(center, Align2::CENTER_CENTER, (i + 1).to_string(), FontId::proportional(12.0), label_color);
   }
   if let Some(band) = hovered.and_then(|i| bands.get(i)) {
     let pos = axes.dot_pos(band) + Vec2::new(0.0, -DOT_RADIUS - 6.0);
     let text = describe(band);
-    let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), Color32::WHITE);
+    let galley = painter.layout_no_wrap(text, FontId::proportional(12.0), pal.text);
     let mut box_rect =
       Rect::from_center_size(pos - Vec2::new(0.0, galley.size().y / 2.0), galley.size() + Vec2::splat(8.0));
     box_rect = box_rect.translate(Vec2::new(
       (rect.left() - box_rect.left()).max(0.0) + (rect.right() - box_rect.right()).min(0.0),
       (rect.top() - box_rect.top()).max(0.0),
     ));
-    painter.rect_filled(box_rect, 3.0, Color32::from_black_alpha(220));
-    painter.galley(box_rect.min + Vec2::splat(4.0), galley, Color32::WHITE);
+    painter.rect(box_rect, 3.0, pal.card, Stroke::new(1.0_f32, pal.card_stroke), egui::StrokeKind::Outside);
+    painter.galley(box_rect.min + Vec2::splat(4.0), galley, pal.text);
   }
   changed
 }
@@ -209,13 +252,21 @@ fn chips(ui: &mut Ui, bands: &mut Vec<BiquadBand>, max_slots: usize, selected: &
     if bands.is_empty() {
       ui.label(theme::caption(tr("No filters: the sound passes unchanged.")));
     }
+    let pal = theme::palette(ui);
+    let font = FontId::proportional(14.0);
     for (i, band) in bands.iter().enumerate() {
       let is_selected = *selected == Some(i);
-      let text = RichText::new(format!("● {}  {}", i + 1, describe(band)));
-      // On the selection fill the band color is unreadable: a selected chip keeps the theme's
-      // text-on-accent color (white), the others show the band color.
-      let text = if is_selected { text } else { text.color(theme::adapt(ui, dot_color(i, band))) };
-      if ui.selectable_label(is_selected, text).clicked() {
+      let mut job = egui::text::LayoutJob::default();
+      let bullet_color = if is_selected { pal.on_accent } else { theme::adapt(ui, dot_color(i, band)) };
+      let text_color = if is_selected { pal.on_accent } else { pal.text };
+      let bullet = if band.enabled { "● " } else { "○ " };
+      job.append(bullet, 0.0, egui::text::TextFormat::simple(font.clone(), bullet_color));
+      job.append(
+        &format!("{}  {}", i + 1, describe(band)),
+        0.0,
+        egui::text::TextFormat::simple(font.clone(), text_color),
+      );
+      if ui.selectable_label(is_selected, job).clicked() {
         *selected = if *selected == Some(i) { None } else { Some(i) };
       }
     }
@@ -239,7 +290,8 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
   theme::inset_frame(ui).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
     ui.set_width(ui.available_width());
     ui.horizontal_wrapped(|ui| {
-      ui.label(theme::strong(format!("● {}", trf("Filter {}", &[&(i + 1)])), 14.0).color(c));
+      ui.label(RichText::new(if band.enabled { "●" } else { "○" }).color(c));
+      ui.label(theme::strong(trf("Filter {}", &[&(i + 1)]), 14.0));
       egui::ComboBox::from_id_salt(format!("{id}_type"))
         .selected_text(tr(friendly_name(&band.filter_type)))
         .width(170.0)
@@ -345,7 +397,7 @@ impl Axes {
 
 fn draw_grid(painter: &egui::Painter, axes: &Axes, pal: &theme::Palette) {
   let grid = Stroke::new(1.0_f32, pal.grid);
-  let label = pal.text_tertiary;
+  let label = pal.text_secondary;
   let font = FontId::proportional(12.0);
   let plot = axes.plot;
   for f in GRID_FREQS {
@@ -409,6 +461,16 @@ fn dot_color(i: usize, band: &BiquadBand) -> Color32 {
     return DISABLED_COLOR;
   }
   DOT_COLORS.get(i % DOT_COLORS.len()).copied().unwrap_or(Color32::WHITE)
+}
+
+/// High-contrast label color (white or near-black) over `bg`, by WCAG relative luminance.
+fn text_on(bg: Color32) -> Color32 {
+  let ch = |v: u8| {
+    let s = f32::from(v) / 255.0;
+    if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+  };
+  let lum = 0.2126 * ch(bg.r()) + 0.7152 * ch(bg.g()) + 0.0722 * ch(bg.b());
+  if lum > 0.18 { Color32::from_rgb(20, 20, 20) } else { Color32::WHITE }
 }
 
 fn friendly_name(ft: &FilterType) -> &'static str {

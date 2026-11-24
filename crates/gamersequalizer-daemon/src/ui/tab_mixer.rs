@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// Smallest height of the app list in each channel strip; it grows (faders shrink) with more apps.
 const APPS_LIST_HEIGHT: f32 = 84.0;
 /// One stacked app chip including the gap below it.
-const APP_ROW_HEIGHT: f32 = 24.0;
+const APP_ROW_HEIGHT: f32 = 28.0;
 /// Vertical fader height range; it grows with the window.
 const FADER_MIN: f32 = 110.0;
 const FADER_MAX: f32 = 260.0;
@@ -441,23 +441,25 @@ fn duck_row(ui: &mut Ui, state: &mut AppState, session_mode: bool) -> bool {
   on
 }
 
-/// How far the game is lowered now: a fixed-size bar that fills with the cut, its percent inside,
-/// so it never moves what is next to it. The words are on hover.
+/// How far the game is lowered now: a fixed-size bar with the percent to its right,
+/// so it never moves what is next to it and keeps text contrast in both themes.
 fn reduction_bar(ui: &mut Ui, percent: u32) {
-  let (rect, resp) = ui.allocate_exact_size(Vec2::new(96.0, 18.0), Sense::hover());
-  let (p, fill_color) = (theme::palette(ui), ui.visuals().selection.bg_fill);
+  let (rect, resp) = ui.allocate_exact_size(Vec2::new(112.0, 18.0), Sense::hover());
+  let p = theme::palette(ui);
+  let bar = egui::Rect::from_center_size(egui::pos2(rect.left() + 34.0, rect.center().y), Vec2::new(68.0, 6.0));
   let painter = ui.painter();
-  painter.rect_filled(rect, CornerRadius::same(4), p.inset);
+  painter.rect_filled(bar, CornerRadius::same(3), p.inset);
+  painter.rect_stroke(bar, CornerRadius::same(3), egui::Stroke::new(1.0_f32, p.grid), egui::StrokeKind::Middle);
   if percent > 0 {
-    let mut fill = rect;
-    fill.set_width(rect.width() * percent as f32 / 100.0);
-    painter.rect_filled(fill, CornerRadius::same(4), fill_color);
+    let mut fill = bar;
+    fill.set_width((bar.width() * percent as f32 / 100.0).max(bar.height()));
+    painter.rect_filled(fill, CornerRadius::same(3), p.accent);
     painter.text(
-      rect.center(),
-      egui::Align2::CENTER_CENTER,
+      egui::pos2(rect.right(), rect.center().y),
+      egui::Align2::RIGHT_CENTER,
       format!("-{percent} %"),
-      egui::FontId::proportional(12.0),
-      ui.visuals().text_color(),
+      egui::FontId::monospace(12.0),
+      p.text_secondary,
     );
   }
   resp.on_hover_text(trf("Game lowered by {} %", &[&percent]));
@@ -510,10 +512,7 @@ fn render_strip(
       // 2. Preset pill (link to the channel's EQ page)
       let preset = super::truncate_chars(strip.preset, 15);
       if ui
-        .add_sized(
-          [ui.available_width(), 26.0],
-          egui::Button::new(RichText::new(format!("{preset}  ↗")).small().color(color)),
-        )
+        .add_sized([ui.available_width(), 26.0], egui::Button::new(RichText::new(format!("{preset}  ↗")).small()))
         .on_hover_text(trf("Click to customize EQ curves for {}", &[&strip.title]))
         .clicked()
       {
@@ -598,14 +597,7 @@ fn peak_meter(ui: &mut Ui, peak: f32, height: f32) {
   if level > 0.005 {
     let fill_h = rect.height() * level;
     let fill_rect = egui::Rect::from_min_max(egui::pos2(rect.min.x, rect.max.y - fill_h), rect.max);
-    let color = if level > 0.88 {
-      Color32::from_rgb(235, 75, 75)
-    } else if level > 0.70 {
-      Color32::from_rgb(245, 190, 35)
-    } else {
-      Color32::from_rgb(46, 204, 113)
-    };
-    painter.rect_filled(fill_rect, CornerRadius::same(3), color);
+    painter.rect_filled(fill_rect, CornerRadius::same(3), theme::level_color(ui, level));
   }
 }
 
@@ -695,7 +687,7 @@ fn render_apps_box(ui: &mut Ui, title: &str, color: Color32, list_h: f32, apps: 
           // ~6 pt per small-font character minus the chip padding.
           let max_chars = ((ui.available_width() - 20.0) / 6.0).max(6.0) as usize;
           for app in apps {
-            app_chip(ui, app, color, max_chars, moved);
+            app_chip(ui, channel, app, color, max_chars, moved);
           }
         });
       });
@@ -709,8 +701,8 @@ fn render_apps_box(ui: &mut Ui, title: &str, color: Color32, list_h: f32, apps: 
 }
 
 /// One draggable app, drawn as a chip in the channel's color (the chip says "grab me");
-/// right-click offers going back to the automatic channel.
-fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved: &mut AppMove) {
+/// keyboard Left/Right or right-click moves it between channels, Backspace/Delete undoes.
+fn app_chip(ui: &mut Ui, channel: AppChannel, app: &AppItem, color: Color32, max_chars: usize, moved: &mut AppMove) {
   let mut suffix = String::new();
   if app.processes > 1 {
     suffix = format!(" ×{}", app.processes);
@@ -722,7 +714,7 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
     .fill(color.gamma_multiply(0.18))
     .stroke(egui::Stroke::new(1.0_f32, color.gamma_multiply(0.7)))
     .corner_radius(CornerRadius::same(10))
-    .inner_margin(egui::Margin::symmetric(7, 2))
+    .inner_margin(egui::Margin::symmetric(7, 5))
     .show(ui, |ui| {
       // Full line width: the chips stack into a tidy column and are easy to grab.
       ui.set_width(ui.available_width());
@@ -730,6 +722,34 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
     });
   let response =
     ui.interact(chip.response.rect, ui.scope_id().with(("mixer_app_chip", &app.exe)), Sense::click_and_drag());
+  if response.has_focus() {
+    ui.painter().rect_stroke(
+      chip.response.rect.expand(1.0),
+      CornerRadius::same(11),
+      egui::Stroke::new(2.0_f32, theme::palette(ui).text),
+      egui::StrokeKind::Outside,
+    );
+    let step = ui.input(|i| {
+      if i.key_pressed(egui::Key::ArrowLeft) {
+        Some(-1i8)
+      } else if i.key_pressed(egui::Key::ArrowRight) {
+        Some(1i8)
+      } else {
+        None
+      }
+    });
+    if let Some(dir) = step {
+      let order = [AppChannel::Game, AppChannel::Chat, AppChannel::Media];
+      if let Some(idx) = order.iter().position(|&c| c == channel) {
+        let next = (idx as isize + dir as isize).rem_euclid(order.len() as isize) as usize;
+        if let Some(&target) = order.get(next) {
+          *moved = Some((app.exe.clone(), Some(target)));
+        }
+      }
+    } else if app.pinned && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+      *moved = Some((app.exe.clone(), None));
+    }
+  }
   response.dnd_set_drag_payload(app.exe.clone());
   if response.dragged() {
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -753,6 +773,14 @@ fn app_chip(ui: &mut Ui, app: &AppItem, color: Color32, max_chars: usize, moved:
     trf("{} - drag to another channel to move it.", &[&app.exe])
   };
   response.on_hover_text(hover).context_menu(|ui| {
+    for (target, label) in
+      [(AppChannel::Game, tr("Game")), (AppChannel::Chat, tr("Chat")), (AppChannel::Media, tr("Media"))]
+    {
+      if target != channel && ui.button(label).clicked() {
+        *moved = Some((app.exe.clone(), Some(target)));
+        ui.close();
+      }
+    }
     if ui.add_enabled(app.pinned, egui::Button::new(tr("Back to automatic channel"))).clicked() {
       *moved = Some((app.exe.clone(), None));
       ui.close();

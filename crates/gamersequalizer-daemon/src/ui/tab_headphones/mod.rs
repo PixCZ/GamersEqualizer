@@ -191,7 +191,7 @@ pub(super) fn strength_row(ui: &mut Ui, h: &ShmHeader, width: f32) {
     {
       h.duck_strength_permille.store(((percent * 10.0).round() as u32).min(1000), Ordering::Relaxed);
     }
-    if strength != DEFAULT_STRENGTH_PERMILLE && ui.small_button(tr("Default")).clicked() {
+    if strength != DEFAULT_STRENGTH_PERMILLE && ui.button(tr("Default")).clicked() {
       h.duck_strength_permille.store(DEFAULT_STRENGTH_PERMILLE, Ordering::Relaxed);
     }
   });

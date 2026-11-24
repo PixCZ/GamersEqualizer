@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
 const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
 const AI_COLOR: Color32 = Color32::from_rgb(140, 240, 120);
-pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(255, 180, 80);
+pub(super) const EQ_COLOR: Color32 = Color32::from_rgb(230, 150, 40);
 const OK_COLOR: Color32 = Color32::from_rgb(80, 220, 120);
 /// Lowest level shown on the dBFS meters.
 const METER_FLOOR_DB: f32 = -80.0;
@@ -110,7 +110,7 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
           tr("normal")
         };
         ui.label(format!("{word} ({target:.0} dBFS)"));
-        if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.small_button(tr("Default")).clicked() {
+        if (target - DEFAULT_TARGET_DB).abs() > 0.5 && ui.button(tr("Default")).clicked() {
           h.mic_leveler_target_db_x10.store((DEFAULT_TARGET_DB * 10.0).round() as i32, Ordering::Relaxed);
         }
       });

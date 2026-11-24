@@ -217,8 +217,8 @@ pub fn render_tab_log(ui: &mut Ui, state: &mut AppState) {
         let color = match line.level {
           LineLevel::Error => palette.err,
           LineLevel::Warn => palette.warn,
-          LineLevel::Info => ui.style().visuals.text_color(),
-          LineLevel::Debug => ui.style().visuals.weak_text_color(),
+          LineLevel::Info => palette.text,
+          LineLevel::Debug => palette.text_secondary,
         };
         let format = egui::text::TextFormat::simple(font_id.clone(), color);
         job.append(&line.text, 0.0, format.clone());
