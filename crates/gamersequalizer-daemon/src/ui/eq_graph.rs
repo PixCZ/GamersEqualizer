@@ -23,6 +23,8 @@ const AXIS_BOTTOM: f32 = 16.0;
 const WIDTH_OCT_RANGE: std::ops::RangeInclusive<f32> = 0.1..=5.0;
 /// Mouse wheel: Q change per scrolled point (about 8 % per wheel notch).
 const WHEEL_Q_PER_POINT: f32 = 1.0015;
+/// Rail width of the three filter sliders in `details`, the same for all so they line up.
+const SLIDER_WIDTH: f32 = 260.0;
 const GRID_FREQS: [f32; 10] = [20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0];
 const DOT_COLORS: [Color32; 8] = [
   Color32::from_rgb(255, 170, 60),
@@ -319,18 +321,35 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
       }
     });
 
-    ui.horizontal_wrapped(|ui| {
+    // One grid for the sliders: labels share a column and every slider has the same width, so they line up.
+    egui::Grid::new(format!("{id}_sliders")).num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+      ui.spacing_mut().slider_width = SLIDER_WIDTH;
       ui.label(tr("Frequency:"))
         .on_hover_text(tr("Which pitch range this filter affects (low = bass, high = treble)."));
       changed |= value_slider(ui, &mut band.frequency, F_MIN..=F_MAX, " Hz", 0, true);
+      ui.end_row();
       if band.filter_type.uses_gain() {
         ui.label(tr("Gain:")).on_hover_text(tr("How much to boost (+) or cut (-) around this frequency, in dB."));
         changed |= value_slider(ui, &mut band.gain_db, -24.0..=24.0, " dB", 1, false);
+        ui.end_row();
+      }
+      if matches!(band.filter_type, FilterType::Peaking | FilterType::Notch) {
+        ui.label(tr("Width:")).on_hover_text(tr("Narrow touches one tone, wide a whole region."));
+        let mut width = width_octaves(band.q);
+        if value_slider(ui, &mut width, WIDTH_OCT_RANGE, tr(" oct"), 2, true) {
+          band.q = q_for_width(width).clamp(0.1, 30.0);
+          changed = true;
+        }
+        ui.end_row();
+      } else if !band.is_cut() {
+        ui.label(tr("Slope (Q):")).on_hover_text(tr("Higher = a sharper step into the shelf."));
+        changed |= value_slider(ui, &mut band.q, 0.3..=2.0, "", 2, false);
+        ui.end_row();
       }
     });
 
-    ui.horizontal_wrapped(|ui| {
-      if band.is_cut() {
+    if band.is_cut() {
+      ui.horizontal_wrapped(|ui| {
         ui.label(tr("Steepness:")).on_hover_text(tr("How fast the sound beyond the frequency disappears."));
         for slope in SLOPES_DB {
           let stages = BiquadBand { slope_db: slope, ..band.clone() }.stages();
@@ -348,18 +367,8 @@ fn details(ui: &mut Ui, id: &str, i: usize, band: &mut BiquadBand, room: usize, 
             changed = true;
           }
         }
-      } else if matches!(band.filter_type, FilterType::Peaking | FilterType::Notch) {
-        ui.label(tr("Width:")).on_hover_text(tr("Narrow touches one tone, wide a whole region."));
-        let mut width = width_octaves(band.q);
-        if value_slider(ui, &mut width, WIDTH_OCT_RANGE, tr(" oct"), 2, true) {
-          band.q = q_for_width(width).clamp(0.1, 30.0);
-          changed = true;
-        }
-      } else {
-        ui.label(tr("Slope (Q):")).on_hover_text(tr("Higher = a sharper step into the shelf."));
-        changed |= value_slider(ui, &mut band.q, 0.3..=2.0, "", 2, false);
-      }
-    });
+      });
+    }
   });
   changed
 }
