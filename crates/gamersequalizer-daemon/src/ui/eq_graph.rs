@@ -1,5 +1,5 @@
 //! Visual parametric EQ editor: the response graph with one dot per filter (drag it to
-//! move frequency and gain, mouse wheel over it for width, double-click the graph to add),
+//! move frequency and gain, Alt + mouse wheel over it for width, double-click the graph to add),
 //! a row of filter chips, and the settings of the selected filter below.
 
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, Vec2};
@@ -60,7 +60,7 @@ pub fn band_editor(
 
   let mut changed = graph(ui, id, bands, max_slots, color, background, height, &mut selected);
   ui.label(theme::caption(tr(
-    "Drag a dot to move it · mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
+    "Drag a dot to move it · Alt + mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
   )));
   changed |= chips(ui, bands, max_slots, &mut selected);
   if let Some(i) = selected {
@@ -145,7 +145,8 @@ fn graph(
   }
   if let Some(i) = hovered.filter(|_| resp.hovered()) {
     ui.ctx().set_cursor_icon(if dragging.is_some() { CursorIcon::Grabbing } else { CursorIcon::Grab });
-    let wheel = ui.input(|inp| inp.smooth_scroll_delta.y);
+    // Alt only: a bare wheel over a dot used to change Q (saved at once) while the user scrolled the page.
+    let wheel = ui.input(|inp| if inp.modifiers.alt { inp.smooth_scroll_delta.y } else { 0.0 });
     if let Some(band) = bands.get_mut(i).filter(|b| wheel != 0.0 && !b.is_cut()) {
       // Wheel up = wider = lower Q. Eaten, so the page doesn't scroll at the same time.
       band.q = (band.q / WHEEL_Q_PER_POINT.powf(wheel)).clamp(0.1, 30.0);

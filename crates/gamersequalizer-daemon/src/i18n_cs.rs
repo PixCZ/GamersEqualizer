@@ -163,8 +163,8 @@ pub static CS: &[(&str, &str)] = &[
   ("Filter...", "Hledat..."),
   ("Auto preamp {} dB", "Automatický předzesilovač {} dB"),
   (
-    "Drag a dot to move it · mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
-    "Tečku přesunete tažením · kolečko myši nad tečkou = užší / širší · dvojklik do grafu přidá filtr",
+    "Drag a dot to move it · Alt + mouse wheel over a dot = narrower / wider · double-click the graph to add a filter",
+    "Tečku přesunete tažením · Alt + kolečko myši nad tečkou = užší / širší · dvojklik do grafu přidá filtr",
   ),
   ("No filters: the sound passes unchanged.", "Žádné filtry: zvuk prochází beze změny."),
   ("Add filter", "Přidat filtr"),
