@@ -237,14 +237,26 @@ pub(super) unsafe extern "system" fn rt_apo_process(
         processor.process(buf, channels, capture_time, render_time);
       }
     });
-    // A silent output block is not processed, but the reference must count it.
+    // A silent output block is not processed, but the reference must count it and active sidetone
+    // still needs to be mixed into the output buffer (in case a driver sends BUFFER_SILENT).
     if st.kind == ApoKind::Output
       && (*input).u32BufferFlags == BUFFER_SILENT
       && let Ok(mut guard) = st.processor.try_lock()
       && let Some(Processor::Output(processor)) = guard.as_mut()
     {
+      let frames = (*input).u32ValidFrameCount as usize;
+      let samples = frames.saturating_mul(channels);
       let render_time = if processor.wants_block_time() { render_time_hns(input) } else { None };
-      processor.process_silence((*input).u32ValidFrameCount as usize, channels, render_time);
+      if (*output).pBuffer != 0 && samples > 0 {
+        // SAFETY: `output.pBuffer` is valid for `u32ValidFrameCount * channels` f32s for the
+        // duration of `APOProcess` (same contract as `process_connection`).
+        let out = std::slice::from_raw_parts_mut((*output).pBuffer as *mut f32, samples);
+        if processor.process_silence(out, frames, channels, render_time) {
+          (*output).u32BufferFlags = BUFFER_VALID;
+        }
+      } else {
+        processor.process_silence(&mut [], frames, channels, render_time);
+      }
     }
     #[cfg(feature = "cpu-stats")]
     if let Some(Some(map)) = CPU_STATS.get() {
