@@ -314,6 +314,17 @@ pub static CS: &[(&str, &str)] = &[
   ("Save as…", "Uložit jako…"),
   ("Reset", "Obnovit"),
   ("Throw away the changes, back to the preset.", "Zahodit změny a vrátit se k předvolbě."),
+  ("Reset to original", "Vrátit původní"),
+  (
+    "Puts the bands back as they were imported (from AutoEQ or a pasted EQ). Your volume stays; the edited version is kept in profiles\\_deleted.",
+    "Vrátí pásma do stavu po importu (z AutoEQ nebo vloženého ekvalizéru). Hlasitost zůstane, upravená verze se uloží do profiles\\_deleted.",
+  ),
+  ("Nothing to reset: the bands are as they were imported.", "Není co vracet: pásma jsou stejná jako po importu."),
+  (
+    "Back to the original. Your edited version was moved to {}.",
+    "Vráceno na původní. Upravená verze je přesunutá do {}.",
+  ),
+  ("Could not reset to the original: {}", "Původní stav se nepodařilo vrátit: {}"),
   ("Copy to share", "Kopírovat ke sdílení"),
   (
     "Copies the EQ as text: paste it into a chat or pastebin.com. Works in Equalizer APO too.",

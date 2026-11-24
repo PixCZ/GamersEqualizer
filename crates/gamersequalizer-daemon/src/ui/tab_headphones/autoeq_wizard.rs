@@ -303,6 +303,7 @@ fn step_review(ui: &mut Ui, state: &mut AppState, device_name: &str) {
     profile.bands = parsed.bands;
     profile.preamp_db = parsed.preamp_db;
     profile.is_custom = false;
+    profile.remember_original();
     match state.output_eq_do(|eq, shm| eq.add_layer_profile(OutputLayer::Headphone, profile, shm)) {
       Ok(()) => {
         state.headphones_ui.saved_name = Some(name);

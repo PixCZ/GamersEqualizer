@@ -192,6 +192,26 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     state.use_mic_profile(p);
   }
 
+  // Imported profiles (AutoEQ, pasted text) only: others have no original to go back to.
+  let original = match target {
+    EqTarget::Output(layer) => {
+      active_profile(state, target).filter(|p| p.original.is_some()).map(|p| (layer, p.differs_from_original()))
+    }
+    EqTarget::Mic => None,
+  };
+  if let Some((layer, differs)) = original
+    && ui
+      .add_enabled(differs, egui::Button::new(theme::with_icon(icons::RESET, tr("Reset to original"))))
+      .on_hover_text(tr(
+        "Puts the bands back as they were imported (from AutoEQ or a pasted EQ). Your volume stays; the edited \
+         version is kept in profiles\\_deleted.",
+      ))
+      .on_disabled_hover_text(tr("Nothing to reset: the bands are as they were imported."))
+      .clicked()
+  {
+    reset_to_original(state, layer);
+  }
+
   let (can_delete, delete_disabled_hint) = match target {
     EqTarget::Mic => (mic_source == Some(PresetSource::User), tr("Only your own presets can be deleted.")),
     EqTarget::Output(_) => (has_profile, tr("Select a profile first.")),
@@ -494,7 +514,10 @@ fn commit_save(state: &mut AppState, target: EqTarget, mode: SaveMode, name: &st
       if let Some(unsaved) = state.out_eq_unsaved.take() {
         state.output_eq_do(|eq, shm| eq.save_layer_profile(unsaved, shm));
       }
-      let profile = draft.profile(name, layer.vad().unwrap_or(VadType::Media));
+      let mut profile = draft.profile(name, layer.vad().unwrap_or(VadType::Media));
+      if mode == SaveMode::Import {
+        profile.remember_original();
+      }
       let result = state.output_eq_do(|eq, shm| eq.add_layer_profile(layer, profile, shm));
       state.profile_bar.notice = Some(match result {
         // A detected game keeps its profile: the new one is saved but not shown in the editor.
@@ -520,6 +543,24 @@ fn commit_save(state: &mut AppState, target: EqTarget, mode: SaveMode, name: &st
       });
     }
   }
+}
+
+fn reset_to_original(state: &mut AppState, layer: OutputLayer) {
+  if state.out_eq_unsaved == Some(layer) {
+    state.out_eq_unsaved = None;
+  }
+  let result = state.output_eq_do(|eq, shm| eq.reset_layer_profile(layer, shm));
+  state.profile_bar.notice = Some(match result {
+    Ok(path) => (
+      EqTarget::Output(layer),
+      true,
+      trf("Back to the original. Your edited version was moved to {}.", &[&path.display()]),
+    ),
+    Err(e) => {
+      log::warn!("[OutputEq] reset to original failed: {e}");
+      (EqTarget::Output(layer), false, trf("Could not reset to the original: {}", &[&e]))
+    }
+  });
 }
 
 fn save_mic_preset(state: &mut AppState, name: &str, draft: SaveDraft, created: bool) {

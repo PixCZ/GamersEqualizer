@@ -449,4 +449,35 @@ mod tests {
     assert_eq!(reloaded.game_profiles.iter().find(|p| p.name == "The Division 2").unwrap().game_ids.len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
   }
+
+  #[test]
+  fn an_edited_autoeq_profile_resets_to_its_original_and_keeps_the_edit_recoverable() {
+    let (mut eq, dir) = engine("reset_original");
+    let h = header();
+    assert!(eq.reset_layer_profile(OutputLayer::Headphone, Some(&h)).is_err(), "no original: no reset");
+
+    let mut imported = eq.headphone_profile().unwrap().clone();
+    imported.remember_original();
+    let original = imported.bands.clone();
+    eq.add_layer_profile(OutputLayer::Headphone, imported, Some(&h)).unwrap();
+
+    // An accidental drag, not saved yet; then "Save as" over the same name keeps the original.
+    eq.headphone_profile_mut().unwrap().bands[0].frequency = 900.0;
+    let resaved = ParametricProfile { bands: vec![], ..ParametricProfile::new("Rode NTH-100", VadType::Media) };
+    eq.add_layer_profile(OutputLayer::Headphone, resaved, Some(&h)).unwrap();
+    eq.headphone_profile_mut().unwrap().bands = vec![BiquadBand::default()];
+    assert!(eq.headphone_profile().unwrap().differs_from_original());
+
+    let moved = eq.reset_layer_profile(OutputLayer::Headphone, Some(&h)).unwrap();
+    assert_eq!(eq.headphone_profile().unwrap().bands, original);
+    assert!(moved.starts_with(dir.join(DELETED_DIR)));
+    let edited: ParametricProfile = serde_json::from_str(&std::fs::read_to_string(&moved).unwrap()).unwrap();
+    assert_eq!(edited.bands, vec![BiquadBand::default()], "the edited version is recoverable");
+
+    let reloaded = OutputEq::new(ProfileStorage::new(&dir));
+    let p = reloaded.layer_profiles(OutputLayer::Headphone).first().unwrap();
+    assert_eq!(p.bands, original);
+    assert!(p.original.is_some() && !p.differs_from_original());
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 }
