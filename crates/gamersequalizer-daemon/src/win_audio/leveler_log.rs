@@ -8,12 +8,13 @@
 //! remembered level applied at stream start). Upgrade with DSP-side counters in the next shm layout.
 
 use gamersequalizer_common::shm::ShmHeader;
+use gamersequalizer_mic_chain::voice_leveler::{MAX_BOOST_DB, MAX_CUT_DB};
 use log::debug;
 use std::sync::atomic::Ordering;
 
-/// Gain caps of the leveler (`voice_leveler.rs`), dB x 10.
-const MAX_BOOST_X10: i32 = 240;
-const MAX_CUT_X10: i32 = -60;
+/// Gain caps of the leveler, dB x 10 as published.
+const MAX_BOOST_X10: i32 = (MAX_BOOST_DB * 10.0) as i32;
+const MAX_CUT_X10: i32 = (MAX_CUT_DB * 10.0) as i32;
 
 /// What feeds or shows the leveler, read once per tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -94,9 +95,9 @@ impl LevelerLog {
       reasons.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(", ")
     };
     let cap = match now.gain_x10 {
-      g if g >= MAX_BOOST_X10 => " [at the +24 dB boost cap]",
-      g if g <= MAX_CUT_X10 => " [at the -6 dB cut cap]",
-      _ => "",
+      g if g >= MAX_BOOST_X10 => format!(" [at the {MAX_BOOST_DB:+} dB boost cap]"),
+      g if g <= MAX_CUT_X10 => format!(" [at the {MAX_CUT_DB} dB cut cap]"),
+      _ => String::new(),
     };
     Some(format!(
       "gain {} -> {} dB, level {} -> {} dBFS{cap} | why: {why}",

@@ -25,8 +25,8 @@ const WARM_START_FRAMES: u32 = 300;
 /// ~-31 dBFS active level, so -12 dB needs ~+19); room noise between words stays under -80 dBFS
 /// with the gate on. The cut tames a hot mic before the limiter: -6 dB left a voice at -10 dBFS
 /// ~5 dB over the target (`chain::chain_report`, "+20 dB clipped"); cutting never raises noise.
-const MAX_BOOST_DB: f32 = 24.0;
-const MAX_CUT_DB: f32 = -18.0;
+pub const MAX_BOOST_DB: f32 = 24.0;
+pub const MAX_CUT_DB: f32 = -18.0;
 /// Speech frames before any gain is applied: one syllable is no level yet.
 const MIN_FRAMES: u32 = 30;
 /// Running mean up to this many speech frames (20 s), then this fixed rate: ever slower while the

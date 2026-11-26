@@ -3123,7 +3123,6 @@ three sit on the +24 dB cap. RNNoise unchanged. Gate green (`check.ps1`); tests
 - Pauses with DFN3 at 0 dB are 2.9 dB short of milestone 29 (-110.5 against -113.4): not looked into.
 - DFN3 with the added 45 Hz rumble: leveler +9.3 dB against +8.1 for RNNoise, voice about 2 dB over
   the target in the second section: not looked into.
-- `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.
 
 ---
 
@@ -3811,3 +3810,36 @@ sidetone noise mode picked while an app records). The running build has
   (no rounded corners, no system border) was not checked.
 - Tests: `mixer_edits.rs`, `flyout.rs`, `flyout/paint.rs`, `app_channels.rs`, `chatmix/mod.rs`; on
   the Mac only clippy for the Windows target, the tests run in CI.
+
+---
+
+## Milestone 69: Automatic input gain: the voice at the converter, apps that hold the volume (2026-11-25)
+
+Branch `fix/auto-gain-converter-level`. The automatic input gain (milestone 23) decided by the
+leveler's gain: up at +18 dB or more, down at -5 dB or less. That gain is `target - level - Windows
+volume`, so the user's target loudness moved the Windows volume: with the target at -36 dBFS a normal
+voice at -31 dBFS read as too hot and was pulled down towards the 20 % floor, worse for the noise.
+The -5 dB was also stale: it was "near the -6 dB cut cap", which has been -18 dB since milestone 29.
+
+- `win_audio::mic_gain` now uses the voice level at the converter: the leveler's learned level (it
+  is learned without the Windows volume) plus the Windows volume in dB. Too weak at -42 dBFS or
+  under, too hot at -19 dBFS or over: the old thresholds at the default target (-24), so nothing
+  changes there. One exception goes by the gain: a leveler at its +24 dB boost cap (within 1 dB)
+  counts as weak too, since with a high target (-12) a voice at -38 dBFS stays short of it otherwise;
+  a higher volume never makes the noise worse against the voice. Clipping, steps, cooldowns and
+  limits are unchanged. The `[MicGain]` line shows the
+  voice in dBFS instead of the leveler's gain.
+- An app that holds the mic volume (sets it back whenever someone else moves it) and a step due
+  (clipping) used to step against each other forever, every 3-10 s: each foreign change is the new
+  wish and the automatic gain waits, then steps again. Now a foreign change within 10 s of our step
+  that moves the volume at least halfway back is a revert; after two in a row (a step that stands or
+  any other change starts the count again) the automatic gain stops on that mic until another mic
+  or a service restart, with one `[MicGain] stopped` line. Halfway, so a device rounding our level
+  a little does not count. The window does not show it (no shm field).
+- `win_audio/leveler_log.rs` takes the gain caps from `voice_leveler` (now public) instead of its own
+  copy, which still said -6 dB.
+- Limit: the level is learned after the echo canceller, denoiser and mic EQ, so it is a few dB off
+  the raw converter.
+- Tests in `mic_gain.rs` (a hot voice is lowered; a leveler at its boost cap raises; a normal voice
+  and an unlearned one stay; an app setting the volume back twice stops it, one moving on does not).
+  On the Mac only clippy for the Windows target; not heard live.
