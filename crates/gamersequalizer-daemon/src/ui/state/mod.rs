@@ -144,7 +144,8 @@ impl AppState {
     let selected_mic_endpoint_id = shm.and_then(|h| h.get_selected_mic_id());
 
     let mic_profile = super::mic_presets::startup_mic_profile(&storage, &available_mic_profiles);
-    let output_eq = load_output_eq(&storage);
+    // When the background service is running, it already synced new Sonar presets at service start.
+    let output_eq = load_output_eq(&storage, !crate::daemon_running());
     let autostart_enabled = crate::autostart::is_autostart_enabled();
     let prefs = super::prefs::UiPrefs::load_or_default(storage.base_dir());
     crate::i18n::set_language(prefs.language);
@@ -486,9 +487,11 @@ pub(crate) fn mic_volume_max(h: Option<&ShmHeader>) -> f32 {
 }
 
 /// The output EQ engine as the window and the service start it: first the presets a GG update
-/// added and the built-in game presets, then the profiles are loaded.
-pub(crate) fn load_output_eq(storage: &ProfileStorage) -> OutputEq {
+/// added (when `sync_sonar` is true) and the built-in game presets, then the profiles are loaded.
+pub(crate) fn load_output_eq(storage: &ProfileStorage, sync_sonar: bool) -> OutputEq {
   crate::output_eq::game_presets::seed_builtin_game_presets(storage);
-  crate::sonar_importer::sync_new_sonar_profiles(storage);
+  if sync_sonar {
+    crate::sonar_importer::sync_new_sonar_profiles(storage);
+  }
   OutputEq::new(storage.clone())
 }

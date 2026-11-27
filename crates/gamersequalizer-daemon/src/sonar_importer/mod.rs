@@ -24,6 +24,11 @@ pub struct ImportStats {
   pub custom_presets: usize,
 }
 
+/// True when Sonar's database or GG's preset scripts exist on disk (no SQLite or file parsing).
+pub fn has_sonar_sources() -> bool {
+  Path::new(DEFAULT_SONAR_DB_PATH).exists() || migrations::default_dir().exists()
+}
+
 /// Sonar's database and GG's preset scripts at their default places.
 pub fn read_sonar_sources() -> Result<Vec<ParametricProfile>, String> {
   SonarDbReader::read_all_sources(Path::new(DEFAULT_SONAR_DB_PATH), &migrations::default_dir())

@@ -234,7 +234,7 @@ pub(super) fn run_background_daemon() {
   // Of the window's state the service needs the output EQ, the mic EQ and the saved audio
   // settings; `AppState` would also load the window's parts and map the shared memory again.
   i18n::set_language(ui::prefs::UiPrefs::load_or_default(storage.base_dir()).language);
-  let mut output_eq = ui::state::load_output_eq(&storage);
+  let mut output_eq = ui::state::load_output_eq(&storage, true);
   let mut audio_settings_saved = ui::audio_settings::AudioSettings::default();
   if let Some(ptr) = shm_ptr {
     // SAFETY: the mapping stays mapped until the service exits (unmapped after the loop); atomics only.

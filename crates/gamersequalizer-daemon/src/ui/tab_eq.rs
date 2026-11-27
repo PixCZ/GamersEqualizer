@@ -34,8 +34,8 @@ pub fn render_tab_eq(ui: &mut Ui, state: &mut AppState, tab: ActiveTab) {
 fn render_game_tab(ui: &mut Ui, state: &mut AppState) {
   ui.horizontal(|ui| {
     theme::page_header(ui, icons::GAME, GAME_COLOR, tr("Game EQ"), None);
-    // Only offered when the Sonar database has profiles (counted once per run).
-    if super::setup::sonar_profiles(state) > 0 {
+    // Only offered when Sonar's database or GG's preset scripts exist on disk.
+    if super::setup::has_sonar_sources(state) {
       ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let hover = trf(
           "Copies Sonar profiles from {}. If you modified a profile with the same name, your version is backed up to profiles\\_deleted first so it can be restored.",

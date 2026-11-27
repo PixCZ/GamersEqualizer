@@ -232,7 +232,7 @@ fn action_buttons(ui: &mut Ui, state: &mut AppState, target: EqTarget, modified:
     && let Some(name) = active_profile(state, target).map(|p| p.name.clone())
   {
     let sonar_hint =
-      matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && super::setup::sonar_profiles(state) > 0;
+      matches!(target, EqTarget::Output(l) if l != OutputLayer::Headphone) && super::setup::has_sonar_sources(state);
     state.profile_bar.dialog = Some((target, Dialog::Delete { name, sonar_hint }));
     state.profile_bar.notice = None;
   }

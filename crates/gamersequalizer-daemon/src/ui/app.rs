@@ -5,6 +5,7 @@ use super::tab_mic::render_tab_mic;
 use super::tab_mixer::render_tab_mixer;
 use crate::win_audio::WinAudioSystem;
 use eframe::egui;
+use log::{debug, info};
 use std::time::{Duration, Instant};
 
 /// How often the window checks that the background service still runs (one mutex open).
@@ -20,17 +21,47 @@ const UNFOCUSED_METER_INTERVAL: Duration = Duration::from_millis(125);
 const STATIC_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 const MINIMIZED_FRAME_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Phase durations measured before the first frame, logged once the window paints.
+pub struct StartupTiming {
+  pub started: Instant,
+  pub takeover_ms: u128,
+  pub audio_ms: u128,
+  pub state_ms: u128,
+  pub wgpu_probe_ms: u128,
+  pub eframe_ms: u128,
+  pub fonts_ms: u128,
+  pub ready_at: Instant,
+}
+
 pub struct GamersEqualizerApp {
   pub state: AppState,
   pub win_audio: WinAudioSystem,
   window: super::window_state::WindowTracker,
   daemon_checked_at: Instant,
   synced_at: Option<Instant>,
+  startup_timing: Option<StartupTiming>,
+  /// 0 = first frame (paint window right away, defer heavy COM/registry checks),
+  /// 1 = second frame (run deferred checks and log their cost), 2 = steady state.
+  startup_stage: u8,
 }
 
 impl GamersEqualizerApp {
   pub fn new(state: AppState, win_audio: WinAudioSystem, window: super::window_state::WindowTracker) -> Self {
-    Self { state, win_audio, window, daemon_checked_at: Instant::now(), synced_at: None }
+    // Levels were just synced/restored in `run_gui_mode`, so the first frame skips a duplicate RPC pass.
+    let now = Instant::now();
+    Self {
+      state,
+      win_audio,
+      window,
+      daemon_checked_at: now,
+      synced_at: Some(now),
+      startup_timing: None,
+      startup_stage: 0,
+    }
+  }
+
+  pub fn set_startup_timing(&mut self, timing: StartupTiming) {
+    self.startup_timing = Some(timing);
   }
 }
 
@@ -125,7 +156,11 @@ impl eframe::App for GamersEqualizerApp {
       super::apo_banner::recheck(&mut self.state);
       super::setup::recheck(&mut self.state);
     }
-    super::header::refresh_spatial(&mut self.state, &mut self.win_audio);
+    let first_frame = self.startup_stage == 0;
+    let deferred_start = (self.startup_stage == 1).then(Instant::now);
+    if !first_frame {
+      super::header::refresh_spatial(&mut self.state, &mut self.win_audio);
+    }
 
     // Windows 11 Settings layout: slim top bar, navigation on the left, page on the right.
     // Mica-like flat chrome: no separator lines, the panels share the window background.
@@ -138,8 +173,11 @@ impl eframe::App for GamersEqualizerApp {
         render_top_bar(ui, &mut self.state);
       });
     // Setup problems are shown right away on every tab, not hidden in the Mic tab.
-    super::apo_banner::refresh(&mut self.state, &self.win_audio);
-    super::setup::refresh(&mut self.state, &self.win_audio);
+    // Deferred by one frame so the window appears before COM / registry checks run.
+    if !first_frame {
+      super::apo_banner::refresh(&mut self.state, &self.win_audio);
+      super::setup::refresh(&mut self.state, &self.win_audio);
+    }
     let mic_warning = super::apo_banner::has_mic_warning(&self.state);
     let setup = super::setup::visible(&self.state);
     let problems = super::apo_banner::has_problems(&self.state);
@@ -175,7 +213,7 @@ impl eframe::App for GamersEqualizerApp {
     egui::CentralPanel::default().frame(page).show(ui, |ui| {
       match self.state.active_tab {
         // The mixer strips fill the window height (it scrolls itself); so does the mic page.
-        ActiveTab::Mixer => render_tab_mixer(ui, &mut self.state, &mut self.win_audio),
+        ActiveTab::Mixer => render_tab_mixer(ui, &mut self.state, &mut self.win_audio, !first_frame),
         ActiveTab::Mic => render_tab_mic(ui, &mut self.state, &mut self.win_audio),
         ActiveTab::Log => super::tab_log::render_tab_log(ui, &mut self.state),
         tab => {
@@ -210,7 +248,24 @@ impl eframe::App for GamersEqualizerApp {
       }
     });
 
-    ctx.request_repaint_after(frame_interval(self.state.active_tab, minimized, focused));
+    if first_frame {
+      if let Some(t) = self.startup_timing.take() {
+        let total = t.started.elapsed().as_millis();
+        let frame1 = t.ready_at.elapsed().as_millis();
+        info!(
+          "[Startup] window ready in {total} ms (takeover {}, audio {}, state {}, wgpu_probe {}, eframe {}, fonts {}, frame1 {})",
+          t.takeover_ms, t.audio_ms, t.state_ms, t.wgpu_probe_ms, t.eframe_ms, t.fonts_ms, frame1
+        );
+      }
+      self.startup_stage = 1;
+      ctx.request_repaint();
+    } else {
+      if let Some(t0) = deferred_start {
+        debug!("[Startup] deferred checks done in {} ms", t0.elapsed().as_millis());
+        self.startup_stage = 2;
+      }
+      ctx.request_repaint_after(frame_interval(self.state.active_tab, minimized, focused));
+    }
     self.window.observe(ctx);
   }
 

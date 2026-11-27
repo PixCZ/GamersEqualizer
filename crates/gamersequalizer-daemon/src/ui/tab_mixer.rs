@@ -77,18 +77,18 @@ struct FooterSync {
   tallest_now: Cell<f32>,
 }
 
-pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
+pub fn render_tab_mixer(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem, populate_lists: bool) {
   // The strips fill the window height (measured here, outside the scroll area). Once the faders
   // are at their minimum (small monitors) the rest scrolls, so ChatMix stays reachable.
   let page_h = ui.available_height();
   egui::ScrollArea::vertical()
     .id_salt("mixer_page")
     .auto_shrink([false, false])
-    .show(ui, |ui| mixer_page(ui, state, win_audio, page_h));
+    .show(ui, |ui| mixer_page(ui, state, win_audio, page_h, populate_lists));
 }
 
-fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem, page_h: f32) {
-  let sessions = sessions_cached();
+fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem, page_h: f32, populate_lists: bool) {
+  let sessions = if populate_lists { sessions_cached() } else { Vec::new() };
 
   let game_apps = apps_on(&sessions, AudioBus::Game);
   let chat_apps = apps_on(&sessions, AudioBus::Chat);
@@ -96,7 +96,7 @@ fn mixer_page(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem,
   let mut all_apps: Vec<String> =
     game_apps.iter().chain(&chat_apps).chain(&media_apps).map(|a| a.exe.clone()).collect();
   all_apps.sort_by_key(|a| a.to_ascii_lowercase());
-  let recording = recording_apps_cached();
+  let recording = if populate_lists { recording_apps_cached() } else { Vec::new() };
 
   // A longer app list takes its height from the faders. Only when they are at their minimum
   // does the list scroll (and the page, if the window is still too short). Master's list (everything) is left out,

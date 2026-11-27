@@ -49,6 +49,8 @@ pub struct SetupUi {
   error: Option<String>,
   /// Profiles in the SteelSeries Sonar database; read once (None = not yet).
   sonar_profiles: Option<usize>,
+  /// Whether Sonar's database or GG's preset scripts exist on disk; checked once without parsing SQLite.
+  sonar_present: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,12 +84,20 @@ pub fn open_for_output(state: &mut AppState) {
   set_ticked(state, Kind::Output, true);
 }
 
+/// True when SteelSeries Sonar's database or GG's preset scripts exist on disk (checked once per run).
+pub fn has_sonar_sources(state: &mut AppState) -> bool {
+  if let Some(count) = state.setup.sonar_profiles {
+    return count > 0;
+  }
+  *state.setup.sonar_present.get_or_insert_with(crate::sonar_importer::has_sonar_sources)
+}
+
 /// Profiles Sonar's database and GG's preset scripts hold (0 without SteelSeries GG). Read once
 /// per run.
 /// shortcut: GG installed while the app runs is seen after a restart; recount on the device
 /// recheck if that matters.
 pub fn sonar_profiles(state: &mut AppState) -> usize {
-  *state.setup.sonar_profiles.get_or_insert_with(|| match crate::sonar_importer::read_sonar_sources() {
+  let count = *state.setup.sonar_profiles.get_or_insert_with(|| match crate::sonar_importer::read_sonar_sources() {
     Ok(p) => {
       log::info!("[Setup] SteelSeries Sonar: {} profiles", p.len());
       p.len()
@@ -96,7 +106,9 @@ pub fn sonar_profiles(state: &mut AppState) -> usize {
       log::warn!("[Setup] SteelSeries Sonar profiles not readable: {e}");
       0
     }
-  })
+  });
+  state.setup.sonar_present = Some(count > 0);
+  count
 }
 
 /// Check again on the next frame (active device or endpoint list changed).
@@ -111,7 +123,9 @@ pub fn refresh(state: &mut AppState, win_audio: &WinAudioSystem) {
     return;
   }
   take_rollbacks(state);
-  sonar_profiles(state);
+  if !state.prefs.setup_done && !state.output_eq.settings.imported_sonar {
+    sonar_profiles(state);
+  }
   let output_id = win_audio.chatmix.master_device_id.clone();
   let check = apo_install::check_flow(Flow::Render, output_id.as_deref());
   state.setup.output_name = state

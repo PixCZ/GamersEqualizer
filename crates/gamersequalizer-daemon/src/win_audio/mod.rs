@@ -40,16 +40,21 @@ pub struct WinAudioSystem {
 
 impl WinAudioSystem {
   pub fn new() -> Result<Self, String> {
+    let mut sys = Self::new_unbound()?;
+    let devices = sys.endpoint_lock.enumerate_playback_devices();
+    let def_id = sys.endpoint_lock.get_default_output_id();
+    sys.chatmix.bind_endpoints(&devices, def_id.as_deref());
+    sys.chatmix.use_mic(None);
+    Ok(sys)
+  }
+
+  /// Initializes COM listeners and game detection without binding endpoints yet: callers that
+  /// immediately enumerate and bind with saved shared-memory picks avoid doing it twice.
+  pub fn new_unbound() -> Result<Self, String> {
     let state = Arc::new(EndpointLockState::default());
     let endpoint_lock = EndpointLockManager::new(state).map_err(|e| e.to_string())?;
-    let mut chatmix = ChatMixController::new();
+    let chatmix = ChatMixController::new();
     let game_detector = GameDetector::start().ok();
-
-    let devices = endpoint_lock.enumerate_playback_devices();
-    let def_id = endpoint_lock.get_default_output_id();
-    chatmix.bind_endpoints(&devices, def_id.as_deref());
-    chatmix.use_mic(None);
-
     Ok(Self { endpoint_lock, chatmix, game_detector })
   }
 

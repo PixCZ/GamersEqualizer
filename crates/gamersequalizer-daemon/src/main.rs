@@ -106,6 +106,7 @@ fn main() {
 
 /// Standalone UI Control Center (can be opened, closed, and reopened at will)
 fn run_gui_mode() {
+  let started = Instant::now();
   info!("[GamersEqualizer] Starting UI Control Center...");
 
   // A new version was unpacked and started: it ends the older one that is running, then
@@ -120,26 +121,30 @@ fn run_gui_mode() {
 
   // Ensure background service is running; if not, spawn it detached
   ensure_daemon_running();
+  let takeover_ms = started.elapsed().as_millis();
 
   // SAFETY: COM init for the window thread with no reserved pointer; it stays for the window's life.
   unsafe {
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
   }
 
+  let before_audio = Instant::now();
   let storage = ProfileStorage::default_storage();
   win_audio::app_channels::init(storage.base_dir());
   win_audio::sidetone::init(storage.base_dir());
 
   // The Sonar profiles are offered on the first-start setup card (`ui::setup`), not imported here.
 
-  let mut win_audio = match WinAudioSystem::new() {
+  let mut win_audio = match WinAudioSystem::new_unbound() {
     Ok(w) => w,
     Err(e) => {
       error!("[GamersEqualizer] Failed to initialize Windows Audio: {}", e);
       return;
     }
   };
+  let audio_ms = before_audio.elapsed().as_millis();
 
+  let before_state = Instant::now();
   let mut state = AppState::init(storage);
   let args: Vec<String> = std::env::args().collect();
   if let Some(result) = args.iter().position(|a| a == IMPORT_RESULT_ARG).and_then(|i| args.get(i + 1)) {
@@ -147,28 +152,30 @@ fn run_gui_mode() {
   }
   state.apply_output_eq();
 
-  // Bind channel endpoints and synchronize live volumes
+  // Bind channel endpoints once and keep the lists on `state` so the first frame skips a second scan.
   let devices = win_audio.endpoint_lock.enumerate_playback_devices();
   let def_id = win_audio.endpoint_lock.get_default_output_id();
   win_audio.chatmix.bind_endpoints(&devices, def_id.as_deref());
   // The saved pick only while it is connected (like the service and the window's re-bind).
   let captures = win_audio.endpoint_lock.enumerate_capture_devices();
-  win_audio.chatmix.use_mic(state.selected_mic_endpoint_id.clone().filter(|id| captures.iter().any(|d| &d.id == id)));
+  let picked_mic = state.selected_mic_endpoint_id.clone().filter(|id| captures.iter().any(|d| &d.id == id));
+  win_audio.chatmix.use_mic(picked_mic.clone());
+  state.selected_mic_endpoint_id = picked_mic;
   // The service's (or the saved) channel levels; the window would otherwise reset them to 100 %.
   // Last, so the running service's mic wish wins over what this process read.
   if let Some(h) = state.shm_header() {
     ui::audio_settings::restore_mixer(h, &mut win_audio.chatmix, h.daemon_active.load(Ordering::Relaxed));
   }
 
-  if let Some(ref mid) = win_audio.chatmix.master_device_id {
-    state.selected_endpoint_id = Some(mid.clone());
-  }
-  if let Some(ref cid) = win_audio.chatmix.chat_device_id {
-    state.selected_chat_endpoint_id = Some(cid.clone());
-  }
+  state.endpoints = devices;
+  state.capture_endpoints = captures;
+  state.selected_endpoint_id = win_audio.chatmix.master_device_id.clone().or(def_id);
+  state.selected_chat_endpoint_id =
+    win_audio.chatmix.chat_device_id.clone().or_else(|| win_audio.endpoint_lock.get_default_communications_id());
 
   // Update SHM with live channel volumes
   state.sync_mixer_to_shm(&win_audio.chatmix);
+  let state_ms = before_state.elapsed().as_millis();
 
   // The echo reference thread and the APO link run only in the background service (started
   // above, restarted by the window's watchdog). The window used to start its own when the
@@ -195,8 +202,10 @@ fn run_gui_mode() {
       viewport = viewport.with_position([g.x, g.y]);
     }
   }
+  let before_wgpu_probe = Instant::now();
   let mut wgpu_setup = egui_wgpu::WgpuSetupCreateNew::without_display_handle();
   wgpu_setup.instance_descriptor.backends = wgpu_backends();
+  let wgpu_probe_ms = before_wgpu_probe.elapsed().as_millis();
   // No power preference: wgpu then takes the first adapter in DXGI's order, which follows the
   // user's choice in Windows graphics settings or the NVIDIA panel (default: the integrated GPU).
   wgpu_setup.power_preference = wgpu::PowerPreference::None;
@@ -204,18 +213,32 @@ fn run_gui_mode() {
     egui_wgpu::WgpuConfiguration { wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(wgpu_setup), ..Default::default() };
   let native_options = eframe::NativeOptions { viewport, wgpu_options, ..Default::default() };
 
-  let app = GamersEqualizerApp::new(state, win_audio, window);
+  let mut app = GamersEqualizerApp::new(state, win_audio, window);
+  let before_eframe = Instant::now();
 
   let _ = eframe::run_native(
     "GamersEqualizer",
     native_options,
-    Box::new(|cc| {
+    Box::new(move |cc| {
+      let eframe_ms = before_eframe.elapsed().as_millis();
       if let Some(render_state) = &cc.wgpu_render_state {
         let info = render_state.adapter.get_info();
         debug!("[GamersEqualizer] graphics: rendering on {} ({:?}, {:?})", info.name, info.device_type, info.backend);
       }
+      let before_fonts = Instant::now();
       ui::theme::install(&cc.egui_ctx);
+      let fonts_ms = before_fonts.elapsed().as_millis();
       cc.egui_ctx.set_theme(app.state.prefs.egui_theme());
+      app.set_startup_timing(ui::app::StartupTiming {
+        started,
+        takeover_ms,
+        audio_ms,
+        state_ms,
+        wgpu_probe_ms,
+        eframe_ms,
+        fonts_ms,
+        ready_at: Instant::now(),
+      });
       Ok(Box::new(app))
     }),
   );
