@@ -140,8 +140,8 @@ pub struct ShmHeader {
   pub mic_input_clips: AtomicU32,
   /// DSP -> daemon: speech the leveler learned from (cumulative ms).
   pub mic_speech_ms: AtomicU32,
-  /// Daemon -> GUI: Windows mic volume the automatic input gain set, permille (0 = none). The
-  /// window must not read it as the user's volume.
+  /// Daemon -> debug capture: Windows mic volume the automatic input gain set last, permille
+  /// (0 = none, or someone moved it since).
   pub mic_auto_gain_permille: AtomicU32,
 
   // --- v13: timing of the audio engine's calls into the mic APO (APO -> daemon debug log) ---
@@ -295,6 +295,11 @@ pub struct ShmHeader {
   /// value needs no layout change) and its version, bumped when a value changes.
   pub duck_tune: [AtomicU32; DUCK_TUNE_SLOTS],
   pub duck_tune_version: AtomicU32,
+
+  // --- v25: an app that moves the mic volume itself (daemon -> DSP) ---
+  /// The leveler keeps its gain where it is: no learning, no compensation of the input gain. Set
+  /// while an app's own automatic gain control moves the Windows mic volume (`mic_hold.rs`).
+  pub mic_leveler_hold: AtomicBool,
 }
 
 /// Game detected by the detection owner (daemon, or the GUI without a daemon).

@@ -842,10 +842,38 @@ pub static CS: &[(&str, &str)] = &[
   ("Sensitivity", "Citlivost"),
   ("Reset to 100 %", "Vrátit na 100 %"),
   (
-    "With the voice leveler enabled, this sets how loud you sound to others (100 % = target loudness, 50 % = 6 dB quieter). The Windows input level only keeps the signal clean; the app adjusts it automatically when the mic clips or is too quiet.",
-    "Se zapnutým vyrovnáním hlasitosti určuje, jak hlasitě vás uslyší ostatní (100 % = cílová hlasitost, 50 % = o 6 dB tišeji). Vstupní úroveň Windows jen udržuje čistý signál: aplikace ji sama upraví, když je mikrofon přebuzený nebo příliš tichý.",
+    "With the voice leveler enabled, this is only the mic's input sensitivity: others hear you at the leveler's target whatever it is set to. It still matters: set too high, the mic picks up more background noise, clips or sounds harsh (often at 100 %), so lower it; set too low, your voice drowns in the mic's own hiss. The app lowers it on its own when the mic clips, and adjusts it when your voice stays too quiet or too loud.",
+    "Se zapnutým vyrovnáním hlasitosti je to jen citlivost vstupu mikrofonu: ostatní vás slyší na cílové hlasitosti, ať je tady nastaveno cokoli. Přesto na ní záleží: když je moc vysoko, mikrofon nabere víc hluku z okolí, ořezává nebo zní tvrdě (často při 100 %), a pak ji snižte; když je moc nízko, hlas zanikne v šumu samotného mikrofonu. Když mikrofon ořezává, aplikace ji sama sníží, a když je váš hlas dlouho moc tichý nebo moc silný, sama ji upraví.",
   ),
-  ("Windows input level set automatically: {} %", "Vstupní úroveň Windows nastavena automaticky: {} %"),
+  (
+    "Voice leveler is holding: {} controls the mic volume itself. It resumes when the call ends.",
+    "Vyrovnání hlasitosti stojí: aplikace {} si sama řídí hlasitost mikrofonu. Rozjede se po skončení hovoru.",
+  ),
+  (
+    "Voice leveler is holding: one of {} controls the mic volume itself. It resumes when they stop recording.",
+    "Vyrovnání hlasitosti stojí: jedna z aplikací {} si sama řídí hlasitost mikrofonu. Rozjede se, až přestanou nahrávat.",
+  ),
+  ("Apps that control the mic volume themselves", "Aplikace, které si řídí hlasitost mikrofonu samy"),
+  (
+    "They moved the mic volume back and forth in two calls. While one of them records, the voice leveler holds the gain learned for your voice and stops evening out the input. Switch off the app's automatic mic volume and remove it here, and the leveler works fully with it again.",
+    "Ve dvou hovorech posouvaly hlasitost mikrofonu sem a tam. Když některá z nich nahrává, vyrovnání hlasitosti podrží zesílení naučené pro váš hlas a vstup přestane vyrovnávat. Vypněte v aplikaci automatickou hlasitost mikrofonu a odeberte ji tady, pak s ní vyrovnání funguje zase celé.",
+  ),
+  (
+    "In Teams: Settings → Devices, switch off \"Automatically adjust mic sensitivity\".",
+    "V Teams: Nastavení → Zařízení, vypněte automatickou citlivost mikrofonu („Automatically adjust mic sensitivity“).",
+  ),
+  (
+    "In Zoom: Settings → Audio, untick \"Automatically adjust microphone volume\".",
+    "V Zoomu: Nastavení → Zvuk, zrušte automatickou hlasitost mikrofonu („Automatically adjust microphone volume“).",
+  ),
+  (
+    "In Skype: Settings → Audio & Video, switch off \"Automatically adjust microphone settings\" (Skype is reported to move the volume even then: keep it on the list if it does).",
+    "Ve Skypu: Nastavení → Zvuk a video, vypněte automatické nastavení mikrofonu („Automatically adjust microphone settings“). Skype prý hlasitost posouvá i potom: pokud ano, nechte ho v seznamu.",
+  ),
+  (
+    "How loud others hear you: the voice leveler's target. The mic's input sensitivity is on the Mic page.",
+    "Jak hlasitě vás slyší ostatní: cíl vyrovnání hlasitosti. Citlivost vstupu mikrofonu je na stránce Mikrofon.",
+  ),
   (
     "0 %–100 % adjusts the Windows input level. 100 %–300 % adds a soft-limited digital boost up to +9.5 dB.",
     "0–100 % posouvá vstupní úroveň Windows. 100–300 % přidá digitální zesílení s měkkým omezením špiček až +9,5 dB.",

@@ -31,7 +31,7 @@ rnnoise2 = { path = "../vendor/rnnoise2" }
 # Silero VAD v6 (pure-Rust port, see crates/vendor/silero_vad/README.md): the gate's second key.
 silero_vad = { path = "../vendor/silero_vad" }
 # DPDFNet (ONNX), exactly the tract the fork is built against.
-tract-onnx-23 = { package = "tract-onnx", version = "=0.23.10" }
+tract-onnx-23 = { package = "tract-onnx", version = "=0.23.11" }
 # Same version as tract 0.23 (the fork's DfTract takes these arrays).
 ndarray = "0.17"
 # Echo canceller: pure Rust port of WebRTC AEC3 (BSD-3), see src/aec3.rs.

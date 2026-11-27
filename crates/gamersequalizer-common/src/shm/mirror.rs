@@ -32,6 +32,7 @@ impl ShmHeader {
     self.mic_leveler_target_db_x10.store(src.mic_leveler_target_db_x10.load(r), r);
     self.mic_leveler_reset_seq.store(src.mic_leveler_reset_seq.load(r), r);
     self.mic_input_gain_db_x10.store(src.mic_input_gain_db_x10.load(r), r);
+    self.mic_leveler_hold.store(src.mic_leveler_hold.load(r), r);
     self.aec_ref_output_hash.store(src.aec_ref_output_hash.load(r), r);
     self.duck_enabled.store(src.duck_enabled.load(r), r);
     self.duck_strength_permille.store(src.duck_strength_permille.load(r), r);

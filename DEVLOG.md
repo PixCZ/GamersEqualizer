@@ -3123,7 +3123,6 @@ three sit on the +24 dB cap. RNNoise unchanged. Gate green (`check.ps1`); tests
 - Pauses with DFN3 at 0 dB are 2.9 dB short of milestone 29 (-110.5 against -113.4): not looked into.
 - DFN3 with the added 45 Hz rumble: leveler +9.3 dB against +8.1 for RNNoise, voice about 2 dB over
   the target in the second section: not looked into.
-- `win_audio/leveler_log.rs:16` still says "-6 dB cut cap" (`MAX_CUT_X10 = -60`); the cut is -18 dB since 29.
 
 ---
 
@@ -3811,3 +3810,117 @@ sidetone noise mode picked while an app records). The running build has
   (no rounded corners, no system border) was not checked.
 - Tests: `mixer_edits.rs`, `flyout.rs`, `flyout/paint.rs`, `app_channels.rs`, `chatmix/mod.rs`; on
   the Mac only clippy for the Windows target, the tests run in CI.
+
+---
+
+## Milestone 69: With the leveler on, only its target sets how loud others hear you (2026-11-24)
+
+Milestone 23 applied the mic volume (0..100 %) again after the leveler, as an output volume, so an
+app's own gain control would see its change and settle. In use that made the mic slider a hidden
+second loudness control nobody expects next to the leveler's target:
+
+- Log 2026-11-22 08:27: 80 ms after an output pick in the tray flyout the mic row went 50 -> 26 %
+  (the pick or a slider press, the log cannot tell), about -6 dB for others until a reinstall.
+- Log 2026-11-24 17:33 and 21:03: the Windows mic volume moved 26 -> 40 -> 29 % in small steps (an
+  app's gain control or the Windows slider); the wish followed and others heard -3 dB.
+- The automatic input gain was off all the time (`automatic level off`); the leveler compensated the
+  input each time ("compensated") and stage 5 then took it out again. The DSP itself is byte-identical
+  between 0.3.2 and 0.4.0 and only gained the volume ramp since.
+
+Now stage 5 applies the volume only without the leveler (a boost above 100 %). With it the Windows
+volume sits before the APO (Milestone 23) and is purely input sensitivity, which the leveler takes out.
+Limit: an app's analog gain control (Teams, Zoom, Chrome/WebRTC) no longer hears its own steps and may
+walk the Windows volume to an end; on a hardware volume the automatic input gain backs off after such a
+foreign change (`COOLDOWN_CLIP`, 3 s), and an app that keeps stepping can keep it waiting. Tests:
+`test_mic_volume_reaches_the_output_only_without_the_leveler`, the gamer chain golden recalibrated (G2).
+
+---
+
+## Milestone 70: Automatic input gain: the voice at the converter, apps that hold the volume (2026-11-25)
+
+Branch `fix/auto-gain-converter-level`. The automatic input gain (milestone 23) decided by the
+leveler's gain: up at +18 dB or more, down at -5 dB or less. That gain is `target - level - Windows
+volume`, so the user's target loudness moved the Windows volume: with the target at -36 dBFS a normal
+voice at -31 dBFS read as too hot and was pulled down towards the 20 % floor, worse for the noise.
+The -5 dB was also stale: it was "near the -6 dB cut cap", which has been -18 dB since milestone 29.
+
+- `win_audio::mic_gain` now uses the voice level at the converter: the leveler's learned level (it
+  is learned without the Windows volume) plus the Windows volume in dB. Too weak at -42 dBFS or
+  under, too hot at -19 dBFS or over: the old thresholds at the default target (-24), so nothing
+  changes there. One exception goes by the gain: a leveler at its +24 dB boost cap (within 1 dB)
+  counts as weak too, since with a high target (-12) a voice at -38 dBFS stays short of it otherwise;
+  a higher volume never makes the noise worse against the voice. Clipping, steps, cooldowns and
+  limits are unchanged. The `[MicGain]` line shows the
+  voice in dBFS instead of the leveler's gain.
+- An app that holds the mic volume (sets it back whenever someone else moves it) and a step due
+  (clipping) used to step against each other forever, every 3-10 s: each foreign change is the new
+  wish and the automatic gain waits, then steps again. Now a foreign change within 10 s of our step
+  that moves the volume at least halfway back is a revert; after two in a row (a step that stands or
+  any other change starts the count again) the automatic gain stops on that mic until another mic
+  or a service restart, with one `[MicGain] stopped` line. Halfway, so a device rounding our level
+  a little does not count. The window does not show it (no shm field).
+- `win_audio/leveler_log.rs` takes the gain caps from `voice_leveler` (now public) instead of its own
+  copy, which still said -6 dB.
+- Limit: the level is learned after the echo canceller, denoiser and mic EQ, so it is a few dB off
+  the raw converter.
+- Tests in `mic_gain.rs` (a hot voice is lowered; a leveler at its boost cap raises; a normal voice
+  and an unlearned one stay; an app setting the volume back twice stops it, one moving on does not).
+  On the Mac only clippy for the Windows target; not heard live.
+
+---
+
+## Milestone 71: Apps that move the mic volume themselves: the leveler holds (2026-11-26)
+
+Spec `docs/mic-leveler-apps-spec.md`, analysis `docs/mic-app-volume-analysis.md`. Since milestone 69
+an app's own gain control (Teams, Zoom) no longer hears its steps: the leveler evens each one out and
+the app walks the Windows volume to an end.
+
+- With the leveler on, the Windows mic volume is only the input sensitivity, everywhere. The service
+  follows Windows (`ChatMixController::sync_mic`, the one place a foreign move is seen) and no longer
+  loads the window's copy from shared memory, which may be older. The automatic input gain sets
+  Windows directly (`set_mic_level`), so `mic_hw_auto`, the wish beside it and `adopt_mic_auto` are
+  gone. The mixer's mic fader sets the leveler's target as the tray row does
+  (`flyout::set_leveler_target`); the Mic page's Sensitivity row is 0-100 % of Windows.
+- `win_audio/mic_hold.rs` sorts every move (moves under 2 s apart are one): nobody records -> the
+  user; a volume window in front (Settings, the Sound panel in rundll32, Game Bar, this app) -> the
+  user; the recording app in front with input in the last 1.5 s -> the user; else an app. The input
+  time comes from `GetLastInputInfo` (its time only, asked only in that case), the one exception to
+  the no-input rule. A second app move within a minute in one recording holds the leveler
+  (`mic_leveler_hold`, shm v25; `VoiceLeveler::set_hold`: gain kept, no learning, the input gain not
+  compensated). It ends when that app stops recording (several recording: all of them); the volume
+  goes back to where it was before the recording unless the user moved it in between. The automatic
+  input gain does nothing while held.
+- With one app recording it is noted in `audio_settings.json` (`mic_volume_apps`: count and date)
+  after its first such recording, listed after the second and from then on held from the start of
+  its recordings, on the gain seeded for the voice. With several recording none is noted. The Mic
+  page lists them with Remove and, for Teams, Zoom and Skype, the option to switch off; a status
+  line says who holds it.
+- The input sensitivity is kept per mic when the leveler is switched off (`mic_sensitivity_permille`)
+  and comes back when it is switched on.
+- `[MicVol]` lines on events only: each move with who and the scene, a hold and why, its end.
+- Limits: Windows does not say who moved the volume, so headset software or a volume wheel on the
+  headset during two calls can list an innocent recording app (the list is visible and can be
+  cleared). A move seen a tick before Windows reports the recording counts as the user's. A package
+  whose name differs from its exe by more than `.exe` and punctuation is not recognised in front.
+  The foreground is unknown until the first foreground change after the service starts (a move then
+  counts as an app's while something records). A service restart forgets a hold. The effects must be
+  reinstalled for shm v25.
+- Tests: `mic_hold.rs` (who moved it; one move vs. a second within a minute; the 2 s merge; the end,
+  the restore and a user change that stays; several apps; a listed app from its start; nobody
+  recording; a new recording counts from zero), `voice_leveler.rs`
+  (`a_hold_keeps_the_gain_while_the_input_moves`), `audio_settings.rs` (the list beside the
+  settings). Not heard live: a Teams test call and zoom.us/test are still to do.
+
+## Milestone 72: tract 0.23.11 from crates.io, the fork patch is gone (2026-11-27)
+
+- tract 0.23.11 carries the three fixes the app took from github.com/PixCZ/tract since milestone 63
+  (sonos/tract#3487, #3488, #3489: the AVX-512 f16 kernel, the kernel choice for small
+  matrix-vector products, the 16x1 partial sums). Every tract crate is pinned `=0.23.11` in the
+  mic-chain and deep_filter manifests, and the `[patch.crates-io]` lines for tract-linalg /
+  tract-data are removed.
+- With it, 18 semver-compatible crate updates (`cargo update`, own commit).
+- Measured against the fork build (3421f7c) on the dev PC (Ryzen 7 9800X3D, AVX-512, f16 weights):
+  DeepFilterNet 3's output is bit-identical (`dfn3_reference`: max diff 0). `cpu_breakdown_report`,
+  interleaved, median of 4 warm runs: DFN3 alone 1.60 -> 1.54 % of a core, DPDFNet alone 9.59 ->
+  9.22 %, the whole denoiser with DFN3 on speech 3.28 -> 3.24 %. Cold cache + paced (2 runs each)
+  within ±3 %, the run-to-run noise (Silero, which does not use tract, moved +11 %).

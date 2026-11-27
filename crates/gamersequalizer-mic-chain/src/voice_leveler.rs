@@ -25,8 +25,8 @@ const WARM_START_FRAMES: u32 = 300;
 /// ~-31 dBFS active level, so -12 dB needs ~+19); room noise between words stays under -80 dBFS
 /// with the gate on. The cut tames a hot mic before the limiter: -6 dB left a voice at -10 dBFS
 /// ~5 dB over the target (`chain::chain_report`, "+20 dB clipped"); cutting never raises noise.
-const MAX_BOOST_DB: f32 = 24.0;
-const MAX_CUT_DB: f32 = -18.0;
+pub const MAX_BOOST_DB: f32 = 24.0;
+pub const MAX_CUT_DB: f32 = -18.0;
 /// Speech frames before any gain is applied: one syllable is no level yet.
 const MIN_FRAMES: u32 = 30;
 /// Running mean up to this many speech frames (20 s), then this fixed rate: ever slower while the
@@ -95,6 +95,10 @@ pub struct VoiceLeveler {
   prior: bool,
   /// Speech learned since the last `reset` / new stream.
   heard_here: bool,
+  /// `set_hold`: an app's own gain control moves the input; and the gain then held, as its
+  /// distance from the target in dB (None until there is a level to hold).
+  hold: bool,
+  held_over_target_db: Option<f32>,
 }
 
 impl Default for VoiceLeveler {
@@ -124,6 +128,8 @@ impl VoiceLeveler {
       fresh_ref: 0.0,
       prior: false,
       heard_here: false,
+      hold: false,
+      held_over_target_db: None,
     }
   }
 
@@ -141,7 +147,20 @@ impl VoiceLeveler {
     self.started = false; // input gain is a setting: kept
     self.prior = false;
     self.heard_here = false;
+    self.held_over_target_db = None; // the hold is a setting: kept, it takes the next level
     self.restart_check();
+  }
+
+  /// Hold: the gain stays where it is (it learns nothing and no longer compensates the input
+  /// gain), so an app's own automatic gain control hears its steps and settles. The target still
+  /// moves the held gain by the same dB. Without a level yet it learns one first, then holds it.
+  /// No allocation: audio thread.
+  pub fn set_hold(&mut self, hold: bool) {
+    if hold != self.hold {
+      self.hold = hold;
+      self.held_over_target_db = None;
+      self.update_target_gain();
+    }
   }
 
   /// Something before the leveler changed the speech level (mic volume, denoiser, EQ, ...): learn
@@ -260,7 +279,7 @@ impl VoiceLeveler {
 
   fn learn(&mut self, pow: f32, voice: bool) {
     // `!(pow > 1e-12)` also rejects NaN, which `pow <= 1e-12` let through.
-    if !voice || !(pow > 1e-12 && pow.is_finite()) {
+    if !voice || !(pow > 1e-12 && pow.is_finite()) || self.held_over_target_db.is_some() {
       return;
     }
     let pow = pow / self.input_pow;
@@ -302,9 +321,15 @@ impl VoiceLeveler {
   }
 
   fn update_target_gain(&mut self) {
-    if let Some(level) = self.level_db() {
-      let gain_db = (self.target_db - level - self.input_gain_db).clamp(MAX_CUT_DB, MAX_BOOST_DB);
-      self.target_gain = 10f32.powf(gain_db / 20.0);
+    let gain_db = match (self.held_over_target_db, self.level_db()) {
+      (Some(over), _) => self.target_db + over,
+      (None, Some(level)) => self.target_db - level - self.input_gain_db,
+      (None, None) => return,
+    };
+    let gain_db = gain_db.clamp(MAX_CUT_DB, MAX_BOOST_DB);
+    self.target_gain = 10f32.powf(gain_db / 20.0);
+    if self.hold && self.held_over_target_db.is_none() {
+      self.held_over_target_db = Some(gain_db - self.target_db);
     }
   }
 }
@@ -576,6 +601,38 @@ mod tests {
     assert_eq!(lv.input_gain_db, -90.0);
     lv.set_input_gain_db(-500.0);
     assert_eq!(lv.input_gain_db, -100.0);
+  }
+
+  #[test]
+  fn a_hold_keeps_the_gain_while_the_input_moves() {
+    let mut lv = VoiceLeveler::new();
+    run(&mut lv, &tone(10.0, -30.0), true);
+    let learned = (lv.level_db().unwrap(), lv.gain_db());
+    lv.set_hold(true);
+    // An app raises the Windows volume 10 dB: the gain stays, the app hears its step.
+    lv.set_input_gain_db(10.0);
+    let out = run(&mut lv, &tone(5.0, -20.0), true);
+    assert!((lv.gain_db() - learned.1).abs() < 0.05, "{:.1} -> {:.1} dB", learned.1, lv.gain_db());
+    assert!((rms_db(&out[SR..]) - (DEFAULT_TARGET_DB + 10.0)).abs() < 0.3, "{:.1} dBFS", rms_db(&out[SR..]));
+    assert_eq!(lv.level_db().unwrap(), learned.0, "nothing learned while held");
+    // The user's target still moves the held gain by the same dB.
+    lv.set_target_db(DEFAULT_TARGET_DB - 6.0);
+    run(&mut lv, &tone(1.0, -20.0), true);
+    assert!((lv.gain_db() - (learned.1 - 6.0)).abs() < 0.05, "{:.1} dB", lv.gain_db());
+    // Released: the input gain is compensated again, at once.
+    lv.set_hold(false);
+    let out = run(&mut lv, &tone(1.0, -20.0), true);
+    assert!((rms_db(&out[SR / 2..]) - (DEFAULT_TARGET_DB - 6.0)).abs() < 0.3, "{:.1} dBFS", rms_db(&out[SR / 2..]));
+
+    // Held before any level: it learns one first, then holds that gain.
+    let mut lv = VoiceLeveler::new();
+    lv.set_hold(true);
+    run(&mut lv, &tone(3.0, -36.0), true);
+    let held = lv.gain_db();
+    assert!((held - 12.0).abs() < 1.0, "{held:.1} dB");
+    lv.set_input_gain_db(-6.0);
+    run(&mut lv, &tone(1.0, -42.0), true);
+    assert!((lv.gain_db() - held).abs() < 0.05, "{held:.1} -> {:.1} dB", lv.gain_db());
   }
 
   #[test]

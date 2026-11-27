@@ -127,7 +127,7 @@ admin or restart Windows audio are never delegated: a human runs them.
 ## Before a release or a push to main
 
 Offer the user the dependency check (GitHub Actions pins, crates and `cargo audit`, the newest tract
-version against our fork, the egui-wgpu fork, the toolchain) and write release notes as in
+version, the egui-wgpu fork, the toolchain) and write release notes as in
 `.claude/rules/release.md`. Offer it, don't run it unasked.
 
 ## General
