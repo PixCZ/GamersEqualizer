@@ -3910,3 +3910,14 @@ the app walks the Windows volume to an end.
   recording; a new recording counts from zero), `voice_leveler.rs`
   (`a_hold_keeps_the_gain_while_the_input_moves`), `audio_settings.rs` (the list beside the
   settings). Not heard live: a Teams test call and zoom.us/test are still to do.
+
+## Milestone 72: tract 0.23.11 from crates.io, the fork patch is gone (2026-11-27)
+
+- tract 0.23.11 carries the three fixes the app took from github.com/PixCZ/tract since milestone 63
+  (sonos/tract#3487, #3488, #3489: the AVX-512 f16 kernel, the kernel choice for small
+  matrix-vector products, the 16x1 partial sums). Every tract crate is pinned `=0.23.11` in the
+  mic-chain and deep_filter manifests, and the `[patch.crates-io]` lines for tract-linalg /
+  tract-data are removed.
+- With it, 18 semver-compatible crate updates (`cargo update`, own commit).
+- Not measured yet: mic-chain CPU in the `cpu-stats` build against the fork build (it should match,
+  being the same kernels).
