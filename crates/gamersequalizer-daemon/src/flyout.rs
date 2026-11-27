@@ -35,12 +35,14 @@ use crate::win_audio::AudioEndpointInfo;
 use crate::win_audio::chatmix::{ChatMixController, get_endpoint_volume, set_endpoint_mute, set_endpoint_volume};
 use crate::win_audio::endpoint_lock::{active_devices, get_endpoint_info};
 use crate::win_audio::mmdevice;
+use gamersequalizer_common::shm::ShmHeader;
 use gamersequalizer_mic_chain::voice_leveler::{MAX_TARGET_DB, MIN_TARGET_DB};
 use log::{debug, info, warn};
 use paint::{Layout, Notice, Texts};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
   CloseHandle, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, RECT, S_FALSE, SIZE, WPARAM,
@@ -632,6 +634,13 @@ pub(crate) fn loudness_db(slider: f32) -> f32 {
 /// The slider position (0..1) of the leveler's target `db`.
 pub(crate) fn loudness_slider(db: f32) -> f32 {
   ((db - MIN_TARGET_DB) / (MAX_TARGET_DB - MIN_TARGET_DB)).clamp(0.0, 1.0)
+}
+
+/// The leveler's target from this row's slider or the mixer's mic fader, in whole dB: a wheel notch
+/// moves it less than the label's precision and the Mic page's slider steps 1 dB too.
+pub(crate) fn set_leveler_target(h: &ShmHeader, slider: f32) {
+  let db = loudness_db(slider).round();
+  h.mic_leveler_target_db_x10.store((db * 10.0) as i32, Ordering::Relaxed);
 }
 
 /// ChatMix's balance (-1 = all game .. 1 = all chat) at slider position `slider` (0..1).

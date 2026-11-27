@@ -13,8 +13,12 @@ use std::sync::atomic::Ordering;
 const FILE: &str = "audio_settings.json";
 /// Windows mic volume counts as "at 100 %" from here: the saved digital boost applies on top.
 const MIC_FULL: f32 = 0.995;
-/// Windows mic volumes this close (permille) are the same level (the slider rounds).
-const MIC_SAME_PERMILLE: u32 = 15;
+/// Keys the service writes on its own (`read_key` / `write_key`), outside `AudioSettings`: the
+/// struct is rebuilt from shared memory, which does not hold them, and a save keeps keys it lacks.
+const VOLUME_APPS_KEY: &str = "mic_volume_apps";
+const SENSITIVITY_KEY: &str = "mic_sensitivity_permille";
+/// Recordings in which an app moved the mic volume back and forth before it is on the list.
+pub const VOLUME_APP_LISTED: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -39,10 +43,6 @@ pub struct AudioSettings {
   pub mic_device_picked: bool,
   pub mic_leveler_enabled: bool,
   pub mic_leveler_target_db_x10: i32,
-  /// Windows mic volume the automatic input gain set, and the volume the user/app wants
-  /// (`mic_volume_permille`, may be > 1000) at that time; 0 = no automatic level.
-  pub mic_auto_gain_permille: u32,
-  pub mic_auto_wish_permille: u32,
   pub sidetone_low_latency: bool,
   /// Automatic ChatMix, and how far the voice should stand out from the game (1000 = about 4x).
   pub duck_enabled: bool,
@@ -118,8 +118,6 @@ impl AudioSettings {
       mic_device_picked: h.get_selected_mic_id().is_some(),
       mic_leveler_enabled: h.mic_leveler_enabled.load(r),
       mic_leveler_target_db_x10: h.mic_leveler_target_db_x10.load(r),
-      mic_auto_gain_permille: h.mic_auto_gain_permille.load(r),
-      mic_auto_wish_permille: if h.mic_auto_gain_permille.load(r) > 0 { h.mic_volume_permille.load(r) } else { 0 },
       sidetone_low_latency: h.sidetone_low_latency.load(r),
       duck_enabled: h.duck_enabled.load(r),
       duck_strength_permille: h.duck_strength_permille.load(r),
@@ -149,12 +147,6 @@ impl AudioSettings {
     if self.mic_boost_permille > 1000 && h.mic_volume_permille.load(r) as f32 / 1000.0 >= MIC_FULL {
       h.mic_volume_permille.store(self.mic_boost_permille, r);
     }
-    // Windows still shows the automatic level: the wish behind it comes back too.
-    let auto = self.mic_auto_gain_permille;
-    if auto > 0 && h.mic_volume_permille.load(r).abs_diff(auto) <= MIC_SAME_PERMILLE {
-      h.mic_volume_permille.store(self.mic_auto_wish_permille, r);
-      h.mic_auto_gain_permille.store(auto, r);
-    }
     if let Some(id) = self.mic_device_id.as_ref().filter(|_| self.mic_device_picked) {
       h.set_selected_mic_id(id);
     }
@@ -164,8 +156,8 @@ impl AudioSettings {
 /// Take the mixer from shared memory (saved or current values) into a fresh controller, whose
 /// channels otherwise start at 100 %. Channels on their own endpoint keep the Windows volume.
 /// `service_runs`: a window starting next to the running service (`daemon_active`), which owns
-/// the mic in use: its mic wish (and automatic level) are taken as they are. Not at the service's
-/// own start, where the mapping may hold only the default capture device's volume.
+/// the mic in use: its mic volume is taken as it is. Not at the service's own start, where the
+/// mapping may hold only the default capture device's volume.
 pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_runs: bool) {
   let r = Ordering::Relaxed;
   let level = |a: &std::sync::atomic::AtomicU32| a.load(r) as f32 / 1000.0;
@@ -182,21 +174,116 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_run
     chatmix.media.muted = h.media_muted.load(r);
   }
   chatmix.balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
-  let auto = h.mic_auto_gain_permille.load(r);
   let mic = level(&h.mic_volume_permille);
   if service_runs {
     // The window read its own guess of the mic (maybe the default capture device, not the mic
     // in use): writing that back moved the headset from 53 % to 40 % at window start.
     chatmix.mic.volume = mic;
     chatmix.mic.applied_volume = mic.min(1.0);
-    chatmix.mic_hw_auto = (auto > 0).then_some(auto as f32 / 1000.0);
     return;
-  }
-  if auto > 0 {
-    chatmix.adopt_mic_auto(mic, auto as f32 / 1000.0);
   }
   if mic > 1.0 && chatmix.mic.volume >= MIC_FULL {
     chatmix.mic.volume = mic;
+  }
+}
+
+/// An app that moved the Windows mic volume back and forth during a recording (its own automatic
+/// gain control): from `VOLUME_APP_LISTED` recordings on, the voice leveler holds while it records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VolumeApp {
+  /// As `mic_usage::recording_apps` names it (`Zoom.exe`, `MSTeams`).
+  pub app: String,
+  pub recordings: u32,
+  /// Local date of the last one, `YYYY-MM-DD`.
+  pub date: String,
+  /// Fields a newer version added.
+  #[serde(flatten)]
+  pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl VolumeApp {
+  pub fn listed(&self) -> bool {
+    self.recordings >= VOLUME_APP_LISTED
+  }
+}
+
+/// The apps of `VolumeApp`, noted or listed. Missing or unreadable: none.
+pub fn volume_apps(dir: &Path) -> Vec<VolumeApp> {
+  read_key(dir, VOLUME_APPS_KEY).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+}
+
+/// One more recording in which `app` moved the mic volume back and forth; its count afterwards.
+pub fn note_volume_app(dir: &Path, app: &str) -> u32 {
+  let mut apps = volume_apps(dir);
+  let date = jiff::ZonedDateTime::now().strftime("%Y-%m-%d").to_string();
+  let recordings = match apps.iter_mut().find(|a| a.app.eq_ignore_ascii_case(app)) {
+    Some(a) => {
+      (a.recordings, a.date) = (a.recordings.saturating_add(1), date);
+      a.recordings
+    }
+    None => {
+      apps.push(VolumeApp { app: app.to_string(), recordings: 1, date, extra: Default::default() });
+      1
+    }
+  };
+  write_volume_apps(dir, &apps);
+  recordings
+}
+
+/// The user removed `app` from the list: it starts from nothing again.
+pub fn remove_volume_app(dir: &Path, app: &str) {
+  let mut apps = volume_apps(dir);
+  apps.retain(|a| !a.app.eq_ignore_ascii_case(app));
+  write_volume_apps(dir, &apps);
+}
+
+fn write_volume_apps(dir: &Path, apps: &[VolumeApp]) {
+  match serde_json::to_value(apps) {
+    Ok(v) => write_key(dir, VOLUME_APPS_KEY, v),
+    Err(e) => log::warn!("[AudioSettings] could not save the mic volume apps: {e}"),
+  }
+}
+
+/// Windows mic volume (permille) `mic_id` had when the voice leveler was switched off last.
+pub fn mic_sensitivity(dir: &Path, mic_id: &str) -> Option<u32> {
+  read_key(dir, SENSITIVITY_KEY)?.get(mic_id)?.as_u64().and_then(|v| u32::try_from(v).ok())
+}
+
+pub fn set_mic_sensitivity(dir: &Path, mic_id: &str, permille: u32) {
+  let mut all = read_key(dir, SENSITIVITY_KEY).filter(|v| v.is_object()).unwrap_or_else(|| serde_json::json!({}));
+  if let Some(map) = all.as_object_mut() {
+    map.insert(mic_id.to_string(), permille.into());
+  }
+  write_key(dir, SENSITIVITY_KEY, all);
+}
+
+fn read_key(dir: &Path, key: &str) -> Option<serde_json::Value> {
+  let bytes = std::fs::read(dir.join(FILE)).ok()?;
+  serde_json::from_slice::<serde_json::Value>(&bytes).ok()?.get_mut(key).map(serde_json::Value::take)
+}
+
+/// Sets one key, the rest of the file as it is. A corrupt file is kept aside first, as a load does.
+/// shortcut: read-modify-write without a lock, so a window saving `AudioSettings` at the same
+/// moment can drop this write (the service learns it again); a lock file would close that.
+fn write_key(dir: &Path, key: &str, value: serde_json::Value) {
+  let path = dir.join(FILE);
+  let mut all = match std::fs::read(&path) {
+    Ok(bytes) => {
+      serde_json::from_slice::<serde_json::Value>(&bytes).ok().filter(|v| v.is_object()).unwrap_or_else(|| {
+        log::warn!("[AudioSettings] {} is corrupt, kept aside", path.display());
+        crate::output_eq::settings::keep_corrupt(&path);
+        serde_json::json!({})
+      })
+    }
+    Err(_) => serde_json::json!({}),
+  };
+  if let Some(map) = all.as_object_mut() {
+    map.insert(key.to_string(), value);
+  }
+  let result =
+    serde_json::to_string_pretty(&all).map_err(std::io::Error::other).and_then(|json| write_atomic(&path, &json));
+  if let Err(e) = result {
+    log::warn!("[AudioSettings] could not save {key} in {}: {e}", path.display());
   }
 }
 
@@ -204,6 +291,38 @@ pub fn restore_mixer(h: &ShmHeader, chatmix: &mut ChatMixController, service_run
 mod tests {
   use super::*;
   use gamersequalizer_common::shm::DenoiseModel;
+
+  #[test]
+  fn the_volume_app_list_lives_beside_the_settings() {
+    let dir = std::env::temp_dir().join(format!("ge_audio_settings_volume_apps_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // A file from before the list: no apps, and its keys stay.
+    std::fs::write(dir.join(FILE), r#"{"aec_enabled": false}"#).unwrap();
+    assert!(volume_apps(&dir).is_empty());
+    assert_eq!(note_volume_app(&dir, "MSTeams"), 1);
+    assert!(!volume_apps(&dir)[0].listed(), "the first recording only notes it");
+    assert_eq!(note_volume_app(&dir, "msteams"), 2);
+    assert!(volume_apps(&dir)[0].listed());
+    assert!(!AudioSettings::load_or_default(&dir).aec_enabled);
+    // A settings save (rebuilt from shared memory, without the list) keeps it.
+    AudioSettings::from_header(&ShmHeader::default()).save(&dir);
+    assert_eq!(volume_apps(&dir).len(), 1);
+    // A field a newer version added to an entry survives a write.
+    let text = std::fs::read_to_string(dir.join(FILE))
+      .unwrap()
+      .replace(r#""recordings": 2"#, r#""recordings": 2, "why": "agc""#);
+    std::fs::write(dir.join(FILE), text).unwrap();
+    note_volume_app(&dir, "Zoom.exe");
+    assert!(std::fs::read_to_string(dir.join(FILE)).unwrap().contains(r#""why": "agc""#));
+    remove_volume_app(&dir, "MSTeams");
+    assert_eq!(volume_apps(&dir).iter().map(|a| a.app.as_str()).collect::<Vec<_>>(), ["Zoom.exe"]);
+    // The sensitivity per mic, beside it.
+    set_mic_sensitivity(&dir, "{mic-1}", 620);
+    set_mic_sensitivity(&dir, "{mic-2}", 400);
+    assert_eq!((mic_sensitivity(&dir, "{mic-1}"), mic_sensitivity(&dir, "{mic-3}")), (Some(620), None));
+    assert_eq!(volume_apps(&dir).len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
 
   #[test]
   fn a_key_from_a_newer_version_survives_a_save() {
@@ -281,7 +400,7 @@ mod tests {
     let mut window = ChatMixController::new();
     (window.mic_device_id, window.mic.volume) = (Some("{headset}".into()), 0.40);
     restore_mixer(&h, &mut window, true);
-    assert_eq!((window.mic.volume, window.mic.applied_volume, window.mic_hw_auto), (0.53, 0.53, None));
+    assert_eq!((window.mic.volume, window.mic.applied_volume), (0.53, 0.53));
     // A re-bind with the same mic (first frame, replug) does not re-read and undo the wish.
     assert!(!window.use_mic(window.mic_device_id.clone()));
     assert_eq!((window.mic.volume, window.mic.applied_volume), (0.53, 0.53));

@@ -23,6 +23,7 @@ pub(super) struct MicSettings {
   pub(super) leveler_target_x10: i32,
   pub(super) leveler_reset_seq: u32,
   pub(super) leveler_saved_x10: i32,
+  pub(super) leveler_hold: bool,
 }
 
 impl MicSettings {
@@ -44,6 +45,7 @@ impl MicSettings {
         leveler_target_x10: MIC_LEVELER_DEFAULT_TARGET_DB_X10,
         leveler_reset_seq: 0,
         leveler_saved_x10: 0,
+        leveler_hold: false,
       };
     };
     let relaxed = Ordering::Relaxed;
@@ -65,6 +67,7 @@ impl MicSettings {
       leveler_target_x10: h.mic_leveler_target_db_x10.load(relaxed),
       leveler_reset_seq: h.mic_leveler_reset_seq.load(relaxed),
       leveler_saved_x10: h.mic_leveler_saved_level_db_x10.load(relaxed),
+      leveler_hold: h.mic_leveler_hold.load(relaxed),
     }
   }
 }

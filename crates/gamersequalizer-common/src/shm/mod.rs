@@ -25,12 +25,12 @@ pub use reference_ring::{ShmRingBuffer, StereoFrame};
 /// build keeps its own mapping instead of both reading each other's memory with different layouts.
 macro_rules! shm_version {
   () => {
-    24
+    25
   };
 }
 pub const SHM_VERSION: u32 = shm_version!();
 /// Size of `ShmLayout` at `SHM_VERSION`.
-const SHM_LAYOUT_SIZE: usize = 1_260_680;
+const SHM_LAYOUT_SIZE: usize = 1_260_688;
 const _: () = assert!(size_of::<ShmLayout>() == SHM_LAYOUT_SIZE, "layout changed: bump shm_version! and the size");
 pub const SHM_NAME: &str = concat!("Local\\GamersEqualizer_SpeakerRef_Buffer_v", shm_version!());
 /// Mapping created by the capture APO inside audiodg (session 0, so it must be Global; only

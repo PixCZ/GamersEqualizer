@@ -83,13 +83,6 @@ fn flyout_channels(h: &ShmHeader) -> Vec<(crate::flyout::MixChannel, crate::flyo
   ]
 }
 
-/// The leveler's target from the flyout row's slider, in whole dB: a wheel notch moves it less than
-/// the label's precision and the Mic page's slider steps 1 dB too.
-fn set_leveler_target(h: &ShmHeader, slider: f32) {
-  let db = crate::flyout::loudness_db(slider).round();
-  h.mic_leveler_target_db_x10.store((db * 10.0) as i32, Ordering::Relaxed);
-}
-
 /// A channel row of the tray flyout moved: what the window's slider does, with the window open or
 /// closed. The other channels start from the header (the window may have moved one since this
 /// loop read it), so the window, adopting all four, loses nothing. The service's own loop then
@@ -108,7 +101,12 @@ fn set_channel(
   (mix.game.volume, mix.game.muted) = (level(&h.game_volume_permille), h.game_muted.load(r));
   (mix.chat.volume, mix.chat.muted) = (level(&h.chat_volume_permille), h.chat_muted.load(r));
   (mix.media.volume, mix.media.muted) = (level(&h.media_volume_permille), h.media_muted.load(r));
-  (mix.mic.volume, mix.mic.muted) = (level(&h.mic_volume_permille), h.mic_muted.load(r));
+  // With the leveler on the mic's volume is the Windows one (`sync_mic`): the header's copy may be
+  // older, and `apply_mix` would set it back over an app's or the automatic gain's move.
+  if !h.mic_leveler_enabled.load(r) {
+    mix.mic.volume = level(&h.mic_volume_permille);
+  }
+  mix.mic.muted = h.mic_muted.load(r);
   mix.balance = h.chatmix_balance_permille.load(r) as f32 / 1000.0;
   debug!("[Flyout] {channel:?} at {:.0} %, muted {muted}", volume * 100.0);
   // A row read before the leveler or Automatic ChatMix was switched means another control now.
@@ -124,7 +122,7 @@ fn set_channel(
     MixChannel::Mic => (&mut mix.mic, &h.mic_volume_permille, &h.mic_muted),
     MixChannel::MicLoudness => {
       if let Some(v) = volume {
-        set_leveler_target(h, v);
+        crate::flyout::set_leveler_target(h, v);
       }
       // The mic's own volume stays; only its mute follows the row's icon.
       mix.mic.muted = muted;
@@ -260,6 +258,8 @@ pub(super) fn run_background_daemon() {
   let mut idle = false;
   // Windows mic volume as the leveler's input gain, stepped at the extremes only.
   let mut mic_gain = win_audio::mic_gain::MicGainLink::default();
+  // Who moved the mic volume; holds the leveler while an app's own gain control moves it.
+  let mut mic_hold = win_audio::mic_hold::MicHoldLink::default();
   // Debug lines for every leveler change and its reason (written only with "save debug" on).
   let mut leveler_log = win_audio::leveler_log::LevelerLog::default();
   // Debug lines for the whole mic chain: switches, devices, volumes, a 10 s summary.
@@ -389,9 +389,8 @@ pub(super) fn run_background_daemon() {
         let wanted = picked.or_else(win_audio::ChatMixController::find_physical_microphone);
         if wanted.is_some() && wanted != win_audio.chatmix.mic_device_id {
           info!("[GamersEqualizer] microphone now {:?}", wanted);
-          // The old mic gets its own wish back before `use_mic` loads the new one's volume.
-          let old = win_audio.chatmix.mic_device_id.clone();
-          mic_gain.switch_mic(&mut win_audio.chatmix, old.as_deref());
+          mic_gain.switch_mic(&mut win_audio.chatmix);
+          mic_hold.switch_mic();
           win_audio.chatmix.use_mic(wanted);
         }
       }
@@ -429,10 +428,14 @@ pub(super) fn run_background_daemon() {
       let mic_link_due = win_audio::worker::due(last_mic_link.map(|t| t.elapsed()), VOLUME_SYNC_INTERVAL);
       if mic_link_due {
         last_mic_link = Some(Instant::now());
-        // The wish (may be a boost > 100 %) is what the window wrote; Windows only shows <= 100 %.
-        win_audio.chatmix.mic.volume = header.mic_volume_permille.load(Ordering::Relaxed) as f32 / 1000.0;
+        // Leveler off: the wish (may be a boost > 100 %) is what the window wrote; Windows only
+        // shows <= 100 %. Leveler on: the Windows volume (`sync_mic`), the window's copy may be older.
+        if !header.mic_leveler_enabled.load(Ordering::Relaxed) {
+          win_audio.chatmix.mic.volume = header.mic_volume_permille.load(Ordering::Relaxed) as f32 / 1000.0;
+        }
       }
-      if volume_sync_due(last_volume_sync.map(|t| t.elapsed()), idle) {
+      let synced = volume_sync_due(last_volume_sync.map(|t| t.elapsed()), idle);
+      if synced {
         last_volume_sync = Some(Instant::now());
         if timed!(sections, "sync_from_system", win_audio.chatmix.sync_from_system()) {
           timed!(sections, "write_levels", win_audio.chatmix.write_levels(header));
@@ -440,10 +443,21 @@ pub(super) fn run_background_daemon() {
       }
       if mic_link_due {
         let mic_id = win_audio.chatmix.mic_device_id.clone();
-        if timed!(sections, "mic_gain", mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref())) {
-          audio_settings_saved
-            .save_if_changed(ui::audio_settings::AudioSettings::from_header(header), storage.base_dir());
+        // The mic's volume at the link's pace also while the full sync above waits (idle).
+        if !synced && timed!(sections, "sync_mic", win_audio.chatmix.sync_mic()) {
+          timed!(sections, "write_levels", win_audio.chatmix.write_levels(header));
         }
+        let foreground = || win_audio.game_detector.as_ref().and_then(|d| d.current()).map(|e| e.exe_name);
+        timed!(
+          sections,
+          "mic_hold",
+          mic_hold.tick(header, &mut win_audio.chatmix, mic_id.as_deref(), foreground, storage.base_dir())
+        );
+        timed!(
+          sections,
+          "mic_gain",
+          mic_gain.tick(header, &mut win_audio.chatmix, mic_id.as_deref(), storage.base_dir())
+        );
         timed!(sections, "leveler_log", leveler_log.tick(header));
         timed!(
           sections,
@@ -582,7 +596,7 @@ mod tests {
     let h = ShmHeader::default();
     // (slider, target x10): -36..-12 dBFS over 0..1; a wheel notch (0.02 = 0.48 dB) lands on a whole dB.
     for (slider, target_x10) in [(0.75, -180), (0.52, -240), (0.0, -360), (2.0, -120), (-1.0, -360)] {
-      set_leveler_target(&h, slider);
+      crate::flyout::set_leveler_target(&h, slider);
       assert_eq!(h.mic_leveler_target_db_x10.load(Ordering::Relaxed), target_x10, "slider {slider}");
     }
   }

@@ -14,9 +14,11 @@
 //! +6 dB worth of volume the voice is ~6 dB louder, far from the edge that triggered it.
 
 use super::chatmix::{ChatMixController, get_endpoint_volume_db};
+use crate::ui::audio_settings::{mic_sensitivity, set_mic_sensitivity};
 use gamersequalizer_common::shm::ShmHeader;
 use gamersequalizer_mic_chain::voice_leveler::MAX_BOOST_DB;
 use log::info;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -186,33 +188,30 @@ impl AutoInputGain {
   }
 }
 
-/// Daemon side: once per volume sync (~250 ms), after `ChatMixController::sync_from_system`.
+/// Daemon side: once per mic tick (~250 ms), after `ChatMixController::sync_mic`.
 #[derive(Debug, Default)]
 pub struct MicGainLink {
   auto: AutoInputGain,
-  /// Wish (`mic_volume_permille`) seen last tick: the window writes it when the user moves its slider.
-  wish_seen: Option<u32>,
+  /// The voice leveler was on at the last tick (None before the first): switching it off
+  /// remembers the mic's input sensitivity, switching it on gives it back.
+  leveler_was_on: Option<bool>,
 }
 
 impl MicGainLink {
   /// Publishes the input gain (dB) for the leveler and takes an automatic step when one is due.
-  /// Returns true when the automatic level changed (the caller saves the settings).
-  pub fn tick(&mut self, h: &ShmHeader, chatmix: &mut ChatMixController, mic_id: Option<&str>) -> bool {
+  /// Nothing moves while the leveler is held (`mic_hold`): an app's own gain control has the volume.
+  pub fn tick(&mut self, h: &ShmHeader, chatmix: &mut ChatMixController, mic_id: Option<&str>, dir: &Path) {
     let r = Ordering::Relaxed;
-    let wish = h.mic_volume_permille.load(r);
-    if self.wish_seen.is_some_and(|w| w != wish) {
-      chatmix.mic_changed_at = Some(Instant::now());
-    }
-    self.wish_seen = Some(wish);
-    let before = chatmix.mic_hw_auto;
     let Some((id, (db, hardware))) = mic_id.and_then(|id| Some((id, get_endpoint_volume_db(id)?))) else {
-      return false;
+      return;
     };
     h.mic_input_gain_db_x10.store((db * 10.0).round() as i32, r);
+    let leveler = h.mic_leveler_enabled.load(r);
+    self.follow_leveler_switch(leveler, chatmix, id, dir);
 
     // Only a volume the device applies itself helps against clipping or noise; a software volume
     // just scales after the converter (the leveler does that already).
-    let on = hardware && h.mic_leveler_enabled.load(r) && !h.master_bypass.load(r) && !chatmix.mic.muted;
+    let on = hardware && leveler && !h.master_bypass.load(r) && !chatmix.mic.muted && !h.mic_leveler_hold.load(r);
     if on {
       // Learned without the Windows volume; 0 = nothing learned yet.
       let level_x10 = h.mic_leveler_level_db_x10.load(r);
@@ -223,7 +222,7 @@ impl MicGainLink {
         voice_db: (level_x10 != 0).then(|| level_x10 as f32 / 10.0 + db),
         // Within 1 dB: the applied gain ramps towards the cap and is published rounded.
         boost_capped: h.mic_leveler_gain_db_x10.load(r) as f32 / 10.0 >= MAX_BOOST_DB - 1.0,
-        level: chatmix.mic_hw_auto.unwrap_or(chatmix.mic.volume.min(1.0)),
+        level: chatmix.mic.volume.min(1.0),
         changed_at: chatmix.mic_changed_at,
       };
       let stopped = self.auto.stopped();
@@ -237,27 +236,42 @@ impl MicGainLink {
       if let Some(level) = step {
         let voice = input.voice_db.map_or("not learned yet".to_string(), |v| format!("{v:.1} dBFS"));
         info!("[MicGain] Windows mic volume {:.0} % -> {:.0} % (voice {voice})", input.level * 100.0, level * 100.0);
-        chatmix.set_mic_hw_auto(id, level);
+        chatmix.set_mic_level(id, level);
+        chatmix.mic_auto_level = Some(level);
       }
     } else {
       self.auto.reset();
-      if chatmix.mic_hw_auto.is_some() {
-        info!("[MicGain] off: Windows mic volume back to {:.0} %", chatmix.mic.volume.min(1.0) * 100.0);
-        chatmix.clear_mic_hw_auto(id);
-      }
     }
-    let auto = chatmix.mic_hw_auto.map_or(0, |l| (l * 1000.0).round() as u32);
+    let auto = chatmix.mic_auto_level.map_or(0, |l| (l * 1000.0).round() as u32);
     h.mic_auto_gain_permille.store(auto, r);
-    chatmix.mic_hw_auto != before
   }
 
-  /// The mic changes: its old device gets the wished volume back first.
-  pub fn switch_mic(&mut self, chatmix: &mut ChatMixController, old_id: Option<&str>) {
-    if let Some(id) = old_id {
-      chatmix.clear_mic_hw_auto(id);
+  /// The mic changes: another converter, with its own clip ceiling.
+  pub fn switch_mic(&mut self, chatmix: &mut ChatMixController) {
+    chatmix.mic_auto_level = None;
+    self.auto = AutoInputGain::default();
+  }
+
+  /// With the leveler off the mic slider is the Windows volume again and may end anywhere: the
+  /// sensitivity it had is kept per mic and comes back when the leveler does.
+  fn follow_leveler_switch(&mut self, on: bool, chatmix: &mut ChatMixController, id: &str, dir: &Path) {
+    match (self.leveler_was_on.replace(on), on) {
+      (Some(true), false) => {
+        let level = chatmix.mic.volume.min(1.0);
+        info!("[MicGain] voice leveler off: input sensitivity {:.0} % kept for this mic", level * 100.0);
+        set_mic_sensitivity(dir, id, (level * 1000.0).round() as u32);
+      }
+      (Some(false), true) => {
+        let Some(level) = mic_sensitivity(dir, id).map(|p| (p as f32 / 1000.0).clamp(0.0, 1.0)) else {
+          return;
+        };
+        if (level - chatmix.mic.volume.min(1.0)).abs() > 0.015 {
+          info!("[MicGain] voice leveler on: input sensitivity back to {:.0} %", level * 100.0);
+          chatmix.set_mic_level(id, level);
+        }
+      }
+      _ => {}
     }
-    chatmix.mic_hw_auto = None;
-    self.auto = AutoInputGain::default(); // another converter: its own clip ceiling
   }
 }
 

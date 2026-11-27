@@ -36,6 +36,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Registry",
     # Console session check (`console_owner.rs`).
     "Win32_System_RemoteDesktop",
+    # GetTickCount, the clock of GetLastInputInfo (`win_audio/mic_hold.rs`).
+    "Win32_System_SystemInformation",
     "Win32_Storage_FileSystem",
     # A packaged app's ID, for its logo in the tray flyout (`flyout.rs`).
     "Win32_Storage_Packaging_Appx",

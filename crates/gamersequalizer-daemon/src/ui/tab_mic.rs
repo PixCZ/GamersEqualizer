@@ -1,6 +1,7 @@
 use super::state::{AecTelemetry, AppState, DenoiseStatus};
 use super::theme::{self, Severity, icons};
 use crate::i18n::{tk, tr, trf};
+use crate::ui::audio_settings::{VolumeApp, volume_apps};
 use crate::win_audio::WinAudioSystem;
 use egui::{Color32, RichText, Stroke, Ui};
 use egui_plot::{HLine, Legend, Line, Plot, PlotPoints, VLine};
@@ -11,8 +12,11 @@ use gamersequalizer_common::shm::{
 use gamersequalizer_mic_chain::ai_denoiser::AiVoiceIsolator;
 use gamersequalizer_mic_chain::delay_estimator::{FULL_SCALE_PEAK_RATIO, MIN_PEAK_RATIO};
 use gamersequalizer_mic_chain::voice_leveler::{DEFAULT_TARGET_DB, MAX_TARGET_DB, MIN_TARGET_DB};
+use std::cell::RefCell;
+use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 pub(super) const ACCENT: Color32 = Color32::from_rgb(247, 127, 0);
 const AEC_COLOR: Color32 = Color32::from_rgb(0, 200, 255);
@@ -33,6 +37,8 @@ const AEC_PLOT_HEIGHT: f32 = 120.0;
 const AEC_Y_AXIS_WIDTH: f32 = 30.0;
 /// Clipping this recent is shown as a warning.
 const CLIP_RECENT_SECS: f64 = 60.0;
+/// How often the list of apps the leveler holds for is read again (the service adds to it).
+const VOLUME_APPS_REFRESH: Duration = Duration::from_secs(2);
 
 pub fn render_tab_mic(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSystem) {
   egui::ScrollArea::vertical().id_salt("mic_page").auto_shrink([false, false]).show(ui, |ui| {
@@ -135,6 +141,7 @@ fn leveler_section(ui: &mut Ui, state: &mut AppState) {
       });
       ui.end_row();
     });
+    volume_apps_part(ui, state, h.mic_leveler_hold.load(Ordering::Relaxed));
   });
 }
 
@@ -226,24 +233,93 @@ fn input_section(ui: &mut Ui, state: &mut AppState, win_audio: &mut WinAudioSyst
       ui.end_row();
     });
 
-    let r = Ordering::Relaxed;
-    let leveler = state.shm_header().map(|h| (h.mic_leveler_enabled.load(r), h.mic_auto_gain_permille.load(r)));
-    let caption = match leveler {
-      Some((true, _)) => tr(
-        "With the voice leveler enabled, this is only the mic's input sensitivity: the leveler evens it out, so others hear you at the leveler's target whatever this is set to. The app lowers or raises it on its own when the mic clips or is too quiet.",
-      ),
-      _ => {
-        tr("0 %–100 % adjusts the Windows input level. 100 %–300 % adds a soft-limited digital boost up to +9.5 dB.")
-      }
+    let caption = if state.shm_header().is_some_and(|h| h.mic_leveler_enabled.load(Ordering::Relaxed)) {
+      tr(
+        "With the voice leveler enabled, this is only the mic's input sensitivity: others hear you at the leveler's target whatever it is set to. It still matters: set too high, the mic picks up more background noise, clips or sounds harsh (often at 100 %), so lower it; set too low, your voice drowns in the mic's own hiss. The app lowers it on its own when the mic clips, and adjusts it when your voice stays too quiet or too loud.",
+      )
+    } else {
+      tr("0 %–100 % adjusts the Windows input level. 100 %–300 % adds a soft-limited digital boost up to +9.5 dB.")
     };
     ui.label(theme::caption(caption));
-    if let Some((true, auto)) = leveler.filter(|&(_, auto)| auto > 0) {
-      ui.label(theme::caption(trf(
-        "Windows input level set automatically: {} %",
-        &[&format!("{:.0}", auto as f32 / 10.0)],
-      )));
+  });
+}
+
+/// While an app's own gain control moves the mic volume, the leveler holds (`win_audio::mic_hold`):
+/// who it is, and the apps it holds for from the start, with what to switch off in them.
+fn volume_apps_part(ui: &mut Ui, state: &AppState, held: bool) {
+  let dir = state.storage.base_dir();
+  let listed = listed_volume_apps(dir, false);
+  if held {
+    let recording = super::tab_mixer::recording_apps_cached();
+    let app = listed.iter().map(|a| &a.app).find(|a| recording.iter().any(|r| r.eq_ignore_ascii_case(a)));
+    let text = match (app, recording.as_slice()) {
+      (Some(app), _) | (None, [app]) => {
+        trf("Voice leveler is holding: {} controls the mic volume itself. It resumes when the call ends.", &[app])
+      }
+      (None, apps) => trf(
+        "Voice leveler is holding: one of {} controls the mic volume itself. It resumes when they stop recording.",
+        &[&apps.join(", ")],
+      ),
+    };
+    theme::status_line(ui, Severity::Info, &text);
+  }
+  if listed.is_empty() {
+    return;
+  }
+  ui.add_space(8.0);
+  ui.label(theme::strong(tr("Apps that control the mic volume themselves"), 14.0));
+  ui.label(theme::caption(tr(
+    "They moved the mic volume back and forth in two calls. While one of them records, the voice leveler holds the gain learned for your voice and stops evening out the input. Switch off the app's automatic mic volume and remove it here, and the leveler works fully with it again.",
+  )));
+  let mut removed = None;
+  theme::inset_frame(ui).show(ui, |ui| {
+    for app in &listed {
+      ui.horizontal(|ui| {
+        ui.label(app.app.as_str());
+        ui.label(theme::caption(&app.date));
+        if ui.button(tr("Remove")).clicked() {
+          removed = Some(app.app.clone());
+        }
+      });
+      if let Some(tip) = volume_app_tip(&app.app) {
+        ui.label(theme::caption(tip));
+      }
     }
   });
+  if let Some(app) = removed {
+    crate::ui::audio_settings::remove_volume_app(dir, &app);
+    listed_volume_apps(dir, true);
+  }
+}
+
+/// What to switch off in apps whose own mic gain control is known (`docs/mic-app-volume-analysis.md`).
+fn volume_app_tip(app: &str) -> Option<&'static str> {
+  let app = app.to_ascii_lowercase();
+  if app.contains("teams") {
+    Some(tr("In Teams: Settings → Devices, switch off \"Automatically adjust mic sensitivity\"."))
+  } else if app.contains("zoom") {
+    Some(tr("In Zoom: Settings → Audio, untick \"Automatically adjust microphone volume\"."))
+  } else if app.contains("skype") {
+    Some(tr(
+      "In Skype: Settings → Audio & Video, switch off \"Automatically adjust microphone settings\" (Skype is reported to move the volume even then: keep it on the list if it does).",
+    ))
+  } else {
+    None
+  }
+}
+
+/// The listed apps, re-read at most every `VOLUME_APPS_REFRESH` or when `fresh` (a file read; the
+/// page repaints every frame; UI thread only).
+fn listed_volume_apps(dir: &Path, fresh: bool) -> Vec<VolumeApp> {
+  thread_local! {
+    static CACHE: RefCell<Option<(Instant, Vec<VolumeApp>)>> = const { RefCell::new(None) };
+  }
+  CACHE.with_borrow_mut(|cache| {
+    if fresh || cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= VOLUME_APPS_REFRESH) {
+      *cache = Some((Instant::now(), volume_apps(dir).into_iter().filter(VolumeApp::listed).collect()));
+    }
+    cache.as_ref().map(|(_, apps)| apps.clone()).unwrap_or_default()
+  })
 }
 
 /// Shows whether the raw mic clipped recently (DSP counter: full-scale samples and flat tops).

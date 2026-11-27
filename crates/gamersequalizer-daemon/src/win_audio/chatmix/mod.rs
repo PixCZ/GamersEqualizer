@@ -77,7 +77,8 @@ pub struct ChatMixController {
   pub game: Channel,
   pub chat: Channel,
   pub media: Channel,
-  /// `volume` is the wish and may be a boost above 100 %; Windows gets at most 100 %.
+  /// Leveler off: `volume` is the wish and may be a boost above 100 %; Windows gets at most 100 %.
+  /// Leveler on: the Windows volume, which is only the input sensitivity there.
   pub mic: Channel,
 
   // Dedicated hardware or virtual endpoints for channels
@@ -87,9 +88,10 @@ pub struct ChatMixController {
   pub media_device_id: Option<String>,
   pub mic_device_id: Option<String>,
   pub mic_peak_level: f32,
-  /// Windows mic volume the automatic input gain set (`mic.volume` stays what the user or an app
-  /// asked for). Seeing exactly this level in Windows is ours, anything else is someone's wish.
-  pub mic_hw_auto: Option<f32>,
+  /// Windows mic volume the automatic input gain set last, until someone else moves it (logs).
+  pub mic_auto_level: Option<f32>,
+  /// Mic volume before someone else last moved it (`sync_mic`), until the service takes it.
+  pub mic_moved_from: Option<f32>,
   /// When someone else (user, app) last changed the mic volume: the automatic gain waits.
   pub mic_changed_at: Option<Instant>,
 
@@ -186,7 +188,8 @@ impl ChatMixController {
       media_device_id: None,
       mic_device_id: None,
       mic_peak_level: 0.0,
-      mic_hw_auto: None,
+      mic_auto_level: None,
+      mic_moved_from: None,
       mic_changed_at: None,
       sessions_enabled: true,
       session_set: HashMap::new(),
@@ -346,21 +349,7 @@ impl ChatMixController {
       }
     }
 
-    // MIC: Sync with the mic in use only; without one there is nothing to follow (the
-    // default capture device may be another mic, whose volume is not this one's wish).
-    let mic_vol_opt = self.mic_device_id.as_deref().and_then(get_endpoint_volume);
-    if let Some((sys_mic_vol, sys_mic_muted)) = mic_vol_opt {
-      let expected = self.mic_hw_auto.unwrap_or(self.mic.volume.min(1.0));
-      if (sys_mic_vol - expected).abs() > 0.015 {
-        // Someone else moved it: that is the volume they want, the automatic gain steps back.
-        self.mic.volume = sys_mic_vol;
-        self.mic.applied_volume = sys_mic_vol;
-        self.mic_hw_auto = None;
-        self.mic_changed_at = Some(Instant::now());
-        changed = true;
-      }
-      changed |= self.mic.follow_mute(sys_mic_muted);
-    }
+    changed |= self.sync_mic();
 
     // MIC PEAK: Read instantaneous audio peak level from physical mic
     let peak_opt = if let Some(ref id) = self.mic_device_id { get_endpoint_peak(id) } else { get_system_mic_peak() };
@@ -377,29 +366,30 @@ impl ChatMixController {
     changed
   }
 
-  /// The automatic input gain sets the Windows mic volume to `level` (the wish stays).
-  pub fn set_mic_hw_auto(&mut self, device_id: &str, level: f32) {
+  /// Follows the Windows volume of the mic in use only; without one there is nothing to follow
+  /// (the default capture device may be another mic). A move by someone else becomes the mic's
+  /// volume, and its level before waits in `mic_moved_from` (`mic_hold` asks who moved it). True
+  /// if anything changed. The only place the mic's Windows volume is read, so no move is missed.
+  pub fn sync_mic(&mut self) -> bool {
+    let Some((volume, muted)) = self.mic_device_id.as_deref().and_then(get_endpoint_volume) else {
+      return false;
+    };
+    let before = self.mic.volume.min(1.0);
+    let moved = (volume - before).abs() > 0.015;
+    if moved {
+      (self.mic.volume, self.mic.applied_volume) = (volume, volume);
+      self.mic_auto_level = None;
+      self.mic_changed_at = Some(Instant::now());
+      self.mic_moved_from.get_or_insert(before);
+    }
+    self.mic.follow_mute(muted) || moved
+  }
+
+  /// This process sets the Windows mic volume (automatic input gain, the end of a leveler hold):
+  /// that is the mic's volume now, and nobody else's move.
+  pub fn set_mic_level(&mut self, device_id: &str, level: f32) {
     set_endpoint_volume(device_id, level);
-    self.mic_hw_auto = Some(level);
-  }
-
-  /// Automatic input gain off: Windows gets the volume the user/app asked for back.
-  pub fn clear_mic_hw_auto(&mut self, device_id: &str) {
-    if self.mic_hw_auto.take().is_some() {
-      let level = self.mic.volume.min(1.0);
-      set_endpoint_volume(device_id, level);
-      self.mic.applied_volume = level;
-    }
-  }
-
-  /// Take over a wish + automatic level from another process (window start, service restart):
-  /// only while Windows still shows that automatic level, else someone changed it meanwhile.
-  pub fn adopt_mic_auto(&mut self, wish: f32, auto: f32) {
-    if (self.mic.volume - auto).abs() <= 0.015 {
-      self.mic.volume = wish;
-      self.mic.applied_volume = wish.min(1.0);
-      self.mic_hw_auto = Some(auto);
-    }
+    (self.mic.volume, self.mic.applied_volume) = (level, level);
   }
 
   pub fn set_balance(&mut self, balance: f32) {

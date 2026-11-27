@@ -15,6 +15,7 @@ pub mod game_detector;
 pub mod in_use;
 pub mod leveler_log;
 pub mod mic_gain;
+pub mod mic_hold;
 pub mod mic_probe;
 pub mod mmdevice;
 pub mod policy_config;

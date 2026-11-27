@@ -182,7 +182,7 @@ pub fn read_context(mix: &ChatMixController, endpoints: &EndpointLockManager, mi
     // The same device as the mic in use is not reported twice.
     default_volume_pct: if default_id == mic_id { None } else { endpoint_volume(&default_id).map(|(v, _)| pct(v)) },
     muted: mic.map_or(mix.mic.muted, |(_, muted)| muted),
-    auto_level_pct: mix.mic_hw_auto.map(pct),
+    auto_level_pct: mix.mic_auto_level.map(pct),
     wish_pct: pct(mix.mic.volume),
     mic_id,
     default_id,

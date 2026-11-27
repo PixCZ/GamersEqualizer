@@ -3866,3 +3866,47 @@ The -5 dB was also stale: it was "near the -6 dB cut cap", which has been -18 dB
 - Tests in `mic_gain.rs` (a hot voice is lowered; a leveler at its boost cap raises; a normal voice
   and an unlearned one stay; an app setting the volume back twice stops it, one moving on does not).
   On the Mac only clippy for the Windows target; not heard live.
+
+---
+
+## Milestone 71: Apps that move the mic volume themselves: the leveler holds (2026-11-26)
+
+Spec `docs/mic-leveler-apps-spec.md`, analysis `docs/mic-app-volume-analysis.md`. Since milestone 69
+an app's own gain control (Teams, Zoom) no longer hears its steps: the leveler evens each one out and
+the app walks the Windows volume to an end.
+
+- With the leveler on, the Windows mic volume is only the input sensitivity, everywhere. The service
+  follows Windows (`ChatMixController::sync_mic`, the one place a foreign move is seen) and no longer
+  loads the window's copy from shared memory, which may be older. The automatic input gain sets
+  Windows directly (`set_mic_level`), so `mic_hw_auto`, the wish beside it and `adopt_mic_auto` are
+  gone. The mixer's mic fader sets the leveler's target as the tray row does
+  (`flyout::set_leveler_target`); the Mic page's Sensitivity row is 0-100 % of Windows.
+- `win_audio/mic_hold.rs` sorts every move (moves under 2 s apart are one): nobody records -> the
+  user; a volume window in front (Settings, the Sound panel in rundll32, Game Bar, this app) -> the
+  user; the recording app in front with input in the last 1.5 s -> the user; else an app. The input
+  time comes from `GetLastInputInfo` (its time only, asked only in that case), the one exception to
+  the no-input rule. A second app move within a minute in one recording holds the leveler
+  (`mic_leveler_hold`, shm v25; `VoiceLeveler::set_hold`: gain kept, no learning, the input gain not
+  compensated). It ends when that app stops recording (several recording: all of them); the volume
+  goes back to where it was before the recording unless the user moved it in between. The automatic
+  input gain does nothing while held.
+- With one app recording it is noted in `audio_settings.json` (`mic_volume_apps`: count and date)
+  after its first such recording, listed after the second and from then on held from the start of
+  its recordings, on the gain seeded for the voice. With several recording none is noted. The Mic
+  page lists them with Remove and, for Teams, Zoom and Skype, the option to switch off; a status
+  line says who holds it.
+- The input sensitivity is kept per mic when the leveler is switched off (`mic_sensitivity_permille`)
+  and comes back when it is switched on.
+- `[MicVol]` lines on events only: each move with who and the scene, a hold and why, its end.
+- Limits: Windows does not say who moved the volume, so headset software or a volume wheel on the
+  headset during two calls can list an innocent recording app (the list is visible and can be
+  cleared). A move seen a tick before Windows reports the recording counts as the user's. A package
+  whose name differs from its exe by more than `.exe` and punctuation is not recognised in front.
+  The foreground is unknown until the first foreground change after the service starts (a move then
+  counts as an app's while something records). A service restart forgets a hold. The effects must be
+  reinstalled for shm v25.
+- Tests: `mic_hold.rs` (who moved it; one move vs. a second within a minute; the 2 s merge; the end,
+  the restore and a user change that stays; several apps; a listed app from its start; nobody
+  recording; a new recording counts from zero), `voice_leveler.rs`
+  (`a_hold_keeps_the_gain_while_the_input_moves`), `audio_settings.rs` (the list beside the
+  settings). Not heard live: a Teams test call and zoom.us/test are still to do.
