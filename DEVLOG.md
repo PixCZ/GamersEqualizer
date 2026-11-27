@@ -3919,5 +3919,8 @@ the app walks the Windows volume to an end.
   mic-chain and deep_filter manifests, and the `[patch.crates-io]` lines for tract-linalg /
   tract-data are removed.
 - With it, 18 semver-compatible crate updates (`cargo update`, own commit).
-- Not measured yet: mic-chain CPU in the `cpu-stats` build against the fork build (it should match,
-  being the same kernels).
+- Measured against the fork build (3421f7c) on the dev PC (Ryzen 7 9800X3D, AVX-512, f16 weights):
+  DeepFilterNet 3's output is bit-identical (`dfn3_reference`: max diff 0). `cpu_breakdown_report`,
+  interleaved, median of 4 warm runs: DFN3 alone 1.60 -> 1.54 % of a core, DPDFNet alone 9.59 ->
+  9.22 %, the whole denoiser with DFN3 on speech 3.28 -> 3.24 %. Cold cache + paced (2 runs each)
+  within ±3 %, the run-to-run noise (Silero, which does not use tract, moved +11 %).
