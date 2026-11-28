@@ -1,5 +1,6 @@
 //! The int8 matrix-vector product of `cgemv8x4` / `sparse_cgemv8x4` (8x4 blocks), with SIMD paths
-//! picked once at construction: AVX2 on x86_64, `dotprod` on aarch64, else the scalar reference.
+//! picked once at construction: AVX-512 VNNI, AVX-VNNI or AVX2 on x86_64, `dotprod` on aarch64,
+//! else the scalar reference.
 //!
 //! Exactness: every path returns the exact integer sum per output, so all are bit-identical.
 //! Weights and quantized inputs are `i8`, so one product is at most 128 * 128 = 16384 in magnitude
@@ -9,8 +10,11 @@
 //! The C (and the previous port) adds each block's 4-term integer sum into an f32 starting at 0;
 //! f32 represents every integer below 2^24 exactly, so each of those additions is exact and the
 //! f32 result equals `sum as f32` of the i32 accumulation here, whatever the summation order.
-//! AVX2 uses `madd_epi16` (i16 products added pairwise in i32, exact), not `maddubs_epi16`
-//! (saturates to i16), which is why upstream's AVX2 build differs from its generic C.
+//! VNNI (`vpdpbusd`) multiplies unsigned `u8` inputs `(x as u8) ^ 0x80 = x + 128` by signed `i8`
+//! weights into `i32` without saturation (at most 384 * 255 * 128 = 12 533 760) and starts each
+//! output's accumulator at `-128 * sum_j w[i][j]` (`bias_corr`), cancelling the +128 offset
+//! bit-identically. AVX2 uses `madd_epi16` (i16 products added pairwise in i32, exact), not
+//! `maddubs_epi16` (saturates to i16), which is why upstream's AVX2 build differs from its generic C.
 
 #![allow(
   unsafe_code,
@@ -40,6 +44,10 @@ enum Path {
   Scalar,
   #[cfg(target_arch = "x86_64")]
   Avx2,
+  #[cfg(target_arch = "x86_64")]
+  AvxVnni,
+  #[cfg(target_arch = "x86_64")]
+  Avx512Vnni,
   #[cfg(target_arch = "aarch64")]
   Dotprod,
 }
@@ -51,6 +59,8 @@ pub(crate) struct Int8Matrix {
   weights: &'static [u8],
   counts: Box<[u8]>,
   cols: Box<[u8]>,
+  #[cfg(target_arch = "x86_64")]
+  bias_corr: Box<[i32]>,
   kernel: Kernel,
 }
 
@@ -60,14 +70,54 @@ impl Kernel {
   /// The fastest path this CPU supports (a cached feature check; call it at construction).
   pub(crate) fn detect() -> Kernel {
     #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-      return Kernel(Path::Avx2);
+    {
+      if std::arch::is_x86_feature_detected!("avx512vnni")
+        && std::arch::is_x86_feature_detected!("avx512vl")
+        && std::arch::is_x86_feature_detected!("avx2")
+      {
+        return Kernel(Path::Avx512Vnni);
+      }
+      if std::arch::is_x86_feature_detected!("avxvnni") && std::arch::is_x86_feature_detected!("avx2") {
+        return Kernel(Path::AvxVnni);
+      }
+      if std::arch::is_x86_feature_detected!("avx2") {
+        return Kernel(Path::Avx2);
+      }
     }
     #[cfg(target_arch = "aarch64")]
     if std::arch::is_aarch64_feature_detected!("dotprod") {
       return Kernel(Path::Dotprod);
     }
     Kernel::SCALAR
+  }
+
+  #[cfg(test)]
+  fn supported() -> Vec<Kernel> {
+    #[allow(unused_mut, reason = "empty on targets without SIMD paths")]
+    let mut v = Vec::new();
+    #[cfg(target_arch = "x86_64")]
+    {
+      if std::arch::is_x86_feature_detected!("avx512vnni")
+        && std::arch::is_x86_feature_detected!("avx512vl")
+        && std::arch::is_x86_feature_detected!("avx2")
+      {
+        v.push(Kernel(Path::Avx512Vnni));
+      }
+      if std::arch::is_x86_feature_detected!("avxvnni") && std::arch::is_x86_feature_detected!("avx2") {
+        v.push(Kernel(Path::AvxVnni));
+      }
+      if std::arch::is_x86_feature_detected!("avx2") {
+        v.push(Kernel(Path::Avx2));
+      }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("dotprod") {
+      v.push(Kernel(Path::Dotprod));
+    }
+    if v.is_empty() {
+      v.push(Kernel::SCALAR);
+    }
+    v
   }
 }
 
@@ -110,7 +160,33 @@ impl Int8Matrix {
       && counts.iter().map(|&c| usize::from(c)).sum::<usize>() == cols.len()
       && cols.iter().all(|&c| usize::from(c) < groups)
       && weights.len() >= cols.len() * BLOCK_SIZE;
-    valid.then(|| Int8Matrix { weights, counts, cols, kernel: Kernel::detect() })
+    if !valid {
+      return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    let bias_corr = {
+      let mut corr = vec![0i32; nb_out].into_boxed_slice();
+      let mut blocks = weights.as_chunks::<BLOCK_SIZE>().0;
+      for (out_corr, &count) in corr.as_chunks_mut::<8>().0.iter_mut().zip(&counts) {
+        let (group_blocks, rest) = blocks.split_at_checked(usize::from(count))?;
+        blocks = rest;
+        for block in group_blocks {
+          for (c, w) in out_corr.iter_mut().zip(block.as_chunks::<4>().0) {
+            let sum: i32 = w.iter().map(|&b| i32::from(b as i8)).sum();
+            *c -= 128 * sum;
+          }
+        }
+      }
+      corr
+    };
+    Some(Int8Matrix {
+      weights,
+      counts,
+      cols,
+      #[cfg(target_arch = "x86_64")]
+      bias_corr,
+      kernel: Kernel::detect(),
+    })
   }
 
   /// `out[i] = sum_j w[i][j] * x[j]` for every output of the matrix; the rest of `out` is untouched.
@@ -121,9 +197,15 @@ impl Int8Matrix {
   fn gemv_with(&self, kernel: Kernel, out: &mut Output, x: &Input) {
     match kernel.0 {
       Path::Scalar => self.gemv_scalar(out, x),
-      // SAFETY: `Path::Avx2` is only created by `Kernel::detect` after `is_x86_feature_detected!("avx2")`.
+      // SAFETY: `Path::Avx2` is only created after `is_x86_feature_detected!("avx2")`.
       #[cfg(target_arch = "x86_64")]
       Path::Avx2 => unsafe { avx2::gemv(self, out, x) },
+      // SAFETY: `Path::AvxVnni` is only created after checking `avxvnni` and `avx2`.
+      #[cfg(target_arch = "x86_64")]
+      Path::AvxVnni => unsafe { vnni::gemv_avx_vnni(self, out, x) },
+      // SAFETY: `Path::Avx512Vnni` is only created after checking `avx512vnni`, `avx512vl` and `avx2`.
+      #[cfg(target_arch = "x86_64")]
+      Path::Avx512Vnni => unsafe { vnni::gemv_avx512_vnni(self, out, x) },
       // SAFETY: `Path::Dotprod` is only created by `Kernel::detect` after the `dotprod` check.
       #[cfg(target_arch = "aarch64")]
       Path::Dotprod => unsafe { dotprod::gemv(self, out, x) },
@@ -198,6 +280,78 @@ mod avx2 {
   }
 }
 
+#[cfg(target_arch = "x86_64")]
+mod vnni {
+  use core::arch::x86_64::{
+    __m256i, _mm256_add_epi32, _mm256_dpbusd_avx_epi32, _mm256_dpbusd_epi32, _mm256_loadu_si256, _mm256_set1_epi32,
+    _mm256_setzero_si256, _mm256_storeu_si256,
+  };
+
+  use super::{Input, Int8Matrix, Output};
+
+  macro_rules! vnni_body {
+    ($m:ident, $out:ident, $x:ident, $dpbusd:ident) => {{
+      // Shift signed i8 inputs by +128 (`^ 0x80`) into u8; `bias_corr` subtracts `128 * sum(w)`.
+      // 256 entries so a u8 column index needs no bounds check.
+      let mut xu = [0u32; 256];
+      for (u, g) in xu.iter_mut().zip($x) {
+        *u = u32::from_le_bytes(g.map(|v| v as u8)) ^ 0x8080_8080;
+      }
+      for ((y, corr), (blocks, cols)) in
+        $out.as_chunks_mut::<8>().0.iter_mut().zip($m.bias_corr.as_chunks::<8>().0).zip($m.groups())
+      {
+        // SAFETY: `corr` is `&[i32; 8]`: one 32-byte unaligned load (`loadu`) is in bounds.
+        let mut acc0 = unsafe { _mm256_loadu_si256(corr.as_ptr().cast::<__m256i>()) };
+        let mut acc1 = _mm256_setzero_si256();
+        let mut acc2 = _mm256_setzero_si256();
+        let mut acc3 = _mm256_setzero_si256();
+        let (quads, rem_blocks) = blocks.as_chunks::<4>();
+        let (col_quads, rem_cols) = cols.as_chunks::<4>();
+        for ([b0, b1, b2, b3], [c0, c1, c2, c3]) in quads.iter().zip(col_quads) {
+          let x0 = _mm256_set1_epi32(xu.get(usize::from(*c0)).copied().unwrap_or(0) as i32);
+          let x1 = _mm256_set1_epi32(xu.get(usize::from(*c1)).copied().unwrap_or(0) as i32);
+          let x2 = _mm256_set1_epi32(xu.get(usize::from(*c2)).copied().unwrap_or(0) as i32);
+          let x3 = _mm256_set1_epi32(xu.get(usize::from(*c3)).copied().unwrap_or(0) as i32);
+          // SAFETY: `b0..b3` are `&[u8; 32]`: 32-byte unaligned loads (`loadu`) are in bounds.
+          let (w0, w1, w2, w3) = unsafe {
+            (
+              _mm256_loadu_si256(b0.as_ptr().cast::<__m256i>()),
+              _mm256_loadu_si256(b1.as_ptr().cast::<__m256i>()),
+              _mm256_loadu_si256(b2.as_ptr().cast::<__m256i>()),
+              _mm256_loadu_si256(b3.as_ptr().cast::<__m256i>()),
+            )
+          };
+          acc0 = $dpbusd(acc0, x0, w0);
+          acc1 = $dpbusd(acc1, x1, w1);
+          acc2 = $dpbusd(acc2, x2, w2);
+          acc3 = $dpbusd(acc3, x3, w3);
+        }
+        for (b, &c) in rem_blocks.iter().zip(rem_cols) {
+          let xv = _mm256_set1_epi32(xu.get(usize::from(c)).copied().unwrap_or(0) as i32);
+          // SAFETY: `b` is `&[u8; 32]`: one 32-byte unaligned load (`loadu`) is in bounds.
+          let wv = unsafe { _mm256_loadu_si256(b.as_ptr().cast::<__m256i>()) };
+          acc0 = $dpbusd(acc0, xv, wv);
+        }
+        let sum = _mm256_add_epi32(_mm256_add_epi32(acc0, acc1), _mm256_add_epi32(acc2, acc3));
+        // SAFETY: `y` is `&mut [i32; 8]`: one 32-byte unaligned store (`storeu`) is in bounds.
+        unsafe { _mm256_storeu_si256(y.as_mut_ptr().cast::<__m256i>(), sum) };
+      }
+    }};
+  }
+
+  /// EVEX `vpdpbusd` (AMD Zen 4+, Intel Ice Lake+): 8 outputs x 4 inputs in one instruction.
+  #[target_feature(enable = "avx2,avx512vnni,avx512vl")]
+  pub(super) fn gemv_avx512_vnni(m: &Int8Matrix, out: &mut Output, x: &Input) {
+    vnni_body!(m, out, x, _mm256_dpbusd_epi32);
+  }
+
+  /// VEX `vpdpbusd` (Intel Alder Lake+, AMD Zen 5): same instruction without AVX-512.
+  #[target_feature(enable = "avx2,avxvnni")]
+  pub(super) fn gemv_avx_vnni(m: &Int8Matrix, out: &mut Output, x: &Input) {
+    vnni_body!(m, out, x, _mm256_dpbusd_avx_epi32);
+  }
+}
+
 #[cfg(target_arch = "aarch64")]
 mod dotprod {
   use core::arch::aarch64::{
@@ -269,12 +423,13 @@ mod tests {
     Box::leak(v.into_boxed_slice())
   }
 
-  /// The selected SIMD path (AVX2 on x86_64 CPUs that have it, `dotprod` on aarch64) against
-  /// the scalar reference, bit for bit, on random weights, inputs and sparse patterns.
+  /// Every supported SIMD path on this CPU against the scalar reference, bit for bit, on random
+  /// weights, inputs and sparse patterns (including extreme `i8::MIN` and `127` rounds).
   #[test]
   fn simd_matches_scalar() {
-    let kernel = Kernel::detect();
-    println!("kernel under test: {kernel:?}");
+    let kernels = Kernel::supported();
+    assert_eq!(kernels.first().copied(), Some(Kernel::detect()));
+    println!("kernels under test: {kernels:?}");
     let mut rng = Rng(0x1234_5678);
     for round in 0..50 {
       let nb_in = 4 * (1 + rng.next() as usize % MAX_GROUPS);
@@ -313,11 +468,14 @@ mod tests {
       let blocks = idx.len() - nb_out / 8;
       let sparse = Int8Matrix::sparse(leak(fill(&mut rng, blocks * BLOCK_SIZE)), &idx, nb_in, nb_out).unwrap();
       for m in [&dense, &sparse] {
-        let (mut want, mut got) = ([7i32; MAX_OUTPUTS], [7i32; MAX_OUTPUTS]);
+        let mut want = [7i32; MAX_OUTPUTS];
         m.gemv_with(Kernel::SCALAR, &mut want, &x);
-        m.gemv_with(kernel, &mut got, &x);
-        assert_eq!(want, got, "round {round}, {nb_in} in, {nb_out} out");
         assert!(want[nb_out..].iter().all(|&v| v == 7), "outputs past nb_out touched");
+        for &kernel in &kernels {
+          let mut got = [7i32; MAX_OUTPUTS];
+          m.gemv_with(kernel, &mut got, &x);
+          assert_eq!(want, got, "{kernel:?} round {round}, {nb_in} in, {nb_out} out");
+        }
       }
     }
   }

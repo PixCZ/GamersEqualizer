@@ -76,8 +76,23 @@ impl Default for RnnState {
 impl RnnModel {
   /// `compute_rnn`: one frame of features in, band gains out; returns the voice probability.
   pub(crate) fn compute(&self, state: &mut RnnState, gains: &mut [f32; NB_BANDS], features: &[f32; CONV1_IN]) -> f32 {
-    let mut tmp = [0.0f32; CONV1_OUT];
     let mut cat = [0.0f32; DENSE_IN];
+    self.trunk(state, &mut cat, features);
+    self.dense_out.compute(gains, &cat);
+    gains.iter_mut().for_each(|g| *g = sigmoid_approx(*g));
+    self.vad(&cat)
+  }
+
+  /// `compute_rnn` without `dense_out`: advances `state` identically and returns the voice probability.
+  pub(crate) fn compute_vad(&self, state: &mut RnnState, features: &[f32; CONV1_IN]) -> f32 {
+    let mut cat = [0.0f32; DENSE_IN];
+    self.trunk(state, &mut cat, features);
+    self.vad(&cat)
+  }
+
+  #[inline(always)]
+  fn trunk(&self, state: &mut RnnState, cat: &mut [f32; DENSE_IN], features: &[f32; CONV1_IN]) {
+    let mut tmp = [0.0f32; CONV1_OUT];
     conv1d(&self.conv1, &mut tmp, &mut state.conv1, features);
     if let [conv2, cat1, cat2, cat3] = cat.as_chunks_mut::<GRU_SIZE>().0 {
       conv1d(&self.conv2, conv2, &mut state.conv2, &tmp);
@@ -88,10 +103,12 @@ impl RnnModel {
       *cat2 = state.gru2;
       *cat3 = state.gru3;
     }
-    self.dense_out.compute(gains, &cat);
-    gains.iter_mut().for_each(|g| *g = sigmoid_approx(*g));
+  }
+
+  #[inline(always)]
+  fn vad(&self, cat: &[f32; DENSE_IN]) -> f32 {
     let mut vad = [0.0f32; 1];
-    self.vad_dense.compute(&mut vad, &cat);
+    self.vad_dense.compute(&mut vad, cat);
     let [vad] = vad;
     sigmoid_approx(vad)
   }
@@ -176,6 +193,9 @@ pub(crate) fn gru(input_weights: &Linear, recurrent_weights: &Linear, state: &mu
 /// `sgemv` (all three generic variants): per output, `sum_j w[j*N + i] * x[j]` from 0 in `j` order.
 fn sgemv(out: &mut [f32], w: &[f32], input: &[f32]) {
   // Fixed widths keep the accumulators in registers (same per-output order, same result).
+  if let Ok(out) = <&mut [f32; 1]>::try_from(&mut *out) {
+    return sgemv_fixed(out, w, input);
+  }
   if let Ok(out) = <&mut [f32; NB_BANDS]>::try_from(&mut *out) {
     return sgemv_fixed(out, w, input);
   }
@@ -427,6 +447,9 @@ mod tests {
       let f: [f32; CONV1_IN] = std::array::from_fn(|i| x[i]);
       time("compute_rnn", &mut |_| {
         black_box(m.compute(&mut st, &mut g, &f));
+      });
+      time("compute_vad", &mut |_| {
+        black_box(m.compute_vad(&mut st, &f));
       });
     }
   }

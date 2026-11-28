@@ -24,6 +24,7 @@ pub const FRAME_SIZE: usize = bands::FRAME_SIZE;
 pub const LATENCY_FRAMES: usize = 2;
 
 const FULL_BLOB: &[u8] = include_bytes!("../models/rnnoise_full.bin");
+#[cfg(feature = "little")]
 const LITTLE_BLOB: &[u8] = include_bytes!("../models/rnnoise_little.bin");
 
 /// Which embedded weight set to run; both have the same shapes and cost per weight.
@@ -33,6 +34,7 @@ pub enum Model {
   #[default]
   Full,
   /// The sparser "little" model (1/3 of the GRU blocks, 1.6 MB blob, about 3x cheaper GRUs).
+  #[cfg(feature = "little")]
   Little,
 }
 
@@ -40,6 +42,7 @@ impl Model {
   fn blob(self) -> &'static [u8] {
     match self {
       Model::Full => FULL_BLOB,
+      #[cfg(feature = "little")]
       Model::Little => LITTLE_BLOB,
     }
   }

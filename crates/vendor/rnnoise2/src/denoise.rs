@@ -159,9 +159,10 @@ pub(crate) fn process_frame(
   vad.unwrap_or(0.0)
 }
 
-/// The voice probability `process_frame` would return, without the pitch filter, gains and
-/// synthesis. The state they skip (`lastg`, `delayed_*`, `synthesis_mem`) never feeds the
-/// analysis or the network, so the network state and the VAD sequence evolve exactly as there.
+/// The voice probability `process_frame` would return, without the pitch filter, gains,
+/// `dense_out` and synthesis. The state they skip (`lastg`, `delayed_*`, `synthesis_mem`) never
+/// feeds the analysis or the network, so the network state and the VAD sequence evolve exactly as
+/// there.
 pub(crate) fn voice_probability(
   model: &RnnModel,
   tables: &Tables,
@@ -170,8 +171,11 @@ pub(crate) fn voice_probability(
   input: &[f32; FRAME_SIZE],
 ) -> f32 {
   let mut frame = Frame::new();
-  let mut g = [0.0f32; NB_BANDS];
-  analyze(model, tables, fft, st, &mut frame, &mut g, input).unwrap_or(0.0)
+  if analyze_features(tables, fft, st, &mut frame, input) {
+    0.0
+  } else {
+    model.compute_vad(&mut st.rnn, &frame.features)
+  }
 }
 
 /// HP filter, frame analysis and, unless the frame is silent, the network (gains into `g`).
@@ -185,10 +189,21 @@ fn analyze(
   g: &mut [f32; NB_BANDS],
   input: &[f32; FRAME_SIZE],
 ) -> Option<f32> {
+  let silence = analyze_features(tables, fft, st, frame, input);
+  (!silence).then(|| model.compute(&mut st.rnn, g, &frame.features))
+}
+
+/// HP filter and frame analysis; returns true for a silent frame.
+fn analyze_features(
+  tables: &Tables,
+  fft: &mut Transform,
+  st: &mut Memory,
+  frame: &mut Frame,
+  input: &[f32; FRAME_SIZE],
+) -> bool {
   let mut x = [0.0f32; FRAME_SIZE];
   biquad(&mut x, &mut st.mem_hp_x, input);
-  let silence = compute_frame_features(tables, fft, st, frame, &x);
-  (!silence).then(|| model.compute(&mut st.rnn, g, &frame.features))
+  compute_frame_features(tables, fft, st, frame, &x)
 }
 
 /// `rnn_compute_frame_features`; returns true for a silent frame (features cleared).

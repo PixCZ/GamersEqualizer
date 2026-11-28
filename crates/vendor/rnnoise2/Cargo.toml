@@ -12,6 +12,12 @@ publish = false
 name = "rnnoise2"
 path = "src/lib.rs"
 
+[features]
+default = ["little"]
+# Embeds `rnnoise_little.bin` (1.6 MB) and `Model::Little`; production builds disable default
+# features so un-LTO'd APO builds do not carry the unused blob.
+little = []
+
 [dependencies]
 rustfft = "6"
 

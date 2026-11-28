@@ -18,7 +18,7 @@ speech at the same false-alarm rate (see "Voice detector operating points").
 ```rust
 pub const FRAME_SIZE: usize = 480;      // samples per frame, 48 kHz
 pub const LATENCY_FRAMES: usize = 2;    // output lags input by 960 samples (nnnoiseless: 1 frame)
-pub enum Model { Full, Little }         // both embedded via include_bytes!
+pub enum Model { Full, Little }         // `Little` gated on default feature `little`
 pub enum WeightsError { .. }            // corrupt blob; Display + Error
 pub struct DenoiseState { .. }
 impl DenoiseState {
@@ -26,7 +26,7 @@ impl DenoiseState {
   pub fn new() -> Result<Box<Self>, WeightsError>;            // Model::Full
   pub fn with_model(model: Model) -> Result<Box<Self>, WeightsError>;
   pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32; // i16-range f32, returns VAD
-  pub fn voice_probability(&mut self, input: &[f32]) -> f32;  // VAD only: analysis + network, no output
+  pub fn voice_probability(&mut self, input: &[f32]) -> f32;  // VAD only: analysis + trunk + vad_dense
   pub fn reset(&mut self);
 }
 ```
@@ -35,23 +35,24 @@ One deliberate change from the spec's interface: construction returns `Result` (
 an `Err`, never a panic). `process_frame` never allocates (`tests/no_alloc.rs`), never panics on
 short slices (input zero-padded, only the first 480 output samples written) and returns 0 VAD on
 silent frames. `voice_probability` is the detector-only variant: same input handling, same VAD
-sequence bit for bit (`voice_probability_matches_process_frame`), but no pitch filter, gains or
-synthesis; it skips that output-side state, so use an instance for one or the other (or `reset()`
-when switching). Neither allocates. The blob is parsed once per instance: f32 arrays are copied (about 0.3 MB), int8
+sequence bit for bit (`voice_probability_matches_process_frame`), but no `dense_out`, pitch filter,
+gains or synthesis; it skips that output-side state, so use an instance for one or the other (or
+`reset()` when switching). Neither allocates. Production builds disable default features
+(`default-features = false`) so non-LTO builds do not embed the 1.6 MB `Little` blob. The blob is parsed once per instance: f32 arrays are copied (about 0.3 MB), int8
 weights are borrowed from the embedded blob.
 
 ## Modules
 
-| File             | Upstream                                            | Content                                                                                 |
-| ---------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `src/lib.rs`     | `rnnoise.h`                                         | public interface, embedded blobs                                                        |
-| `src/weights.rs` | `parse_lpcnet_weights.c`, `init_rnnoise`            | record parser and checks, `WeightsError`                                                |
-| `src/nnet.rs`    | `nnet.c`, `nnet_arch.h`, `vec.h` (generic), `rnn.c` | f32 dense, int8 layers (quantize, scale, diag), conv1d, GRU, activations, `compute_rnn` |
-| `src/kernel.rs`  | `vec.h` `cgemv8x4`, `sparse_cgemv8x4`               | int8 8x4-block mat-vec: scalar reference, AVX2 (x86_64), `dotprod` (aarch64); `unsafe`  |
-| `src/bands.rs`   | `denoise.c`, `rnnoise_tables.c`                     | `eband20ms` energies/correlations, gain interpolation, DCT, window                      |
-| `src/pitch.rs`   | `pitch.c`, `celt_lpc.c`                             | pitch downsample/search/`remove_doubling` (from nnnoiseless, C summation order)         |
-| `src/denoise.rs` | `denoise.c`                                         | per-frame pipeline, HP biquad, FFT (rustfft), pitch filter, synthesis                   |
-| `tests/`         |                                                     | `reference.rs` (6.2, 6.4 latency), `no_alloc.rs`, `report.rs` (6.3, 6.4 bench, ignored) |
+| File             | Upstream                                            | Content                                                                                            |
+| ---------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `src/lib.rs`     | `rnnoise.h`                                         | public interface, embedded blobs (`little` feature)                                                |
+| `src/weights.rs` | `parse_lpcnet_weights.c`, `init_rnnoise`            | record parser and checks, `WeightsError`                                                           |
+| `src/nnet.rs`    | `nnet.c`, `nnet_arch.h`, `vec.h` (generic), `rnn.c` | f32 dense, int8 layers (quantize, scale, diag), conv1d, GRU, activations, `compute` / `compute_vad` |
+| `src/kernel.rs`  | `vec.h` `cgemv8x4`, `sparse_cgemv8x4`               | int8 8x4-block mat-vec: scalar, AVX-512 VNNI / AVX-VNNI / AVX2 (x86_64), `dotprod` (aarch64)       |
+| `src/bands.rs`   | `denoise.c`, `rnnoise_tables.c`                     | `eband20ms` energies/correlations, gain interpolation, DCT, window                                 |
+| `src/pitch.rs`   | `pitch.c`, `celt_lpc.c`                             | pitch downsample/search/`remove_doubling` (from nnnoiseless, C summation order)                    |
+| `src/denoise.rs` | `denoise.c`                                         | per-frame pipeline, HP biquad, FFT (rustfft), pitch filter, synthesis                              |
+| `tests/`         |                                                     | `reference.rs` (6.2, 6.4 latency), `no_alloc.rs`, `report.rs` (6.3, 6.4 bench, ignored)            |
 
 Tests: `cargo test --manifest-path crates/vendor/rnnoise2/Cargo.toml` (about 15 s unoptimized;
 add `--release` for under a second). Reports: `... --release --test report -- --ignored --nocapture --test-threads=1`.
@@ -427,11 +428,14 @@ both models, debug and release). What changed, per-layer timing from `nnet::test
 | conv1 f32 (195→128)            | 1.3         | 0.8        | same                                                                                   |
 | coarse pitch xcorr             | -           | -          | 8 lags side by side, each still one sequential sum: about -6 µs per frame in the bench |
 
-`compute_rnn` went from 374 µs to 52 µs (Little: 145 → 28). The rest of a frame (two forward
-FFTs, pitch search, band energies; plus pitch filter, gains, inverse FFT for `process_frame`) is
-now 30 µs and dominates `voice_probability`. Kernel choice is made once per model load
-(`Kernel::detect`); without AVX2 / `dotprod` the scalar i32 kernel runs (Full about 275 µs here).
-The input quantization avoids `f64::floor`, a libm call per value on x86_64 without SSE4.1 (the
-Windows baseline). The AVX2 path is compiled and clippy-checked for `x86_64-apple-darwin`
-(`-Zbuild-std`) but not run on this machine; `kernel::tests::simd_matches_scalar` covers it on
-any AVX2 CPU.
+`compute_rnn` went from 374 µs to 52 µs on Apple Silicon (Little: 145 → 28). On x86_64 with VNNI
+(`vpdpbusd` on `(x as u8) ^ 0x80` with precomputed `-128 * sum(w)` row correction, bit-identical to
+the scalar reference; `Avx512Vnni` on Zen 4+/Ice Lake+, `AvxVnni` on Alder Lake+), Ryzen 7 9800X3D
+went from 50 µs (AVX2) to 36 µs (`compute_vad`: 35 µs, skipping `dense_out` and keeping the 1-output
+`vad_dense` accumulator in a register), and `voice_probability` from 65 µs to 51 µs per 10 ms frame.
+The rest of a frame (two forward FFTs, pitch search, band energies; plus pitch filter, gains,
+inverse FFT for `process_frame`) dominates `voice_probability`. Kernel choice is made once per model
+load (`Kernel::detect`); without VNNI / AVX2 / `dotprod` the scalar i32 kernel runs. The input
+quantization avoids `f64::floor`, a libm call per value on x86_64 without SSE4.1 (the Windows
+baseline). `kernel::tests::simd_matches_scalar` tests every SIMD path supported by the host CPU
+bit-for-bit against `Kernel::SCALAR`.
