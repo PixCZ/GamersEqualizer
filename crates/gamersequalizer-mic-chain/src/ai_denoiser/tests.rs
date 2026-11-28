@@ -77,6 +77,68 @@ fn test_level_key_needs_a_sure_run_and_a_dip_restarts_it() {
 }
 
 #[test]
+fn test_leveler_fallback_key_runs_only_behind_active_aec() {
+  let sure = AEC_LEVEL_SOFT_PROB + 0.01;
+  let mut run = 0;
+  for _ in 0..AEC_LEVEL_SOFT_CHUNKS - 1 {
+    assert!(!aec_level_key(&mut run, sure));
+  }
+  assert!(aec_level_key(&mut run, sure));
+  assert!(!aec_level_key(&mut run, AEC_LEVEL_SOFT_PROB));
+  assert!(!aec_level_key(&mut run, sure));
+
+  // DPDFNet with the gate off: Silero (`soft_net`) is idle unless `set_aec_active(true)` asks
+  // for it; outside active AEC, neither the audio nor `heard_level_voice` may move a bit.
+  let (clean, _) = speech_over_keyboard(-30.0, 0.0);
+  let slice = &clean[..480 * 200];
+  let mut off = AiVoiceIsolator::new();
+  off.set_model(DenoiseModel::DpdfNet);
+  off.set_gate_threshold_db(GATE_OFF_DB - 1.0);
+  let mut out_off = slice.to_vec();
+  let mut flags_off = Vec::new();
+  for b in out_off.chunks_mut(480) {
+    off.process_samples(b);
+    assert_eq!(off.debug_state().soft_prob, -1.0, "Silero must stay idle outside active AEC");
+    flags_off.push(off.heard_level_voice());
+  }
+
+  let mut toggled = AiVoiceIsolator::new();
+  toggled.set_model(DenoiseModel::DpdfNet);
+  toggled.set_gate_threshold_db(GATE_OFF_DB - 1.0);
+  toggled.set_aec_active(false);
+  let mut out_toggled = slice.to_vec();
+  let mut flags_toggled = Vec::new();
+  for b in out_toggled.chunks_mut(480) {
+    toggled.process_samples(b);
+    flags_toggled.push(toggled.heard_level_voice());
+  }
+  assert_eq!(out_off, out_toggled);
+  assert_eq!(flags_off, flags_toggled);
+
+  // Behind active AEC with the gate off, Silero runs and feeds `heard_level_voice` even when
+  // `in_net`'s run is held at 0 (as nonlinear AEC3 suppression does on speaker captures).
+  let mut on = AiVoiceIsolator::new();
+  on.set_model(DenoiseModel::DpdfNet);
+  on.set_gate_threshold_db(GATE_OFF_DB - 1.0);
+  on.set_aec_active(true);
+  let mut out_on = slice.to_vec();
+  let (mut seen_soft, mut fallback_blocks) = (false, 0);
+  for b in out_on.chunks_mut(480) {
+    on.level_run = 0;
+    on.process_samples(b);
+    seen_soft |= on.debug_state().soft_prob >= 0.0;
+    if on.level_run < LEVEL_MIN_FRAMES && on.heard_level_voice() {
+      fallback_blocks += 1;
+    }
+  }
+  assert!(seen_soft, "Silero must run behind active AEC even with the gate off");
+  assert!(fallback_blocks > 0, "Silero fallback key must fire on speech behind active AEC");
+  assert_eq!(out_off, out_on, "the fallback key must not alter the denoised audio");
+  on.set_aec_active(false);
+  assert_eq!(on.aec_soft_run, 0, "leaving active AEC clears the fallback run");
+}
+
+#[test]
 fn test_leveler_detector_hears_speech_behind_every_model() {
   // The leveler's key is stricter than the gate's (`level_key`): behind a heavy model it must still
   // hear a clean voice, and with RNNoise as the model it is the one the gate already uses.
@@ -2139,6 +2201,108 @@ fn leveler_key_report() {
       pct(old),
       pct(key)
     );
+  }
+
+  // Fallback key behind active AEC3 (`Vad48k` last k chunks > t, OR'd with `level_key`):
+  // whisper must stay < 2 %, keys and voiceless `AecState::Locked` blocks at 0.0 %.
+  let trace_silero = |x: &[f32]| -> (Vec<f32>, Vec<Option<f32>>) {
+    let mut in_net = VoiceNet::new_input();
+    let mut silero = Vad48k::new().unwrap();
+    let (mut ip_out, mut sp_out) = (Vec::with_capacity(x.len() / 480), Vec::with_capacity(x.len() / 480));
+    for b in x.as_chunks::<480>().0 {
+      let (mut ip, mut sp) = (0.0f32, None);
+      in_net.process(b, |p| ip = p);
+      silero.process(b, |p| sp = Some(p));
+      ip_out.push(ip);
+      sp_out.push(sp);
+    }
+    (ip_out, sp_out)
+  };
+  let eval_aec = |ip: &[f32], sp: &[Option<f32>], t: f32, k: u32| -> Vec<bool> {
+    let (mut run, mut srun) = (0u32, 0u32);
+    ip.iter()
+      .zip(sp)
+      .map(|(&p, &s)| {
+        if let Some(sv) = s {
+          srun = if sv > t { srun + 1 } else { 0 };
+        }
+        level_key(&mut run, p) || srun >= k
+      })
+      .collect()
+  };
+  let (_, wh_sil) = trace_silero(&input);
+  eprintln!("\nAEC fallback (`level_key || Vad48k > t x k`) on whisper_scenario.wav:");
+  for t in [0.80f32, 0.85, 0.90, 0.95] {
+    for k in [2u32, 3, 4] {
+      let flags = eval_aec(&probs, &wh_sil, t, k);
+      eprintln!("{:<22} {}", format!("sil > {t:.2} x {k}"), share(&flags).join("     "));
+    }
+  }
+  if let Ok(dirs) = std::fs::read_dir(std::path::Path::new(FIXTURES).join("../private/captures")) {
+    let mut names: Vec<_> = dirs.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+    names.sort();
+    let mut hp = BiquadCascade::default();
+    let band = BiquadBand {
+      filter_type: FilterType::HighPass,
+      frequency: 70.0,
+      q: 0.707,
+      slope_db: 12,
+      ..BiquadBand::default()
+    };
+    hp.set_bands(&[band], 48_000.0);
+    let hp70 = |hp: &mut BiquadCascade, x: &[f32]| {
+      let mut y = x.to_vec();
+      hp.reset_state();
+      hp.process(&mut y);
+      y
+    };
+    let mut caps = Vec::new();
+    for cap in names {
+      let dir = format!("../private/captures/{cap}");
+      let tsv = std::path::Path::new(FIXTURES).join(&dir).join("vars.tsv");
+      let Ok(vars) = std::fs::read_to_string(&tsv) else { continue };
+      let mut lines = vars.lines();
+      let Some(hdr) = lines.next() else { continue };
+      let Some(col) = hdr.split('\t').position(|h| h == "aec_state") else { continue };
+      let locked: Vec<bool> = lines.map(|l| l.split('\t').nth(col) == Some("4")).collect();
+      if !locked.iter().any(|&v| v) {
+        continue;
+      }
+      let (_, raw_sil) = trace_silero(&hp70(&mut hp, &read_wav_48k(&format!("{dir}/01_mic_raw.wav"))));
+      let (aec_in, aec_sil) = trace_silero(&hp70(&mut hp, &read_wav_48k(&format!("{dir}/04_after_aec.wav"))));
+      let n = aec_in.len().min(locked.len());
+      let voiceless: Vec<bool> = (0..n)
+        .map(|b| locked[b] && raw_sil[b.saturating_sub(25)..(b + 26).min(n)].iter().flatten().all(|&p| p < 0.15))
+        .collect();
+      caps.push((cap, aec_in, aec_sil, voiceless));
+    }
+    eprintln!("\nSpeaker captures (`04_after_aec.wav` + 70 Hz HP): voiceless locked false% & key speech sections:");
+    for t in [0.80f32, 0.85, 0.90, 0.95] {
+      for k in [2u32, 3, 4] {
+        let (mut tot_vl, mut false_vl) = (0usize, 0usize);
+        let mut secs = Vec::new();
+        for (cap, ip, sp, vl) in &caps {
+          let f = eval_aec(ip, sp, t, k);
+          for (i, &is_vl) in vl.iter().enumerate() {
+            if is_vl {
+              tot_vl += 1;
+              false_vl += usize::from(f[i]);
+            }
+          }
+          for (tag, target, a, b) in [
+            ("205013 9-29s", "20261109-205013", 900, 2900),
+            ("210655 10-48s", "20261109-210655", 1000, 4800),
+            ("130319 10-29s", "20261109-130319", 1000, 2900),
+          ] {
+            if cap == target {
+              let s = &f[a..b.min(f.len())];
+              secs.push(format!("{tag} {:4.1}%", s.iter().filter(|&&v| v).count() as f32 * 100.0 / s.len() as f32));
+            }
+          }
+        }
+        eprintln!("sil > {t:.2} x {k} | voiceless {false_vl}/{tot_vl} | {}", secs.join(" | "));
+      }
+    }
   }
 }
 

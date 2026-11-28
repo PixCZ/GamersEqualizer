@@ -352,6 +352,7 @@ impl MicChain {
     let leveler_boost_db = if s.leveler_on { self.leveler.gain_db() } else { 0.0 };
     self.ai_denoiser.set_gate_floor_extra_db(leveler_boost_db);
     self.ai_denoiser.set_pre_gain_db(leveler_boost_db);
+    self.ai_denoiser.set_aec_active(self.aec_state == AecState::Locked);
     self.ai_denoiser.process_samples(mic);
     #[cfg(feature = "debug-capture")]
     if let Some(cap) = self.capture.as_ref().filter(|_| capturing) {

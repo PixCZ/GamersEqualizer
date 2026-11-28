@@ -290,7 +290,9 @@ fn test_gamer_chain_output_and_word_onsets_stay_the_same() {
   const ECHO_DELAY: usize = 960;
   // G1 (2026-11-24): first values. G2 (2026-11-24): the mic volume no longer applies after the
   // leveler, so seconds 1-4 rose by (1 / 0.3)^2 and 5-7 by (1 / 0.5)^2, nothing else moved.
-  const EXPECTED: [f64; SECONDS] = [0.0034573, 54.917, 33.046, 47.605, 102.05, 170.05, 56.172, 57.862];
+  // G3 (2026-11-28): behind `AecState::Locked` the leveler also hears speech through Silero
+  // (`AEC_LEVEL_SOFT_PROB`), so second 7 learns a softer syllable AEC3 hid from `in_net` (+0.17 dB).
+  const EXPECTED: [f64; SECONDS] = [0.0034573, 54.917, 33.046, 47.605, 102.05, 170.05, 56.160, 60.175];
   // Onset cut measured -2.0 .. +3.5 dB; a gate or model opening 10-30 ms late cuts tens of dB.
   const MAX_ONSET_CUT_DB: f32 = 6.0;
   let speech = read_wav_48k("speech_clean.wav");

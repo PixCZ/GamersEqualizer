@@ -102,6 +102,14 @@ const RESCUE_IDLE_SAMPLES: usize = 48_000 * 2;
 /// (2017: 77 %), at no cost: the probability is there already.
 const LEVEL_PROB: f32 = 0.95;
 const LEVEL_MIN_FRAMES: u32 = 6;
+/// Behind an active echo canceller (`set_aec_active`), AEC3's nonlinear suppressor alters the
+/// speech spectrum enough that `in_net` (`LEVEL_PROB`) falls from ~73 % of voice frames to 0-2 %
+/// (`20261109-205013`: 50 ms learned in 20 s of speech over speakers, gain +0.0 dB instead of
+/// +18.6 dB). Silero (`soft_net`) still scores 0.99-1.00 there while staying at 0.0 % on whisper
+/// (`whisper_scenario.wav`, 1.2 % combined), keys (`keys.wav`), and all 26 510 voiceless/click
+/// `AecState::Locked` blocks across the 19 speaker captures (`leveler_key_report`).
+const AEC_LEVEL_SOFT_PROB: f32 = 0.95;
+const AEC_LEVEL_SOFT_CHUNKS: u32 = 3;
 /// Input this far over the room's noise floor counts as activity: it keeps the heavy model
 /// awake / wakes it. The voice detector misses whisper and a quiet voice (mic set low), which
 /// RNNoise standing in then lost by 14-20 dB (`leveler_report`); sleeping only in a quiet room
@@ -222,6 +230,13 @@ pub struct AiVoiceIsolator {
   bypassed: bool,
   /// Someone reads `heard_voice` / `heard_level_voice` while bypassed (`set_voice_wanted`).
   voice_wanted: bool,
+  /// The echo canceller in front of us is actively suppressing a live reference (`AecState::Locked`):
+  /// `heard_level_voice` then also accepts `AEC_LEVEL_SOFT_CHUNKS` Silero chunks above `AEC_LEVEL_SOFT_PROB`.
+  aec_active: bool,
+  /// Consecutive 32 ms `soft_net` chunks above `AEC_LEVEL_SOFT_PROB` while `aec_active`.
+  aec_soft_run: u32,
+  /// `soft_net` ran in the previous block (when starting it for `aec_active` alone, flush stale input).
+  soft_ran: bool,
   /// The input detector heard speech in the last block (it runs while bypassed too).
   heard_voice: bool,
   /// Frames in a row `in_net` rated above `LEVEL_PROB` (the leveler's key, see `level_key`).
@@ -309,6 +324,9 @@ impl AiVoiceIsolator {
       delay: DelayLine::new(),
       bypassed: false,
       voice_wanted: true,
+      aec_active: false,
+      aec_soft_run: 0,
+      soft_ran: false,
       heard_voice: false,
       level_run: 0,
       heard_level_voice: false,
@@ -336,6 +354,15 @@ impl AiVoiceIsolator {
   /// state runs no network at all.
   pub fn set_voice_wanted(&mut self, wanted: bool) {
     self.voice_wanted = wanted;
+  }
+
+  /// Whether AEC3 in front of this stage is actively suppressing a live speaker reference
+  /// (`AecState::Locked`). Outside it, `heard_level_voice` stays on `in_net` (`level_key`) alone.
+  pub fn set_aec_active(&mut self, active: bool) {
+    self.aec_active = active;
+    if !active {
+      self.aec_soft_run = 0;
+    }
   }
 
   /// Closed gate `extra_db` (0..=`GATE_FLOOR_EXTRA_MAX_DB`) under `GATE_FLOOR_DB`: the leveler's
@@ -504,7 +531,7 @@ impl AiVoiceIsolator {
       if !self.voice_wanted {
         // Its buffered audio and hysteresis are from before once it is wanted again.
         self.in_net.input.clear();
-        (self.vad, self.level_run) = (VoiceHysteresis::new(), 0);
+        (self.vad, self.level_run, self.aec_soft_run, self.soft_ran) = (VoiceHysteresis::new(), 0, 0, false);
         (self.heard_voice, self.heard_level_voice) = (false, false);
         return;
       }
@@ -516,6 +543,22 @@ impl AiVoiceIsolator {
         voice |= vad.frame_at(p, open, keep);
         level_voice |= level_key(level_run, p);
       });
+      if self.aec_active {
+        if let Some(net) = self.soft_net.as_mut() {
+          if !self.soft_ran {
+            net.flush();
+          }
+          let (soft_prob, aec_soft_run) = (&mut self.soft_prob, &mut self.aec_soft_run);
+          net.process(samples, |p| {
+            *soft_prob = soft_prob.max(p);
+            let _ = aec_level_key(aec_soft_run, p);
+          });
+        }
+        self.soft_ran = true;
+        level_voice |= self.aec_soft_run >= AEC_LEVEL_SOFT_CHUNKS;
+      } else {
+        (self.soft_ran, self.aec_soft_run) = (false, 0);
+      }
       self.heard_voice = voice;
       self.heard_level_voice = level_voice;
       return;
@@ -575,6 +618,10 @@ impl AiVoiceIsolator {
       vad_out,
       in_net,
       level_run,
+      voice_wanted,
+      aec_active,
+      aec_soft_run,
+      soft_ran,
       out_net,
       soft_net,
       soft_voice_prob,
@@ -596,12 +643,30 @@ impl AiVoiceIsolator {
       ..
     } = self;
     let (mut voice, mut voice_out, mut voice_soft, mut level_voice) = (false, false, false, false);
-    if let (true, Some(net)) = (gate_on || rescue_on, soft_net.as_mut()) {
-      net.process(samples, |p| {
-        *soft_prob = soft_prob.max(p);
-        voice_soft |= p > *soft_voice_prob;
-        *soft_recent = [soft_recent[1], p];
-      });
+    let soft_for_gate = gate_on || rescue_on;
+    let soft_for_level = *aec_active && *voice_wanted && heavy;
+    if soft_for_gate || soft_for_level {
+      if let Some(net) = soft_net.as_mut() {
+        if !*soft_ran && !soft_for_gate {
+          net.flush();
+        }
+        net.process(samples, |p| {
+          *soft_prob = soft_prob.max(p);
+          if soft_for_gate {
+            voice_soft |= p > *soft_voice_prob;
+            *soft_recent = [soft_recent[1], p];
+          }
+          if soft_for_level {
+            let _ = aec_level_key(aec_soft_run, p);
+          }
+        });
+      }
+      *soft_ran = true;
+    } else {
+      *soft_ran = false;
+    }
+    if !soft_for_level {
+      *aec_soft_run = 0;
     }
     // The chunk just reported and the one before cover what DFN3 puts out now (its latency is
     // 40 ms, a chunk 32 ms).
@@ -617,6 +682,9 @@ impl AiVoiceIsolator {
         voice |= vad.frame_at(p, open, keep);
         level_voice |= level_key(level_run, p);
       });
+      if soft_for_level {
+        level_voice |= *aec_soft_run >= AEC_LEVEL_SOFT_CHUNKS;
+      }
     }
     *no_voice_samples = if voice || voice_soft { 0 } else { no_voice_samples.saturating_add(n) };
     // During a takeover RNNoise works on a copy, the heavy model in place.
@@ -744,6 +812,8 @@ impl AiVoiceIsolator {
     self.gate = NoiseGate::new(self.gate.enabled);
     self.vad = VoiceHysteresis::new();
     self.level_run = 0;
+    self.aec_soft_run = 0;
+    self.soft_ran = false;
     self.vad_out = VoiceHysteresis::new_output();
     self.delay.clear();
     self.bypassed = false;
@@ -918,6 +988,12 @@ fn lookahead_samples(model: DenoiseModel) -> usize {
 fn level_key(run: &mut u32, prob: f32) -> bool {
   *run = if prob > LEVEL_PROB { run.saturating_add(1) } else { 0 };
   *run >= LEVEL_MIN_FRAMES
+}
+
+/// One `soft_net` 32 ms chunk into the leveler's fallback key behind active AEC3.
+fn aec_level_key(run: &mut u32, prob: f32) -> bool {
+  *run = if prob > AEC_LEVEL_SOFT_PROB { run.saturating_add(1) } else { 0 };
+  *run >= AEC_LEVEL_SOFT_CHUNKS
 }
 
 fn latency_samples(model: DenoiseModel) -> usize {
